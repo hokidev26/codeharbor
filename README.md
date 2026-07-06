@@ -12,6 +12,7 @@ The project is currently an experimental MVP. It is intended for local developme
   - OpenAI official Responses API
   - Anthropic official Messages API
   - OpenAI-compatible Chat Completions APIs
+  - CLIProxyAPI local OpenAI-compatible preset
 - Core tools:
   - Read
   - Write
@@ -61,6 +62,13 @@ go run ./cmd/codeharbor --config /path/to/config.json
 
 On first run, CodeHarbor creates a local config file if it does not exist. Runtime secrets can be supplied through environment variables.
 
+Agent model environment variables:
+
+```text
+CODEHARBOR_DEFAULT_MODEL
+CODEHARBOR_SUMMARY_MODEL
+```
+
 Provider environment variables:
 
 ```text
@@ -72,7 +80,23 @@ OPENAI_BASE_URL
 OPENAI_COMPATIBLE_BASE_URL
 OPENAI_COMPATIBLE_API_KEY
 OPENAI_COMPATIBLE_MODEL
+CLIPROXYAPI_BASE_URL
+CLIPROXYAPI_API_KEY
+CLIPROXYAPI_MODEL
 ```
+
+### CLIProxyAPI preset
+
+CodeHarbor includes a built-in `cliproxyapi` provider profile for local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instances:
+
+```text
+Provider: cliproxyapi
+Type:     openai-compatible
+Base URL: http://127.0.0.1:8317/v1
+Model:    gpt-5.5
+```
+
+Start CLIProxyAPI, then choose `cliproxyapi:gpt-5.5` from the model selector. To make new projects use it by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`.
 
 Agent Server backend seed variables:
 

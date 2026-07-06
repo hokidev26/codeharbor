@@ -125,7 +125,7 @@ internal/config/defaults.go
 - default project dir
 - agent 默认模型
 - agent 默认权限模式
-- 多 provider 实例配置（OpenAI 官方 / Anthropic 官方 / OpenAI-compatible）
+- 多 provider 实例配置（OpenAI 官方 / Anthropic 官方 / OpenAI-compatible / CLIProxyAPI 本地预置）
 
 当前默认：
 
@@ -134,6 +134,13 @@ server.host = localhost
 server.port = 7788
 agent.defaultPermissionMode = acceptEdits
 agent.defaultModel = openai:gpt-4.1-mini
+```
+
+Agent 模型支持环境变量：
+
+```txt
+CODEHARBOR_DEFAULT_MODEL
+CODEHARBOR_SUMMARY_MODEL
 ```
 
 Provider 支持环境变量：
@@ -146,6 +153,9 @@ ANTHROPIC_MODEL
 OPENAI_COMPATIBLE_BASE_URL
 OPENAI_COMPATIBLE_API_KEY
 OPENAI_COMPATIBLE_MODEL
+CLIPROXYAPI_BASE_URL
+CLIPROXYAPI_API_KEY
+CLIPROXYAPI_MODEL
 ```
 
 首次生成默认 `config.json` 时，运行时仍会读取环境变量中的 API key，但写入磁盘的默认配置会清空 provider/backend API key，避免把 shell 环境里的 secret 持久化。
@@ -317,6 +327,7 @@ internal/providers/anthropic_provider.go
 openai              -> OpenAI 官方 Go SDK，Responses API
 anthropic           -> Anthropic 官方 Go SDK，Messages API
 openai-compatible   -> 手写 OpenAI-compatible Chat Completions 兼容层
+cliproxyapi         -> 基于 OpenAI-compatible 的本地 CLIProxyAPI 预置
 ```
 
 模型字符串使用 `provider:model` 前缀路由，例如：
@@ -325,9 +336,10 @@ openai-compatible   -> 手写 OpenAI-compatible Chat Completions 兼容层
 openai:gpt-4.1-mini
 anthropic:claude-sonnet-4-5
 openai-compatible:gpt-4.1-mini
+cliproxyapi:gpt-5.5
 ```
 
-如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型。当前官方 SDK provider 先使用非流式调用打通 MVP；流式输出、tool calling、usage/cost 统计保留为后续增强。
+如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前官方 SDK provider 先使用非流式调用打通 MVP；流式输出、tool calling、usage/cost 统计保留为后续增强。
 
 环境变量：
 
@@ -339,6 +351,9 @@ ANTHROPIC_MODEL
 OPENAI_COMPATIBLE_BASE_URL
 OPENAI_COMPATIBLE_API_KEY
 OPENAI_COMPATIBLE_MODEL
+CLIPROXYAPI_BASE_URL
+CLIPROXYAPI_API_KEY
+CLIPROXYAPI_MODEL
 ```
 
 后续计划支持：

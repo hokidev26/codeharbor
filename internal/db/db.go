@@ -150,7 +150,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var projects []Project
+	projects := make([]Project, 0)
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Status, &p.FlowMode, &p.GitPath, &p.RemoteURL, &p.DefaultBranch, &p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -202,7 +202,7 @@ func (s *Store) ListChaptersByProject(ctx context.Context, projectID string) ([]
 		return nil, err
 	}
 	defer rows.Close()
-	var chapters []Chapter
+	chapters := make([]Chapter, 0)
 	for rows.Next() {
 		var c Chapter
 		var isRoot int
@@ -261,7 +261,7 @@ func (s *Store) ListNarratorsByChapter(ctx context.Context, chapterID string) ([
 		return nil, err
 	}
 	defer rows.Close()
-	var narrators []Narrator
+	narrators := make([]Narrator, 0)
 	for rows.Next() {
 		var n Narrator
 		var planMode int
@@ -299,7 +299,7 @@ func (s *Store) ListMessages(ctx context.Context, narratorID string) ([]Message,
 		return nil, err
 	}
 	defer rows.Close()
-	var messages []Message
+	messages := make([]Message, 0)
 	for rows.Next() {
 		var m Message
 		var raw string

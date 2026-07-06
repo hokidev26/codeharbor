@@ -53,7 +53,7 @@
             <div id="activeBackendName" class="backend-name">未配置后端</div>
             <button id="manageBackendsBtn" class="ghost-btn mini" type="button">管理后端</button>
           </section>
-          <button class="nav-item" type="button">⚙ 设置</button>
+          <button id="settingsBtn" class="nav-item" type="button">⚙ 设置</button>
           <button class="nav-item" type="button">⇥ 退出登录</button>
           <div class="version">v0.1.0-dev</div>
         </div>
@@ -117,25 +117,67 @@
       <button id="expandTerminalBtn" class="terminal-rail hidden" type="button" title="展开终端">⌁</button>
     </main>
 
-    <div id="folderModal" class="modal hidden" role="dialog" aria-modal="true">
-      <div class="modal-card">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">选择电脑上的目录</div>
-            <div id="directoryPath" class="modal-path">Loading...</div>
+    <div id="folderModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="folderModalTitle">
+      <div class="modal-card folder-picker-card">
+        <div class="folder-picker-head">
+          <div id="folderModalTitle" class="modal-title">选择目录</div>
+          <button id="closeFolderModalBtn" class="folder-close-btn" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="folder-toolbar" aria-label="目录操作">
+          <button id="folderHomeBtn" class="folder-tool-btn" type="button" title="主目录">⌂</button>
+          <button id="folderParentBtn" class="folder-tool-btn" type="button" title="上一级">↑</button>
+          <button id="folderRefreshBtn" class="folder-tool-btn" type="button" title="刷新">↻</button>
+          <button id="newFolderBtn" class="folder-tool-btn" type="button" title="新建文件夹">▱＋</button>
+          <button id="toggleHiddenFoldersBtn" class="folder-tool-btn muted" type="button" title="隐藏文件夹暂未显示">⊘</button>
+        </div>
+        <div class="folder-path-row">
+          <input id="manualDirectoryPath" class="folder-path-input" aria-label="当前路径" placeholder="输入绝对路径，例如 /Users/aaa/Desktop/my-project" />
+          <button id="goDirectoryBtn" class="folder-icon-action" type="button" title="前往路径">✎</button>
+          <button id="favoriteDirectoryBtn" class="folder-icon-action" type="button" title="收藏当前目录">☆</button>
+        </div>
+        <div class="folder-picker-body">
+          <aside class="folder-sidebar">
+            <div class="folder-sidebar-title">快速访问</div>
+            <div id="directoryShortcuts" class="folder-shortcut-list"></div>
+            <div class="folder-sidebar-title with-border">收藏夹</div>
+            <div id="recentModalDirectories" class="folder-shortcut-list muted-list"></div>
+          </aside>
+          <section class="folder-main">
+            <div id="directoryList" class="directory-list folder-list"></div>
+          </section>
+        </div>
+        <div class="folder-picker-footer">
+          <div id="directoryPath" class="folder-current-path">Loading...</div>
+          <div class="folder-footer-actions">
+            <button id="cancelDirectoryBtn" class="folder-cancel-btn" type="button">取消</button>
+            <button id="chooseDirectoryBtn" class="folder-confirm-btn" type="button">选择此目录</button>
           </div>
-          <button id="closeFolderModalBtn" class="icon-btn" type="button">×</button>
         </div>
-        <div id="directoryShortcuts" class="shortcut-row"></div>
-        <div id="recentModalDirectories" class="shortcut-row compact-shortcuts"></div>
-        <div class="path-row">
-          <input id="manualDirectoryPath" class="input" placeholder="输入绝对路径，例如 /Users/aaa/Desktop/my-project" />
-          <button id="goDirectoryBtn" class="ghost-btn" type="button">前往</button>
-        </div>
-        <div id="directoryList" class="directory-list"></div>
-        <div class="modal-actions">
-          <button id="chooseDirectoryBtn" class="send-btn" type="button">使用此目录创建项目</button>
-        </div>
+      </div>
+    </div>
+
+    <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+      <div class="modal-card settings-modal-card">
+        <aside class="settings-sidebar">
+          <div class="settings-sidebar-head">
+            <div id="settingsModalTitle" class="settings-title">设置</div>
+            <button id="closeSettingsModalBtn" class="settings-close-btn" type="button" aria-label="关闭设置">×</button>
+          </div>
+          <div id="settingsNav" class="settings-nav"></div>
+          <button id="settingsWizardBtn" class="settings-wizard-btn" type="button">
+            <span class="settings-nav-icon">✣</span>
+            <span>重新打开设置向导</span>
+          </button>
+        </aside>
+        <section class="settings-content">
+          <div class="settings-content-head">
+            <div>
+              <div id="settingsContentTitle" class="settings-content-title">个人资料</div>
+              <div id="settingsContentSubtitle" class="settings-content-subtitle">管理当前用户的显示信息。</div>
+            </div>
+          </div>
+          <div id="settingsContentBody" class="settings-content-body"></div>
+        </section>
       </div>
     </div>
 

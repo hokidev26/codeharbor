@@ -30,14 +30,16 @@ func NewOpenAICompatible(cfg config.OpenAICompatibleConfig) *OpenAICompatible {
 func (p *OpenAICompatible) Name() string { return p.cfg.Name }
 
 func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
-	if p.cfg.APIKey == "" {
+	if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
 		return []string{p.cfg.Model}, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.cfg.BaseURL, "/")+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	if p.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	}
 	res, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -68,8 +70,8 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-		if p.cfg.APIKey == "" {
-			text := "OpenAI-compatible provider is not configured. Set OPENAI_API_KEY to enable real model calls."
+		if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
+			text := "OpenAI-compatible provider is not configured. Set OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY to enable real model calls."
 			out <- Event{Type: "text", Text: text}
 			out <- Event{Type: "done", Done: true}
 			return
@@ -104,15 +106,17 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+		if p.cfg.APIKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+		}
 		res, err := p.client.Do(httpReq)
 		if err != nil {
-			out <- Event{Type: "error", Text: err.Error()}
+			out <- Event{Type: "error", Text: fmt.Sprintf("%s provider request failed: %v", p.cfg.Name, err)}
 			return
 		}
 		defer res.Body.Close()
 		if res.StatusCode >= 300 {
-			out <- Event{Type: "error", Text: fmt.Sprintf("model request failed: %s", res.Status)}
+			out <- Event{Type: "error", Text: fmt.Sprintf("%s model request failed: %s", p.cfg.Name, res.Status)}
 			return
 		}
 		var body struct {

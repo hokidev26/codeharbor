@@ -53,12 +53,13 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	BaseURL   string `json:"baseUrl,omitempty"`
-	APIKey    string `json:"apiKey,omitempty"`
-	Model     string `json:"model"`
-	MaxTokens int64  `json:"maxTokens,omitempty"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	BaseURL        string `json:"baseUrl,omitempty"`
+	APIKey         string `json:"apiKey,omitempty"`
+	Model          string `json:"model"`
+	MaxTokens      int64  `json:"maxTokens,omitempty"`
+	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
 }
 
 type OpenAICompatibleConfig = ProviderConfig
@@ -77,12 +78,13 @@ type BackendConfig struct {
 }
 
 type ProviderSummary struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	BaseURL    string `json:"baseUrl,omitempty"`
-	Model      string `json:"model"`
-	MaxTokens  int64  `json:"maxTokens,omitempty"`
-	Configured bool   `json:"configured"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	BaseURL        string `json:"baseUrl,omitempty"`
+	Model          string `json:"model"`
+	MaxTokens      int64  `json:"maxTokens,omitempty"`
+	Configured     bool   `json:"configured"`
+	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
 }
 
 func Default() (Config, error) {
@@ -99,8 +101,8 @@ func Default() (Config, error) {
 			DefaultProjectDir: filepath.Join(home, "projects"),
 		},
 		Agent: AgentConfig{
-			DefaultModel:           "openai:gpt-4.1-mini",
-			SummaryModel:           "openai:gpt-4.1-mini",
+			DefaultModel:           getenv("CODEHARBOR_DEFAULT_MODEL", "openai:gpt-4.1-mini"),
+			SummaryModel:           getenv("CODEHARBOR_SUMMARY_MODEL", getenv("CODEHARBOR_DEFAULT_MODEL", "openai:gpt-4.1-mini")),
 			DefaultPermissionMode:  "acceptEdits",
 			DefaultStartInPlanMode: false,
 			MaxTurns:               200,
@@ -122,6 +124,7 @@ func Default() (Config, error) {
 				Model:     getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
 				MaxTokens: 4096,
 			},
+			defaultCLIProxyAPIProvider(),
 			{
 				Name:    "openai-compatible",
 				Type:    "openai-compatible",
@@ -171,17 +174,18 @@ func (c Config) Addr() string {
 }
 
 func (p ProviderConfig) IsConfigured() bool {
-	return p.APIKey != ""
+	return p.APIKey != "" || p.APIKeyOptional
 }
 
 func (p ProviderConfig) Summary() ProviderSummary {
 	return ProviderSummary{
-		Name:       p.Name,
-		Type:       p.Type,
-		BaseURL:    p.BaseURL,
-		Model:      p.Model,
-		MaxTokens:  p.MaxTokens,
-		Configured: p.IsConfigured(),
+		Name:           p.Name,
+		Type:           p.Type,
+		BaseURL:        p.BaseURL,
+		Model:          p.Model,
+		MaxTokens:      p.MaxTokens,
+		Configured:     p.IsConfigured(),
+		APIKeyOptional: p.APIKeyOptional,
 	}
 }
 
@@ -219,6 +223,10 @@ func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 }
 
 func applyProviderEnvDefaults(provider *ProviderConfig) {
+	if provider.Name == "cliproxyapi" || provider.Type == "cliproxyapi" {
+		applyCLIProxyAPIEnvDefaults(provider)
+		return
+	}
 	switch provider.Type {
 	case "openai":
 		if provider.APIKey == "" {
@@ -247,6 +255,35 @@ func applyProviderEnvDefaults(provider *ProviderConfig) {
 		if provider.Model == "" {
 			provider.Model = getenv("OPENAI_COMPATIBLE_MODEL", getenv("OPENAI_MODEL", "gpt-4.1-mini"))
 		}
+	}
+}
+
+func defaultCLIProxyAPIProvider() ProviderConfig {
+	provider := ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", APIKeyOptional: true}
+	applyCLIProxyAPIEnvDefaults(&provider)
+	return provider
+}
+
+func applyCLIProxyAPIEnvDefaults(provider *ProviderConfig) {
+	if provider.Name == "" {
+		provider.Name = "cliproxyapi"
+	}
+	provider.Type = "openai-compatible"
+	provider.APIKeyOptional = true
+	if provider.BaseURL == "" {
+		provider.BaseURL = firstEnv("CLIPROXYAPI_BASE_URL", "CLIPROXY_BASE_URL", "CLI_PROXY_API_BASE_URL", "CPA_BASE_URL")
+	}
+	if provider.BaseURL == "" {
+		provider.BaseURL = "http://127.0.0.1:8317/v1"
+	}
+	if provider.APIKey == "" {
+		provider.APIKey = firstEnv("CLIPROXYAPI_API_KEY", "CLIPROXY_API_KEY", "CLI_PROXY_API_KEY", "CPA_API_KEY")
+	}
+	if provider.Model == "" {
+		provider.Model = firstEnv("CLIPROXYAPI_MODEL", "CLIPROXY_MODEL", "CLI_PROXY_MODEL", "CPA_MODEL")
+	}
+	if provider.Model == "" {
+		provider.Model = "gpt-5.5"
 	}
 }
 

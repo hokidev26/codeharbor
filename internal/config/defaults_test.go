@@ -22,6 +22,13 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Agent.DefaultPermissionMode == "" {
 		t.Fatal("expected default permission mode")
 	}
+	provider := providerByName(cfg, "cliproxyapi")
+	if provider == nil {
+		t.Fatal("expected CLIProxyAPI provider preset")
+	}
+	if provider.Type != "openai-compatible" || provider.BaseURL != "http://127.0.0.1:8317/v1" || provider.Model != "gpt-5.5" || !provider.APIKeyOptional {
+		t.Fatalf("unexpected CLIProxyAPI provider preset: %+v", *provider)
+	}
 }
 
 func TestDefaultBackendsFromEnv(t *testing.T) {
@@ -45,6 +52,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-secret")
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
 	t.Setenv("OPENAI_COMPATIBLE_API_KEY", "compatible-secret")
+	t.Setenv("CLIPROXYAPI_API_KEY", "cliproxy-secret")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_URL", "http://127.0.0.1:8000")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_API_KEY", "backend-secret")
 
@@ -56,6 +64,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	expectedRuntimeKeys := map[string]string{
 		"openai":            "openai-secret",
 		"anthropic":         "anthropic-secret",
+		"cliproxyapi":       "cliproxy-secret",
 		"openai-compatible": "compatible-secret",
 	}
 	for _, provider := range cfg.Providers.Instances {
@@ -71,7 +80,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"openai-secret", "anthropic-secret", "compatible-secret", "backend-secret"} {
+	for _, secret := range []string{"openai-secret", "anthropic-secret", "cliproxy-secret", "compatible-secret", "backend-secret"} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("persisted config contains secret %q", secret)
 		}
@@ -91,4 +100,13 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 			t.Fatalf("expected persisted backend api key to be empty for %s", backend.Name)
 		}
 	}
+}
+
+func providerByName(cfg Config, name string) *ProviderConfig {
+	for i := range cfg.Providers.Instances {
+		if cfg.Providers.Instances[i].Name == name {
+			return &cfg.Providers.Instances[i]
+		}
+	}
+	return nil
 }

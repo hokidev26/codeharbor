@@ -29,6 +29,25 @@ func TestCreateProjectCreatesCoreRecords(t *testing.T) {
 	}
 }
 
+func TestListProjectsReturnsEmptySlice(t *testing.T) {
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	projects, err := store.ListProjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projects == nil {
+		t.Fatal("expected empty slice, got nil")
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected no projects, got %d", len(projects))
+	}
+}
+
 func TestBackendRegistryActivatesSingleBackend(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
