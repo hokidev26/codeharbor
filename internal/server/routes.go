@@ -49,6 +49,7 @@ type createProjectRequest struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	GitPath     string `json:"gitPath"`
+	Model       string `json:"model"`
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +66,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, s.cfg.Agent.DefaultModel, s.cfg.Agent.DefaultPermissionMode)
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = s.cfg.Agent.DefaultModel
+	}
+	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, s.cfg.Agent.DefaultPermissionMode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

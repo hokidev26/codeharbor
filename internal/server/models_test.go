@@ -1,14 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"codeharbor/internal/config"
+	"codeharbor/internal/db"
 	"codeharbor/internal/providers"
 )
 
@@ -31,6 +34,37 @@ func (p fakeModelProvider) Generate(ctx context.Context, req providers.GenerateR
 	out := make(chan providers.Event)
 	close(out)
 	return out, nil
+}
+
+func TestCreateProjectUsesRequestedModel(t *testing.T) {
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectDir := filepath.Join(t.TempDir(), "project")
+	app := New(config.Config{
+		Paths: config.PathsConfig{DefaultProjectDir: t.TempDir()},
+		Agent: config.AgentConfig{DefaultModel: "openai:default", DefaultPermissionMode: "acceptEdits"},
+	}, store, nil, nil)
+
+	payload := []byte(`{"name":"Demo","gitPath":"` + projectDir + `","model":"cliproxyapi:gpt-dynamic"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Narrator db.Narrator `json:"narrator"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Narrator.Model != "cliproxyapi:gpt-dynamic" {
+		t.Fatalf("expected requested model, got %q", body.Narrator.Model)
+	}
 }
 
 func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {

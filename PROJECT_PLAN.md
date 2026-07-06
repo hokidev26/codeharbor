@@ -253,7 +253,8 @@ GET  /ws/terminal?narratorId={narratorId}
 {
   "name": "Demo Project",
   "description": "optional",
-  "gitPath": "optional"
+  "gitPath": "optional",
+  "model": "optional provider:model override"
 }
 ```
 
@@ -531,6 +532,7 @@ GET /ui/app.js
 - 预览 `/api/fs/preview`
 - 查看 settings / licenses 简要统计
 - 从 `/api/models` 动态刷新 CLIProxyAPI 登录账号可用模型
+- 设置 → 模型/提供商页内完成模型刷新、登录跳转、模型选择和首选模型保存
 - 管理 Agent Server 后端并显示健康状态
 
 后续如果需要正式使用 shadcn/ui，可升级为：

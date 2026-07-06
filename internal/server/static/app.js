@@ -5,6 +5,7 @@ const state = {
   narrator: null,
   settings: null,
   modelCatalog: null,
+  activeSettingsPanel: "profile",
   backends: [],
   backendHealth: null,
   directoryPath: "",
@@ -16,6 +17,7 @@ const state = {
 };
 
 const recentDirectoriesKey = "codeharbor.recentDirectories";
+const preferredModelKey = "codeharbor.preferredModel";
 
 const settingsSections = [
   {
@@ -235,6 +237,7 @@ async function loadModelCatalog() {
     state.modelCatalog = { providers: [], error: err.message };
   }
   renderModelOptions();
+  refreshActiveSettingsPanel();
 }
 
 async function refreshModelCatalog() {
@@ -278,17 +281,26 @@ function renderSettingsNav(activeKey = "profile") {
 
 function selectSettingsPanel(key) {
   const item = settingsItems.find((entry) => entry.key === key) || settingsItems[0];
+  state.activeSettingsPanel = item.key;
   $("settingsContentTitle").textContent = item.key === "skills" ? "套路" : item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
   $("settingsContentBody").innerHTML = renderSettingsContent(item);
   $("settingsNav").querySelectorAll(".settings-nav-item").forEach((node) => {
     node.classList.toggle("active", node.dataset.settingsKey === item.key);
   });
-  if (item.key === "skills") bindSkillTabs("commands");
+  bindSettingsContent(item.key);
+}
+
+function refreshActiveSettingsPanel() {
+  const modal = $("settingsModal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  selectSettingsPanel(state.activeSettingsPanel || "profile");
 }
 
 function renderSettingsContent(item) {
   if (item.key === "skills") return renderSkillSettingsContent("commands");
+  if (item.key === "models") return renderModelSettingsContent();
+  if (item.key === "providers") return renderProviderSettingsContent();
   const details = settingsPanelDetails(item.key);
   return `
     <div class="settings-panel-card">
@@ -307,6 +319,204 @@ function renderSettingsContent(item) {
       `).join("")}
     </div>
   `;
+}
+
+function bindSettingsContent(key) {
+  if (key === "skills") bindSkillTabs("commands");
+  if (key === "models") bindModelSettingsActions();
+  if (key === "providers") bindProviderSettingsActions();
+}
+
+function renderModelSettingsContent() {
+  const providers = modelProvidersForUI();
+  const options = allModelOptions();
+  const current = currentModelValue();
+  const preferred = getPreferredModel();
+  const clip = cliProxyProvider();
+  return `
+    <div class="settings-live-page">
+      <section class="settings-hero-card">
+        <div>
+          <div class="settings-hero-kicker">当前模型</div>
+          <div class="settings-hero-title">${escapeHtml(current || "尚未选择")}</div>
+          <p>${escapeHtml(preferred ? `首选模型：${preferred}` : "还没有保存首选模型；可先选模型，再创建项目。")}</p>
+        </div>
+        <div class="settings-action-row">
+          <button id="settingsRefreshModelsBtn" class="settings-action-btn primary" type="button">刷新模型</button>
+          <button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">登录 / 授权</button>
+          <button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">清除首选</button>
+        </div>
+      </section>
+      <div class="settings-status-strip">
+        <div><strong>${escapeHtml(String(options.length))}</strong><span>可选模型</span></div>
+        <div><strong>${escapeHtml(clip?.error ? "需处理" : (clip ? "已就绪" : "未发现"))}</strong><span>CLIProxyAPI</span></div>
+        <div><strong>${escapeHtml(clip?.baseUrl || "默认")}</strong><span>模型来源</span></div>
+      </div>
+      <div class="settings-model-list">
+        ${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card">尚未加载模型。请先刷新模型。</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderModelProviderSection(provider) {
+  const models = providerModelList(provider);
+  return `
+    <section class="settings-provider-section">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
+          <div class="settings-provider-meta">${escapeHtml(provider.baseUrl || provider.type || "provider")}</div>
+        </div>
+        <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
+      </div>
+      ${provider.error ? `<div class="settings-inline-alert">${escapeHtml(provider.error)}</div>` : ""}
+      <div class="settings-model-grid">
+        ${models.map((model) => renderModelChoice(provider, model)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderModelChoice(provider, model) {
+  const value = `${provider.name}:${model}`;
+  const active = value === currentModelValue();
+  const preferred = value === getPreferredModel();
+  return `
+    <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}">
+      <span class="settings-model-name">${escapeHtml(model)}</span>
+      <span class="settings-model-provider">${escapeHtml(provider.name)}${preferred ? " · 首选" : ""}</span>
+    </button>
+  `;
+}
+
+function renderProviderSettingsContent() {
+  const providers = modelProvidersForUI();
+  const clip = cliProxyProvider();
+  const envSample = `CODEHARBOR_DEFAULT_MODEL=${getPreferredModel() || "cliproxyapi:gpt-5.5"}\nCLIPROXYAPI_BASE_URL=${clip?.baseUrl || "http://127.0.0.1:8317/v1"}\n# 如果 CLIProxyAPI 启用了 api-keys，再设置：\n# CLIPROXYAPI_API_KEY=你的key`;
+  return `
+    <div class="settings-live-page">
+      <section class="settings-hero-card">
+        <div>
+          <div class="settings-hero-kicker">提供商</div>
+          <div class="settings-hero-title">CLIProxyAPI 本地接入</div>
+          <p>不需要另一个项目。CodeHarbor 直接连接本机 CLIProxyAPI；只有 OAuth 登录时才跳出授权页面。</p>
+        </div>
+        <div class="settings-action-row">
+          <button id="providerOpenLoginBtn" class="settings-action-btn primary" type="button">登录 / 授权</button>
+          <button id="providerRefreshModelsBtn" class="settings-action-btn" type="button">刷新模型</button>
+        </div>
+      </section>
+      ${clip ? renderCLIProxyStatusCard(clip) : `<div class="settings-empty-card">未找到 cliproxyapi provider。</div>`}
+      <section class="settings-provider-section">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">环境变量示例</div>
+            <div class="settings-provider-meta">复制后可用于启动 CodeHarbor</div>
+          </div>
+          <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envSample)}">复制</button>
+        </div>
+        <pre class="settings-code-sample">${escapeHtml(envSample)}</pre>
+      </section>
+      <div class="settings-provider-cards">
+        ${providers.map(renderProviderCard).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderCLIProxyStatusCard(provider) {
+  const models = providerModelList(provider);
+  return `
+    <section class="settings-provider-section highlighted">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
+          <div class="settings-provider-meta">${escapeHtml(provider.baseUrl || "http://127.0.0.1:8317/v1")}</div>
+        </div>
+        <span class="settings-status-pill ${provider.error ? "warn" : "ok"}">${escapeHtml(providerStatusText(provider))}</span>
+      </div>
+      ${provider.error ? `<div class="settings-inline-alert">${escapeHtml(provider.error)}</div>` : `<div class="settings-inline-success">已加载 ${escapeHtml(String(models.length))} 个模型。登录/切换账号后点“刷新模型”即可更新。</div>`}
+      <div class="settings-copy-row">
+        <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(provider.baseUrl || "http://127.0.0.1:8317/v1")}">复制 Base URL</button>
+        <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(provider.managementUrl || "http://127.0.0.1:8317/management.html")}">复制登录页</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderProviderCard(provider) {
+  const models = providerModelList(provider);
+  return `
+    <section class="settings-provider-card">
+      <div class="settings-provider-card-head">
+        <div>
+          <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
+          <div class="settings-provider-meta">${escapeHtml(provider.type)} · ${escapeHtml(models.length + " 个模型")}</div>
+        </div>
+        <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
+      </div>
+      <div class="settings-provider-meta path">${escapeHtml(provider.baseUrl || "无 Base URL")}</div>
+      ${provider.error ? `<div class="settings-inline-alert compact">${escapeHtml(provider.error)}</div>` : ""}
+    </section>
+  `;
+}
+
+function bindModelSettingsActions() {
+  $("settingsRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
+  $("settingsOpenLoginBtn")?.addEventListener("click", openProviderLoginPage);
+  $("settingsClearPreferredModelBtn")?.addEventListener("click", () => applyPreferredModel("").catch(showError));
+  $("settingsContentBody").querySelectorAll("[data-apply-model]").forEach((node) => {
+    node.addEventListener("click", () => applyPreferredModel(node.dataset.applyModel).catch(showError));
+  });
+}
+
+function bindProviderSettingsActions() {
+  $("providerOpenLoginBtn")?.addEventListener("click", openProviderLoginPage);
+  $("providerRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
+  $("settingsContentBody").querySelectorAll("[data-copy-text]").forEach((node) => {
+    node.addEventListener("click", () => copyText(node.dataset.copyText || ""));
+  });
+}
+
+function allModelOptions() {
+  return modelProvidersForUI().flatMap((provider) => providerModelList(provider).map((model) => ({ provider, model, value: `${provider.name}:${model}` })));
+}
+
+function providerLabel(provider) {
+  if (provider.name === "cliproxyapi") return "CLIProxyAPI";
+  if (provider.name === "openai-compatible") return "OpenAI-compatible";
+  return provider.name;
+}
+
+function providerStatusText(provider) {
+  if (provider.error) return "需登录/处理";
+  if (provider.configured) return "已就绪";
+  return "未配置";
+}
+
+async function applyPreferredModel(model) {
+  const value = String(model || "").trim();
+  setPreferredModel(value);
+  if ($("modelSelect")) {
+    if (value) $("modelSelect").value = value;
+    renderModelOptions();
+  }
+  if (state.narrator && value && value !== state.narrator.model) {
+    state.narrator = await api(`/api/narrators/${state.narrator.id}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
+  }
+  refreshActiveSettingsPanel();
+  appendTerminal(value ? `[info] 已使用模型：${value}\n` : "[info] 已清除首选模型。\n");
+}
+
+async function copyText(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    appendTerminal("[info] 已复制到剪贴板。\n");
+  } catch {
+    prompt("复制以下内容", text);
+  }
 }
 
 function renderSkillSettingsContent(activeKey = "commands") {
@@ -394,6 +604,30 @@ function settingsPanelDetails(key) {
   ];
 }
 
+function getPreferredModel() {
+  try {
+    return localStorage.getItem(preferredModelKey) || "";
+  } catch {
+    return "";
+  }
+}
+
+function setPreferredModel(model) {
+  const value = String(model || "").trim();
+  try {
+    if (value) localStorage.setItem(preferredModelKey, value);
+    else localStorage.removeItem(preferredModelKey);
+  } catch {}
+}
+
+function selectedModelValue() {
+  return $("modelSelect")?.value || state.narrator?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+}
+
+function currentModelValue() {
+  return state.narrator?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+}
+
 function renderModelOptions() {
   const select = $("modelSelect");
   const providers = modelProvidersForUI();
@@ -409,7 +643,7 @@ function renderModelOptions() {
     }).join("");
     return `<optgroup label="${escapeAttr(groupLabel)}">${options}</optgroup>`;
   }).join("");
-  const currentModel = state.narrator?.model || "";
+  const currentModel = currentModelValue();
   const currentOption = currentModel && !optionValues.includes(currentModel)
     ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel)}（未配置）</option>`
     : "";
@@ -455,7 +689,7 @@ function providerModelList(provider) {
   return provider.defaultModel ? [provider.defaultModel] : [];
 }
 
-function currentProviderConfig(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
+function currentProviderConfig(modelValue = selectedModelValue()) {
   const [providerName] = String(modelValue || "").split(":");
   return modelProvidersForUI().find((provider) => provider.name === providerName)
     || (state.settings?.providers || []).find((provider) => provider.name === providerName)
@@ -551,9 +785,10 @@ async function createProjectFromDirectory(path) {
     return;
   }
   const name = basename(path) || "Project";
+  const model = currentModelValue();
   const created = await api("/api/projects", {
     method: "POST",
-    body: JSON.stringify({ name, gitPath: path }),
+    body: JSON.stringify({ name, gitPath: path, ...(model ? { model } : {}) }),
   });
   closeDirectoryModal();
   await loadProjects();
@@ -675,9 +910,15 @@ function connectWS() {
 }
 
 async function saveNarratorSettings() {
-  if (!state.narrator) return;
-  const id = state.narrator.id;
   const model = $("modelSelect").value.trim();
+  if (model) setPreferredModel(model);
+  if (!state.narrator) {
+    renderModelOptions();
+    refreshActiveSettingsPanel();
+    appendTerminal(model ? `[info] 已保存首选模型：${model}\n` : "[info] 尚未选择模型。\n");
+    return;
+  }
+  const id = state.narrator.id;
   const permissionMode = $("permissionMode").value;
   if (model && model !== state.narrator.model) {
     state.narrator = await api(`/api/narrators/${id}/model`, { method: "PATCH", body: JSON.stringify({ model }) });
