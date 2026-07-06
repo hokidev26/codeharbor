@@ -298,6 +298,19 @@ button { color: inherit; }
 }
 .compact-select { max-width: min(390px, 42vw); min-width: 170px; height: 26px; font-size: 12px; }
 .permission-select { min-width: 116px; height: 26px; font-size: 12px; }
+.model-tool-btn {
+  height: 26px;
+  border: 1px solid var(--line);
+  background: #23242a;
+  color: var(--text-soft);
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.model-tool-btn:hover { color: var(--text); border-color: var(--accent); }
 .model-unconfigured { color: #ffb86b !important; }
 .setup-notice-card {
   max-width: min(620px, 90%);

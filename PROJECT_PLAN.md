@@ -207,6 +207,7 @@ projects
 GET  /api/health
 GET  /api/auth/status
 GET  /api/settings
+GET  /api/models
 GET  /api/licenses
 
 GET    /api/backends
@@ -529,6 +530,7 @@ GET /ui/app.js
 - 浏览 `/api/fs/browse`
 - 预览 `/api/fs/preview`
 - 查看 settings / licenses 简要统计
+- 从 `/api/models` 动态刷新 CLIProxyAPI 登录账号可用模型
 - 管理 Agent Server 后端并显示健康状态
 
 后续如果需要正式使用 shadcn/ui，可升级为：

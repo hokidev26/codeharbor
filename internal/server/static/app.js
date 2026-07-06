@@ -4,6 +4,7 @@ const state = {
   chapter: null,
   narrator: null,
   settings: null,
+  modelCatalog: null,
   backends: [],
   backendHealth: null,
   directoryPath: "",
@@ -227,6 +228,26 @@ async function loadSettings() {
   renderModelOptions();
 }
 
+async function loadModelCatalog() {
+  try {
+    state.modelCatalog = await api("/api/models");
+  } catch (err) {
+    state.modelCatalog = { providers: [], error: err.message };
+  }
+  renderModelOptions();
+}
+
+async function refreshModelCatalog() {
+  const button = $("refreshModelsBtn");
+  if (button) button.textContent = "刷新中";
+  try {
+    await loadModelCatalog();
+    appendTerminal("[info] 模型列表已刷新。\n");
+  } finally {
+    if (button) button.textContent = "刷新模型";
+  }
+}
+
 function openSettingsModal(key = "profile") {
   $("settingsModal").classList.remove("hidden");
   renderSettingsNav(key);
@@ -328,6 +349,14 @@ function skillTabLabel(key) {
   return skillTabs.find((tab) => tab.key === key)?.label || key;
 }
 
+function cliProxyProviderSummary() {
+  const provider = cliProxyProvider();
+  if (!provider) return "已内置 cliproxyapi provider；启动 CLIProxyAPI 后点击刷新模型。";
+  const count = providerModelList(normalizeModelProvider(provider)).length;
+  if (provider.error) return `${provider.error} 当前保留 ${count} 个回退模型。`;
+  return `已连接 ${provider.baseUrl || "http://127.0.0.1:8317/v1"}，当前可选 ${count} 个模型；登录/切换账号后点击刷新模型即可更新。`;
+}
+
 function settingsPanelDetails(key) {
   const base = {
     profile: [
@@ -343,7 +372,7 @@ function settingsPanelDetails(key) {
       { title: "运行策略", text: "后续会管理自动工具调用、计划模式和代理行为。" },
     ],
     providers: [
-      { title: "CLIProxyAPI", text: "已内置 cliproxyapi provider，默认连接 http://127.0.0.1:8317/v1，模型菜单可直接选择 cliproxyapi:gpt-5.5。" },
+      { title: "CLIProxyAPI", text: cliProxyProviderSummary() },
       { title: "Secret", text: "默认 config 写盘会脱敏；如 CLIProxyAPI 配置了 api-keys，请通过 CLIPROXYAPI_API_KEY 注入。" },
     ],
     "agent-admin": [
@@ -367,28 +396,70 @@ function settingsPanelDetails(key) {
 
 function renderModelOptions() {
   const select = $("modelSelect");
-  const providers = state.settings?.providers || [];
-  const options = providers.map((provider) => {
-    const value = `${provider.name}:${provider.model}`;
-    return {
-      value,
-      configured: Boolean(provider.configured),
-      label: `${value}${provider.configured ? "" : "（未配置）"}`,
-    };
-  });
-  if (state.narrator?.model && !options.some((option) => option.value === state.narrator.model)) {
-    options.unshift({ value: state.narrator.model, configured: false, label: `${state.narrator.model}（未配置）` });
-  }
-  select.innerHTML = options.map((option) => `<option value="${escapeAttr(option.value)}" data-configured="${option.configured ? "true" : "false"}">${escapeHtml(option.label)}</option>`).join("");
-  if (state.narrator?.model) {
-    select.value = state.narrator.model;
+  const providers = modelProvidersForUI();
+  const optionValues = [];
+  const groups = providers.map((provider) => {
+    const models = providerModelList(provider);
+    const groupLabel = `${provider.name}${provider.error ? "（需登录/刷新）" : ""}`;
+    const options = models.map((model) => {
+      const value = `${provider.name}:${model}`;
+      optionValues.push(value);
+      const suffix = provider.configured ? "" : "（未配置）";
+      return `<option value="${escapeAttr(value)}" data-provider="${escapeAttr(provider.name)}" data-configured="${provider.configured ? "true" : "false"}">${escapeHtml(model + suffix)}</option>`;
+    }).join("");
+    return `<optgroup label="${escapeAttr(groupLabel)}">${options}</optgroup>`;
+  }).join("");
+  const currentModel = state.narrator?.model || "";
+  const currentOption = currentModel && !optionValues.includes(currentModel)
+    ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel)}（未配置）</option>`
+    : "";
+  select.innerHTML = currentOption + (groups || `<option value="" data-configured="false">尚未加载模型</option>`);
+  if (currentModel) {
+    select.value = currentModel;
   }
   updateModelConfiguredState();
 }
 
+function modelProvidersForUI() {
+  const catalogProviders = Array.isArray(state.modelCatalog?.providers) ? state.modelCatalog.providers : [];
+  if (catalogProviders.length) {
+    return catalogProviders.map(normalizeModelProvider);
+  }
+  return (state.settings?.providers || []).map((provider) => normalizeModelProvider({
+    name: provider.name,
+    type: provider.type,
+    baseUrl: provider.baseUrl,
+    defaultModel: provider.model,
+    models: provider.model ? [provider.model] : [],
+    configured: provider.configured,
+    apiKeyOptional: provider.apiKeyOptional,
+  }));
+}
+
+function normalizeModelProvider(provider) {
+  return {
+    name: provider.name || provider.type || "provider",
+    type: provider.type || provider.name || "provider",
+    baseUrl: provider.baseUrl || "",
+    defaultModel: provider.defaultModel || provider.model || "",
+    models: Array.isArray(provider.models) ? provider.models.filter(Boolean) : [],
+    configured: Boolean(provider.configured),
+    apiKeyOptional: Boolean(provider.apiKeyOptional),
+    managementUrl: provider.managementUrl || "",
+    error: provider.error || "",
+  };
+}
+
+function providerModelList(provider) {
+  if (provider.models.length) return provider.models;
+  return provider.defaultModel ? [provider.defaultModel] : [];
+}
+
 function currentProviderConfig(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
   const [providerName] = String(modelValue || "").split(":");
-  return (state.settings?.providers || []).find((provider) => provider.name === providerName) || null;
+  return modelProvidersForUI().find((provider) => provider.name === providerName)
+    || (state.settings?.providers || []).find((provider) => provider.name === providerName)
+    || null;
 }
 
 function isCurrentModelConfigured(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
@@ -398,14 +469,18 @@ function isCurrentModelConfigured(modelValue = $("modelSelect")?.value || state.
 function updateModelConfiguredState() {
   const select = $("modelSelect");
   if (!select) return;
-  const configured = isCurrentModelConfigured(select.value);
+  const provider = currentProviderConfig(select.value);
+  const configured = Boolean(provider?.configured);
   select.classList.toggle("model-unconfigured", !configured);
-  select.title = configured ? "模型已配置，可以对话" : modelSetupMessage(select.value);
+  select.title = provider?.error || (configured ? "模型已配置，可以对话" : modelSetupMessage(select.value));
 }
 
 function modelSetupMessage(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
   const provider = currentProviderConfig(modelValue);
   const providerName = provider?.name || String(modelValue || "openai").split(":")[0] || "openai";
+  if (provider?.error) {
+    return `${provider.error} 登录完成后点击“刷新模型”。`;
+  }
   const envByProvider = {
     openai: "OPENAI_API_KEY",
     anthropic: "ANTHROPIC_API_KEY",
@@ -414,6 +489,22 @@ function modelSetupMessage(modelValue = $("modelSelect")?.value || state.narrato
   };
   const envName = envByProvider[providerName] || "对应 provider 的 API key 环境变量";
   return `当前模型 ${modelValue || "未选择"} 尚未配置 API Key。请在启动 CodeHarbor 前设置 ${envName}，然后重启服务。`;
+}
+
+function cliProxyProvider() {
+  return modelProvidersForUI().find((provider) => provider.name === "cliproxyapi")
+    || (state.settings?.providers || []).find((provider) => provider.name === "cliproxyapi")
+    || null;
+}
+
+function openProviderLoginPage() {
+  const provider = currentProviderConfig() || cliProxyProvider();
+  const url = provider?.managementUrl || cliProxyProvider()?.managementUrl;
+  if (url) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  openSettingsModal("providers");
 }
 
 async function loadProjects() {
@@ -1045,6 +1136,8 @@ $("terminalOutput").addEventListener("paste", (event) => {
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", resizeTerminal);
 $("saveNarratorBtn").addEventListener("click", () => saveNarratorSettings().catch(showError));
+$("refreshModelsBtn").addEventListener("click", () => refreshModelCatalog().catch(showError));
+$("openProviderLoginBtn").addEventListener("click", openProviderLoginPage);
 $("modelSelect").addEventListener("change", () => {
   updateModelConfiguredState();
   saveNarratorSettings().catch(showError);
@@ -1058,7 +1151,7 @@ async function init() {
   autoResizeMessageInput();
   renderRecentSidebarDirectories();
   await loadHealth();
-  await Promise.all([loadSettings(), loadProjects(), loadBackends()]);
+  await Promise.all([loadSettings(), loadModelCatalog(), loadProjects(), loadBackends()]);
   if (!state.narrator && state.projects.length) {
     await selectProject(state.projects[0].id);
   }

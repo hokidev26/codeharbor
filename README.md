@@ -96,7 +96,7 @@ Base URL: http://127.0.0.1:8317/v1
 Model:    gpt-5.5
 ```
 
-Start CLIProxyAPI, then choose `cliproxyapi:gpt-5.5` from the model selector. To make new projects use it by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`.
+Start CLIProxyAPI, complete OAuth/account login in the CLIProxyAPI management UI, then click **Refresh models** in CodeHarbor. CodeHarbor calls `/v1/models` and expands every model available to that logged-in account under the `cliproxyapi:*` model selector group. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`.
 
 Agent Server backend seed variables:
 
@@ -121,6 +121,7 @@ Core routes include:
 GET  /api/health
 GET  /api/auth/status
 GET  /api/settings
+GET  /api/models
 GET  /api/licenses
 
 GET    /api/backends

@@ -11,17 +11,23 @@ import (
 	"codeharbor/internal/agent"
 	"codeharbor/internal/config"
 	"codeharbor/internal/db"
+	"codeharbor/internal/providers"
 )
 
 type Server struct {
-	cfg    config.Config
-	store  *db.Store
-	runner *agent.Runner
-	hub    *agent.Hub
+	cfg       config.Config
+	store     *db.Store
+	runner    *agent.Runner
+	hub       *agent.Hub
+	providers *providers.Registry
 }
 
-func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub) *Server {
-	return &Server{cfg: cfg, store: store, runner: runner, hub: hub}
+func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
+	var providerRegistry *providers.Registry
+	if len(providerRegistries) > 0 {
+		providerRegistry = providerRegistries[0]
+	}
+	return &Server{cfg: cfg, store: store, runner: runner, hub: hub, providers: providerRegistry}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -35,6 +41,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/health", s.health)
 	r.Get("/api/auth/status", s.authStatus)
 	r.Get("/api/settings", s.settings)
+	r.Get("/api/models", s.models)
 	r.Get("/api/licenses", s.licenses)
 	r.Route("/api/backends", func(r chi.Router) {
 		r.Get("/", s.listBackends)

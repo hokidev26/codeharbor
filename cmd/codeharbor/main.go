@@ -63,7 +63,7 @@ func main() {
 
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
-	app := server.New(cfg, store, runner, hub)
+	app := server.New(cfg, store, runner, hub, providerRegistry)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),
