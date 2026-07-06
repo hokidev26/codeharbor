@@ -156,6 +156,9 @@ OPENAI_COMPATIBLE_MODEL
 CLIPROXYAPI_BASE_URL
 CLIPROXYAPI_API_KEY
 CLIPROXYAPI_MODEL
+CLIPROXYAPI_MANAGEMENT_KEY
+CLIPROXYAPI_BIN
+CLIPROXYAPI_CONFIG
 ```
 
 首次生成默认 `config.json` 时，运行时仍会读取环境变量中的 API key，但写入磁盘的默认配置会清空 provider/backend API key，避免把 shell 环境里的 secret 持久化。
@@ -209,6 +212,11 @@ GET  /api/auth/status
 GET  /api/settings
 GET  /api/models
 GET  /api/licenses
+
+POST /api/providers/cliproxyapi/codex/login
+GET  /api/providers/cliproxyapi/login-jobs/{id}
+GET  /api/providers/cliproxyapi/auth-files
+POST /api/providers/cliproxyapi/auth-files/import
 
 GET    /api/backends
 POST   /api/backends
@@ -356,6 +364,9 @@ OPENAI_COMPATIBLE_MODEL
 CLIPROXYAPI_BASE_URL
 CLIPROXYAPI_API_KEY
 CLIPROXYAPI_MODEL
+CLIPROXYAPI_MANAGEMENT_KEY
+CLIPROXYAPI_BIN
+CLIPROXYAPI_CONFIG
 ```
 
 后续计划支持：
@@ -532,7 +543,7 @@ GET /ui/app.js
 - 预览 `/api/fs/preview`
 - 查看 settings / licenses 简要统计
 - 从 `/api/models` 动态刷新 CLIProxyAPI 登录账号可用模型
-- 设置 → 模型/提供商页内完成模型刷新、登录跳转、模型选择和首选模型保存
+- 设置 → 模型/提供商页内完成模型刷新、Codex 浏览器登录、Codex 设备码登录、Token/JSON 导入、账号列表刷新、模型选择和首选模型保存
 - 管理 Agent Server 后端并显示健康状态
 
 后续如果需要正式使用 shadcn/ui，可升级为：

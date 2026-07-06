@@ -902,6 +902,47 @@ button { color: inherit; }
   font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   margin: 0;
 }
+.codex-provider-page { gap: 18px; }
+.codex-hero-card { background: linear-gradient(135deg, #ffffff, #edf7ff); }
+.settings-login-output {
+  min-height: 150px;
+  max-height: 330px;
+  overflow: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  margin: 0;
+}
+.settings-token-input {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #0f172a;
+  padding: 12px;
+  outline: none;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.settings-token-input:focus { border-color: #5369f3; box-shadow: 0 0 0 3px rgba(83, 105, 243, .12); }
+.settings-auth-list { display: grid; gap: 9px; }
+.settings-auth-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 13px;
+  padding: 12px;
+}
+.settings-auth-title { color: #0f172a; font-weight: 850; word-break: break-all; }
+.settings-auth-meta { color: #64748b; font-size: 12px; margin-top: 4px; word-break: break-all; }
+.settings-empty-card.compact { padding: 12px; color: #64748b; }
 .skills-page {
   background: #ffffff;
   border-radius: 16px;

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,11 +16,13 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *db.Store
-	runner    *agent.Runner
-	hub       *agent.Hub
-	providers *providers.Registry
+	cfg            config.Config
+	store          *db.Store
+	runner         *agent.Runner
+	hub            *agent.Hub
+	providers      *providers.Registry
+	providerJobsMu sync.Mutex
+	providerJobs   map[string]*providerLoginJob
 }
 
 func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -27,7 +30,7 @@ func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hu
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
 	}
-	return &Server{cfg: cfg, store: store, runner: runner, hub: hub, providers: providerRegistry}
+	return &Server{cfg: cfg, store: store, runner: runner, hub: hub, providers: providerRegistry, providerJobs: make(map[string]*providerLoginJob)}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -43,6 +46,12 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/settings", s.settings)
 	r.Get("/api/models", s.models)
 	r.Get("/api/licenses", s.licenses)
+	r.Route("/api/providers/cliproxyapi", func(r chi.Router) {
+		r.Post("/codex/login", s.startCLIProxyAPICodexLogin)
+		r.Get("/login-jobs/{id}", s.getProviderLoginJob)
+		r.Get("/auth-files", s.listCLIProxyAPIAuthFiles)
+		r.Post("/auth-files/import", s.importCLIProxyAPIAuthFile)
+	})
 	r.Route("/api/backends", func(r chi.Router) {
 		r.Get("/", s.listBackends)
 		r.Post("/", s.createBackend)

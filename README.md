@@ -83,6 +83,9 @@ OPENAI_COMPATIBLE_MODEL
 CLIPROXYAPI_BASE_URL
 CLIPROXYAPI_API_KEY
 CLIPROXYAPI_MODEL
+CLIPROXYAPI_MANAGEMENT_KEY
+CLIPROXYAPI_BIN
+CLIPROXYAPI_CONFIG
 ```
 
 ### CLIProxyAPI preset
@@ -96,7 +99,7 @@ Base URL: http://127.0.0.1:8317/v1
 Model:    gpt-5.5
 ```
 
-Start CLIProxyAPI, complete OAuth/account login only when authorization is needed, then click **Refresh models** in CodeHarbor. CodeHarbor calls `/v1/models` and expands every model available to that logged-in account under the `cliproxyapi:*` model selector group. The built-in Models and Providers settings pages show the CLIProxyAPI status, login link, refresh action, and available models directly inside CodeHarbor; no separate dashboard project is required. You can pick a preferred model before creating a project, and CodeHarbor will use it for the new narrator. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`.
+Start CLIProxyAPI, then use **Settings → Providers → Codex** inside CodeHarbor to add credentials. CodeHarbor can start CLIProxyAPI's browser OAuth flow, device-code login flow, or import a pasted Codex JSON/token without sending users to a separate dashboard project. After login/import, CodeHarbor refreshes CLIProxyAPI auth files and calls `/v1/models`, expanding every model available to the logged-in account under the `cliproxyapi:*` selector group. You can pick a preferred model before creating a project, and CodeHarbor will use it for the new narrator. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`. CodeHarbor uses `CLIPROXYAPI_MANAGEMENT_KEY` for local management API calls; local previews default to `codeharbor-local`.
 
 Agent Server backend seed variables:
 
@@ -123,6 +126,11 @@ GET  /api/auth/status
 GET  /api/settings
 GET  /api/models
 GET  /api/licenses
+
+POST /api/providers/cliproxyapi/codex/login
+GET  /api/providers/cliproxyapi/login-jobs/{id}
+GET  /api/providers/cliproxyapi/auth-files
+POST /api/providers/cliproxyapi/auth-files/import
 
 GET    /api/backends
 POST   /api/backends

@@ -5,6 +5,10 @@ const state = {
   narrator: null,
   settings: null,
   modelCatalog: null,
+  providerAuthFiles: null,
+  providerAuthError: "",
+  providerLoginJob: null,
+  providerLoginPoll: null,
   activeSettingsPanel: "profile",
   backends: [],
   backendHealth: null,
@@ -251,6 +255,61 @@ async function refreshModelCatalog() {
   }
 }
 
+async function loadProviderAuthFiles({ silent = false } = {}) {
+  try {
+    state.providerAuthFiles = await api("/api/providers/cliproxyapi/auth-files");
+    state.providerAuthError = "";
+  } catch (err) {
+    state.providerAuthFiles = null;
+    state.providerAuthError = err.message;
+    if (!silent) appendTerminal(`[warn] 读取 CLIProxyAPI 账号失败：${err.message}\n`);
+  }
+  refreshActiveSettingsPanel();
+}
+
+async function startCodexLogin(method) {
+  const job = await api("/api/providers/cliproxyapi/codex/login", { method: "POST", body: JSON.stringify({ method }) });
+  state.providerLoginJob = job;
+  appendTerminal(`[info] 已启动 Codex ${method === "device" ? "设备码" : "浏览器"}登录。\n`);
+  refreshActiveSettingsPanel();
+  pollProviderLoginJob(job.id);
+}
+
+function pollProviderLoginJob(id) {
+  if (state.providerLoginPoll) window.clearInterval(state.providerLoginPoll);
+  const tick = async () => {
+    try {
+      const job = await api(`/api/providers/cliproxyapi/login-jobs/${id}`);
+      state.providerLoginJob = job;
+      refreshActiveSettingsPanel();
+      if (job.status !== "running") {
+        if (state.providerLoginPoll) window.clearInterval(state.providerLoginPoll);
+        state.providerLoginPoll = null;
+        await loadProviderAuthFiles({ silent: true });
+        await loadModelCatalog();
+      }
+    } catch (err) {
+      appendTerminal(`[warn] 登录状态查询失败：${err.message}\n`);
+    }
+  };
+  tick().catch(showError);
+  state.providerLoginPoll = window.setInterval(() => tick().catch(showError), 1500);
+}
+
+async function importCodexAuthFile() {
+  const textarea = $("codexAuthImportText");
+  const content = textarea?.value.trim() || "";
+  if (!content) throw new Error("请先粘贴 JSON 或 token 内容");
+  await api("/api/providers/cliproxyapi/auth-files/import", {
+    method: "POST",
+    body: JSON.stringify({ filename: "codeharbor-codex-auth.json", content }),
+  });
+  if (textarea) textarea.value = "";
+  appendTerminal("[info] 已导入 Codex 凭据，正在刷新账号和模型。\n");
+  await loadProviderAuthFiles({ silent: true });
+  await loadModelCatalog();
+}
+
 function openSettingsModal(key = "profile") {
   $("settingsModal").classList.remove("hidden");
   renderSettingsNav(key);
@@ -393,36 +452,140 @@ function renderModelChoice(provider, model) {
 function renderProviderSettingsContent() {
   const providers = modelProvidersForUI();
   const clip = cliProxyProvider();
-  const envSample = `CODEHARBOR_DEFAULT_MODEL=${getPreferredModel() || "cliproxyapi:gpt-5.5"}\nCLIPROXYAPI_BASE_URL=${clip?.baseUrl || "http://127.0.0.1:8317/v1"}\n# 如果 CLIProxyAPI 启用了 api-keys，再设置：\n# CLIPROXYAPI_API_KEY=你的key`;
+  const models = clip ? providerModelList(clip) : [];
+  const authFiles = extractAuthFiles(state.providerAuthFiles);
   return `
-    <div class="settings-live-page">
-      <section class="settings-hero-card">
+    <div class="settings-live-page codex-provider-page">
+      <section class="settings-hero-card codex-hero-card">
         <div>
-          <div class="settings-hero-kicker">提供商</div>
-          <div class="settings-hero-title">CLIProxyAPI 本地接入</div>
-          <p>不需要另一个项目。CodeHarbor 直接连接本机 CLIProxyAPI；只有 OAuth 登录时才跳出授权页面。</p>
+          <div class="settings-hero-kicker">AI 供应商</div>
+          <div class="settings-hero-title">Codex</div>
+          <p>直接在 CodeHarbor 添加 ChatGPT/Codex 账号。OAuth 授权页最多弹出一次；回来后自动刷新账号和模型。</p>
         </div>
         <div class="settings-action-row">
-          <button id="providerOpenLoginBtn" class="settings-action-btn primary" type="button">登录 / 授权</button>
-          <button id="providerRefreshModelsBtn" class="settings-action-btn" type="button">刷新模型</button>
+          <button id="codexBrowserLoginBtn" class="settings-action-btn primary" type="button">浏览器添加</button>
+          <button id="codexDeviceLoginBtn" class="settings-action-btn" type="button">设备码添加</button>
+          <button id="providerRefreshModelsBtn" class="settings-action-btn subtle" type="button">刷新模型</button>
         </div>
       </section>
+      <div class="settings-status-strip">
+        <div><strong>${escapeHtml(String(authFiles.length))}</strong><span>已导入账号</span></div>
+        <div><strong>${escapeHtml(String(models.length))}</strong><span>可用模型</span></div>
+        <div><strong>${escapeHtml(clip?.error ? "需处理" : "已连接")}</strong><span>CLIProxyAPI</span></div>
+      </div>
       ${clip ? renderCLIProxyStatusCard(clip) : `<div class="settings-empty-card">未找到 cliproxyapi provider。</div>`}
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">环境变量示例</div>
-            <div class="settings-provider-meta">复制后可用于启动 CodeHarbor</div>
-          </div>
-          <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envSample)}">复制</button>
-        </div>
-        <pre class="settings-code-sample">${escapeHtml(envSample)}</pre>
-      </section>
+      ${renderCodexLoginJobCard()}
+      ${renderCodexImportCard()}
+      ${renderCodexAccountCard(authFiles)}
       <div class="settings-provider-cards">
         ${providers.map(renderProviderCard).join("")}
       </div>
     </div>
   `;
+}
+
+function renderCodexLoginJobCard() {
+  const job = state.providerLoginJob;
+  if (!job) {
+    return `
+      <section class="settings-provider-section">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">添加凭据</div>
+            <div class="settings-provider-meta">选择浏览器添加或设备码添加，CodeHarbor 会直接启动 CLIProxyAPI 的 Codex 登录流程。</div>
+          </div>
+          <span class="settings-status-pill muted">等待操作</span>
+        </div>
+        <div class="settings-inline-success">推荐先点“浏览器添加”。如果浏览器授权不方便，再使用“设备码添加”。</div>
+      </section>
+    `;
+  }
+  return `
+    <section class="settings-provider-section highlighted">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">登录进度</div>
+          <div class="settings-provider-meta">${escapeHtml(job.method === "device" ? "设备码登录" : "浏览器登录")} · ${escapeHtml(job.id)}</div>
+        </div>
+        <span class="settings-status-pill ${job.status === "running" ? "warn" : (job.status === "succeeded" ? "ok" : "muted")}">${escapeHtml(loginJobStatusText(job.status))}</span>
+      </div>
+      ${job.error ? `<div class="settings-inline-alert">${escapeHtml(job.error)}</div>` : ""}
+      <pre class="settings-login-output">${escapeHtml(job.output || "等待 CLIProxyAPI 输出...")}</pre>
+    </section>
+  `;
+}
+
+function renderCodexImportCard() {
+  return `
+    <section class="settings-provider-section">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">从 JSON 或 Token 导入</div>
+          <div class="settings-provider-meta">粘贴 Codex auth JSON、refresh_token 或 CLIProxyAPI 支持的 token 文本。</div>
+        </div>
+        <button id="codexImportAuthBtn" class="settings-action-btn primary" type="button">导入</button>
+      </div>
+      <textarea id="codexAuthImportText" class="settings-token-input" placeholder="粘贴 refresh_token / access_token JSON / auth JSON"></textarea>
+    </section>
+  `;
+}
+
+function renderCodexAccountCard(authFiles) {
+  return `
+    <section class="settings-provider-section">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">已登录账号</div>
+          <div class="settings-provider-meta">来自 CLIProxyAPI auth-dir。登录或导入后点击刷新账号。</div>
+        </div>
+        <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button">刷新账号</button>
+      </div>
+      ${state.providerAuthError ? `<div class="settings-inline-alert">${escapeHtml(state.providerAuthError)}</div>` : ""}
+      <div class="settings-auth-list">
+        ${authFiles.length ? authFiles.map(renderCodexAuthItem).join("") : `<div class="settings-empty-card compact">暂无 Codex 账号。请使用浏览器添加、设备码添加或导入 token。</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderCodexAuthItem(item) {
+  const name = authFileName(item);
+  const provider = authFileProvider(item);
+  const alias = typeof item === "object" && item ? (item.alias || item.email || item.account || item.account_id || item.accountID || "") : "";
+  const disabled = Boolean(typeof item === "object" && item && item.disabled);
+  return `
+    <div class="settings-auth-item">
+      <div>
+        <div class="settings-auth-title">${escapeHtml(name)}</div>
+        <div class="settings-auth-meta">${escapeHtml(provider)}${alias ? ` · ${escapeHtml(alias)}` : ""}</div>
+      </div>
+      <span class="settings-status-pill ${disabled ? "muted" : "ok"}">${disabled ? "已停用" : "可用"}</span>
+    </div>
+  `;
+}
+
+function extractAuthFiles(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  for (const key of ["files", "authFiles", "data", "items"]) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return [];
+}
+
+function authFileName(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "unknown";
+  return item.name || item.filename || item.file || item.path || item.auth_index || item.authIndex || "unknown";
+}
+
+function authFileProvider(item) {
+  if (!item || typeof item !== "object") return "Codex";
+  return item.provider || item.type || item.channel || "Codex";
+}
+
+function loginJobStatusText(status) {
+  return ({ running: "进行中", succeeded: "已完成", failed: "失败" })[status] || status || "未知";
 }
 
 function renderCLIProxyStatusCard(provider) {
@@ -472,11 +635,17 @@ function bindModelSettingsActions() {
 }
 
 function bindProviderSettingsActions() {
-  $("providerOpenLoginBtn")?.addEventListener("click", openProviderLoginPage);
+  $("codexBrowserLoginBtn")?.addEventListener("click", () => startCodexLogin("browser").catch(showError));
+  $("codexDeviceLoginBtn")?.addEventListener("click", () => startCodexLogin("device").catch(showError));
+  $("codexImportAuthBtn")?.addEventListener("click", () => importCodexAuthFile().catch(showError));
+  $("codexRefreshAuthBtn")?.addEventListener("click", () => loadProviderAuthFiles().catch(showError));
   $("providerRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
   $("settingsContentBody").querySelectorAll("[data-copy-text]").forEach((node) => {
     node.addEventListener("click", () => copyText(node.dataset.copyText || ""));
   });
+  if (!state.providerAuthFiles && !state.providerAuthError) {
+    loadProviderAuthFiles({ silent: true }).catch(showError);
+  }
 }
 
 function allModelOptions() {
