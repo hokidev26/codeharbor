@@ -16,6 +16,7 @@
 - 基础文件系统 API
 - 基础开源协议依赖清单
 - 简单内嵌 Web UI
+- 公开仓库入口文档、MIT License、CI 与安全说明
 
 长期目标是逐步扩展到：
 
@@ -147,6 +148,8 @@ OPENAI_COMPATIBLE_API_KEY
 OPENAI_COMPATIBLE_MODEL
 ```
 
+首次生成默认 `config.json` 时，运行时仍会读取环境变量中的 API key，但写入磁盘的默认配置会清空 provider/backend API key，避免把 shell 环境里的 secret 持久化。
+
 ---
 
 ### 3.3 SQLite 数据库
@@ -221,6 +224,7 @@ POST  /api/narrators/{id}/tool-calls
 GET   /api/narrators/{id}/tool-calls/{toolUseId}
 
 GET  /api/fs/browse?path=...
+GET  /api/fs/directories?path=...
 GET  /api/fs/preview?path=...
 POST /api/fs/mkdir
 
@@ -425,6 +429,7 @@ internal/server/fs.go
 
 ```txt
 GET  /api/fs/browse?path=...
+GET  /api/fs/directories?path=...
 GET  /api/fs/preview?path=...
 POST /api/fs/mkdir
 ```
@@ -548,15 +553,40 @@ GET /api/licenses
 当前已确认直接依赖：
 
 ```txt
-github.com/go-chi/chi/v5      MIT
-github.com/google/uuid        BSD-3-Clause
-modernc.org/sqlite            BSD-3-Clause
-nhooyr.io/websocket           ISC
+github.com/go-chi/chi/v5               MIT
+github.com/google/uuid                 BSD-3-Clause
+modernc.org/sqlite                     BSD-3-Clause
+nhooyr.io/websocket                    ISC
+github.com/openai/openai-go/v3         Apache-2.0
+github.com/anthropics/anthropic-sdk-go MIT
+github.com/creack/pty                  MIT
 ```
 
 注意：
 
 此接口只是开发期合规辅助，不是法律意见。发布前仍需生成完整 third-party notice。
+
+---
+
+### 3.13 公开仓库基础建设
+
+当前已补齐：
+
+```txt
+README.md
+LICENSE
+SECURITY.md
+CONTRIBUTING.md
+THIRD_PARTY_NOTICES.md
+.github/workflows/ci.yml
+```
+
+说明：
+
+- 仓库入口以 `README.md` 为准。
+- `PROJECT_PLAN.md` 用于开发规划和实现状态跟踪。
+- `THIRD_PARTY_NOTICES.md` 是直接依赖初版说明，不是法律意见；正式发布前仍应生成完整 transitive notice。
+- CI 会检查 Go 格式、测试、vet、构建和内嵌 JavaScript 语法。
 
 ---
 
@@ -609,13 +639,13 @@ node --check internal/server/static/app.js
 
 待做：
 
-- [ ] `GET /api/projects/{id}/chapters`
-- [ ] `GET /api/chapters/{id}/narrators`
-- [ ] `PATCH /api/narrators/{id}/cwd`
-- [ ] `PATCH /api/narrators/{id}/model`
-- [ ] `PATCH /api/narrators/{id}/permission-mode`
+- [x] `GET /api/projects/{id}/chapters`
+- [x] `GET /api/chapters/{id}/narrators`
+- [x] `PATCH /api/narrators/{id}/cwd`
+- [x] `PATCH /api/narrators/{id}/model`
+- [x] `PATCH /api/narrators/{id}/permission-mode`
 - [ ] `POST /api/narrators/{id}/interrupt`
-- [ ] 工具调用 WebSocket 事件
+- [x] 工具调用 WebSocket 事件
 - [ ] provider request/response 记录到 `api_requests`
 - [ ] narrator status 更细化：`idle/running/error/interrupted`
 
@@ -627,7 +657,7 @@ node --check internal/server/static/app.js
 
 待做：
 
-- [ ] Edit 工具
+- [x] Edit 工具
 - [ ] Bash 支持显式审批状态
 - [ ] Bash 输出流式事件
 - [ ] 工具执行超时配置

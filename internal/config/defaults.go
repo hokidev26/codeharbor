@@ -261,11 +261,33 @@ func upsertProvider(providers []ProviderConfig, provider ProviderConfig) []Provi
 }
 
 func writeDefaultConfig(path string, cfg Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(sanitizeConfigForDisk(cfg), "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+func sanitizeConfigForDisk(cfg Config) Config {
+	cfg.Auth.JWTSecret = ""
+	if len(cfg.Providers.Instances) > 0 {
+		cfg.Providers.Instances = append([]ProviderConfig(nil), cfg.Providers.Instances...)
+		for i := range cfg.Providers.Instances {
+			cfg.Providers.Instances[i].APIKey = ""
+		}
+	}
+	if cfg.Providers.OpenAICompatible != nil {
+		legacy := *cfg.Providers.OpenAICompatible
+		legacy.APIKey = ""
+		cfg.Providers.OpenAICompatible = &legacy
+	}
+	if len(cfg.Backends.Instances) > 0 {
+		cfg.Backends.Instances = append([]BackendConfig(nil), cfg.Backends.Instances...)
+		for i := range cfg.Backends.Instances {
+			cfg.Backends.Instances[i].APIKey = ""
+		}
+	}
+	return cfg
 }
 
 func defaultBackendsFromEnv() []BackendConfig {

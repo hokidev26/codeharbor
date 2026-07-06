@@ -1,7 +1,12 @@
 # Go build artifacts
 /codeharbor
+/bin/
+/dist/
 *.test
 *.out
+coverage.out
+*.coverprofile
+/coverage/
 
 # Local runtime data
 *.db
