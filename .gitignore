@@ -1,0 +1,19 @@
+# Go build artifacts
+/codeharbor
+*.test
+*.out
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+
+# Local environment/config secrets
+.env
+.env.*
+config.local.json
+
+# Logs and temporary files
+*.log
+tmp/
+.DS_Store

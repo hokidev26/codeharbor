@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CodeHarbor</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <main id="appShell" class="app-shell">
+      <header class="mobile-topbar">
+        <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单">☰</button>
+        <div class="mobile-brand">CodeHarbor</div>
+        <div class="mobile-score">39.7</div>
+        <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端">▣</button>
+        <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索">⌕</button>
+      </header>
+      <button id="mobileSidebarBackdrop" class="mobile-backdrop hidden" type="button" aria-label="关闭菜单"></button>
+      <aside class="sidebar">
+        <div class="brand-row">
+          <div>
+            <div class="brand">CodeHarbor</div>
+            <div id="healthBadge" class="status-text">checking</div>
+          </div>
+          <button id="refreshBtn" class="icon-btn" type="button" title="刷新">↻</button>
+        </div>
+
+        <nav class="nav-stack">
+          <button class="nav-item active" type="button">◉ 仪表盘</button>
+          <button class="nav-item" type="button">▣ 工作线</button>
+          <button class="nav-item selected" type="button">☻ AI 代理</button>
+        </nav>
+
+        <section class="sidebar-section">
+          <div class="section-head">
+            <span>AI 代理</span>
+            <button id="newProjectBtn" class="icon-btn primary" type="button" title="选择电脑目录">＋</button>
+          </div>
+          <input id="projectSearch" class="sidebar-search" placeholder="搜索项目或目录..." />
+          <div id="projects" class="project-list"></div>
+          <div class="recent-sidebar">
+            <div class="recent-title">最近目录</div>
+            <div id="recentSidebarDirectories" class="recent-list"></div>
+          </div>
+        </section>
+
+        <div class="sidebar-footer">
+          <section class="backend-panel">
+            <div class="backend-panel-head">
+              <span>Agent Server</span>
+              <span id="backendHealthBadge" class="status-dot">unknown</span>
+            </div>
+            <div id="activeBackendName" class="backend-name">未配置后端</div>
+            <button id="manageBackendsBtn" class="ghost-btn mini" type="button">管理后端</button>
+          </section>
+          <button class="nav-item" type="button">⚙ 设置</button>
+          <button class="nav-item" type="button">⇥ 退出登录</button>
+          <div class="version">v0.1.0-dev</div>
+        </div>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="chat-header">
+          <div class="header-left">
+            <button class="icon-btn" type="button">←</button>
+            <div>
+              <div id="currentTitle" class="chat-title">No agent selected</div>
+              <div id="currentMeta" class="chat-subtitle">按左侧 + 选择电脑目录开始。</div>
+            </div>
+          </div>
+          <div class="header-actions">
+            <span id="wsBadge" class="pill">ws idle</span>
+            <button id="openFolderBtn" class="icon-btn" type="button" title="切换目录">□</button>
+            <button id="toggleTerminalBtn" class="icon-btn active" type="button" title="收起/展开终端">▣</button>
+          </div>
+        </header>
+
+        <div id="messages" class="messages empty">选择一个目录或项目后开始对话。</div>
+
+        <footer class="composer-wrap">
+          <form id="messageForm" class="composer-card">
+            <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息，按 Enter 发送，Shift + Enter 换行"></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-controls">
+                <span class="select-pill"><span class="pill-label">模型</span><select id="modelSelect" class="select compact-select" title="模型"></select></span>
+                <span class="select-pill"><span class="pill-label">权限</span><select id="permissionMode" class="select permission-select" title="权限模式">
+                  <option value="readOnly">readOnly</option>
+                  <option value="acceptEdits">acceptEdits</option>
+                  <option value="bypassPermissions">bypassPermissions</option>
+                  <option value="default">default</option>
+                  <option value="dontAsk">dontAsk</option>
+                </select></span>
+              </div>
+              <div class="composer-actions">
+                <button id="saveNarratorBtn" class="ghost-btn mini" type="button">保存</button>
+                <button id="sendMessageBtn" class="send-btn round" type="submit" title="发送">发送</button>
+              </div>
+            </div>
+          </form>
+        </footer>
+      </section>
+
+      <aside id="terminalPanel" class="terminal-panel">
+        <div class="terminal-header">
+          <div class="terminal-tabs">
+            <span class="terminal-tab active">Terminal 1</span>
+          </div>
+          <button id="collapseTerminalBtn" class="icon-btn" type="button" title="收起终端">×</button>
+        </div>
+        <pre id="terminalOutput" class="terminal-output" tabindex="0">Terminal ready. 选择 agent 后会连接交互式 PTY 终端。</pre>
+        <div class="terminal-status-row">
+          <span id="terminalStatus">terminal idle</span>
+          <button id="reconnectTerminalBtn" class="ghost-btn mini" type="button">重连</button>
+        </div>
+      </aside>
+
+      <button id="expandTerminalBtn" class="terminal-rail hidden" type="button" title="展开终端">⌁</button>
+    </main>
+
+    <div id="folderModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">选择电脑上的目录</div>
+            <div id="directoryPath" class="modal-path">Loading...</div>
+          </div>
+          <button id="closeFolderModalBtn" class="icon-btn" type="button">×</button>
+        </div>
+        <div id="directoryShortcuts" class="shortcut-row"></div>
+        <div id="recentModalDirectories" class="shortcut-row compact-shortcuts"></div>
+        <div class="path-row">
+          <input id="manualDirectoryPath" class="input" placeholder="输入绝对路径，例如 /Users/aaa/Desktop/my-project" />
+          <button id="goDirectoryBtn" class="ghost-btn" type="button">前往</button>
+        </div>
+        <div id="directoryList" class="directory-list"></div>
+        <div class="modal-actions">
+          <button id="chooseDirectoryBtn" class="send-btn" type="button">使用此目录创建项目</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="backendsModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card backend-modal-card">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">管理 Agent Server 后端</div>
+            <div class="modal-path">兼容 OpenHands Agent Server 的 /alive、/ready 与 /server_info。</div>
+          </div>
+          <button id="closeBackendsModalBtn" class="icon-btn" type="button">×</button>
+        </div>
+        <div id="backendsList" class="backend-list"></div>
+        <form id="backendForm" class="backend-form">
+          <div class="form-grid">
+            <label>名称<input id="backendName" class="input" placeholder="Local Agent Server" /></label>
+            <label>类型<select id="backendKind" class="select"><option value="local">local</option><option value="cloud">cloud</option></select></label>
+            <label class="span-2">URL<input id="backendBaseUrl" class="input" placeholder="http://127.0.0.1:8000" /></label>
+            <label class="span-2">API Key<input id="backendApiKey" class="input" type="password" placeholder="可选；本地使用 X-Session-API-Key" /></label>
+          </div>
+          <div class="modal-actions backend-actions">
+            <button id="resetBackendFormBtn" class="ghost-btn" type="button">清空</button>
+            <button class="send-btn" type="submit">添加后端</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
