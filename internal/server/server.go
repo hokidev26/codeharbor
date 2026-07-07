@@ -105,6 +105,7 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/messages/{messageId}/attachments/{attachmentId}", s.getMessageAttachment)
 		r.Get("/{id}/tools", s.listTools)
 		r.Post("/{id}/tool-calls", s.executeTool)
+		r.Post("/{id}/tool-calls/{toolUseId}/approval", s.approveToolCall)
 		r.Get("/{id}/tool-calls/{toolUseId}", s.getToolCall)
 	})
 	r.Get("/ws/narrator", s.narratorWS)

@@ -129,6 +129,174 @@ func TestRunnerAutoExecutesToolCallsAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestRunnerWaitsForBashApprovalAndAllowsOnce(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "run bash"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-1", Name: "Bash", Input: json.RawMessage(`{"command":"printf approved"}`)}}, {Type: "done", Done: true}},
+		{{Type: "text", Text: "done"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 3})
+	done := make(chan struct{})
+	go func() { runner.Run(ctx, narrator.ID); close(done) }()
+	waitForPendingApproval(t, runner, narrator.ID, "bash-1")
+	accepted, err := runner.ApproveToolCall(ctx, narrator.ID, "bash-1", ToolApprovalDecision{Decision: "allow_once", Reason: "ok", DecidedBy: "test"})
+	if err != nil || !accepted {
+		t.Fatalf("approval failed accepted=%v err=%v", accepted, err)
+	}
+	waitDone(t, done)
+	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "completed" || call.PermissionDecidedBy != "test" {
+		t.Fatalf("unexpected approved call: %+v", call)
+	}
+	if !requestHasToolResult(provider.request(1), "bash-1", false) {
+		t.Fatalf("expected approved bash result to be fed back")
+	}
+}
+
+func TestRunnerBashApprovalDenyFeedsErrorResult(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "run bash"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-deny", Name: "Bash", Input: json.RawMessage(`{"command":"printf denied"}`)}}, {Type: "done", Done: true}},
+		{{Type: "text", Text: "handled denial"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 3})
+	done := make(chan struct{})
+	go func() { runner.Run(ctx, narrator.ID); close(done) }()
+	waitForPendingApproval(t, runner, narrator.ID, "bash-deny")
+	accepted, err := runner.ApproveToolCall(ctx, narrator.ID, "bash-deny", ToolApprovalDecision{Decision: "deny", Reason: "no", DecidedBy: "test"})
+	if err != nil || !accepted {
+		t.Fatalf("deny approval failed accepted=%v err=%v", accepted, err)
+	}
+	waitDone(t, done)
+	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-deny")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "denied" || call.PermissionDenyMessage != "no" {
+		t.Fatalf("unexpected denied call: %+v", call)
+	}
+	if !requestHasToolResult(provider.request(1), "bash-deny", true) {
+		t.Fatalf("expected denied bash result to be fed back as error")
+	}
+}
+
+func TestRunnerBashApprovalAllowSessionSkipsSecondPrompt(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "run bash twice"}); err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"command":"printf session"}`)
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-session-1", Name: "Bash", Input: input}}, {Type: "done", Done: true}},
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-session-2", Name: "Bash", Input: input}}, {Type: "done", Done: true}},
+		{{Type: "text", Text: "done"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 4})
+	done := make(chan struct{})
+	go func() { runner.Run(ctx, narrator.ID); close(done) }()
+	waitForPendingApproval(t, runner, narrator.ID, "bash-session-1")
+	accepted, err := runner.ApproveToolCall(ctx, narrator.ID, "bash-session-1", ToolApprovalDecision{Decision: "allow_session", Reason: "ok", DecidedBy: "test"})
+	if err != nil || !accepted {
+		t.Fatalf("session approval failed accepted=%v err=%v", accepted, err)
+	}
+	waitDone(t, done)
+	if runnerPendingApprovalCount(runner) != 0 {
+		t.Fatalf("expected no pending approvals, got %d", runnerPendingApprovalCount(runner))
+	}
+	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-session-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "completed" || call.PermissionDecisionReason != "allowed by permission mode" && call.PermissionDecisionReason != "auto-approved by built-in exec whitelist" {
+		t.Fatalf("expected second session command to auto execute, got %+v", call)
+	}
+}
+
+func TestRunnerInterruptCancelsPendingApproval(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "run bash"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-wait", Name: "Bash", Input: json.RawMessage(`{"command":"printf wait"}`)}}, {Type: "done", Done: true}}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 2})
+	done := make(chan struct{})
+	go func() { runner.Run(ctx, narrator.ID); close(done) }()
+	waitForPendingApproval(t, runner, narrator.ID, "bash-wait")
+	interrupted, err := runner.Interrupt(ctx, narrator.ID)
+	if err != nil || !interrupted {
+		t.Fatalf("interrupt failed interrupted=%v err=%v", interrupted, err)
+	}
+	waitDone(t, done)
+	if runnerPendingApprovalCount(runner) != 0 {
+		t.Fatalf("expected pending approval cleanup")
+	}
+	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "denied" {
+		t.Fatalf("expected canceled approval to be denied, got %+v", call)
+	}
+}
+
+func TestRunnerDangerBashIsBlockedWithoutApproval(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "delete"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "bash-danger", Name: "Bash", Input: json.RawMessage(`{"command":"rm -rf tmp"}`)}}, {Type: "done", Done: true}},
+		{{Type: "text", Text: "blocked"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 3})
+	runner.Run(ctx, narrator.ID)
+	if runnerPendingApprovalCount(runner) != 0 {
+		t.Fatal("danger command should not create approvable pending state")
+	}
+	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-danger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "denied" || call.PermissionDecidedBy != "policy" {
+		t.Fatalf("expected policy-denied danger command, got %+v", call)
+	}
+	if !requestHasToolResult(provider.request(1), "bash-danger", true) {
+		t.Fatalf("expected danger block to be fed back as error")
+	}
+}
+
+func TestWhitelistedExecMatcher(t *testing.T) {
+	for _, command := range []string{"go test ./...", "go vet ./internal/...", "go build ./...", "npm test", "npm run lint", "git status --short", "git diff --stat"} {
+		if !isWhitelistedExecCommand(command) {
+			t.Fatalf("expected command to be whitelisted: %s", command)
+		}
+	}
+	for _, command := range []string{"go test ./... && rm -rf tmp", "npm run deploy", "git clean -fdx", "echo ok > file"} {
+		if isWhitelistedExecCommand(command) {
+			t.Fatalf("expected command not to be whitelisted: %s", command)
+		}
+	}
+}
+
 func TestRunnerReturnsDeniedToolResultToModel(t *testing.T) {
 	ctx := context.Background()
 	store, narrator := newAgentTestStore(t, t.TempDir(), "readOnly")
@@ -377,6 +545,36 @@ func newAgentTestRunner(store *db.Store, provider providers.Provider, cfg config
 	toolRegistry := tools.NewRegistry()
 	tools.RegisterCore(toolRegistry)
 	return NewRunner(store, registry, toolRegistry, NewHub(), cfg)
+}
+
+func waitForPendingApproval(t *testing.T, runner *Runner, narratorID, toolUseID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runner.approvalMu.Lock()
+		approval := runner.approvals[approvalKey(narratorID, toolUseID)]
+		runner.approvalMu.Unlock()
+		if approval != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for approval %s", toolUseID)
+}
+
+func runnerPendingApprovalCount(runner *Runner) int {
+	runner.approvalMu.Lock()
+	defer runner.approvalMu.Unlock()
+	return len(runner.approvals)
+}
+
+func waitDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner")
+	}
 }
 
 func requestHasToolResult(req providers.GenerateRequest, toolUseID string, isError bool) bool {

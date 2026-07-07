@@ -53,6 +53,7 @@ const state = {
   messageRefreshTimersByNarrator: {},
   currentMessages: [],
   messageCopyTexts: [],
+  pendingToolApprovals: {},
   modelRefreshing: false,
   modelApplying: false,
   modelApplySeq: 0,
@@ -5174,13 +5175,14 @@ async function loadMessages(narratorId = state.narrator?.id) {
   state.currentMessages = messages;
   state.messageCopyTexts = messages.map((message) => String(message.contentText || ""));
   updateConversationCopyButton();
-  if (!messages.length) {
+  const approvalCards = renderApprovalCardsHTML();
+  if (!messages.length && !approvalCards) {
     el.classList.add("empty");
     el.textContent = "还没有消息。输入你的需求开始对话。";
     return;
   }
   el.classList.remove("empty");
-  el.innerHTML = messages.map((message, index) => `
+  el.innerHTML = `${messages.map((message, index) => `
     <div class="message ${escapeAttr(message.role)}">
       <div class="message-head">
         <div class="message-role">${escapeHtml(message.role)}</div>
@@ -5189,10 +5191,138 @@ async function loadMessages(narratorId = state.narrator?.id) {
       <div class="message-content">${renderMarkdown(friendlyMessageText(message.contentText || ""))}</div>
       ${renderMessageAttachments(message)}
     </div>
-  `).join("");
+  `).join("")}${approvalCards}`;
   bindMessageActionButtons(el);
+  bindApprovalButtons(el);
   bindCopyCodeButtons(el);
   el.scrollTop = el.scrollHeight;
+}
+
+function currentApprovalList() {
+  const narratorId = state.narrator?.id || "";
+  return Object.values(state.pendingToolApprovals || {})
+    .filter((item) => item && (!item.narratorId || item.narratorId === narratorId))
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+}
+
+function renderApprovalCardsHTML() {
+  const approvals = currentApprovalList();
+  if (!approvals.length) return "";
+  return `
+    <div class="approval-stack" data-approval-stack>
+      ${approvals.map(renderApprovalCard).join("")}
+    </div>
+  `;
+}
+
+function renderApprovalCard(approval) {
+  const risk = approval.risk || "exec";
+  const isDanger = risk === "danger";
+  const command = approval.command || approval.input?.command || JSON.stringify(approval.input || {});
+  const title = isDanger ? "危险命令已被阻止" : "需要批准执行命令";
+  const warning = approval.warning || (isDanger ? "该命令被安全策略阻止。" : "请确认命令安全后再允许。");
+  return `
+    <section class="approval-card ${isDanger ? "danger" : ""}" data-approval-card="${escapeAttr(approval.toolUseId || "")}">
+      <div class="approval-card-head">
+        <div>
+          <div class="approval-title">${escapeHtml(title)}</div>
+          <div class="approval-meta">${escapeHtml(approval.toolName || "tool")} · ${escapeHtml(risk)} · ${escapeHtml(shortPath(approval.cwd || state.narrator?.cwd || ""))}</div>
+        </div>
+        <span class="approval-risk">${escapeHtml(risk)}</span>
+      </div>
+      <pre class="approval-command">${escapeHtml(command)}</pre>
+      <div class="approval-warning">${escapeHtml(warning)}</div>
+      ${approval.expiresAt ? `<div class="approval-meta">到期：${escapeHtml(formatTimestamp(approval.expiresAt))}</div>` : ""}
+      ${isDanger ? `<div class="approval-blocked-note">后端已硬阻断该命令，无法通过 UI 放行。</div>` : `
+        <div class="approval-actions">
+          <button class="ghost-btn mini" type="button" data-approval-decision="allow_once" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">允许一次</button>
+          <button class="ghost-btn mini" type="button" data-approval-decision="allow_session" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">本次会话都允许</button>
+          <button class="ghost-btn mini danger" type="button" data-approval-decision="deny" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">拒绝</button>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function renderApprovalCards() {
+  const el = $("messages");
+  if (!el) return;
+  const existing = el.querySelector("[data-approval-stack]");
+  if (existing) existing.remove();
+  const html = renderApprovalCardsHTML();
+  if (!html) return;
+  if (el.classList.contains("empty")) {
+    el.classList.remove("empty");
+    el.innerHTML = html;
+  } else {
+    el.insertAdjacentHTML("beforeend", html);
+  }
+  bindApprovalButtons(el);
+  el.scrollTop = el.scrollHeight;
+}
+
+function bindApprovalButtons(root) {
+  root.querySelectorAll("[data-approval-decision]").forEach((button) => {
+    button.addEventListener("click", () => approveToolCall(button.dataset.toolUseId, button.dataset.approvalDecision, button));
+  });
+}
+
+async function approveToolCall(toolUseId, decision, button) {
+  if (!state.narrator?.id || !toolUseId || !decision) return;
+  const approval = state.pendingToolApprovals?.[toolUseId];
+  const buttons = button?.closest(".approval-card")?.querySelectorAll("button") || [];
+  buttons.forEach((node) => { node.disabled = true; });
+  try {
+    await api(`/api/narrators/${state.narrator.id}/tool-calls/${encodeURIComponent(toolUseId)}/approval`, {
+      method: "POST",
+      body: JSON.stringify({ decision, reason: decision === "deny" ? "denied in UI" : "approved in UI" }),
+    });
+    const next = { ...(state.pendingToolApprovals || {}) };
+    delete next[toolUseId];
+    state.pendingToolApprovals = next;
+    renderApprovalCards();
+    showToast(decision === "deny" ? "已拒绝工具执行。" : "已批准工具执行。", decision === "deny" ? "warn" : "success");
+    notifyTerminal(`[tool] ${decision}: ${approval?.toolName || "tool"} ${toolUseId}\n`);
+    scheduleMessageRefresh(120, state.narrator.id);
+  } catch (err) {
+    buttons.forEach((node) => { node.disabled = false; });
+    showError(err);
+  }
+}
+
+function rememberToolApproval(event) {
+  const data = event.data || {};
+  const toolUseId = data.toolUseId || data.tool_use_id;
+  if (!toolUseId) return;
+  state.pendingToolApprovals = {
+    ...(state.pendingToolApprovals || {}),
+    [toolUseId]: {
+      ...data,
+      narratorId: event.narratorId || state.narrator?.id,
+      toolUseId,
+      createdAt: event.createdAt || new Date().toISOString(),
+    },
+  };
+  renderApprovalCards();
+}
+
+function clearToolApproval(toolUseId) {
+  if (!toolUseId || !state.pendingToolApprovals?.[toolUseId]) return;
+  const next = { ...(state.pendingToolApprovals || {}) };
+  delete next[toolUseId];
+  state.pendingToolApprovals = next;
+  renderApprovalCards();
+}
+
+function clearCurrentNarratorApprovals() {
+  const narratorId = state.narrator?.id;
+  if (!narratorId) return;
+  const next = { ...(state.pendingToolApprovals || {}) };
+  for (const [key, value] of Object.entries(next)) {
+    if (!value?.narratorId || value.narratorId === narratorId) delete next[key];
+  }
+  state.pendingToolApprovals = next;
+  renderApprovalCards();
 }
 
 function renderMessageAttachments(message) {
@@ -5434,6 +5564,16 @@ function connectWS() {
     try {
       const event = JSON.parse(message.data);
       if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
+      if (event.type === "tool.approval_required") {
+        rememberToolApproval(event);
+        showToast(event.data?.risk === "danger" ? "危险工具调用已被阻止。" : "有工具调用等待审批。", event.data?.risk === "danger" ? "error" : "warn");
+      }
+      if (event.type === "tool.finished") {
+        clearToolApproval(event.data?.toolUseId);
+      }
+      if (event.type === "agent.interrupted") {
+        clearCurrentNarratorApprovals();
+      }
       if (event.type === "message.created" || event.type === "agent.done") {
         scheduleMessageRefresh(80, narratorId);
       }

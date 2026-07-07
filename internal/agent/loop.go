@@ -27,6 +27,10 @@ type Runner struct {
 
 	runMu   sync.Mutex
 	running map[string]*activeRun
+
+	approvalMu    sync.Mutex
+	approvals     map[string]*pendingApproval
+	sessionGrants map[string]map[string]struct{}
 }
 
 type activeRun struct {
@@ -40,8 +44,31 @@ type runCompletion struct {
 	interrupted bool
 }
 
+type pendingApproval struct {
+	NarratorID string
+	ToolUseID  string
+	ToolName   string
+	Input      json.RawMessage
+	Risk       tools.Risk
+	CWD        string
+	Command    string
+	Reason     string
+	Warning    string
+	GrantKey   string
+	ExpiresAt  time.Time
+	Decision   chan ToolApprovalDecision
+}
+
+type ToolApprovalDecision struct {
+	Decision  string
+	Reason    string
+	DecidedBy string
+}
+
+const toolApprovalTimeout = 10 * time.Minute
+
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun)}
+	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]struct{})}
 }
 
 func (r *Runner) SubmitUserMessage(ctx context.Context, narratorID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
@@ -104,6 +131,35 @@ func (r *Runner) Interrupt(ctx context.Context, narratorID string) (bool, error)
 	}
 	cancel()
 	return true, nil
+}
+
+func (r *Runner) ApproveToolCall(ctx context.Context, narratorID, toolUseID string, decision ToolApprovalDecision) (bool, error) {
+	if _, err := r.store.GetNarrator(ctx, narratorID); err != nil {
+		return false, err
+	}
+	decision.Decision = strings.TrimSpace(decision.Decision)
+	if decision.Decision != "allow_once" && decision.Decision != "allow_session" && decision.Decision != "deny" {
+		return false, fmt.Errorf("invalid approval decision: %s", decision.Decision)
+	}
+	key := approvalKey(narratorID, toolUseID)
+	r.approvalMu.Lock()
+	approval := r.approvals[key]
+	if approval == nil {
+		r.approvalMu.Unlock()
+		return false, nil
+	}
+	if decision.Decision == "allow_session" {
+		r.addSessionGrantLocked(narratorID, approval.GrantKey)
+	}
+	r.approvalMu.Unlock()
+	select {
+	case approval.Decision <- decision:
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+		return false, nil
+	}
 }
 
 func (r *Runner) registerRun(ctx context.Context, narratorID string) (context.Context, *activeRun, bool) {
@@ -216,7 +272,7 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 				return err
 			}
 			toolCall := normalizeProviderToolCall(call)
-			toolResult, err := r.executeTool(ctx, narratorID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID)
+			toolResult, err := r.executeToolForLoop(ctx, narratorID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID)
 			if err != nil {
 				toolResult = tools.Result{Output: err.Error(), IsError: true}
 			}
@@ -399,6 +455,57 @@ func (r *Runner) ExecuteTool(ctx context.Context, narratorID string, call tools.
 	return r.executeTool(ctx, narratorID, call, "")
 }
 
+func (r *Runner) executeToolForLoop(ctx context.Context, narratorID string, call tools.Call, messageID string) (tools.Result, error) {
+	call = normalizeToolCall(call)
+	narrator, err := r.store.GetNarrator(ctx, narratorID)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if r.tools == nil {
+		return tools.Result{}, errors.New("tool registry is not initialized")
+	}
+	tool, err := r.tools.MustGet(call.Name)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	risk := tool.Risk(call.Input)
+	if risk == tools.RiskDanger {
+		warning := toolRiskWarning(call.Name, call.Input)
+		result := tools.Result{Output: dangerBlockedMessage(warning), IsError: true}
+		r.recordImmediateToolResult(ctx, narratorID, messageID, call, risk, result, "denied", warning)
+		r.publish(Event{Type: "tool.approval_required", NarratorID: narratorID, Data: approvalEventData(narrator, call, risk, warning, "danger", time.Time{})})
+		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "warning": warning}})
+		return result, nil
+	}
+	if r.canAutoExecuteTool(narrator.ID, narrator.PermissionMode, call.Name, risk, call.Input) {
+		return r.executeApprovedTool(ctx, narrator, call, tool, risk, messageID, false)
+	}
+	if !approvalRequired(narrator.PermissionMode, call.Name, risk) {
+		result := tools.Result{Output: "tool call denied by permission mode", IsError: true}
+		r.recordImmediateToolResult(ctx, narratorID, messageID, call, risk, result, "denied", result.Output)
+		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}})
+		return result, nil
+	}
+	decision, err := r.waitForToolApproval(ctx, narrator, call, risk, messageID)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if decision.Decision == "deny" {
+		message := strings.TrimSpace(decision.Reason)
+		if message == "" {
+			message = "tool call denied by user"
+		}
+		result := tools.Result{Output: message, IsError: true}
+		r.updatePendingToolResult(ctx, narratorID, call.ID, result, "denied", 0)
+		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}})
+		return result, nil
+	}
+	if err := r.store.UpdateToolCallApproval(ctx, narratorID, call.ID, "approved", decision.DecidedBy, "", decision.Reason, ""); err != nil {
+		slog.Warn("record tool approval failed", "narratorId", narratorID, "toolUseId", call.ID, "error", err)
+	}
+	return r.executeApprovedTool(ctx, narrator, call, tool, risk, messageID, true)
+}
+
 func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.Call, messageID string) (tools.Result, error) {
 	if call.ID == "" {
 		call.ID = db.NewID()
@@ -447,6 +554,261 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 	}
 	r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
 	return result, err
+}
+
+func (r *Runner) executeApprovedTool(ctx context.Context, narrator db.Narrator, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool) (tools.Result, error) {
+	r.publish(Event{Type: "tool.started", NarratorID: narrator.ID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}})
+	started := time.Now()
+	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD})
+	duration := time.Since(started).Milliseconds()
+	status := "completed"
+	errMsg := ""
+	if result.IsError {
+		status = "error"
+		errMsg = result.Output
+	}
+	if err != nil {
+		status = "error"
+		errMsg = err.Error()
+	}
+	output, _ := json.Marshal(result)
+	if updateExisting {
+		if recordErr := r.store.UpdateToolCallResult(ctx, narrator.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
+			slog.Warn("update approved tool call failed", "narratorId", narrator.ID, "toolUseId", call.ID, "error", recordErr)
+		}
+	} else if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narrator.ID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReason(call.Name, call.Input)}); recordErr != nil {
+		slog.Warn("record tool call failed", "narratorId", narrator.ID, "toolUseId", call.ID, "error", recordErr)
+	}
+	r.publish(Event{Type: "tool.finished", NarratorID: narrator.ID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
+	return result, err
+}
+
+func (r *Runner) waitForToolApproval(ctx context.Context, narrator db.Narrator, call tools.Call, risk tools.Risk, messageID string) (ToolApprovalDecision, error) {
+	command := toolCommand(call.Name, call.Input)
+	approval := &pendingApproval{
+		NarratorID: narrator.ID,
+		ToolUseID:  call.ID,
+		ToolName:   call.Name,
+		Input:      call.Input,
+		Risk:       risk,
+		CWD:        narrator.CWD,
+		Command:    command,
+		Reason:     "exec risk requires approval",
+		Warning:    "Bash 命令将访问本地 shell，请确认命令安全后再允许。",
+		GrantKey:   sessionGrantKey(call.Name, call.Input),
+		ExpiresAt:  time.Now().Add(toolApprovalTimeout),
+		Decision:   make(chan ToolApprovalDecision, 1),
+	}
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narrator.ID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "pending_approval", PermissionDecisionReason: approval.Reason, PermissionSuggestions: approval.Warning}); err != nil {
+		return ToolApprovalDecision{}, err
+	}
+	r.addPendingApproval(approval)
+	defer r.removePendingApproval(narrator.ID, call.ID)
+	r.publish(Event{Type: "tool.approval_required", NarratorID: narrator.ID, Data: approvalEventData(narrator, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt)})
+
+	timer := time.NewTimer(toolApprovalTimeout)
+	defer timer.Stop()
+	select {
+	case decision := <-approval.Decision:
+		if decision.DecidedBy == "" {
+			decision.DecidedBy = "user"
+		}
+		if decision.Decision == "deny" {
+			_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
+		}
+		return decision, nil
+	case <-timer.C:
+		decision := ToolApprovalDecision{Decision: "deny", Reason: "tool approval timed out", DecidedBy: "system"}
+		_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
+		return decision, nil
+	case <-ctx.Done():
+		_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", "system", "tool approval canceled", "tool approval canceled", approval.Warning)
+		return ToolApprovalDecision{}, ctx.Err()
+	}
+}
+
+func (r *Runner) addPendingApproval(approval *pendingApproval) {
+	r.approvalMu.Lock()
+	if r.approvals == nil {
+		r.approvals = make(map[string]*pendingApproval)
+	}
+	r.approvals[approvalKey(approval.NarratorID, approval.ToolUseID)] = approval
+	r.approvalMu.Unlock()
+}
+
+func (r *Runner) removePendingApproval(narratorID, toolUseID string) {
+	r.approvalMu.Lock()
+	delete(r.approvals, approvalKey(narratorID, toolUseID))
+	r.approvalMu.Unlock()
+}
+
+func (r *Runner) addSessionGrantLocked(narratorID, grantKey string) {
+	if grantKey == "" {
+		return
+	}
+	if r.sessionGrants == nil {
+		r.sessionGrants = make(map[string]map[string]struct{})
+	}
+	if r.sessionGrants[narratorID] == nil {
+		r.sessionGrants[narratorID] = make(map[string]struct{})
+	}
+	r.sessionGrants[narratorID][grantKey] = struct{}{}
+}
+
+func (r *Runner) hasSessionGrant(narratorID, grantKey string) bool {
+	r.approvalMu.Lock()
+	defer r.approvalMu.Unlock()
+	_, ok := r.sessionGrants[narratorID][grantKey]
+	return ok
+}
+
+func approvalKey(narratorID, toolUseID string) string {
+	return narratorID + ":" + toolUseID
+}
+
+func (r *Runner) canAutoExecuteTool(narratorID, mode, toolName string, risk tools.Risk, input json.RawMessage) bool {
+	if allowed(mode, toolName, risk) {
+		return true
+	}
+	if risk != tools.RiskExec || toolName != "Bash" {
+		return false
+	}
+	if mode != "acceptEdits" && mode != "default" && mode != "dontAsk" {
+		return false
+	}
+	command := tools.BashCommand(input)
+	if isWhitelistedExecCommand(command) {
+		return true
+	}
+	return r.hasSessionGrant(narratorID, sessionGrantKey(toolName, input))
+}
+
+func approvalRequired(mode, toolName string, risk tools.Risk) bool {
+	if risk != tools.RiskExec || toolName != "Bash" {
+		return false
+	}
+	switch mode {
+	case "acceptEdits", "default", "dontAsk":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runner) recordImmediateToolResult(ctx context.Context, narratorID, messageID string, call tools.Call, risk tools.Risk, result tools.Result, status, reason string) {
+	output, _ := json.Marshal(result)
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narratorID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: reason, PermissionSuggestions: reason}); err != nil {
+		slog.Warn("record immediate tool result failed", "narratorId", narratorID, "toolUseId", call.ID, "error", err)
+	}
+}
+
+func (r *Runner) updatePendingToolResult(ctx context.Context, narratorID, toolUseID string, result tools.Result, status string, durationMS int64) {
+	output, _ := json.Marshal(result)
+	errMsg := ""
+	if result.IsError {
+		errMsg = result.Output
+	}
+	if err := r.store.UpdateToolCallResult(ctx, narratorID, toolUseID, output, status, durationMS, errMsg); err != nil {
+		slog.Warn("update pending tool result failed", "narratorId", narratorID, "toolUseId", toolUseID, "error", err)
+	}
+}
+
+func approvalEventData(narrator db.Narrator, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
+	data := map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk, "input": json.RawMessage(call.Input), "command": toolCommand(call.Name, call.Input), "cwd": narrator.CWD, "warning": warning, "reason": reason}
+	if !expiresAt.IsZero() {
+		data["expiresAt"] = expiresAt.Format(time.RFC3339Nano)
+	}
+	return data
+}
+
+func toolCommand(toolName string, input json.RawMessage) string {
+	if toolName == "Bash" {
+		return tools.BashCommand(input)
+	}
+	return ""
+}
+
+func toolRiskWarning(toolName string, input json.RawMessage) string {
+	if toolName == "Bash" {
+		return tools.BashDangerWarning(tools.BashCommand(input))
+	}
+	return "tool risk is blocked by policy"
+}
+
+func dangerBlockedMessage(warning string) string {
+	if strings.TrimSpace(warning) == "" {
+		warning = "dangerous tool call blocked by policy"
+	}
+	return warning
+}
+
+func normalizeToolCall(call tools.Call) tools.Call {
+	if call.ID == "" {
+		call.ID = db.NewID()
+	}
+	if len(call.Input) == 0 {
+		call.Input = json.RawMessage(`{}`)
+	}
+	return call
+}
+
+func sessionGrantKey(toolName string, input json.RawMessage) string {
+	if toolName == "Bash" {
+		return toolName + ":" + normalizeShellCommand(tools.BashCommand(input))
+	}
+	return toolName + ":" + strings.TrimSpace(string(input))
+}
+
+func autoApprovalReason(toolName string, input json.RawMessage) string {
+	if toolName == "Bash" && isWhitelistedExecCommand(tools.BashCommand(input)) {
+		return "auto-approved by built-in exec whitelist"
+	}
+	return "allowed by permission mode"
+}
+
+func isWhitelistedExecCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || shellCommandIsComplex(command) {
+		return false
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "go":
+		return len(fields) >= 2 && oneOf(fields[1], "test", "vet", "build")
+	case "npm":
+		return len(fields) == 2 && fields[1] == "test" || len(fields) == 3 && fields[1] == "run" && oneOf(fields[2], "test", "build", "lint", "check")
+	case "pnpm", "yarn", "bun":
+		return len(fields) == 2 && oneOf(fields[1], "test", "build", "lint", "check")
+	case "git":
+		return len(fields) >= 2 && oneOf(fields[1], "status", "diff", "log", "show")
+	default:
+		return false
+	}
+}
+
+func shellCommandIsComplex(command string) bool {
+	for _, token := range []string{"|", ">", "<", ";", "&&", "||", "$(", "`", "\n"} {
+		if strings.Contains(command, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeShellCommand(command string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, item := range allowed {
+		if value == item {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) toolSpecs() []providers.ToolSpec {

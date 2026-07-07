@@ -516,6 +516,25 @@ body.ui-density-compact .terminal-header { height: 38px; }
 }
 .message.user { margin-left: auto; background: transparent; border: 0; color: var(--text); }
 .message.assistant { margin-right: auto; background: transparent; border: 0; }
+.approval-stack { display: grid; gap: 12px; margin: 10px 0 18px; max-width: min(760px, 92%); }
+.approval-card {
+  border: 1px solid rgba(245, 158, 11, .45);
+  background: rgba(245, 158, 11, .08);
+  border-radius: 16px;
+  padding: 14px;
+  color: var(--text);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, .12);
+}
+.approval-card.danger { border-color: rgba(255, 107, 107, .58); background: rgba(255, 107, 107, .08); }
+.approval-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.approval-title { font-weight: 850; margin-bottom: 4px; }
+.approval-meta { color: var(--muted); font-size: 12px; }
+.approval-risk { border: 1px solid currentColor; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 800; color: #f59e0b; }
+.approval-card.danger .approval-risk { color: var(--bad); }
+.approval-command { margin: 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0, 0, 0, .22); white-space: pre-wrap; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.approval-warning, .approval-blocked-note { color: var(--text-soft); font-size: 13px; line-height: 1.55; }
+.approval-blocked-note { color: var(--bad); font-weight: 750; margin-top: 8px; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .message-head {
   display: flex;
   align-items: center;

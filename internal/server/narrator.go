@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"codeharbor/internal/agent"
 	"codeharbor/internal/db"
 	"codeharbor/internal/tools"
 )
@@ -238,6 +239,33 @@ func (s *Server) executeTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"toolUseId": req.ToolUseID, "result": result})
+}
+
+type approveToolCallRequest struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+}
+
+func (s *Server) approveToolCall(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
+		return
+	}
+	var req approveToolCallRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	accepted, err := s.runner.ApproveToolCall(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "toolUseId"), agent.ToolApprovalDecision{Decision: req.Decision, Reason: req.Reason, DecidedBy: "user"})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !accepted {
+		writeError(w, http.StatusNotFound, "pending tool approval not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"toolUseId": chi.URLParam(r, "toolUseId"), "decision": req.Decision, "accepted": true})
 }
 
 func (s *Server) getToolCall(w http.ResponseWriter, r *http.Request) {

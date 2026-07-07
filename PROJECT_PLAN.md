@@ -718,14 +718,14 @@ node --check internal/server/static/app.js
 待做：
 
 - [x] Edit 工具
-- [ ] Bash 支持显式审批状态
+- [x] Bash 支持显式审批状态
 - [ ] Bash 输出流式事件
 - [ ] 工具执行超时配置
 - [ ] 工具输出截断策略配置
 - [ ] 工具输入 JSON schema 输出
 - [ ] 工具权限规则表
 - [ ] whitelist/blacklist dirs
-- [ ] whitelist/blacklist commands
+- [ ] whitelist/blacklist commands（已内置 exec 白名单 matcher 与 danger 阻断，规则配置 UI/表待补）
 
 ---
 

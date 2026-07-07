@@ -97,17 +97,22 @@ type Attachment struct {
 }
 
 type ToolCall struct {
-	ID           string          `json:"id"`
-	NarratorID   string          `json:"narratorId"`
-	MessageID    string          `json:"messageId,omitempty"`
-	ToolUseID    string          `json:"toolUseId"`
-	ToolName     string          `json:"toolName"`
-	InputJSON    json.RawMessage `json:"inputJson,omitempty"`
-	OutputJSON   json.RawMessage `json:"outputJson,omitempty"`
-	Status       string          `json:"status"`
-	DurationMS   int64           `json:"durationMs,omitempty"`
-	ErrorMessage string          `json:"errorMessage,omitempty"`
-	CreatedAt    string          `json:"createdAt"`
+	ID                       string          `json:"id"`
+	NarratorID               string          `json:"narratorId"`
+	MessageID                string          `json:"messageId,omitempty"`
+	ToolUseID                string          `json:"toolUseId"`
+	ToolName                 string          `json:"toolName"`
+	InputJSON                json.RawMessage `json:"inputJson,omitempty"`
+	OutputJSON               json.RawMessage `json:"outputJson,omitempty"`
+	Status                   string          `json:"status"`
+	DurationMS               int64           `json:"durationMs,omitempty"`
+	ErrorMessage             string          `json:"errorMessage,omitempty"`
+	PermissionDecidedBy      string          `json:"permissionDecidedBy,omitempty"`
+	PermissionDecidedAt      string          `json:"permissionDecidedAt,omitempty"`
+	PermissionDenyMessage    string          `json:"permissionDenyMessage,omitempty"`
+	PermissionDecisionReason string          `json:"permissionDecisionReason,omitempty"`
+	PermissionSuggestions    string          `json:"permissionSuggestions,omitempty"`
+	CreatedAt                string          `json:"createdAt"`
 }
 
 type APIRequest struct {
@@ -462,7 +467,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 	if call.CreatedAt == "" {
 		call.CreatedAt = Now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO narrator_tool_calls (id, narrator_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, call.ID, call.NarratorID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO narrator_tool_calls (id, narrator_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, call.ID, call.NarratorID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.CreatedAt)
 	if err != nil {
 		return ToolCall{}, err
 	}
@@ -472,7 +477,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 func (s *Store) GetToolCallByUseID(ctx context.Context, narratorID, toolUseID string) (ToolCall, error) {
 	var c ToolCall
 	var input, output string
-	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), created_at FROM narrator_tool_calls WHERE narrator_id = ? AND tool_use_id = ?`, narratorID, toolUseID).Scan(&c.ID, &c.NarratorID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), created_at FROM narrator_tool_calls WHERE narrator_id = ? AND tool_use_id = ?`, narratorID, toolUseID).Scan(&c.ID, &c.NarratorID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.CreatedAt)
 	if input != "" {
 		c.InputJSON = json.RawMessage(input)
 	}
@@ -480,6 +485,17 @@ func (s *Store) GetToolCallByUseID(ctx context.Context, narratorID, toolUseID st
 		c.OutputJSON = json.RawMessage(output)
 	}
 	return c, err
+}
+
+func (s *Store) UpdateToolCallApproval(ctx context.Context, narratorID, toolUseID, status, decidedBy, denyMessage, reason, suggestions string) error {
+	decidedAt := Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE narrator_tool_calls SET status = ?, permission_decided_by = NULLIF(?, ''), permission_decided_at = ?, permission_deny_message = NULLIF(?, ''), permission_decision_reason = NULLIF(?, ''), permission_suggestions = NULLIF(?, '') WHERE narrator_id = ? AND tool_use_id = ?`, status, decidedBy, decidedAt, denyMessage, reason, suggestions, narratorID, toolUseID)
+	return err
+}
+
+func (s *Store) UpdateToolCallResult(ctx context.Context, narratorID, toolUseID string, outputJSON json.RawMessage, status string, durationMS int64, errorMessage string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE narrator_tool_calls SET output_json = ?, status = ?, duration_ms = ?, error_message = NULLIF(?, '') WHERE narrator_id = ? AND tool_use_id = ?`, string(outputJSON), status, durationMS, errorMessage, narratorID, toolUseID)
+	return err
 }
 
 func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIRequest, error) {
