@@ -102,6 +102,7 @@
             <span id="wsBadge" class="pill header-status-pill">ws idle</span>
             <div class="header-tool-group" aria-label="工作区操作">
               <button id="openFolderBtn" class="icon-btn header-tool-btn primary" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-open-directory-shortcut="current">□</button>
+              <button id="gitWorkflowBtn" class="icon-btn header-tool-btn" type="button" title="查看 Git 变更" aria-label="查看 Git 变更" disabled>⑂</button>
               <button id="copyConversationBtn" class="icon-btn header-tool-btn" type="button" title="复制当前对话 Markdown" aria-label="复制当前对话 Markdown" disabled>⧉</button>
               <button id="toggleTerminalBtn" class="icon-btn header-tool-btn" type="button" title="收起/展开终端" aria-label="收起/展开终端">▣</button>
             </div>
@@ -278,6 +279,19 @@
             <button class="send-btn" type="submit" data-backend-submit>添加后端</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="gitModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="gitModalTitle">
+      <div class="modal-card git-modal-card">
+        <div class="modal-head git-modal-head">
+          <div>
+            <div id="gitModalTitle" class="modal-title">Git 变更</div>
+            <div id="gitModalPath" class="modal-path">查看并提交当前 CodeHarbor 工作目录的 Git 变更。</div>
+          </div>
+          <button id="closeGitModalBtn" class="icon-btn" type="button" aria-label="关闭 Git 面板">×</button>
+        </div>
+        <div id="gitModalBody" class="git-modal-body"></div>
       </div>
     </div>
 

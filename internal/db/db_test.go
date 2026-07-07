@@ -30,6 +30,29 @@ func TestCreateProjectCreatesCoreRecords(t *testing.T) {
 	}
 }
 
+func TestUpdateNarratorContextSummaryRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNarratorContextSummary(ctx, narrator.ID, "summary text", "message-1", 42); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetNarrator(ctx, narrator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextSummary != "summary text" || got.PruneBoundaryMessageID != "message-1" || got.PrunedPercent != 42 {
+		t.Fatalf("unexpected context summary round trip: %+v", got)
+	}
+}
+
 func TestListProjectsReturnsEmptySlice(t *testing.T) {
 	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

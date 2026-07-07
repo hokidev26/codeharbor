@@ -54,20 +54,23 @@ type Chapter struct {
 }
 
 type Narrator struct {
-	ID             string `json:"id"`
-	ChapterID      string `json:"chapterId,omitempty"`
-	Type           string `json:"type"`
-	SubagentType   string `json:"subagentType,omitempty"`
-	Title          string `json:"title"`
-	Model          string `json:"model"`
-	SystemPrompt   string `json:"systemPrompt,omitempty"`
-	PermissionMode string `json:"permissionMode"`
-	Status         string `json:"status"`
-	PlanMode       bool   `json:"planMode"`
-	CWD            string `json:"cwd,omitempty"`
-	MessageCount   int    `json:"messageCount"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt"`
+	ID                     string `json:"id"`
+	ChapterID              string `json:"chapterId,omitempty"`
+	Type                   string `json:"type"`
+	SubagentType           string `json:"subagentType,omitempty"`
+	Title                  string `json:"title"`
+	Model                  string `json:"model"`
+	SystemPrompt           string `json:"systemPrompt,omitempty"`
+	PermissionMode         string `json:"permissionMode"`
+	Status                 string `json:"status"`
+	PlanMode               bool   `json:"planMode"`
+	CWD                    string `json:"cwd,omitempty"`
+	MessageCount           int    `json:"messageCount"`
+	ContextSummary         string `json:"-"`
+	PruneBoundaryMessageID string `json:"-"`
+	PrunedPercent          int    `json:"-"`
+	CreatedAt              string `json:"createdAt"`
+	UpdatedAt              string `json:"updatedAt"`
 }
 
 type Message struct {
@@ -264,7 +267,7 @@ func (s *Store) GetChapter(ctx context.Context, id string) (Chapter, error) {
 func (s *Store) GetNarrator(ctx context.Context, id string) (Narrator, error) {
 	var n Narrator
 	var planMode int
-	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(chapter_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, status, plan_mode, COALESCE(cwd,''), message_count, created_at, updated_at FROM narrators WHERE id = ?`, id).Scan(&n.ID, &n.ChapterID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.CreatedAt, &n.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(chapter_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM narrators WHERE id = ?`, id).Scan(&n.ID, &n.ChapterID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt)
 	n.PlanMode = planMode != 0
 	return n, err
 }
@@ -285,6 +288,12 @@ func (s *Store) UpdateNarratorModel(ctx context.Context, id, model string) (Narr
 	return s.GetNarrator(ctx, id)
 }
 
+func (s *Store) UpdateNarratorContextSummary(ctx context.Context, id, summary, boundaryMessageID string, prunedPercent int) error {
+	now := Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE narrators SET context_summary = NULLIF(?, ''), prune_boundary_message_id = NULLIF(?, ''), pruned_percent = ?, prune_enabled = 1, updated_at = ? WHERE id = ?`, summary, boundaryMessageID, prunedPercent, now, id)
+	return err
+}
+
 func (s *Store) UpdateNarratorPermissionMode(ctx context.Context, id, mode string) (Narrator, error) {
 	now := Now()
 	if _, err := s.db.ExecContext(ctx, `UPDATE narrators SET permission_mode = ?, updated_at = ? WHERE id = ?`, mode, now, id); err != nil {
@@ -294,7 +303,7 @@ func (s *Store) UpdateNarratorPermissionMode(ctx context.Context, id, mode strin
 }
 
 func (s *Store) ListNarratorsByChapter(ctx context.Context, chapterID string) ([]Narrator, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(chapter_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, status, plan_mode, COALESCE(cwd,''), message_count, created_at, updated_at FROM narrators WHERE chapter_id = ? ORDER BY type ASC, created_at ASC`, chapterID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(chapter_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM narrators WHERE chapter_id = ? ORDER BY type ASC, created_at ASC`, chapterID)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +312,7 @@ func (s *Store) ListNarratorsByChapter(ctx context.Context, chapterID string) ([
 	for rows.Next() {
 		var n Narrator
 		var planMode int
-		if err := rows.Scan(&n.ID, &n.ChapterID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.ChapterID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, err
 		}
 		n.PlanMode = planMode != 0

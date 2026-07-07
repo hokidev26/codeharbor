@@ -129,6 +129,100 @@ func TestRunnerAutoExecutesToolCallsAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestEstimateUsageCostUSD(t *testing.T) {
+	openAICost := estimateUsageCostUSD("openai", "gpt-4.1-mini", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 250_000, OutputTokens: 100_000})
+	if openAICost < 0.4849 || openAICost > 0.4851 {
+		t.Fatalf("unexpected OpenAI cost: %.6f", openAICost)
+	}
+	anthropicCost := estimateUsageCostUSD("anthropic", "claude-sonnet-4-5", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 100_000, OutputTokens: 100_000})
+	if anthropicCost < 4.2299 || anthropicCost > 4.2301 {
+		t.Fatalf("unexpected Anthropic cost: %.6f", anthropicCost)
+	}
+	if got := estimateUsageCostUSD("unknown", "custom-model", providers.Usage{InputTokens: 1_000_000}); got != 0 {
+		t.Fatalf("expected unknown model cost to be 0, got %.6f", got)
+	}
+}
+
+func TestRunnerRecordsEstimatedCost(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	provider := &scriptedProvider{}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{})
+	runner.recordAPIRequest(narrator.ID, "openai", "gpt-4.1-mini", time.Millisecond, providers.Usage{InputTokens: 1_000_000, OutputTokens: 100_000}, "")
+	var cost float64
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM api_requests WHERE narrator_id = ?`, narrator.ID).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost < 0.5599 || cost > 0.5601 {
+		t.Fatalf("expected estimated cost to be stored, got %.6f", cost)
+	}
+}
+
+func TestRunnerSummarizesOldContextWithLocalFallback(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	oldFullText := "old-message-0 " + strings.Repeat("alpha ", 120)
+	var firstMessages []db.Message
+	for i := 0; i < 12; i++ {
+		text := oldFullText
+		if i > 0 {
+			text = "message " + string(rune('a'+i)) + " " + strings.Repeat("body ", 80)
+		}
+		msg, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstMessages = append(firstMessages, msg)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{{Type: "text", Text: "summarized"}, {Type: "done", Done: true}}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1, ContextTokenLimit: 20, SummaryModel: "missing:test"})
+
+	runner.Run(ctx, narrator.ID)
+
+	if provider.requestCount() != 1 {
+		t.Fatalf("expected one main model request, got %d", provider.requestCount())
+	}
+	request := provider.request(0)
+	if !requestHasSystemText(request, "较早对话摘要（本地降级生成）") {
+		t.Fatalf("expected local fallback summary message, got %+v", request.Messages)
+	}
+	if requestHasRoleText(request, "user", oldFullText) {
+		t.Fatalf("expected oldest full user message to be pruned from live context")
+	}
+	updated, err := store.GetNarrator(ctx, narrator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ContextSummary == "" || updated.PruneBoundaryMessageID != firstMessages[3].ID || updated.PrunedPercent == 0 {
+		t.Fatalf("unexpected stored summary state: %+v", updated)
+	}
+}
+
+func TestProviderMessagesCompactOnlyOldToolResults(t *testing.T) {
+	longOutput := "tool output " + strings.Repeat("very long ", 100)
+	oldBlocks := mustJSON([]providers.ContentBlock{{Type: "tool_result", ToolUseID: "old-tool", ToolName: "Read", Output: longOutput}})
+	recentBlocks := mustJSON([]providers.ContentBlock{{Type: "tool_result", ToolUseID: "recent-tool", ToolName: "Read", Output: "fresh output"}})
+	messages := []db.Message{{ID: "old", Role: "user", ParentToolID: "old-tool", ContentText: "old result", ContentJSON: oldBlocks}}
+	for i := 0; i < contextKeepRecentMessages-1; i++ {
+		messages = append(messages, db.Message{ID: string(rune('a' + i)), Role: "user", ContentText: "recent filler"})
+	}
+	messages = append(messages, db.Message{ID: "recent", Role: "user", ParentToolID: "recent-tool", ContentText: "recent result", ContentJSON: recentBlocks})
+
+	providerMessages := providerMessagesForContext(db.Narrator{}, messages)
+	oldOutput := toolResultOutput(providerMessages, "old-tool")
+	if strings.Contains(oldOutput, "very long") || oldOutput != "[工具 Read 已执行，输出已省略]" {
+		t.Fatalf("expected old tool output to be compacted, got %q", oldOutput)
+	}
+	if strings.Contains(providerMessages[0].Content, "very long") {
+		t.Fatalf("expected compacted message content to omit old tool output, got %q", providerMessages[0].Content)
+	}
+	if got := toolResultOutput(providerMessages, "recent-tool"); got != "fresh output" {
+		t.Fatalf("expected recent tool output to stay intact, got %q", got)
+	}
+}
+
 func TestRunnerWaitsForBashApprovalAndAllowsOnce(t *testing.T) {
 	ctx := context.Background()
 	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
@@ -581,6 +675,38 @@ func requestHasToolResult(req providers.GenerateRequest, toolUseID string, isErr
 	for _, message := range req.Messages {
 		for _, block := range message.Blocks {
 			if block.Type == "tool_result" && block.ToolUseID == toolUseID && block.IsError == isError {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolResultOutput(messages []providers.Message, toolUseID string) string {
+	for _, message := range messages {
+		for _, block := range message.Blocks {
+			if block.Type == "tool_result" && block.ToolUseID == toolUseID {
+				return block.Output
+			}
+		}
+	}
+	return ""
+}
+
+func requestHasSystemText(req providers.GenerateRequest, text string) bool {
+	return requestHasRoleText(req, "system", text)
+}
+
+func requestHasRoleText(req providers.GenerateRequest, role, text string) bool {
+	for _, message := range req.Messages {
+		if message.Role != role {
+			continue
+		}
+		if strings.Contains(message.Content, text) {
+			return true
+		}
+		for _, block := range message.Blocks {
+			if strings.Contains(block.Text, text) || strings.Contains(block.Output, text) {
 				return true
 			}
 		}

@@ -558,6 +558,7 @@ GET /ui/app.js
 - 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求/后台任务统计
 - 查看 `/api/auth/status` 驱动的用户初始化和注册开放状态
 - 从 `/api/models` 动态刷新 CLIProxyAPI 凭证账号可用模型
+- 在 Git 变更面板中查看 status/diff/log，并显式选择文件创建本地 commit（不自动 push）
 
 - 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
 - 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略
@@ -657,6 +658,7 @@ internal/db/db_test.go
 internal/providers/anthropic_provider_test.go
 internal/providers/openai_compatible_test.go
 internal/server/backends_test.go
+internal/server/git_test.go
 internal/server/interrupt_test.go
 internal/tools/tools_test.go
 ```
@@ -707,6 +709,7 @@ node --check internal/server/static/app.js
 - [x] `POST /api/narrators/{id}/interrupt`
 - [x] 工具调用 WebSocket 事件
 - [x] provider request/response 记录到 `api_requests`
+- [x] 最简 context 管理（粗略 token 估算、旧消息摘要、旧工具输出降级）
 - [x] narrator status 更细化：`idle/running/error/interrupted`
 
 ---
@@ -743,7 +746,7 @@ node --check internal/server/static/app.js
 - [x] Anthropic 官方 SDK provider（非流式 MVP）
 - [x] OpenAI 官方 Responses API provider（非流式 MVP）
 - [x] provider 前缀路由与基础 model list
-- [ ] usage/cost 统计（usage 已写入 `api_requests`，cost 价格表待补）
+- [x] usage/cost 统计（usage 写入 `api_requests`，cost 使用内置 per-model 价格表估算）
 - [ ] retry/backoff
 - [ ] first token timeout
 
@@ -755,7 +758,9 @@ node --check internal/server/static/app.js
 
 待做：
 
-- [ ] Git status/diff/log/commit API
+- [x] Git status/diff/log API（只读）
+- [x] UI diff 查看器（只读 Git 变更面板）
+- [x] Git commit API
 - [ ] project git path 检查
 - [ ] chapter fork
 - [ ] git worktree 创建

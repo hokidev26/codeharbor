@@ -22,12 +22,26 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Agent.DefaultPermissionMode == "" {
 		t.Fatal("expected default permission mode")
 	}
+	if cfg.Agent.ContextTokenLimit <= 0 {
+		t.Fatalf("expected positive context token limit, got %d", cfg.Agent.ContextTokenLimit)
+	}
 	provider := providerByName(cfg, "cliproxyapi")
 	if provider == nil {
 		t.Fatal("expected CLIProxyAPI provider preset")
 	}
 	if provider.Type != "openai-compatible" || provider.BaseURL != "http://127.0.0.1:8317/v1" || provider.Model != "gpt-5.5" || !provider.APIKeyOptional {
 		t.Fatalf("unexpected CLIProxyAPI provider preset: %+v", *provider)
+	}
+}
+
+func TestContextTokenLimitFromEnv(t *testing.T) {
+	t.Setenv("CODEHARBOR_CONTEXT_TOKEN_LIMIT", "12345")
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.ContextTokenLimit != 12345 {
+		t.Fatalf("expected env context token limit, got %d", cfg.Agent.ContextTokenLimit)
 	}
 }
 

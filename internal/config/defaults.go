@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +39,7 @@ type AgentConfig struct {
 	DefaultPermissionMode  string `json:"defaultPermissionMode"`
 	DefaultStartInPlanMode bool   `json:"defaultStartInPlanMode"`
 	MaxTurns               int    `json:"maxTurns"`
+	ContextTokenLimit      int    `json:"contextTokenLimit"`
 	FirstTokenTimeoutMs    int    `json:"firstTokenTimeoutMs"`
 	MaxTransientRetries    int    `json:"maxTransientRetries"`
 }
@@ -106,6 +108,7 @@ func Default() (Config, error) {
 			DefaultPermissionMode:  "acceptEdits",
 			DefaultStartInPlanMode: false,
 			MaxTurns:               200,
+			ContextTokenLimit:      getenvInt("CODEHARBOR_CONTEXT_TOKEN_LIMIT", 120000),
 			FirstTokenTimeoutMs:    60000,
 			MaxTransientRetries:    10,
 		},
@@ -411,4 +414,16 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getenvInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }

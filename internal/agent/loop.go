@@ -65,7 +65,13 @@ type ToolApprovalDecision struct {
 	DecidedBy string
 }
 
-const toolApprovalTimeout = 10 * time.Minute
+const (
+	toolApprovalTimeout       = 10 * time.Minute
+	defaultContextTokenLimit  = 120000
+	contextKeepRecentMessages = 8
+	maxDeterministicSummary   = 8000
+	maxSummaryLineRunes       = 240
+)
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
 	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]struct{})}
@@ -219,10 +225,6 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 	if err != nil {
 		return err
 	}
-	providerMessages := make([]providers.Message, 0, len(messages))
-	for _, message := range messages {
-		providerMessages = append(providerMessages, providerMessageFromDB(message))
-	}
 
 	maxTurns := r.cfg.MaxTurns
 	if maxTurns <= 0 {
@@ -233,6 +235,11 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		providerMessages, updatedNarrator, err := r.managedContextForTurn(ctx, narrator, messages, toolSpecs)
+		if err != nil {
+			return err
+		}
+		narrator = updatedNarrator
 		result, err := r.runModelTurn(ctx, narratorID, provider, model, narrator.SystemPrompt, providerMessages, toolSpecs)
 		if err != nil {
 			return err
@@ -265,7 +272,7 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 			return err
 		}
 		r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: assistantMsg.ID, Text: assistantText, Data: map[string]any{"toolCalls": len(result.ToolCalls)}})
-		providerMessages = append(providerMessages, providerMessageFromDB(assistantMsg))
+		messages = append(messages, assistantMsg)
 
 		for _, call := range result.ToolCalls {
 			if err := ctx.Err(); err != nil {
@@ -284,10 +291,349 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 				return err
 			}
 			r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: toolMsg.ID, Text: toolResultText, Data: map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": toolResult.IsError}})
-			providerMessages = append(providerMessages, providerMessageFromDB(toolMsg))
+			messages = append(messages, toolMsg)
 		}
 	}
 	return fmt.Errorf("agent reached max turns (%d) while model kept requesting tools", maxTurns)
+}
+
+func (r *Runner) managedContextForTurn(ctx context.Context, narrator db.Narrator, messages []db.Message, toolSpecs []providers.ToolSpec) ([]providers.Message, db.Narrator, error) {
+	providerMessages := providerMessagesForContext(narrator, messages)
+	limit := r.contextTokenLimit()
+	if estimateRequestTokens(narrator.SystemPrompt, providerMessages, toolSpecs) <= limit {
+		return providerMessages, narrator, nil
+	}
+
+	candidates := selectSummaryCandidates(messages, narrator.PruneBoundaryMessageID, contextKeepRecentMessages)
+	if len(candidates) == 0 {
+		return providerMessages, narrator, nil
+	}
+	summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, narrator, candidates))
+	if summary == "" {
+		return providerMessages, narrator, nil
+	}
+	boundaryID := candidates[len(candidates)-1].ID
+	prunedPercent := 0
+	if len(messages) > 0 {
+		prunedPercent = int(float64(len(candidates)) / float64(len(messages)) * 100)
+	}
+	if err := r.store.UpdateNarratorContextSummary(ctx, narrator.ID, summary, boundaryID, prunedPercent); err != nil {
+		return nil, narrator, err
+	}
+	narrator.ContextSummary = summary
+	narrator.PruneBoundaryMessageID = boundaryID
+	narrator.PrunedPercent = prunedPercent
+	return providerMessagesForContext(narrator, messages), narrator, nil
+}
+
+func (r *Runner) contextTokenLimit() int {
+	if r.cfg.ContextTokenLimit > 0 {
+		return r.cfg.ContextTokenLimit
+	}
+	return defaultContextTokenLimit
+}
+
+func providerMessagesForContext(narrator db.Narrator, messages []db.Message) []providers.Message {
+	start := messagesStartAfterBoundary(messages, narrator.PruneBoundaryMessageID)
+	out := make([]providers.Message, 0, len(messages)-start+1)
+	if summary := strings.TrimSpace(narrator.ContextSummary); summary != "" {
+		out = append(out, summaryProviderMessage(summary))
+	}
+	compactBefore := len(messages) - contextKeepRecentMessages
+	for i := start; i < len(messages); i++ {
+		message := providerMessageFromDBForContext(messages[i], i < compactBefore)
+		if strings.TrimSpace(message.Content) == "" && len(message.Blocks) == 0 {
+			continue
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+func messagesStartAfterBoundary(messages []db.Message, boundaryID string) int {
+	if strings.TrimSpace(boundaryID) == "" {
+		return 0
+	}
+	for i, message := range messages {
+		if message.ID == boundaryID {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func summaryProviderMessage(summary string) providers.Message {
+	text := "以下是较早对话的压缩摘要，后续消息仍按时间顺序完整提供：\n" + strings.TrimSpace(summary)
+	return providers.Message{Role: "system", Content: text, Blocks: []providers.ContentBlock{{Type: "text", Text: text}}}
+}
+
+func providerMessageFromDBForContext(message db.Message, compactToolResult bool) providers.Message {
+	blocks := contentBlocksFromMessage(message)
+	content := message.ContentText
+	if compactToolResult {
+		blocks = compactToolResultBlocks(blocks)
+		if contentFromBlocks := contextMessageContent(blocks); strings.TrimSpace(contentFromBlocks) != "" {
+			content = contentFromBlocks
+		}
+	}
+	return providers.Message{Role: message.Role, Content: content, Blocks: blocks}
+}
+
+func compactToolResultBlocks(blocks []providers.ContentBlock) []providers.ContentBlock {
+	if len(blocks) == 0 {
+		return blocks
+	}
+	out := make([]providers.ContentBlock, len(blocks))
+	copy(out, blocks)
+	for i := range out {
+		if out[i].Type != "tool_result" {
+			continue
+		}
+		out[i].Output = compactToolResultOutput(out[i].ToolName)
+	}
+	return out
+}
+
+func compactToolResultOutput(toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		toolName = "工具"
+	}
+	return fmt.Sprintf("[工具 %s 已执行，输出已省略]", toolName)
+}
+
+func contextMessageContent(blocks []providers.ContentBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		switch block.Type {
+		case "tool_result":
+			if text := strings.TrimSpace(block.Output); text != "" {
+				parts = append(parts, text)
+			}
+		case "tool_use":
+			parts = append(parts, fmt.Sprintf("[请求工具 %s %s]", strings.TrimSpace(block.ToolName), strings.TrimSpace(block.ToolUseID)))
+		case "image":
+			name := strings.TrimSpace(block.Filename)
+			if name == "" {
+				name = "image"
+			}
+			parts = append(parts, fmt.Sprintf("[图片附件 %s]", name))
+		default:
+			if text := strings.TrimSpace(block.Text); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func selectSummaryCandidates(messages []db.Message, boundaryID string, keepRecent int) []db.Message {
+	if keepRecent <= 0 {
+		keepRecent = contextKeepRecentMessages
+	}
+	start := messagesStartAfterBoundary(messages, boundaryID)
+	if len(messages)-start <= keepRecent {
+		return nil
+	}
+	end := len(messages) - keepRecent
+	for end < len(messages) && strings.TrimSpace(messages[end].ParentToolID) != "" {
+		end++
+	}
+	if end <= start {
+		return nil
+	}
+	return messages[start:end]
+}
+
+func estimateRequestTokens(systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) int {
+	total := estimateTextTokens(systemPrompt)
+	if len(toolSpecs) > 0 {
+		data, _ := json.Marshal(toolSpecs)
+		total += estimateTextTokens(string(data))
+	}
+	for _, message := range messages {
+		total += estimateMessageTokens(message)
+	}
+	return total
+}
+
+func estimateMessageTokens(message providers.Message) int {
+	total := estimateTextTokens(message.Role)
+	if len(message.Blocks) == 0 {
+		total += estimateTextTokens(message.Content)
+	}
+	for _, block := range message.Blocks {
+		total += estimateBlockTokens(block)
+	}
+	return total
+}
+
+func estimateBlockTokens(block providers.ContentBlock) int {
+	total := estimateTextTokens(block.Type) + estimateTextTokens(block.Text) + estimateTextTokens(block.Output) + estimateTextTokens(block.ToolName) + estimateTextTokens(block.ToolUseID) + estimateTextTokens(block.Filename) + estimateTextTokens(block.MIMEType)
+	if len(block.Input) > 0 {
+		total += estimateTextTokens(string(block.Input))
+	}
+	return total
+}
+
+func estimateTextTokens(text string) int {
+	count := len([]rune(text))
+	if count == 0 {
+		return 0
+	}
+	return (count + 3) / 4
+}
+
+func (r *Runner) summarizeOldestMessages(ctx context.Context, narrator db.Narrator, candidates []db.Message) string {
+	if summary, err := r.summarizeWithModel(ctx, narrator.ContextSummary, candidates); err == nil && strings.TrimSpace(summary) != "" {
+		return strings.TrimSpace(summary)
+	} else if err != nil {
+		slog.Warn("summary model unavailable, using local context summary", "narratorId", narrator.ID, "error", err)
+	}
+	return deterministicSummary(narrator.ContextSummary, candidates)
+}
+
+func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string, candidates []db.Message) (string, error) {
+	if r.providers == nil || strings.TrimSpace(r.cfg.SummaryModel) == "" {
+		return "", errors.New("summary model is not configured")
+	}
+	provider, model, err := r.providers.Resolve(r.cfg.SummaryModel)
+	if err != nil {
+		return "", err
+	}
+	prompt := "请把下面较早的对话历史压缩成一段供后续 Agent 继续工作的中文摘要。保留用户目标、关键决策、文件路径、工具执行结果状态和未完成事项；省略大段工具输出。不要编造。\n\n" + renderMessagesForSummary(existingSummary, candidates)
+	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 CodeHarbor 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}}
+	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	events, err := provider.Generate(summaryCtx, request)
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	for {
+		select {
+		case <-summaryCtx.Done():
+			return "", summaryCtx.Err()
+		case event, ok := <-events:
+			if !ok {
+				text := strings.TrimSpace(builder.String())
+				if text == "" {
+					return "", errors.New("summary model returned empty response")
+				}
+				return text, nil
+			}
+			switch event.Type {
+			case "text":
+				builder.WriteString(event.Text)
+			case "error":
+				return "", errors.New(event.Text)
+			case "done":
+				if event.StopReason == "not_configured" {
+					return "", errors.New("summary model provider is not configured")
+				}
+				text := strings.TrimSpace(builder.String())
+				if text == "" {
+					return "", errors.New("summary model returned empty response")
+				}
+				return text, nil
+			}
+		}
+	}
+}
+
+func renderMessagesForSummary(existingSummary string, messages []db.Message) string {
+	var builder strings.Builder
+	if summary := strings.TrimSpace(existingSummary); summary != "" {
+		builder.WriteString("已有摘要：\n")
+		builder.WriteString(truncateRunes(summary, maxDeterministicSummary/2))
+		builder.WriteString("\n\n新增压缩内容：\n")
+	}
+	for _, message := range messages {
+		builder.WriteString(messageSummaryLine(message, maxSummaryLineRunes*2))
+		builder.WriteByte('\n')
+	}
+	return truncateRunes(builder.String(), maxDeterministicSummary*2)
+}
+
+func deterministicSummary(existingSummary string, messages []db.Message) string {
+	var builder strings.Builder
+	builder.WriteString("较早对话摘要（本地降级生成）：\n")
+	if summary := strings.TrimSpace(existingSummary); summary != "" {
+		builder.WriteString("已有摘要：\n")
+		builder.WriteString(truncateRunes(summary, maxDeterministicSummary/2))
+		builder.WriteString("\n")
+	}
+	builder.WriteString("新增压缩内容：\n")
+	for _, message := range messages {
+		builder.WriteString(messageSummaryLine(message, maxSummaryLineRunes))
+		builder.WriteByte('\n')
+		if len([]rune(builder.String())) >= maxDeterministicSummary {
+			break
+		}
+	}
+	return truncateRunes(builder.String(), maxDeterministicSummary)
+}
+
+func messageSummaryLine(message db.Message, maxRunes int) string {
+	role := strings.TrimSpace(message.Role)
+	if role == "" {
+		role = "message"
+	}
+	parts := make([]string, 0)
+	blocks := contentBlocksFromMessage(message)
+	for _, block := range blocks {
+		switch block.Type {
+		case "tool_result":
+			status := "已执行"
+			if block.IsError {
+				status = "执行出错"
+			}
+			name := strings.TrimSpace(block.ToolName)
+			if name == "" {
+				name = "工具"
+			}
+			parts = append(parts, fmt.Sprintf("[工具 %s %s，输出已省略]", name, status))
+		case "tool_use":
+			name := strings.TrimSpace(block.ToolName)
+			if name == "" {
+				name = "工具"
+			}
+			parts = append(parts, fmt.Sprintf("[请求工具 %s %s]", name, strings.TrimSpace(block.ToolUseID)))
+		case "image":
+			name := strings.TrimSpace(block.Filename)
+			if name == "" {
+				name = "image"
+			}
+			parts = append(parts, fmt.Sprintf("[图片附件 %s 已省略]", name))
+		default:
+			if text := strings.TrimSpace(block.Text); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	if len(parts) == 0 && strings.TrimSpace(message.ContentText) != "" {
+		parts = append(parts, strings.TrimSpace(message.ContentText))
+	}
+	text := strings.Join(parts, " ")
+	if text == "" {
+		text = "[空消息]"
+	}
+	return fmt.Sprintf("- %s: %s", role, truncateRunes(text, maxRunes))
+}
+
+func truncateRunes(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	if maxRunes <= 1 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 type modelTurnResult struct {
@@ -366,12 +712,85 @@ func (r *Runner) recordAPIRequest(narratorID, providerName, model string, durati
 		CachedInputTokens: usage.CachedInputTokens,
 		ReasoningTokens:   usage.ReasoningTokens,
 		DurationMS:        duration.Milliseconds(),
-		CostUSD:           0,
+		CostUSD:           estimateUsageCostUSD(providerName, model, usage),
 		ErrorMessage:      errorMessage,
 	})
 	if err != nil {
 		slog.Warn("record api request failed", "narratorId", narratorID, "error", err)
 	}
+}
+
+type tokenPrice struct {
+	InputPerMTok       float64
+	CachedInputPerMTok float64
+	OutputPerMTok      float64
+}
+
+func estimateUsageCostUSD(providerName, model string, usage providers.Usage) float64 {
+	price, ok := modelTokenPrice(providerName, model)
+	if !ok {
+		return 0
+	}
+	cachedInput := usage.CachedInputTokens
+	if cachedInput < 0 {
+		cachedInput = 0
+	}
+	if cachedInput > usage.InputTokens {
+		cachedInput = usage.InputTokens
+	}
+	uncachedInput := usage.InputTokens - cachedInput
+	if uncachedInput < 0 {
+		uncachedInput = 0
+	}
+	return (float64(uncachedInput)*price.InputPerMTok + float64(cachedInput)*price.CachedInputPerMTok + float64(usage.OutputTokens)*price.OutputPerMTok) / 1_000_000
+}
+
+func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
+	provider := strings.ToLower(strings.TrimSpace(providerName))
+	name := strings.ToLower(strings.TrimSpace(model))
+	if _, stripped := providers.SplitModel(name); stripped != name && stripped != "" {
+		name = stripped
+	}
+	openAIPrices := []struct {
+		match string
+		price tokenPrice
+	}{
+		{match: "gpt-5.5", price: tokenPrice{InputPerMTok: 5.00, CachedInputPerMTok: 0.50, OutputPerMTok: 30.00}},
+		{match: "gpt-5.4-mini", price: tokenPrice{InputPerMTok: 0.75, CachedInputPerMTok: 0.075, OutputPerMTok: 4.50}},
+		{match: "gpt-5.4", price: tokenPrice{InputPerMTok: 2.50, CachedInputPerMTok: 0.25, OutputPerMTok: 15.00}},
+		{match: "gpt-4.1-mini", price: tokenPrice{InputPerMTok: 0.40, CachedInputPerMTok: 0.10, OutputPerMTok: 1.60}},
+		{match: "gpt-4.1-nano", price: tokenPrice{InputPerMTok: 0.10, CachedInputPerMTok: 0.025, OutputPerMTok: 0.40}},
+		{match: "gpt-4.1", price: tokenPrice{InputPerMTok: 2.00, CachedInputPerMTok: 0.50, OutputPerMTok: 8.00}},
+		{match: "gpt-4o-mini", price: tokenPrice{InputPerMTok: 0.15, CachedInputPerMTok: 0.075, OutputPerMTok: 0.60}},
+		{match: "gpt-4o", price: tokenPrice{InputPerMTok: 2.50, CachedInputPerMTok: 1.25, OutputPerMTok: 10.00}},
+	}
+	if strings.Contains(provider, "openai") || strings.Contains(provider, "cliproxy") || strings.HasPrefix(name, "gpt-") {
+		for _, candidate := range openAIPrices {
+			if strings.HasPrefix(name, candidate.match) {
+				return candidate.price, true
+			}
+		}
+	}
+
+	anthropicPrice := tokenPrice{}
+	switch {
+	case strings.HasPrefix(name, "claude-sonnet-5"):
+		anthropicPrice = tokenPrice{InputPerMTok: 2.00, CachedInputPerMTok: 0.20, OutputPerMTok: 10.00}
+	case strings.HasPrefix(name, "claude-opus-4"):
+		anthropicPrice = tokenPrice{InputPerMTok: 5.00, CachedInputPerMTok: 0.50, OutputPerMTok: 25.00}
+	case strings.HasPrefix(name, "claude-sonnet-4"):
+		anthropicPrice = tokenPrice{InputPerMTok: 3.00, CachedInputPerMTok: 0.30, OutputPerMTok: 15.00}
+	case strings.HasPrefix(name, "claude-haiku-4"):
+		anthropicPrice = tokenPrice{InputPerMTok: 1.00, CachedInputPerMTok: 0.10, OutputPerMTok: 5.00}
+	case strings.HasPrefix(name, "claude-3-5-haiku"):
+		anthropicPrice = tokenPrice{InputPerMTok: 0.80, CachedInputPerMTok: 0.08, OutputPerMTok: 4.00}
+	case strings.HasPrefix(name, "claude-3-5-sonnet") || strings.HasPrefix(name, "claude-3-7-sonnet"):
+		anthropicPrice = tokenPrice{InputPerMTok: 3.00, CachedInputPerMTok: 0.30, OutputPerMTok: 15.00}
+	}
+	if anthropicPrice != (tokenPrice{}) && (strings.Contains(provider, "anthropic") || strings.HasPrefix(name, "claude-")) {
+		return anthropicPrice, true
+	}
+	return tokenPrice{}, false
 }
 
 func providerMessageFromDB(message db.Message) providers.Message {
