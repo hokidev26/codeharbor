@@ -54,7 +54,7 @@
             <button id="manageBackendsBtn" class="ghost-btn mini" type="button">管理后端</button>
           </section>
           <button id="settingsBtn" class="nav-item" type="button">⚙ 设置</button>
-          <button class="nav-item" type="button">⇥ 退出登录</button>
+          <button id="logoutBtn" class="nav-item" type="button">⇥ 退出登录</button>
           <div class="version">v0.1.0-dev</div>
         </div>
       </aside>
@@ -64,12 +64,13 @@
           <div class="header-left">
             <button class="icon-btn" type="button">←</button>
             <div>
-              <div id="currentTitle" class="chat-title">No agent selected</div>
+              <div id="currentTitle" class="chat-title">未选择 CodeHarbor</div>
               <div id="currentMeta" class="chat-subtitle">按左侧 + 选择电脑目录开始。</div>
             </div>
           </div>
           <div class="header-actions">
             <span id="wsBadge" class="pill">ws idle</span>
+            <button id="copyConversationBtn" class="icon-btn" type="button" title="复制当前对话 Markdown" aria-label="复制当前对话 Markdown" disabled>⧉</button>
             <button id="openFolderBtn" class="icon-btn" type="button" title="切换目录">□</button>
             <button id="toggleTerminalBtn" class="icon-btn active" type="button" title="收起/展开终端">▣</button>
           </div>
@@ -79,12 +80,14 @@
 
         <footer class="composer-wrap">
           <form id="messageForm" class="composer-card">
-            <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息，按 Enter 发送，Shift + Enter 换行"></textarea>
+            <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息，按 Enter 发送，Shift + Enter 换行" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
+            <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
+            <div id="promptHistoryHint" class="prompt-history-hint">草稿会自动保存；输入框为空时 ↑/↓ 可召回最近提示。</div>
             <div class="composer-toolbar">
               <div class="composer-controls">
                 <span class="select-pill"><span class="pill-label">模型</span><select id="modelSelect" class="select compact-select" title="模型"></select></span>
                 <button id="refreshModelsBtn" class="model-tool-btn" type="button" title="从 CLIProxyAPI 刷新可用模型">刷新模型</button>
-                <button id="openProviderLoginBtn" class="model-tool-btn" type="button" title="打开 CLIProxyAPI 登录/管理页">登录</button>
+                <button id="openProviderLoginBtn" class="model-tool-btn" type="button" title="打开凭证导入和中转站配置">凭证</button>
                 <span class="select-pill"><span class="pill-label">权限</span><select id="permissionMode" class="select permission-select" title="权限模式">
                   <option value="readOnly">readOnly</option>
                   <option value="acceptEdits">acceptEdits</option>
@@ -109,7 +112,7 @@
           </div>
           <button id="collapseTerminalBtn" class="icon-btn" type="button" title="收起终端">×</button>
         </div>
-        <pre id="terminalOutput" class="terminal-output" tabindex="0">Terminal ready. 选择 agent 后会连接交互式 PTY 终端。</pre>
+        <pre id="terminalOutput" class="terminal-output" tabindex="0">Terminal ready. 选择 CodeHarbor 代理后会连接交互式 PTY 终端。</pre>
         <div class="terminal-status-row">
           <span id="terminalStatus">terminal idle</span>
           <button id="reconnectTerminalBtn" class="ghost-btn mini" type="button">重连</button>
@@ -131,6 +134,11 @@
           <button id="folderRefreshBtn" class="folder-tool-btn" type="button" title="刷新">↻</button>
           <button id="newFolderBtn" class="folder-tool-btn" type="button" title="新建文件夹">▱＋</button>
           <button id="toggleHiddenFoldersBtn" class="folder-tool-btn muted" type="button" title="隐藏文件夹暂未显示">⊘</button>
+        </div>
+        <div id="newFolderInline" class="folder-inline-create hidden">
+          <input id="newFolderNameInput" type="text" aria-label="新建文件夹名称" placeholder="输入新文件夹名称" autocomplete="off" maxlength="255" />
+          <button id="confirmNewFolderBtn" class="folder-confirm-btn small" type="button">创建</button>
+          <button id="cancelNewFolderBtn" class="folder-cancel-btn small" type="button">取消</button>
         </div>
         <div class="folder-path-row">
           <input id="manualDirectoryPath" class="folder-path-input" aria-label="当前路径" placeholder="输入绝对路径，例如 /Users/aaa/Desktop/my-project" />
@@ -164,6 +172,11 @@
           <div class="settings-sidebar-head">
             <div id="settingsModalTitle" class="settings-title">设置</div>
             <button id="closeSettingsModalBtn" class="settings-close-btn" type="button" aria-label="关闭设置">×</button>
+          </div>
+          <div class="settings-search-box">
+            <span aria-hidden="true">⌕</span>
+            <input id="settingsSearchInput" type="search" placeholder="搜索设置..." autocomplete="off" aria-label="搜索设置" />
+            <button id="clearSettingsSearchBtn" type="button" aria-label="清空设置搜索">×</button>
           </div>
           <div id="settingsNav" class="settings-nav"></div>
           <button id="settingsWizardBtn" class="settings-wizard-btn" type="button">
@@ -202,12 +215,13 @@
           </div>
           <div class="modal-actions backend-actions">
             <button id="resetBackendFormBtn" class="ghost-btn" type="button">清空</button>
-            <button class="send-btn" type="submit">添加后端</button>
+            <button class="send-btn" type="submit" data-backend-submit>添加后端</button>
           </div>
         </form>
       </div>
     </div>
 
+    <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
     <script src="/ui/app.js"></script>
   </body>
 </html>
