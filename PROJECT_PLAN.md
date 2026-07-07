@@ -245,6 +245,10 @@ POST  /api/narrators/{id}/messages
 GET   /api/narrators/{id}/tools
 POST  /api/narrators/{id}/tool-calls
 GET   /api/narrators/{id}/tool-calls/{toolUseId}
+GET   /api/narrators/{id}/git/status
+GET   /api/narrators/{id}/git/diff
+GET   /api/narrators/{id}/git/log
+POST  /api/narrators/{id}/git/commit
 
 GET  /api/fs/browse?path=...
 GET  /api/fs/directories?path=...
@@ -353,7 +357,7 @@ openai-compatible:gpt-4.1-mini
 cliproxyapi:gpt-5.5
 ```
 
-如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前官方 SDK provider 先使用非流式调用打通 MVP；Anthropic Messages API 已支持非流式 tool calling 自动循环与 tool result 回灌。流式输出、OpenAI 官方 Responses API tool calling、OpenAI-compatible tool calling、完整 usage/cost 价格表保留为后续增强。
+如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前 Anthropic 官方 Messages API 与 OpenAI 官方 Responses API provider 已支持流式文本输出；Anthropic Messages API 已支持 tool calling 自动循环与 tool result 回灌。OpenAI 官方 Responses API tool calling、OpenAI-compatible streaming/tool calling 保留为后续增强。
 
 环境变量：
 
@@ -657,6 +661,7 @@ internal/config/defaults_test.go
 internal/db/db_test.go
 internal/providers/anthropic_provider_test.go
 internal/providers/openai_compatible_test.go
+internal/providers/openai_official_test.go
 internal/server/backends_test.go
 internal/server/git_test.go
 internal/server/interrupt_test.go
@@ -671,6 +676,9 @@ internal/tools/tools_test.go
 - OpenHands Agent Server 健康检查
 - 工具路径越界检查
 - Write 后 Read
+- 官方 Anthropic/OpenAI SDK provider 流式事件、usage 与 fallback 行为
+- usage cost 估算：OpenAI、Anthropic Sonnet/Opus 与未知模型分支
+- Git commit API 的显式 paths 提交、安全路径拒绝、空仓库 diff 降级
 
 当前验证命令：
 
@@ -690,6 +698,11 @@ node --check internal/server/static/app.js
 - `/api/backends/{id}/health`
 - `POST /api/projects`
 - `POST /api/narrators/{id}/tool-calls`
+- `GET /api/narrators/{id}/git/status`
+- `GET /api/narrators/{id}/git/diff`
+- `POST /api/narrators/{id}/git/commit`
+
+本地 dogfood 证据：2026-07-07 UTC / 2026-07-08 +08:00 使用临时 CodeHarbor 服务与临时 Git 仓库，通过 API 创建项目，执行 `Write` / `Read` / `Grep`，让已跟踪文件 `demo/notes.md` 变为 `worktree=M`，通过 Git diff API 看到 `added=2 deleted=0` 和补丁行 `+- Updated through CodeHarbor Write tool for tracked diff review.`，再用显式 `paths: ["demo/notes.md"]` 调用 Git commit API 创建提交 `96cd79e Dogfood tracked diff workflow`，提交后仓库 `clean=true`。较早的未跟踪文件 smoke 也创建并提交了 `2484ab7 Dogfood CodeHarbor API workflow`。
 
 ---
 
@@ -739,14 +752,14 @@ node --check internal/server/static/app.js
 待做：
 
 - [ ] OpenAI-compatible streaming
-- [ ] OpenAI 官方 Responses API streaming
-- [ ] Anthropic 官方 Messages API streaming
+- [x] OpenAI 官方 Responses API streaming
+- [x] Anthropic 官方 Messages API streaming
 - [x] tool call parsing（Anthropic 非流式）
 - [x] tool result 回灌模型（Anthropic 非流式）
 - [x] Anthropic 官方 SDK provider（非流式 MVP）
 - [x] OpenAI 官方 Responses API provider（非流式 MVP）
 - [x] provider 前缀路由与基础 model list
-- [x] usage/cost 统计（usage 写入 `api_requests`，cost 使用内置 per-model 价格表估算）
+- [x] usage/cost 统计（usage 写入 `api_requests`，cost 使用内置 per-model USD/MTok 价格表估算；价格来源在 `internal/agent/loop.go` 注释和 README 中记录，未知模型估算为 0）
 - [ ] retry/backoff
 - [ ] first token timeout
 
@@ -879,8 +892,8 @@ license
 
 - 前端 UI 仍是内嵌 HTML/CSS/JS MVP，不是完整 React/shadcn 实现
 - 没有真实权限审批流程
-- Agent loop 暂未支持模型 tool calling
-- OpenAI / Anthropic / OpenAI-compatible provider 暂未流式输出
+- Agent loop 暂未支持所有 provider 的完整模型 tool calling（Anthropic 路径已具备自动工具循环基础）
+- OpenAI-compatible provider 暂未流式输出；官方 OpenAI/Anthropic provider 已支持 SDK streaming
 - Bash 工具默认在 `acceptEdits` 下不可执行
 - `/api/fs` 当前以 default project dir 为边界，尚未按 narrator cwd 动态限制
 - license API 只确认了部分依赖协议
@@ -893,10 +906,10 @@ license
 
 建议下一轮优先做：
 
-1. OpenAI Responses API streaming + tool calling
-2. Anthropic Messages API streaming + tool calling
-3. tool result 回灌模型，形成自动工具循环
-4. `api_requests` 记录与 usage/cost 统计
+1. OpenAI Responses API tool calling 与 tool result 回灌
+2. OpenAI-compatible streaming/tool calling
+3. 将 provider streaming 事件更细粒度地接入 agent loop / WebSocket（首 token、usage、tool delta、done）
+4. retry/backoff 与 first-token timeout 策略落地
 5. 权限审批 UI 与 whitelist/blacklist 规则
 6. Codex 凭证导入、账号额度和 provider 中转配置继续增强
 

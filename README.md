@@ -4,13 +4,15 @@ CodeHarbor is a local-first Go MVP for an AI coding agent server. It ships as a 
 
 The project is currently an experimental MVP. It is intended for local development and iteration, not for untrusted multi-user or production deployments.
 
+> **Real local dogfood:** the current code has been run end-to-end against temporary local projects. The latest tracked-file smoke created a project through the HTTP API, edited a tracked file with the `Write` tool, reviewed the resulting Git diff, and committed only the selected path. See [Dogfood demo](#dogfood-demo).
+
 ## Features
 
 - Local HTTP server with embedded HTML/CSS/JS UI
 - SQLite persistence for projects, chapters, narrators, messages, tool calls, and backend registry entries
 - Provider abstraction for:
-  - OpenAI official Responses API
-  - Anthropic official Messages API
+  - OpenAI official Responses API with SDK streaming text deltas and usage capture
+  - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, and usage capture
   - OpenAI-compatible Chat Completions APIs
   - CLIProxyAPI local OpenAI-compatible preset
 - Core tools:
@@ -20,6 +22,7 @@ The project is currently an experimental MVP. It is intended for local developme
   - Bash
   - Glob
   - Grep
+- Git workspace APIs and UI for status, diff, log, and explicit-path commits without automatic push, amend, reset, clean, force, or `git add -A`
 - WebSocket agent event stream: `/ws/narrator` with Settings → AI Agents current narrator controls for model, permission mode, and working directory
 - Settings → Chapters & Containers project workline view backed by existing project chapter and narrator APIs
 - Interactive PTY terminal WebSocket: `/ws/terminal` with Settings → Terminal management controls and browser-local retention/focus preferences
@@ -39,7 +42,7 @@ The project is currently an experimental MVP. It is intended for local developme
 - Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and agent limits
 - Settings → Users read-only auth status panel backed by `/api/auth/status`
 - Local storage summary endpoint and Settings → Storage panel for config, database, home, and project directory footprint
-- Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, backends, and background tasks
+- Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, estimated token cost, backends, and background tasks
 - Settings → About dependency license panel backed by the development-time `/api/licenses` endpoint
 - Settings → About browser-local preferences backup/import for migrating profile, skills, chat drafts, prompt history, search, IM, notification, appearance, terminal, recent directory, model, and relay protocol settings
 
@@ -74,6 +77,34 @@ You can pass a custom config path:
 ```bash
 go run ./cmd/codeharbor --config /path/to/config.json
 ```
+
+## Dogfood demo
+
+Local API-only dogfood smokes were run against temporary CodeHarbor servers and temporary Git repositories. The workflow creates a project through `POST /api/projects`, executes tools through `POST /api/narrators/{id}/tool-calls`, reviews Git state through `GET /api/narrators/{id}/git/status` and `GET /api/narrators/{id}/git/diff`, then commits only selected files through `POST /api/narrators/{id}/git/commit` with an explicit `paths` list.
+
+Latest tracked-file run on 2026-07-07 UTC / 2026-07-08 +08:00:
+
+```text
+Write: Wrote 197 bytes to demo/notes.md inside the temporary project worktree
+Read:  confirmed the new tracked diff review line
+Grep:  notes.md:4:- Updated through CodeHarbor Write tool for tracked diff review.
+Status before commit: demo/notes.md was tracked and modified (worktree=M)
+Diff:  demo/notes.md added=2 deleted=0
+Patch excerpt:
+  diff --git a/demo/notes.md b/demo/notes.md
+  +- Updated through CodeHarbor Write tool for tracked diff review.
+Commit: 96cd79e Dogfood tracked diff workflow
+Paths:  demo/notes.md
+After commit: clean=true, remainingFiles=[]
+```
+
+An earlier untracked-file smoke also created and committed `demo/notes.md` with commit `2484ab7 Dogfood CodeHarbor API workflow`.
+
+To reproduce manually, start CodeHarbor with a temporary config, create or open a local Git repository as the project worktree, use the UI or tool-call API to write a small file, verify Git status, inspect the diff in the Git panel, select the file checkbox, enter a commit message, and submit the commit. The commit API stages only the selected paths and does not push, amend, reset, clean, force, or auto-stage the full worktree.
+
+## Usage cost estimates
+
+CodeHarbor records provider usage in `api_requests` and shows aggregate estimated cost in Settings → Usage. Cost is calculated from a small built-in USD-per-million-token table in `internal/agent/loop.go`. The table was last reviewed on 2026-07-07 against public pricing pages: [OpenAI API pricing](https://developers.openai.com/api/docs/pricing), [OpenAI GPT-4.1 pricing announcement](https://openai.com/index/gpt-4-1/), and [Anthropic Claude pricing](https://docs.anthropic.com/en/docs/about-claude/pricing). Unknown models intentionally estimate to `0`, and OpenAI-compatible relay or local models may bill differently from their public model-name match.
 
 ## Configuration
 
@@ -177,6 +208,10 @@ POST  /api/narrators/{id}/messages
 GET   /api/narrators/{id}/tools
 POST  /api/narrators/{id}/tool-calls
 GET   /api/narrators/{id}/tool-calls/{toolUseId}
+GET   /api/narrators/{id}/git/status
+GET   /api/narrators/{id}/git/diff
+GET   /api/narrators/{id}/git/log
+POST  /api/narrators/{id}/git/commit
 
 GET  /api/fs/browse?path=...
 GET  /api/fs/directories?path=...

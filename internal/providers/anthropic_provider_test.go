@@ -1,9 +1,15 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"codeharbor/internal/config"
 )
 
 func TestAnthropicMessagesPreserveToolBlocks(t *testing.T) {
@@ -34,6 +40,125 @@ func TestAnthropicMessagesPreserveImageBlocks(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected marshaled Anthropic image message to contain %q: %s", want, text)
 		}
+	}
+}
+
+func TestAnthropicProviderStreamsTextUsageAndToolCalls(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "test-key" {
+			t.Fatalf("expected Anthropic API key header, got %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_read_input_tokens":2,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0}}}}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel"}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}`,
+			``,
+			`event: content_block_stop`,
+			`data: {"type":"content_block_stop","index":0}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":"}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"README.md\"}"}}`,
+			``,
+			`event: content_block_stop`,
+			`data: {"type":"content_block_stop","index":1}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_read_input_tokens":2,"output_tokens":7,"output_tokens_details":{"thinking_tokens":1}}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "claude-sonnet-4-5", MaxTokens: 128})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}, Tools: []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	var usage Usage
+	var toolCalls []ToolCall
+	var stopReason string
+	for event := range events {
+		switch event.Type {
+		case "error":
+			t.Fatalf("unexpected error event: %s", event.Text)
+		case "text":
+			text += event.Text
+		case "usage":
+			if event.Usage != nil {
+				usage = *event.Usage
+			}
+		case "tool_call":
+			if event.ToolCall != nil {
+				toolCalls = append(toolCalls, *event.ToolCall)
+			}
+		case "done":
+			stopReason = event.StopReason
+		}
+	}
+	if requestBody["stream"] != true {
+		t.Fatalf("expected stream=true request, got %+v", requestBody)
+	}
+	if text != "hello" {
+		t.Fatalf("expected streamed text hello, got %q", text)
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 7 || usage.CachedInputTokens != 2 || usage.ReasoningTokens != 1 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+	if len(toolCalls) != 1 || toolCalls[0].ID != "toolu_1" || toolCalls[0].Name != "Read" || string(toolCalls[0].Input) != `{"file_path":"README.md"}` {
+		t.Fatalf("unexpected tool calls: %+v", toolCalls)
+	}
+	if stopReason != "tool_use" {
+		t.Fatalf("expected tool_use stop reason, got %q", stopReason)
+	}
+}
+
+func TestAnthropicProviderWithoutAPIKeyStillReturnsNotConfigured(t *testing.T) {
+	provider := NewAnthropicProvider(config.ProviderConfig{Model: "claude-sonnet-4-5"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text, stopReason string
+	for event := range events {
+		if event.Type == "text" {
+			text += event.Text
+		}
+		if event.Type == "done" {
+			stopReason = event.StopReason
+		}
+	}
+	if !strings.Contains(text, "not configured") || stopReason != "not_configured" {
+		t.Fatalf("unexpected not configured events: text=%q stop=%q", text, stopReason)
 	}
 }
 

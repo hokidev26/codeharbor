@@ -745,6 +745,13 @@ func estimateUsageCostUSD(providerName, model string, usage providers.Usage) flo
 	return (float64(uncachedInput)*price.InputPerMTok + float64(cachedInput)*price.CachedInputPerMTok + float64(usage.OutputTokens)*price.OutputPerMTok) / 1_000_000
 }
 
+// modelTokenPrice returns coarse USD-per-million-token estimates used for local usage summaries.
+// Pricing references last reviewed on 2026-07-07:
+//   - OpenAI API pricing: https://developers.openai.com/api/docs/pricing
+//   - OpenAI GPT-4.1 pricing announcement: https://openai.com/index/gpt-4-1/
+//   - Anthropic pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
+//
+// Relay/local models may bill differently from their public model-name match; unknown models return false.
 func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
 	provider := strings.ToLower(strings.TrimSpace(providerName))
 	name := strings.ToLower(strings.TrimSpace(model))
@@ -755,9 +762,9 @@ func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
 		match string
 		price tokenPrice
 	}{
-		{match: "gpt-5.5", price: tokenPrice{InputPerMTok: 5.00, CachedInputPerMTok: 0.50, OutputPerMTok: 30.00}},
-		{match: "gpt-5.4-mini", price: tokenPrice{InputPerMTok: 0.75, CachedInputPerMTok: 0.075, OutputPerMTok: 4.50}},
-		{match: "gpt-5.4", price: tokenPrice{InputPerMTok: 2.50, CachedInputPerMTok: 0.25, OutputPerMTok: 15.00}},
+		{match: "gpt-5.5", price: tokenPrice{InputPerMTok: 5.00, CachedInputPerMTok: 0.50, OutputPerMTok: 22.50}},
+		{match: "gpt-5.4-mini", price: tokenPrice{InputPerMTok: 0.375, CachedInputPerMTok: 0.0375, OutputPerMTok: 2.25}},
+		{match: "gpt-5.4", price: tokenPrice{InputPerMTok: 2.50, CachedInputPerMTok: 0.25, OutputPerMTok: 11.25}},
 		{match: "gpt-4.1-mini", price: tokenPrice{InputPerMTok: 0.40, CachedInputPerMTok: 0.10, OutputPerMTok: 1.60}},
 		{match: "gpt-4.1-nano", price: tokenPrice{InputPerMTok: 0.10, CachedInputPerMTok: 0.025, OutputPerMTok: 0.40}},
 		{match: "gpt-4.1", price: tokenPrice{InputPerMTok: 2.00, CachedInputPerMTok: 0.50, OutputPerMTok: 8.00}},
@@ -776,6 +783,8 @@ func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
 	switch {
 	case strings.HasPrefix(name, "claude-sonnet-5"):
 		anthropicPrice = tokenPrice{InputPerMTok: 2.00, CachedInputPerMTok: 0.20, OutputPerMTok: 10.00}
+	case name == "claude-opus-4" || strings.HasPrefix(name, "claude-opus-4-1") || strings.HasPrefix(name, "claude-opus-4-202"):
+		anthropicPrice = tokenPrice{InputPerMTok: 15.00, CachedInputPerMTok: 1.50, OutputPerMTok: 75.00}
 	case strings.HasPrefix(name, "claude-opus-4"):
 		anthropicPrice = tokenPrice{InputPerMTok: 5.00, CachedInputPerMTok: 0.50, OutputPerMTok: 25.00}
 	case strings.HasPrefix(name, "claude-sonnet-4"):

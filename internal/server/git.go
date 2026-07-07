@@ -162,13 +162,17 @@ func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	contextLines := boundedInt(r.URL.Query().Get("context"), 3, 0, 20)
-	patchArgs := gitDiffArgs(scope, contextLines, false, relPath)
+	hasHead := true
+	if scope == "all" {
+		hasHead = gitRepoHasHead(r.Context(), repoRoot)
+	}
+	patchArgs := gitDiffArgs(scope, contextLines, false, relPath, hasHead)
 	patch, truncated, err := runGitCommand(r.Context(), repoRoot, gitDiffMaxBytes, 5*time.Second, nil, patchArgs...)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
-	statArgs := gitDiffArgs(scope, contextLines, true, relPath)
+	statArgs := gitDiffArgs(scope, contextLines, true, relPath, hasHead)
 	statOut, statTruncated, _ := runGitCommand(r.Context(), repoRoot, gitLogMaxBytes, 5*time.Second, nil, statArgs...)
 	writeJSON(w, http.StatusOK, gitDiffResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -489,7 +493,7 @@ func normalizeGitCommitError(err error) error {
 	return gitErr
 }
 
-func gitDiffArgs(scope string, contextLines int, numstat bool, relPath string) []string {
+func gitDiffArgs(scope string, contextLines int, numstat bool, relPath string, hasHead bool) []string {
 	args := []string{"diff", "--no-ext-diff", "--find-renames"}
 	if numstat {
 		args = append(args, "--numstat", "-z")
@@ -498,7 +502,9 @@ func gitDiffArgs(scope string, contextLines int, numstat bool, relPath string) [
 	}
 	switch scope {
 	case "all":
-		args = append(args, "HEAD")
+		if hasHead {
+			args = append(args, "HEAD")
+		}
 	case "staged":
 		args = append(args, "--cached")
 	}
@@ -507,6 +513,11 @@ func gitDiffArgs(scope string, contextLines int, numstat bool, relPath string) [
 		args = append(args, relPath)
 	}
 	return args
+}
+
+func gitRepoHasHead(ctx context.Context, repoRoot string) bool {
+	out, _, err := runGitCommand(ctx, repoRoot, 128, 2*time.Second, []int{1, 128}, "rev-parse", "--verify", "HEAD")
+	return err == nil && strings.TrimSpace(out) != ""
 }
 
 func cleanGitPath(repoRoot, input string) (string, error) {

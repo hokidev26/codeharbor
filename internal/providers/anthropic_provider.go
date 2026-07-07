@@ -84,33 +84,85 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 			System:    system,
 			Tools:     anthropicTools(req.Tools),
 		}
-		res, err := p.client.Messages.New(ctx, params)
-		if err != nil {
+		stream := p.client.Messages.NewStreaming(ctx, params)
+		defer stream.Close()
+		var acc anthropic.Message
+		var usage Usage
+		var stopReason string
+		for stream.Next() {
+			event := stream.Current()
+			if err := acc.Accumulate(event); err != nil {
+				out <- Event{Type: "error", Text: err.Error()}
+				return
+			}
+			switch typed := event.AsAny().(type) {
+			case anthropic.MessageStartEvent:
+				usage = anthropicUsageFromUsage(typed.Message.Usage)
+			case anthropic.ContentBlockDeltaEvent:
+				if delta, ok := typed.Delta.AsAny().(anthropic.TextDelta); ok && delta.Text != "" {
+					out <- Event{Type: "text", Text: delta.Text}
+				}
+			case anthropic.ContentBlockStopEvent:
+				emitAnthropicToolCall(out, acc, typed.Index)
+			case anthropic.MessageDeltaEvent:
+				applyAnthropicDeltaUsage(&usage, typed.Usage)
+				if typed.Delta.StopReason != "" {
+					stopReason = string(typed.Delta.StopReason)
+				}
+			}
+		}
+		if err := stream.Err(); err != nil {
 			out <- Event{Type: "error", Text: err.Error()}
 			return
 		}
-		usage := Usage{
-			InputTokens:       res.Usage.InputTokens,
-			OutputTokens:      res.Usage.OutputTokens,
-			CachedInputTokens: res.Usage.CacheReadInputTokens,
-			ReasoningTokens:   res.Usage.OutputTokensDetails.ThinkingTokens,
+		if usage != (Usage{}) {
+			out <- Event{Type: "usage", Usage: &usage}
 		}
-		out <- Event{Type: "usage", Usage: &usage}
-		for _, block := range res.Content {
-			switch block.Type {
-			case "text":
-				out <- Event{Type: "text", Text: block.Text}
-			case "tool_use":
-				input := block.Input
-				if len(input) == 0 {
-					input = json.RawMessage(`{}`)
-				}
-				out <- Event{Type: "tool_call", ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input}}
-			}
+		if stopReason == "" {
+			stopReason = string(acc.StopReason)
 		}
-		out <- Event{Type: "done", Done: true, StopReason: string(res.StopReason)}
+		out <- Event{Type: "done", Done: true, StopReason: stopReason}
 	}()
 	return out, nil
+}
+
+func anthropicUsageFromUsage(usage anthropic.Usage) Usage {
+	return Usage{
+		InputTokens:       usage.InputTokens,
+		OutputTokens:      usage.OutputTokens,
+		CachedInputTokens: usage.CacheReadInputTokens,
+		ReasoningTokens:   usage.OutputTokensDetails.ThinkingTokens,
+	}
+}
+
+func applyAnthropicDeltaUsage(usage *Usage, delta anthropic.MessageDeltaUsage) {
+	if delta.JSON.InputTokens.Valid() {
+		usage.InputTokens = delta.InputTokens
+	}
+	if delta.JSON.OutputTokens.Valid() {
+		usage.OutputTokens = delta.OutputTokens
+	}
+	if delta.JSON.CacheReadInputTokens.Valid() {
+		usage.CachedInputTokens = delta.CacheReadInputTokens
+	}
+	if delta.JSON.OutputTokensDetails.Valid() {
+		usage.ReasoningTokens = delta.OutputTokensDetails.ThinkingTokens
+	}
+}
+
+func emitAnthropicToolCall(out chan<- Event, message anthropic.Message, index int64) {
+	if index < 0 || index >= int64(len(message.Content)) {
+		return
+	}
+	block := message.Content[index]
+	if block.Type != "tool_use" || block.ID == "" || block.Name == "" {
+		return
+	}
+	input := block.Input
+	if len(input) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	out <- Event{Type: "tool_call", ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input}}
 }
 
 func anthropicMessages(messages []Message, systemPrompt string) ([]anthropic.MessageParam, []anthropic.TextBlockParam) {

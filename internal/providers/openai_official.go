@@ -81,27 +81,104 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 		if req.SystemPrompt != "" {
 			params.Instructions = param.NewOpt(req.SystemPrompt)
 		}
-		res, err := p.client.Responses.New(ctx, params)
-		if err != nil {
+		stream := p.client.Responses.NewStreaming(ctx, params)
+		defer stream.Close()
+		sawDelta := false
+		for stream.Next() {
+			event := stream.Current()
+			switch event.Type {
+			case "response.output_text.delta":
+				delta := event.AsResponseOutputTextDelta()
+				if delta.Delta != "" {
+					sawDelta = true
+					out <- Event{Type: "text", Text: delta.Delta}
+				}
+			case "response.output_text.done":
+				done := event.AsResponseOutputTextDone()
+				if !sawDelta && done.Text != "" {
+					sawDelta = true
+					out <- Event{Type: "text", Text: done.Text}
+				}
+			case "response.completed":
+				completed := event.AsResponseCompleted()
+				if errText := openAIResponseErrorText(completed.Response); errText != "" {
+					out <- Event{Type: "error", Text: errText}
+					return
+				}
+				emitOpenAIUsage(out, completed.Response)
+				out <- Event{Type: "done", Done: true}
+				return
+			case "response.incomplete":
+				incomplete := event.AsResponseIncomplete()
+				emitOpenAIUsage(out, incomplete.Response)
+				out <- Event{Type: "done", Done: true, StopReason: openAIIncompleteStopReason(incomplete.Response)}
+				return
+			case "response.failed":
+				failed := event.AsResponseFailed()
+				emitOpenAIUsage(out, failed.Response)
+				if errText := openAIResponseErrorText(failed.Response); errText != "" {
+					out <- Event{Type: "error", Text: errText}
+					return
+				}
+				out <- Event{Type: "error", Text: "openai response failed"}
+				return
+			case "error":
+				errEvent := event.AsError()
+				out <- Event{Type: "error", Text: openAIStreamErrorText(errEvent)}
+				return
+			}
+		}
+		if err := stream.Err(); err != nil {
 			out <- Event{Type: "error", Text: err.Error()}
 			return
 		}
-		if res.Error.Message != "" {
-			out <- Event{Type: "error", Text: fmt.Sprintf("openai response error: %s", res.Error.Message)}
-			return
-		}
-		usage := Usage{
-			InputTokens:       res.Usage.InputTokens,
-			OutputTokens:      res.Usage.OutputTokens,
-			CachedInputTokens: res.Usage.InputTokensDetails.CachedTokens,
-			ReasoningTokens:   res.Usage.OutputTokensDetails.ReasoningTokens,
-		}
-		out <- Event{Type: "usage", Usage: &usage}
-		text := res.OutputText()
-		out <- Event{Type: "text", Text: text}
 		out <- Event{Type: "done", Done: true}
 	}()
 	return out, nil
+}
+
+func emitOpenAIUsage(out chan<- Event, response responses.Response) {
+	usage := openAIUsageFromResponse(response)
+	if usage == (Usage{}) {
+		return
+	}
+	out <- Event{Type: "usage", Usage: &usage}
+}
+
+func openAIUsageFromResponse(response responses.Response) Usage {
+	return Usage{
+		InputTokens:       response.Usage.InputTokens,
+		OutputTokens:      response.Usage.OutputTokens,
+		CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
+		ReasoningTokens:   response.Usage.OutputTokensDetails.ReasoningTokens,
+	}
+}
+
+func openAIResponseErrorText(response responses.Response) string {
+	if strings.TrimSpace(response.Error.Message) == "" {
+		return ""
+	}
+	if strings.TrimSpace(string(response.Error.Code)) != "" {
+		return fmt.Sprintf("openai response error (%s): %s", response.Error.Code, response.Error.Message)
+	}
+	return fmt.Sprintf("openai response error: %s", response.Error.Message)
+}
+
+func openAIIncompleteStopReason(response responses.Response) string {
+	if strings.TrimSpace(response.IncompleteDetails.Reason) != "" {
+		return response.IncompleteDetails.Reason
+	}
+	if response.Status != "" {
+		return string(response.Status)
+	}
+	return "incomplete"
+}
+
+func openAIStreamErrorText(event responses.ResponseErrorEvent) string {
+	if strings.TrimSpace(event.Code) != "" {
+		return fmt.Sprintf("openai stream error (%s): %s", event.Code, event.Message)
+	}
+	return fmt.Sprintf("openai stream error: %s", event.Message)
 }
 
 func renderTranscript(messages []Message) string {

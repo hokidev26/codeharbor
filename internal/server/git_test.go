@@ -74,6 +74,29 @@ func TestGitDiffRouteReturnsPatchForPath(t *testing.T) {
 	}
 }
 
+func TestGitDiffRouteHandlesUnbornHead(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "new.txt", "new\n")
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/git/diff?scope=all&path=new.txt", nil)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body gitDiffResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Path != "new.txt" || body.Scope != "all" {
+		t.Fatalf("unexpected diff body: %+v", body)
+	}
+}
+
 func TestGitLogRouteReturnsCommitsAndBoundsLimit(t *testing.T) {
 	ctx := context.Background()
 	repo := newGitTestRepo(t)

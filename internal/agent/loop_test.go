@@ -134,9 +134,21 @@ func TestEstimateUsageCostUSD(t *testing.T) {
 	if openAICost < 0.4849 || openAICost > 0.4851 {
 		t.Fatalf("unexpected OpenAI cost: %.6f", openAICost)
 	}
+	gpt55Cost := estimateUsageCostUSD("openai", "gpt-5.5", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 100_000, OutputTokens: 100_000})
+	if gpt55Cost < 6.7999 || gpt55Cost > 6.8001 {
+		t.Fatalf("unexpected OpenAI GPT-5.5 cost: %.6f", gpt55Cost)
+	}
 	anthropicCost := estimateUsageCostUSD("anthropic", "claude-sonnet-4-5", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 100_000, OutputTokens: 100_000})
 	if anthropicCost < 4.2299 || anthropicCost > 4.2301 {
 		t.Fatalf("unexpected Anthropic cost: %.6f", anthropicCost)
+	}
+	opusCost := estimateUsageCostUSD("anthropic", "claude-opus-4-1", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 100_000, OutputTokens: 100_000})
+	if opusCost < 21.1499 || opusCost > 21.1501 {
+		t.Fatalf("unexpected Anthropic Opus cost: %.6f", opusCost)
+	}
+	opus45Cost := estimateUsageCostUSD("anthropic", "claude-opus-4-5", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 100_000, OutputTokens: 100_000})
+	if opus45Cost < 7.0499 || opus45Cost > 7.0501 {
+		t.Fatalf("unexpected Anthropic Opus 4.5 cost: %.6f", opus45Cost)
 	}
 	if got := estimateUsageCostUSD("unknown", "custom-model", providers.Usage{InputTokens: 1_000_000}); got != 0 {
 		t.Fatalf("expected unknown model cost to be 0, got %.6f", got)
