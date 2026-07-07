@@ -100,7 +100,7 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 func renderTranscript(messages []Message) string {
 	var builder strings.Builder
 	for _, message := range messages {
-		content := strings.TrimSpace(message.Content)
+		content := strings.TrimSpace(contentBlocksText(normalizeContentBlocks(message)))
 		if content == "" {
 			continue
 		}

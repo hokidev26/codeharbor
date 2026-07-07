@@ -3,8 +3,12 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"mime"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -124,6 +128,10 @@ type postMessageRequest struct {
 }
 
 func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		s.postMultipartMessage(w, r)
+		return
+	}
 	var req postMessageRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -139,6 +147,50 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, msg)
+}
+
+func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
+	text, createdBy, attachments, err := parseMultipartAttachments(w, r)
+	if err != nil {
+		var uploadErr attachmentUploadError
+		if errors.As(err, &uploadErr) {
+			writeError(w, uploadErr.Status, uploadErr.Message)
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), text, createdBy, attachments...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, msg)
+}
+
+func (s *Server) getMessageAttachment(w http.ResponseWriter, r *http.Request) {
+	attachment, err := s.store.GetAttachment(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "messageId"), chi.URLParam(r, "attachmentId"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	contentType := attachment.MIMEType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	disposition := "attachment"
+	if attachment.Kind == "image" || attachment.Kind == "pdf" || strings.HasPrefix(contentType, "text/") {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(attachment.Data)), 10))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": attachment.Filename}))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(attachment.Data)
 }
 
 func (s *Server) listTools(w http.ResponseWriter, r *http.Request) {

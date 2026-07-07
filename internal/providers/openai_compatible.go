@@ -3,6 +3,7 @@ package providers
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -66,6 +67,88 @@ func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 	return models, nil
 }
 
+func openAICompatibleMessages(req GenerateRequest) []map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages)+1)
+	if req.SystemPrompt != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": req.SystemPrompt})
+	}
+	for _, message := range req.Messages {
+		role := strings.TrimSpace(message.Role)
+		if role == "" {
+			role = "user"
+		}
+		blocks := normalizeContentBlocks(message)
+		if len(blocks) == 0 {
+			continue
+		}
+		if !contentBlocksHaveImage(blocks) {
+			messages = append(messages, map[string]any{"role": role, "content": contentBlocksText(blocks)})
+			continue
+		}
+		content := make([]map[string]any, 0, len(blocks))
+		for _, block := range blocks {
+			switch block.Type {
+			case "image":
+				if len(block.Data) == 0 {
+					continue
+				}
+				mimeType := strings.TrimSpace(block.MIMEType)
+				if mimeType == "" {
+					mimeType = "image/png"
+				}
+				content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(block.Data)}})
+			default:
+				text := strings.TrimSpace(block.Text)
+				if text != "" {
+					content = append(content, map[string]any{"type": "text", "text": text})
+				}
+			}
+		}
+		if len(content) > 0 {
+			messages = append(messages, map[string]any{"role": role, "content": content})
+		}
+	}
+	return messages
+}
+
+func normalizeContentBlocks(message Message) []ContentBlock {
+	if len(message.Blocks) > 0 {
+		return message.Blocks
+	}
+	content := strings.TrimSpace(message.Content)
+	if content == "" {
+		return nil
+	}
+	return []ContentBlock{{Type: "text", Text: content}}
+}
+
+func contentBlocksHaveImage(blocks []ContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "image" && len(block.Data) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func contentBlocksText(blocks []ContentBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, strings.TrimSpace(block.Text))
+			continue
+		}
+		if block.Type == "image" {
+			name := strings.TrimSpace(block.Filename)
+			if name == "" {
+				name = "image"
+			}
+			parts = append(parts, fmt.Sprintf("[图片附件 %s 已上传；当前 provider adapter 未以视觉格式传递该图片。]", name))
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
 	out := make(chan Event, 8)
 	go func() {
@@ -80,20 +163,7 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 		if model == "" {
 			model = p.cfg.Model
 		}
-		messages := make([]map[string]string, 0, len(req.Messages)+1)
-		if req.SystemPrompt != "" {
-			messages = append(messages, map[string]string{"role": "system", "content": req.SystemPrompt})
-		}
-		for _, message := range req.Messages {
-			if message.Content == "" {
-				continue
-			}
-			role := message.Role
-			if role == "" {
-				role = "user"
-			}
-			messages = append(messages, map[string]string{"role": role, "content": message.Content})
-		}
+		messages := openAICompatibleMessages(req)
 		payload := map[string]any{"model": model, "messages": messages, "stream": false}
 		data, err := json.Marshal(payload)
 		if err != nil {

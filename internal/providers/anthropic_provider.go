@@ -104,7 +104,7 @@ func anthropicMessages(messages []Message, systemPrompt string) ([]anthropic.Mes
 		system = append(system, anthropic.TextBlockParam{Text: systemPrompt})
 	}
 	for _, message := range messages {
-		content := strings.TrimSpace(message.Content)
+		content := strings.TrimSpace(contentBlocksText(normalizeContentBlocks(message)))
 		if content == "" {
 			continue
 		}

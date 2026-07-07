@@ -23,15 +23,16 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hasUsers": hasUsers, "registrationOpen": s.cfg.Auth.RegistrationOpen})
+	writeJSON(w, http.StatusOK, map[string]any{"hasUsers": hasUsers, "registrationOpen": s.configSnapshot().Auth.RegistrationOpen})
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configSnapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":    s.cfg.Server,
-		"paths":     s.cfg.Paths,
-		"agent":     s.cfg.Agent,
-		"providers": s.cfg.Providers.Summaries(),
+		"server":    cfg.Server,
+		"paths":     cfg.Paths,
+		"agent":     cfg.Agent,
+		"providers": cfg.Providers.Summaries(),
 		"version":   config.Version,
 	})
 }
@@ -58,19 +59,26 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	gitPath := strings.TrimSpace(req.GitPath)
+	cfg := s.configSnapshot()
+	gitPath := cleanProjectPath(strings.TrimSpace(req.GitPath))
 	if gitPath == "" {
-		gitPath = filepath.Join(s.cfg.Paths.DefaultProjectDir, slugify(req.Name))
+		gitPath = filepath.Join(cfg.Paths.DefaultProjectDir, slugify(req.Name))
 	}
+	absGitPath, err := filepath.Abs(gitPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	gitPath = absGitPath
 	if err := os.MkdirAll(gitPath, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = s.cfg.Agent.DefaultModel
+		model = cfg.Agent.DefaultModel
 	}
-	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, s.cfg.Agent.DefaultPermissionMode)
+	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, cfg.Agent.DefaultPermissionMode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -92,6 +100,13 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 }
 
 var slugCleanup = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+func cleanProjectPath(path string) string {
+	if strings.HasPrefix(path, "Users"+string(filepath.Separator)) {
+		return string(filepath.Separator) + path
+	}
+	return path
+}
 
 func slugify(name string) string {
 	slug := strings.ToLower(strings.TrimSpace(name))

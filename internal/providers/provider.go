@@ -10,8 +10,18 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string         `json:"role"`
+	Content string         `json:"content"`
+	Blocks  []ContentBlock `json:"blocks,omitempty"`
+}
+
+type ContentBlock struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Data     []byte `json:"-"`
+	Filename string `json:"filename,omitempty"`
+	Kind     string `json:"kind,omitempty"`
 }
 
 type ToolSpec struct {

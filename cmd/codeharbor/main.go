@@ -27,7 +27,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	cfg, err := config.Load(*configPath)
+	resolvedConfigPath, err := config.ResolvePath(*configPath)
+	if err != nil {
+		logger.Error("resolve config", "error", err)
+		os.Exit(1)
+	}
+	cfg, err := config.Load(resolvedConfigPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
 		os.Exit(1)
@@ -64,6 +69,7 @@ func main() {
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
 	app := server.New(cfg, store, runner, hub, providerRegistry)
+	app.SetConfigPath(resolvedConfigPath)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),

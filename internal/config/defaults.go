@@ -137,13 +137,25 @@ func Default() (Config, error) {
 	}, nil
 }
 
+func ResolvePath(path string) (string, error) {
+	if strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	cfg, err := Default()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg.Paths.HomeDir, "config.json"), nil
+}
+
 func Load(path string) (Config, error) {
 	cfg, err := Default()
 	if err != nil {
 		return Config{}, err
 	}
-	if path == "" {
-		path = filepath.Join(cfg.Paths.HomeDir, "config.json")
+	path, err = ResolvePath(path)
+	if err != nil {
+		return Config{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Config{}, err
@@ -295,6 +307,17 @@ func upsertProvider(providers []ProviderConfig, provider ProviderConfig) []Provi
 		}
 	}
 	return append(providers, provider)
+}
+
+func Save(path string, cfg Config) error {
+	path, err := ResolvePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return writeDefaultConfig(path, cfg)
 }
 
 func writeDefaultConfig(path string, cfg Config) error {

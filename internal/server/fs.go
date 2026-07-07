@@ -4,7 +4,9 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -46,9 +48,10 @@ type fsDirectoryShortcut struct {
 }
 
 func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
+	defaultProjectDir := s.configSnapshot().Paths.DefaultProjectDir
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
 	if path == "" {
-		path = defaultDirectoryRoot(s.cfg.Paths.DefaultProjectDir)
+		path = defaultDirectoryRoot(defaultProjectDir)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -88,10 +91,72 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":      abs,
+		"name":      filepath.Base(abs),
 		"parent":    parent,
 		"entries":   items,
-		"shortcuts": directoryShortcuts(s.cfg.Paths.DefaultProjectDir),
+		"shortcuts": directoryShortcuts(defaultProjectDir),
 	})
+}
+
+func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
+	if runtime.GOOS != "darwin" {
+		writeError(w, http.StatusNotImplemented, "当前系统暂不支持原生资料夹选择器，请使用内置目录浏览器")
+		return
+	}
+	defaultProjectDir := s.configSnapshot().Paths.DefaultProjectDir
+	defaultPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if defaultPath == "" {
+		defaultPath = defaultDirectoryRoot(defaultProjectDir)
+	}
+	if abs, err := filepath.Abs(defaultPath); err == nil {
+		if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+			defaultPath = abs
+		} else {
+			defaultPath = defaultDirectoryRoot(defaultProjectDir)
+		}
+	}
+
+	script := `set chosenFolder to choose folder with prompt "选择 CodeHarbor 工作资料夹"`
+	if defaultPath != "" {
+		script = `set defaultFolder to POSIX file ` + appleScriptString(defaultPath) + ` as alias
+set chosenFolder to choose folder with prompt "选择 CodeHarbor 工作资料夹" default location defaultFolder`
+	}
+	script += "\nPOSIX path of chosenFolder"
+
+	output, err := exec.CommandContext(r.Context(), "osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if strings.Contains(message, "User canceled") || strings.Contains(message, "-128") {
+			writeJSON(w, http.StatusOK, map[string]any{"canceled": true})
+			return
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		writeError(w, http.StatusInternalServerError, "原生资料夹选择器打开失败："+message)
+		return
+	}
+	path := filepath.Clean(strings.TrimSpace(string(output)))
+	if path == "." || path == "" {
+		writeError(w, http.StatusInternalServerError, "原生资料夹选择器没有返回路径")
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		writeError(w, statusFromFSError(err), err.Error())
+		return
+	}
+	if !info.IsDir() {
+		writeError(w, http.StatusBadRequest, "path must be a directory")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "name": filepath.Base(path), "canceled": false})
+}
+
+func appleScriptString(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
 }
 
 func defaultDirectoryRoot(defaultProjectDir string) string {
@@ -179,9 +244,10 @@ func (s *Server) fsMkdir(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resolveFSPath(input string) (string, error) {
-	base := s.cfg.Paths.DefaultProjectDir
+	cfg := s.configSnapshot()
+	base := cfg.Paths.DefaultProjectDir
 	if base == "" {
-		base = s.cfg.Paths.HomeDir
+		base = cfg.Paths.HomeDir
 	}
 	baseAbs, err := filepath.Abs(base)
 	if err != nil {

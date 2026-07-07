@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -24,12 +25,12 @@ func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *too
 	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg}
 }
 
-func (r *Runner) SubmitUserMessage(ctx context.Context, narratorID, text, createdBy string) (db.Message, error) {
-	msg, err := r.store.AddMessage(ctx, db.Message{NarratorID: narratorID, Role: "user", ContentText: text, CreatedBy: createdBy})
+func (r *Runner) SubmitUserMessage(ctx context.Context, narratorID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
+	msg, err := r.store.AddMessageWithAttachments(ctx, db.Message{NarratorID: narratorID, Role: "user", ContentText: text, CreatedBy: createdBy}, attachments)
 	if err != nil {
 		return db.Message{}, err
 	}
-	r.hub.Publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: msg.ID, Text: text})
+	r.hub.Publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: msg.ID, Text: text, Data: map[string]any{"attachments": len(msg.Attachments)}})
 	go r.Run(context.Background(), narratorID)
 	return msg, nil
 }
@@ -52,7 +53,7 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 	if err != nil {
 		return err
 	}
-	messages, err := r.store.ListMessages(ctx, narratorID)
+	messages, err := r.store.ListMessagesWithAttachmentData(ctx, narratorID)
 	if err != nil {
 		return err
 	}
@@ -62,7 +63,7 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 	}
 	providerMessages := make([]providers.Message, 0, len(messages))
 	for _, message := range messages {
-		providerMessages = append(providerMessages, providers.Message{Role: message.Role, Content: message.ContentText})
+		providerMessages = append(providerMessages, providerMessageFromDB(message))
 	}
 	events, err := provider.Generate(ctx, providers.GenerateRequest{Model: model, SystemPrompt: narrator.SystemPrompt, Messages: providerMessages})
 	if err != nil {
@@ -93,6 +94,41 @@ func (r *Runner) run(ctx context.Context, narratorID string) error {
 		return err
 	}
 	return nil
+}
+
+func providerMessageFromDB(message db.Message) providers.Message {
+	blocks := make([]providers.ContentBlock, 0, 1+len(message.Attachments))
+	content := strings.TrimSpace(message.ContentText)
+	if content != "" {
+		blocks = append(blocks, providers.ContentBlock{Type: "text", Text: content})
+	}
+	for _, attachment := range message.Attachments {
+		name := attachment.Filename
+		if name == "" {
+			name = "attachment"
+		}
+		switch attachment.Kind {
+		case "image":
+			if len(attachment.Data) > 0 {
+				blocks = append(blocks, providers.ContentBlock{Type: "image", MIMEType: attachment.MIMEType, Data: attachment.Data, Filename: name, Kind: attachment.Kind})
+			}
+		case "text", "docx":
+			if strings.TrimSpace(attachment.ExtractedText) != "" {
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("附件 %s 的内容：\n%s", name, attachment.ExtractedText), Filename: name, MIMEType: attachment.MIMEType, Kind: attachment.Kind})
+			} else {
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("附件 %s 已上传，但没有可抽取文本。", name), Filename: name, MIMEType: attachment.MIMEType, Kind: attachment.Kind})
+			}
+		case "pdf":
+			if strings.TrimSpace(attachment.ExtractedText) != "" {
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("PDF 附件 %s 的可抽取文字：\n%s", name, attachment.ExtractedText), Filename: name, MIMEType: attachment.MIMEType, Kind: attachment.Kind})
+			} else {
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("PDF 附件 %s 已上传，但当前无法抽取可读文字；它可能是扫描件，或需要支持原生 PDF/视觉/OCR 的模型。", name), Filename: name, MIMEType: attachment.MIMEType, Kind: attachment.Kind})
+			}
+		default:
+			blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("附件 %s 已上传，类型 %s；当前模型链路没有可读文本可传递。", name, attachment.MIMEType), Filename: name, MIMEType: attachment.MIMEType, Kind: attachment.Kind})
+		}
+	}
+	return providers.Message{Role: message.Role, Content: message.ContentText, Blocks: blocks}
 }
 
 type ToolInfo struct {

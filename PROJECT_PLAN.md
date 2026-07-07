@@ -212,9 +212,12 @@ GET  /api/auth/status
 GET  /api/settings
 GET  /api/models
 GET  /api/licenses
+GET  /api/runtime/summary
+GET  /api/storage/summary
+GET  /api/usage/summary
 
-POST /api/providers/cliproxyapi/codex/login
-GET  /api/providers/cliproxyapi/login-jobs/{id}
+PUT  /api/providers/{name}/config
+
 GET  /api/providers/cliproxyapi/auth-files
 POST /api/providers/cliproxyapi/auth-files/import
 
@@ -371,7 +374,7 @@ CLIPROXYAPI_CONFIG
 
 后续计划支持：
 
-- Codex 文档调研与预留适配
+- Codex 凭证导入体验继续完善（账号状态、额度、错误恢复）
 - Kiro-like provider
 - 本地模型 provider
 - 多 provider fallback / load balancing
@@ -534,17 +537,39 @@ GET /ui/app.js
 - 创建项目
 - 自动选择 root chapter / primary narrator
 - 查看 narrator messages
+- 复制任意用户/助手消息原文，或一键复制当前对话 Markdown，便于整理 issue、PR 描述或外部笔记
 - 发送消息
+- 按当前 narrator 浏览器本地自动保存/恢复聊天输入草稿，切换项目或刷新页面不丢失未发送内容
+- 在聊天输入框中通过浏览器本地提示词历史保存最近提示，并在空输入时用 ↑/↓ 快速召回
+- 在聊天输入框输入 `/` 调出已启用的本地技能命令模板，并通过键盘或点击插入提示词
 - 连接 `/ws/narrator`
 - 查看 WebSocket event log
 - 连接 `/ws/terminal` 交互式 PTY
+- 通过设置 → 终端管理查看 PTY 状态、重连/清空/复制/聚焦终端，并管理输出保留和连接后聚焦偏好
 - 更新 narrator cwd / model / permission mode
 - 浏览 `/api/fs/browse`
 - 预览 `/api/fs/preview`
-- 查看 settings / licenses 简要统计
-- 从 `/api/models` 动态刷新 CLIProxyAPI 登录账号可用模型
-- 设置 → 模型/提供商页内完成模型刷新、Codex 浏览器登录、Codex 设备码登录、Token/JSON 导入、账号列表刷新、模型选择和首选模型保存
-- 管理 Agent Server 后端并显示健康状态
+- 在设置弹窗内搜索/过滤个人设置、实例管理和各产品化设置面板，并支持快捷键聚焦搜索
+- 查看 settings 简要统计，并在设置 → 关于中通过 `/api/licenses` 查看第三方依赖许可证清单
+- 在设置 → 关于中复制、下载、导入浏览器本地偏好备份，迁移个人资料、技能草案、聊天草稿、提示词历史、搜索/IM/通知/外观/终端/模型和中转协议设置
+- 查看 `/api/runtime/summary` 驱动的服务器与系统、运行资源、Go runtime、内存和 Agent 限制概览
+- 查看 `/api/storage/summary` 驱动的储存空间、数据库、配置文件和默认项目目录容量统计
+- 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求/后台任务统计
+- 查看 `/api/auth/status` 驱动的用户初始化和注册开放状态
+- 从 `/api/models` 动态刷新 CLIProxyAPI 凭证账号可用模型
+
+- 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
+- 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略
+- 设置 → IM 网关页内完成浏览器本地 Webhook/Discord/Slack/Telegram/Lark/企业微信预设、入站确认、签名、脱敏和事件路由策略
+- 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出
+- 设置 → 章节与容器页内完成当前项目章节/workline、当前章节 narrator、worktree/branch/容器隔离边界概览和快速切换
+- 设置 → AI 代理页内完成默认 Agent 策略概览、当前 narrator 状态、模型/权限/workdir 快速调整和 ID 复制
+- 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
+- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好
+- 设置 → 外观与界面页内完成浏览器本地主题、布局密度、终端默认展开和 Agent 事件日志显示偏好
+- 设置 → 关于页内完成浏览器本地偏好备份、下载、复制和导入恢复，便于跨浏览器或跨机器迁移工作台设置
+- 设置 → 模型/提供商页内完成模型刷新、Codex Token/JSON 凭证导入、账号列表刷新、中转站 API Key/Base URL/协议/默认模型保存、模型选择和首选模型保存
+- 设置 → 代理管理页内完成 Agent Server 后端列表、健康检测、启用切换、双击确认删除和新增后端
 
 后续如果需要正式使用 shadcn/ui，可升级为：
 
@@ -863,6 +888,6 @@ license
 3. tool result 回灌模型，形成自动工具循环
 4. `api_requests` 记录与 usage/cost 统计
 5. 权限审批 UI 与 whitelist/blacklist 规则
-6. Codex 官方能力文档调研与 provider 预留设计
+6. Codex 凭证导入、账号额度和 provider 中转配置继续增强
 
 这样可以从“可交互 MVP”继续推进到“能自动执行工具的本地 Agent”。

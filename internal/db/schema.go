@@ -131,6 +131,21 @@ CREATE TABLE IF NOT EXISTS narrator_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_narrator_messages_narrator_time ON narrator_messages(narrator_id, created_at);
 
+CREATE TABLE IF NOT EXISTS narrator_message_attachments (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES narrator_messages(id) ON DELETE CASCADE,
+  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  mime_type TEXT,
+  kind TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  data_blob BLOB NOT NULL,
+  extracted_text TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON narrator_message_attachments(message_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_narrator ON narrator_message_attachments(narrator_id, created_at);
+
 CREATE TABLE IF NOT EXISTS narrator_tool_calls (
   id TEXT PRIMARY KEY,
   narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,

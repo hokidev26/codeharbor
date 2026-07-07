@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -16,13 +17,14 @@ import (
 )
 
 type Server struct {
-	cfg            config.Config
-	store          *db.Store
-	runner         *agent.Runner
-	hub            *agent.Hub
-	providers      *providers.Registry
-	providerJobsMu sync.Mutex
-	providerJobs   map[string]*providerLoginJob
+	cfg        config.Config
+	cfgMu      sync.RWMutex
+	configPath string
+	startedAt  time.Time
+	store      *db.Store
+	runner     *agent.Runner
+	hub        *agent.Hub
+	providers  *providers.Registry
 }
 
 func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -30,7 +32,19 @@ func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hu
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
 	}
-	return &Server{cfg: cfg, store: store, runner: runner, hub: hub, providers: providerRegistry, providerJobs: make(map[string]*providerLoginJob)}
+	return &Server{cfg: cfg, startedAt: time.Now().UTC(), store: store, runner: runner, hub: hub, providers: providerRegistry}
+}
+
+func (s *Server) SetConfigPath(path string) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	s.configPath = path
+}
+
+func (s *Server) configSnapshot() config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
 }
 
 func (s *Server) Routes() http.Handler {
@@ -46,9 +60,11 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/settings", s.settings)
 	r.Get("/api/models", s.models)
 	r.Get("/api/licenses", s.licenses)
+	r.Get("/api/runtime/summary", s.runtimeSummary)
+	r.Get("/api/storage/summary", s.storageSummary)
+	r.Get("/api/usage/summary", s.usageSummary)
+	r.Put("/api/providers/{name}/config", s.updateProviderConfig)
 	r.Route("/api/providers/cliproxyapi", func(r chi.Router) {
-		r.Post("/codex/login", s.startCLIProxyAPICodexLogin)
-		r.Get("/login-jobs/{id}", s.getProviderLoginJob)
 		r.Get("/auth-files", s.listCLIProxyAPIAuthFiles)
 		r.Post("/auth-files/import", s.importCLIProxyAPIAuthFile)
 	})
@@ -65,6 +81,7 @@ func (s *Server) Routes() http.Handler {
 	r.Route("/api/fs", func(r chi.Router) {
 		r.Get("/browse", s.fsBrowse)
 		r.Get("/directories", s.fsDirectories)
+		r.Post("/native-directory", s.fsNativeDirectory)
 		r.Get("/preview", s.fsPreview)
 		r.Post("/mkdir", s.fsMkdir)
 	})
@@ -84,6 +101,7 @@ func (s *Server) Routes() http.Handler {
 		r.Patch("/{id}/permission-mode", s.updateNarratorPermissionMode)
 		r.Get("/{id}/messages", s.listMessages)
 		r.Post("/{id}/messages", s.postMessage)
+		r.Get("/{id}/messages/{messageId}/attachments/{attachmentId}", s.getMessageAttachment)
 		r.Get("/{id}/tools", s.listTools)
 		r.Post("/{id}/tool-calls", s.executeTool)
 		r.Get("/{id}/tool-calls/{toolUseId}", s.getToolCall)

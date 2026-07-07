@@ -13,6 +13,7 @@ const state = {
   providerAuthError: "",
   providerAuthSeq: 0,
   providerConfigStatus: "",
+  providerConfigExpanded: {},
   storageSummary: null,
   storageError: "",
   storageSeq: 0,
@@ -37,6 +38,7 @@ const state = {
   appearance: null,
   terminalPrefs: null,
   chatDrafts: null,
+  pendingAttachments: [],
   promptHistory: null,
   promptHistoryIndex: -1,
   promptHistoryDraft: "",
@@ -76,6 +78,7 @@ const state = {
   directoryParent: "",
   directoryShortcuts: [],
   directoryBrowseSeq: 0,
+  nativeDirectorySelecting: false,
   projectQuery: "",
   ws: null,
   terminalWS: null,
@@ -83,6 +86,7 @@ const state = {
 
 const recentDirectoriesKey = "codeharbor.recentDirectories";
 const preferredModelKey = "codeharbor.preferredModel";
+const modelVisibilityPrefsKey = "codeharbor.modelVisibility";
 const profilePrefsKey = "codeharbor.profile";
 const searchPrefsKey = "codeharbor.search";
 const imGatewayPrefsKey = "codeharbor.imGateway";
@@ -180,7 +184,7 @@ const defaultNotificationPrefs = {
 const defaultAppearancePrefs = {
   theme: "dark",
   density: "comfortable",
-  terminalDefaultOpen: true,
+  terminalDefaultOpen: false,
   showEventLog: true,
 };
 const defaultTerminalPrefs = {
@@ -238,9 +242,12 @@ const skillTabs = [
 const $ = (id) => document.getElementById(id);
 
 async function api(path, options = {}) {
+  const headers = options.body instanceof FormData
+    ? { ...(options.headers || {}) }
+    : { "Content-Type": "application/json", ...(options.headers || {}) };
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers,
   });
   const text = await res.text();
   let body = null;
@@ -301,11 +308,30 @@ function applyProfilePreferences() {
   document.title = profile.workspaceLabel && profile.workspaceLabel !== "CodeHarbor Local"
     ? `${profile.workspaceLabel} · CodeHarbor`
     : "CodeHarbor";
+  const displayName = profileDisplayName();
+  const avatar = $("sidebarAvatar");
+  const accountName = $("sidebarAccountName");
+  const menuName = $("sidebarMenuProfileName");
+  const menuMeta = $("sidebarMenuProfileMeta");
+  if (avatar) avatar.textContent = profile.avatarInitials;
+  if (accountName) accountName.textContent = displayName;
+  if (menuName) menuName.textContent = displayName;
+  if (menuMeta) menuMeta.textContent = profile.roleLabel || "本地工作台";
+  updateSidebarAccountSummary();
 }
 
 function profileDisplayName() {
   const profile = currentProfilePreferences();
   return profile.displayName || profile.workspaceLabel || "CodeHarbor User";
+}
+
+function updateSidebarAccountSummary() {
+  const version = String(state.settings?.version || "0.1.0-dev").replace(/^v/i, "");
+  const backend = activeBackend();
+  const meta = $("sidebarAccountMeta");
+  if (meta) meta.textContent = `v${version} · ${backend?.name || "本地"}`;
+  const mobileVersionChip = $("mobileVersionChip");
+  if (mobileVersionChip) mobileVersionChip.textContent = `更新: v${version} → …`;
 }
 
 function profileGitEnvExample(profile = currentProfilePreferences()) {
@@ -1041,15 +1067,25 @@ function activeBackend() {
 
 function renderBackendPanel() {
   const backend = activeBackend();
-  $("activeBackendName").textContent = backend ? `${backend.name} · ${backend.baseUrl}` : "未配置后端";
+  const name = $("activeBackendName");
+  if (name) name.textContent = backend ? `${backend.name} · ${backend.baseUrl}` : "未配置后端";
+  updateSidebarAccountSummary();
   if (!backend) setBackendHealthBadge(false, "未配置");
 }
 
 function setBackendHealthBadge(ok, text) {
   const badge = $("backendHealthBadge");
-  badge.textContent = text;
-  badge.classList.toggle("ok", ok);
-  badge.classList.toggle("err", !ok);
+  if (badge) {
+    badge.textContent = text;
+    badge.classList.toggle("ok", ok);
+    badge.classList.toggle("err", !ok);
+  }
+  const dot = $("sidebarBackendDot");
+  if (dot) {
+    dot.classList.toggle("ok", ok);
+    dot.classList.toggle("err", !ok);
+    dot.title = text;
+  }
 }
 
 async function refreshActiveBackendHealth() {
@@ -1089,8 +1125,52 @@ function isComposingInput(event) {
   return Boolean(event.isComposing || event.keyCode === 229);
 }
 
+function sidebarSettingsMenuOpen() {
+  const menu = $("sidebarSettingsMenu");
+  return Boolean(menu && !menu.classList.contains("hidden"));
+}
+
+function setSidebarSettingsMenuOpen(open) {
+  const menu = $("sidebarSettingsMenu");
+  const button = $("sidebarAccountBtn");
+  if (!menu) return;
+  menu.classList.toggle("hidden", !open);
+  button?.setAttribute("aria-expanded", open ? "true" : "false");
+  button?.classList.toggle("open", open);
+}
+
+function toggleSidebarSettingsMenu() {
+  setSidebarSettingsMenuOpen(!sidebarSettingsMenuOpen());
+}
+
+function closeSidebarSettingsMenu() {
+  setSidebarSettingsMenuOpen(false);
+}
+
+function handleSidebarSettingsMenuDocumentClick(event) {
+  if (!sidebarSettingsMenuOpen()) return;
+  if (event.target.closest?.(".sidebar-footer")) return;
+  closeSidebarSettingsMenu();
+}
+
+function handleDirectoryShortcutClick(event) {
+  const trigger = event.target.closest?.("[data-open-directory-shortcut]");
+  if (!trigger) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const path = trigger.dataset.openDirectoryShortcut === "current"
+    ? (state.narrator?.cwd || state.project?.gitPath || "")
+    : "";
+  openDirectoryChooser(path, { trigger }).catch(showError);
+}
+
 function handleGlobalEscape(event) {
   if (event.key !== "Escape" || isComposingInput(event)) return;
+  if (sidebarSettingsMenuOpen()) {
+    closeSidebarSettingsMenu();
+    event.preventDefault();
+    return;
+  }
   if (elementVisible("folderModal")) {
     closeDirectoryModal();
     event.preventDefault();
@@ -1291,6 +1371,7 @@ async function loadSettings() {
     const settings = await api("/api/settings");
     if (seq !== state.settingsLoadSeq) return;
     state.settings = settings;
+    updateSidebarAccountSummary();
     renderModelOptions();
   } catch (err) {
     if (seq === state.settingsLoadSeq) throw err;
@@ -1618,6 +1699,25 @@ function defaultModelForProtocol(protocol) {
   if (protocol === "anthropic" || protocol === "claude-code") return "claude-sonnet-4-5";
   if (protocol === "codex") return "gpt-5.5";
   return "gpt-4.1-mini";
+}
+
+function providerConfigExpanded(key) {
+  return Boolean(state.providerConfigExpanded?.[key]);
+}
+
+function renderProviderConfigToggle(key, expanded, label = "配置") {
+  return `<button class="settings-action-btn subtle" type="button" data-toggle-provider-config="${escapeAttr(key)}" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "收起" : `展开${label}`}</button>`;
+}
+
+function toggleProviderConfig(key) {
+  state.providerConfigExpanded = { ...(state.providerConfigExpanded || {}), [key]: !providerConfigExpanded(key) };
+  refreshActiveSettingsPanel();
+}
+
+function expandProviderConfig(key) {
+  if (providerConfigExpanded(key)) return;
+  state.providerConfigExpanded = { ...(state.providerConfigExpanded || {}), [key]: true };
+  refreshActiveSettingsPanel();
 }
 
 function providerByName(name) {
@@ -2020,9 +2120,9 @@ function renderAgentModelOptions(currentModel) {
   const options = allModelOptions();
   const values = new Set(options.map((item) => item.value));
   const currentOption = currentModel && !values.has(currentModel)
-    ? `<option value="${escapeAttr(currentModel)}">${escapeHtml(currentModel)}（当前）</option>`
+    ? `<option value="${escapeAttr(currentModel)}">${escapeHtml(currentModel)}（当前 / 已隐藏）</option>`
     : "";
-  const grouped = modelProvidersForUI().map((provider) => {
+  const grouped = selectableModelProviders().map((provider) => {
     const models = providerModelList(provider);
     if (!models.length) return "";
     return `<optgroup label="${escapeAttr(providerLabel(provider))}">${models.map((model) => {
@@ -2058,7 +2158,7 @@ function bindAgentSettingsActions() {
     if ($("agentSettingsCWD") && state.project?.gitPath) $("agentSettingsCWD").value = state.project.gitPath;
   });
   $("openAgentProviderBtn")?.addEventListener("click", () => selectSettingsPanel("providers"));
-  document.querySelector("[data-agent-open-directory]")?.addEventListener("click", () => openDirectoryModal().catch(showError));
+  document.querySelector("[data-agent-open-directory]")?.addEventListener("click", (event) => openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError));
 }
 
 async function refreshCurrentAgent() {
@@ -2913,8 +3013,8 @@ function renderChapterBoundaryCard(title, value, description) {
 
 function bindChaptersSettingsActions() {
   $("refreshChaptersBtn")?.addEventListener("click", () => loadChapterContainerData({ notify: true }).catch(showError));
-  $("openChaptersDirectoryBtn")?.addEventListener("click", () => openDirectoryModal(state.project?.gitPath || "").catch(showError));
-  document.querySelector("[data-open-project-directory]")?.addEventListener("click", () => openDirectoryModal().catch(showError));
+  $("openChaptersDirectoryBtn")?.addEventListener("click", (event) => openDirectoryChooser(state.project?.gitPath || "", { trigger: event.currentTarget }).catch(showError));
+  document.querySelector("[data-open-project-directory]")?.addEventListener("click", (event) => openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError));
   document.querySelectorAll("[data-select-chapter]").forEach((node) => {
     node.addEventListener("click", () => selectChapterFromSettings(node.dataset.selectChapter).catch(showError));
   });
@@ -3719,6 +3819,7 @@ function renderModelSettingsContent() {
         <div class="settings-action-row">
           <button id="settingsRefreshModelsBtn" class="settings-action-btn primary" type="button">刷新模型</button>
           <button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">凭证 / 中转站</button>
+          <button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">显示已配置模型</button>
           <button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">清除首选</button>
         </div>
       </section>
@@ -3754,14 +3855,22 @@ function renderModelProviderSection(provider) {
 }
 
 function renderModelChoice(provider, model) {
-  const value = `${provider.name}:${model}`;
+  const value = modelOptionValue(provider, model);
   const active = value === currentModelValue();
   const preferred = value === getPreferredModel();
+  const hidden = isModelHidden(value);
+  const selectable = isModelSelectable(provider, model);
+  const disabled = !provider.configured;
+  const icon = hidden || disabled ? "⊘" : "◉";
+  const title = hidden ? "显示这个模型" : "隐藏这个模型";
   return `
-    <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}">
-      <span class="settings-model-name">${escapeHtml(model)}</span>
-      <span class="settings-model-provider">${escapeHtml(provider.name)}${preferred ? " · 首选" : ""}</span>
-    </button>
+    <div class="settings-model-row ${active ? "active" : ""} ${hidden || disabled ? "muted" : ""}">
+      <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}" ${selectable ? "" : "disabled"}>
+        <span class="settings-model-name">${escapeHtml(value)}</span>
+        <span class="settings-model-provider">${escapeHtml(model)}${preferred ? " · 首选" : ""}${disabled ? " · 未配置" : hidden ? " · 已隐藏" : ""}</span>
+      </button>
+      <button class="settings-model-icon-btn" type="button" data-toggle-model-visibility="${escapeAttr(value)}" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}" ${disabled ? "disabled" : ""}>${escapeHtml(icon)}</button>
+    </div>
   `;
 }
 
@@ -3791,6 +3900,7 @@ function renderProviderSettingsContent() {
       ${renderCodexImportCard()}
       ${renderCodexAccountCard(authFiles)}
       ${renderRelayProviderConfigCard()}
+      ${renderCustomProviderConfigCard()}
       ${clip ? renderCLIProxyStatusCard(clip) : `<div class="settings-empty-card">未找到 cliproxyapi provider。</div>`}
       <div class="settings-provider-cards">
         ${providers.map(renderProviderCard).join("")}
@@ -3837,73 +3947,133 @@ function renderRelayProviderConfigCard() {
   const spec = relayProtocolSpec(getRelayProtocol());
   const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), model: defaultModelForProtocol(spec.key), baseUrl: spec.key === "codex" ? "http://127.0.0.1:8317/v1" : "" };
   const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
+  const expanded = providerConfigExpanded("relay");
   return `
-    <section class="settings-provider-section relay-config-section">
+    <section class="settings-provider-section relay-config-section ${expanded ? "expanded" : "collapsed"}">
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">中转站配置</div>
-          <div class="settings-provider-meta">配置供应商的 API 凭据、模型列表和高级选项。当前协议：${escapeHtml(spec.help)}</div>
+          <div class="settings-provider-meta">当前协议：${escapeHtml(spec.help)} · 当前前缀：${escapeHtml(spec.providerName)}:${escapeHtml(modelValue)}</div>
         </div>
         <div class="settings-action-row compact-actions">
-          <button id="relayFetchModelsBtn" class="settings-action-btn subtle" type="button">获取模型列表</button>
-          <button id="relaySaveConfigBtn" class="settings-action-btn primary" type="button">保存更改</button>
+          ${renderProviderConfigToggle("relay", expanded, "中转配置")}
         </div>
       </div>
       ${state.providerConfigStatus ? `<div class="settings-inline-success">${escapeHtml(state.providerConfigStatus)}</div>` : ""}
-      <div class="relay-form-grid">
-        <label class="relay-field wide">
-          <span>供应商名称</span>
-          <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
-          <small>当前保存到 CodeHarbor provider：${escapeHtml(spec.providerName)}</small>
-        </label>
-        <label class="relay-field wide">
-          <span>供应商前缀</span>
-          <input class="settings-text-input" value="${escapeAttr((provider.name || spec.providerName) + ":")}" disabled>
-          <small>模型会以这个前缀出现在下拉框里，例如 ${escapeHtml(spec.providerName)}:${escapeHtml(modelValue)}</small>
-        </label>
-        <label class="relay-field wide">
-          <span>API Key</span>
-          <input id="relayApiKey" class="settings-text-input" type="password" autocomplete="off" placeholder="sk-... / sk-ant-...；留空沿用当前运行时或环境变量">
-        </label>
-        <label class="relay-field wide">
-          <span>Base URL</span>
-          <input id="relayBaseUrl" class="settings-text-input" value="${escapeAttr(provider.baseUrl || "")}" placeholder="例如 https://api.example.com/v1 或 http://127.0.0.1:8317/v1">
-        </label>
-      </div>
-      <div class="relay-field">
-        <span>API 协议</span>
-        <div class="relay-protocol-tabs">
-          ${relayProtocolSpecs().map((item) => `
-            <button class="relay-protocol-tab ${item.key === spec.key ? "active" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">
-              ${escapeHtml(item.label)}
-            </button>
-          `).join("")}
+      ${expanded ? `
+        <div class="settings-collapsible-body">
+          <div class="settings-provider-actions compact-actions">
+            <button id="relayFetchModelsBtn" class="settings-action-btn subtle" type="button">获取模型列表</button>
+            <button id="relaySaveConfigBtn" class="settings-action-btn primary" type="button">保存更改</button>
+          </div>
+          <div class="relay-form-grid">
+            <label class="relay-field wide">
+              <span>供应商名称</span>
+              <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
+              <small>当前保存到 CodeHarbor provider：${escapeHtml(spec.providerName)}</small>
+            </label>
+            <label class="relay-field wide">
+              <span>供应商前缀</span>
+              <input class="settings-text-input" value="${escapeAttr((provider.name || spec.providerName) + ":")}" disabled>
+              <small>模型会以这个前缀出现在下拉框里，例如 ${escapeHtml(spec.providerName)}:${escapeHtml(modelValue)}</small>
+            </label>
+            <label class="relay-field wide">
+              <span>API Key</span>
+              <input id="relayApiKey" class="settings-text-input" type="password" autocomplete="off" placeholder="sk-... / sk-ant-...；留空沿用当前运行时或环境变量">
+            </label>
+            <label class="relay-field wide">
+              <span>Base URL</span>
+              <input id="relayBaseUrl" class="settings-text-input" value="${escapeAttr(provider.baseUrl || "")}" placeholder="例如 https://api.example.com/v1 或 http://127.0.0.1:8317/v1">
+            </label>
+          </div>
+          <div class="relay-field">
+            <span>API 协议</span>
+            <div class="relay-protocol-tabs">
+              ${relayProtocolSpecs().map((item) => `
+                <button class="relay-protocol-tab ${item.key === spec.key ? "active" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">
+                  ${escapeHtml(item.label)}
+                </button>
+              `).join("")}
+            </div>
+            <small>${escapeHtml(spec.help)}</small>
+          </div>
+          <div class="relay-form-grid">
+            <label class="relay-field wide">
+              <span>HTTPS 代理</span>
+              <input class="settings-text-input" value="" placeholder="例如 http://127.0.0.1:7890、socks5://proxy:1080（当前仅作记录提示）" disabled>
+            </label>
+            <label class="relay-field wide">
+              <span>默认思考强度</span>
+              <select class="settings-text-input" disabled>
+                <option>自动</option>
+                <option>低</option>
+                <option>中</option>
+                <option>高</option>
+              </select>
+            </label>
+          </div>
+          <div class="relay-field">
+            <span>自定义模型</span>
+            <div class="relay-model-row">
+              <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="模型 ID">
+              <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="显示名称" disabled>
+            </div>
+            <small>保存后会作为该 provider 的默认模型；点击“获取模型列表”可从 Base URL 动态拉取可用模型。</small>
+          </div>
         </div>
-        <small>${escapeHtml(spec.help)}</small>
-      </div>
-      <div class="relay-form-grid">
-        <label class="relay-field wide">
-          <span>HTTPS 代理</span>
-          <input class="settings-text-input" value="" placeholder="例如 http://127.0.0.1:7890、socks5://proxy:1080（当前仅作记录提示）" disabled>
-        </label>
-        <label class="relay-field wide">
-          <span>默认思考强度</span>
-          <select class="settings-text-input" disabled>
-            <option>自动</option>
-            <option>低</option>
-            <option>中</option>
-            <option>高</option>
-          </select>
-        </label>
-      </div>
-      <div class="relay-field">
-        <span>自定义模型</span>
-        <div class="relay-model-row">
-          <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="模型 ID">
-          <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="显示名称" disabled>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderCustomProviderConfigCard() {
+  const expanded = providerConfigExpanded("custom-provider");
+  return `
+    <section class="settings-provider-section custom-provider-section ${expanded ? "expanded" : "collapsed"}">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">新增 / 更新自定义 Provider</div>
+          <div class="settings-provider-meta">默认收起；点开后可自行填写 Provider、协议、Base URL、API Key 和默认模型。Groq 示例：groq:openai/gpt-oss-20b。</div>
         </div>
-        <small>保存后会作为该 provider 的默认模型；点击“获取模型列表”可从 Base URL 动态拉取可用模型。</small>
+        <div class="settings-action-row compact-actions">
+          <button id="fillGroqProviderExampleBtn" class="settings-action-btn subtle" type="button">填入 Groq 示例</button>
+          ${renderProviderConfigToggle("custom-provider", expanded, "自定义配置")}
+        </div>
       </div>
+      ${expanded ? `
+        <form id="customProviderConfigForm" class="settings-provider-config-form custom-provider-config-form settings-collapsible-body">
+          <div class="settings-provider-form-grid">
+            <label>Provider 名称 / 前缀
+              <input id="customProviderName" class="settings-field" name="name" value="" placeholder="groq" autocomplete="off" />
+            </label>
+            <label>协议
+              <select id="customProviderType" class="settings-field" name="type">
+                ${renderProviderTypeOptions("openai-compatible")}
+              </select>
+            </label>
+            <label class="settings-form-span-2">Base URL
+              <input id="customProviderBaseUrl" class="settings-field" name="baseUrl" value="" placeholder="https://api.groq.com/openai/v1" autocomplete="off" />
+            </label>
+            <label class="settings-form-span-2">API Key
+              <input id="customProviderApiKey" class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="粘贴用户自己的 API Key（不会写入磁盘）" />
+            </label>
+            <label>默认模型
+              <input id="customProviderModel" class="settings-field" name="model" value="" placeholder="openai/gpt-oss-20b" autocomplete="off" />
+            </label>
+            <label>Max tokens
+              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="" placeholder="可留空" />
+            </label>
+            <label class="settings-checkbox-field settings-form-span-2">
+              <input name="apiKeyOptional" type="checkbox" />
+              <span>API Key 可选（本地代理或免鉴权端点）</span>
+            </label>
+          </div>
+          <div class="settings-provider-actions">
+            <button class="settings-action-btn primary" type="submit" data-provider-save>保存自定义 Provider</button>
+          </div>
+          <div class="settings-provider-note">例如 Groq：Provider 填 groq、协议选 OpenAI-compatible、Base URL 填 https://api.groq.com/openai/v1、默认模型填 openai/gpt-oss-20b。保存后模型前缀会是 groq:。</div>
+        </form>
+      ` : ""}
     </section>
   `;
 }
@@ -3972,47 +4142,54 @@ function renderProviderCard(provider) {
   const models = providerModelList(provider);
   const apiKeyOptional = Boolean(provider.apiKeyOptional || setting.apiKeyOptional || provider.name === "cliproxyapi");
   const envExample = providerEnvExample({ ...provider, type, baseUrl, defaultModel: model });
+  const expanded = providerConfigExpanded(`provider:${provider.name}`);
   return `
-    <section class="settings-provider-card">
+    <section class="settings-provider-card ${expanded ? "expanded" : "collapsed"}">
       <div class="settings-provider-card-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
           <div class="settings-provider-meta">${escapeHtml(type)} · ${escapeHtml(models.length + " 个模型")}</div>
         </div>
-        <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
+        <div class="settings-action-row compact-actions">
+          <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
+          ${renderProviderConfigToggle(`provider:${provider.name}`, expanded, "配置")}
+        </div>
       </div>
       <div class="settings-provider-meta path">${escapeHtml(baseUrl || "默认官方端点 / 无 Base URL")}</div>
+      ${provider.configured ? `<div class="settings-inline-success compact">已配置：该 provider 的可见模型会出现在模型选择器。</div>` : `<div class="settings-inline-alert compact">未配置：该 provider 不会出现在模型选择器；填入 API Key 后保存即可启用。</div>`}
       ${provider.error ? `<div class="settings-inline-alert compact">${escapeHtml(provider.error)}</div>` : ""}
-      <form class="settings-provider-config-form" data-provider-name="${escapeAttr(provider.name)}">
-        <div class="settings-provider-form-grid">
-          <label>协议
-            <select class="settings-field" name="type">
-              ${renderProviderTypeOptions(type)}
-            </select>
-          </label>
-          <label>默认模型
-            <input class="settings-field" name="model" value="${escapeAttr(model)}" placeholder="例如 gpt-4.1-mini" />
-          </label>
-          <label class="settings-form-span-2">Base URL
-            <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.name))}" />
-          </label>
-          <label class="settings-form-span-2">API Key
-            <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${provider.configured ? "留空保留当前运行时密钥" : "粘贴 API Key（不会写入磁盘）"}" />
-          </label>
-          <label>Max tokens
-            <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(maxTokens || "")}" placeholder="Anthropic 默认 4096" />
-          </label>
-          <label class="settings-checkbox-field">
-            <input name="apiKeyOptional" type="checkbox" ${apiKeyOptional ? "checked" : ""} />
-            <span>API Key 可选（本地代理或免鉴权端点）</span>
-          </label>
-        </div>
-        <div class="settings-provider-actions">
-          <button class="settings-action-btn primary" type="submit" data-provider-save>保存配置</button>
-          <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envExample)}">复制 env 示例</button>
-        </div>
-        <div class="settings-provider-note">保存后立即更新当前运行时和模型列表；API Key 只保存在内存，不写入 config.json。</div>
-      </form>
+      ${expanded ? `
+        <form class="settings-provider-config-form settings-collapsible-body" data-provider-name="${escapeAttr(provider.name)}">
+          <div class="settings-provider-form-grid">
+            <label>协议
+              <select class="settings-field" name="type">
+                ${renderProviderTypeOptions(type)}
+              </select>
+            </label>
+            <label>默认模型
+              <input class="settings-field" name="model" value="${escapeAttr(model)}" placeholder="例如 gpt-4.1-mini" />
+            </label>
+            <label class="settings-form-span-2">Base URL
+              <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.name))}" />
+            </label>
+            <label class="settings-form-span-2">API Key
+              <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${provider.configured ? "留空保留当前运行时密钥" : "粘贴 API Key（不会写入磁盘）"}" />
+            </label>
+            <label>Max tokens
+              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(maxTokens || "")}" placeholder="Anthropic 默认 4096" />
+            </label>
+            <label class="settings-checkbox-field">
+              <input name="apiKeyOptional" type="checkbox" ${apiKeyOptional ? "checked" : ""} />
+              <span>API Key 可选（本地代理或免鉴权端点）</span>
+            </label>
+          </div>
+          <div class="settings-provider-actions">
+            <button class="settings-action-btn primary" type="submit" data-provider-save>保存配置</button>
+            <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envExample)}">复制 env 示例</button>
+          </div>
+          <div class="settings-provider-note">保存后立即更新当前运行时和模型列表；API Key 只保存在内存，不写入 config.json。</div>
+        </form>
+      ` : ""}
     </section>
   `;
 }
@@ -4044,13 +4221,31 @@ function providerEnvExample(provider) {
   return (rowsByProvider[provider.name] || rowsByProvider[provider.type] || rowsByProvider["openai-compatible"]).join("\n");
 }
 
+function fillGroqProviderExample() {
+  if (!providerConfigExpanded("custom-provider")) {
+    expandProviderConfig("custom-provider");
+  }
+  const form = $("customProviderConfigForm");
+  if (!form) return;
+  form.elements.name.value = "groq";
+  form.elements.type.value = "openai-compatible";
+  form.elements.baseUrl.value = "https://api.groq.com/openai/v1";
+  form.elements.model.value = "openai/gpt-oss-20b";
+  form.elements.maxTokens.value = "";
+  form.elements.apiKeyOptional.checked = false;
+  form.elements.apiKey.value = "";
+  form.elements.apiKey.focus();
+}
+
 async function saveProviderConfig(event) {
   event.preventDefault();
   const form = event.currentTarget;
   if (form.dataset.submitting === "true") return;
-  const providerName = form.dataset.providerName || form.elements.name?.value || "provider";
+  const providerName = String(form.dataset.providerName || form.elements.name?.value || "").trim();
   const saveButton = form.querySelector("[data-provider-save]");
   const maxTokens = Number(form.elements.maxTokens?.value || 0);
+  if (!providerName) throw new Error("请填写 Provider 名称");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerName)) throw new Error("Provider 名称必须以英文字母或数字开头，且只能包含英文字母、数字、点、下划线和中横线");
   const payload = {
     name: providerName,
     type: form.elements.type?.value || "openai-compatible",
@@ -4082,6 +4277,10 @@ function bindModelSettingsActions() {
   $("settingsRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
   $("settingsOpenLoginBtn")?.addEventListener("click", () => openSettingsModal("providers"));
   $("settingsClearPreferredModelBtn")?.addEventListener("click", () => applyPreferredModel("").catch(showError));
+  $("settingsShowConfiguredModelsBtn")?.addEventListener("click", clearVisibleConfiguredModelHides);
+  $("settingsContentBody").querySelectorAll("[data-toggle-model-visibility]").forEach((node) => {
+    node.addEventListener("click", () => setModelHidden(node.dataset.toggleModelVisibility, !isModelHidden(node.dataset.toggleModelVisibility)));
+  });
   $("settingsContentBody").querySelectorAll("[data-apply-model]").forEach((node) => {
     node.addEventListener("click", () => applyPreferredModel(node.dataset.applyModel).catch(showError));
   });
@@ -4094,6 +4293,10 @@ function bindProviderSettingsActions() {
   $("providerRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
   $("relaySaveConfigBtn")?.addEventListener("click", () => saveRelayProviderConfig().catch(showError));
   $("relayFetchModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
+  $("fillGroqProviderExampleBtn")?.addEventListener("click", fillGroqProviderExample);
+  $("settingsContentBody").querySelectorAll("[data-toggle-provider-config]").forEach((node) => {
+    node.addEventListener("click", () => toggleProviderConfig(node.dataset.toggleProviderConfig));
+  });
   $("settingsContentBody").querySelectorAll("[data-relay-protocol]").forEach((node) => {
     node.addEventListener("click", () => selectRelayProtocol(node.dataset.relayProtocol));
   });
@@ -4109,7 +4312,7 @@ function bindProviderSettingsActions() {
 }
 
 function allModelOptions() {
-  return modelProvidersForUI().flatMap((provider) => providerModelList(provider).map((model) => ({ provider, model, value: `${provider.name}:${model}` })));
+  return selectableModelProviders().flatMap((provider) => providerModelList(provider).map((model) => ({ provider, model, value: modelOptionValue(provider, model) })));
 }
 
 function providerLabel(provider) {
@@ -4488,6 +4691,67 @@ function setPreferredModel(model) {
   } catch {}
 }
 
+function loadModelVisibilityPreferences() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(modelVisibilityPrefsKey) || "{}");
+    return {
+      hiddenModels: raw.hiddenModels && typeof raw.hiddenModels === "object" ? raw.hiddenModels : {},
+      showUnconfiguredProviders: Boolean(raw.showUnconfiguredProviders),
+    };
+  } catch {
+    return { hiddenModels: {}, showUnconfiguredProviders: false };
+  }
+}
+
+function saveModelVisibilityPreferences(prefs) {
+  try {
+    localStorage.setItem(modelVisibilityPrefsKey, JSON.stringify({
+      hiddenModels: prefs.hiddenModels || {},
+      showUnconfiguredProviders: Boolean(prefs.showUnconfiguredProviders),
+    }));
+  } catch {}
+}
+
+function modelVisibilityPreferences() {
+  return loadModelVisibilityPreferences();
+}
+
+function modelOptionValue(provider, model) {
+  return `${provider.name}:${model}`;
+}
+
+function isModelHidden(value) {
+  return Boolean(modelVisibilityPreferences().hiddenModels?.[value]);
+}
+
+function isModelSelectable(provider, model) {
+  const prefs = modelVisibilityPreferences();
+  if (!provider.configured && !prefs.showUnconfiguredProviders) return false;
+  return !prefs.hiddenModels?.[modelOptionValue(provider, model)];
+}
+
+function setModelHidden(value, hidden) {
+  const prefs = modelVisibilityPreferences();
+  const hiddenModels = { ...(prefs.hiddenModels || {}) };
+  if (hidden) hiddenModels[value] = true;
+  else delete hiddenModels[value];
+  saveModelVisibilityPreferences({ ...prefs, hiddenModels });
+  renderModelOptions();
+  refreshActiveSettingsPanel();
+}
+
+function clearVisibleConfiguredModelHides() {
+  const prefs = modelVisibilityPreferences();
+  const hiddenModels = { ...(prefs.hiddenModels || {}) };
+  modelProvidersForUI().forEach((provider) => {
+    if (!provider.configured) return;
+    providerModelList(provider).forEach((model) => delete hiddenModels[modelOptionValue(provider, model)]);
+  });
+  saveModelVisibilityPreferences({ ...prefs, hiddenModels });
+  renderModelOptions();
+  refreshActiveSettingsPanel();
+}
+
 function selectedModelValue() {
   return $("modelSelect")?.value || state.narrator?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
 }
@@ -4498,7 +4762,8 @@ function currentModelValue() {
 
 function renderModelOptions() {
   const select = $("modelSelect");
-  const providers = modelProvidersForUI();
+  if (!select) return;
+  const providers = selectableModelProviders();
   const optionValues = [];
   const groups = providers.map((provider) => {
     const models = providerModelList(provider);
@@ -4513,13 +4778,14 @@ function renderModelOptions() {
   }).join("");
   const currentModel = currentModelValue();
   const currentOption = currentModel && !optionValues.includes(currentModel)
-    ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel)}（未配置）</option>`
+    ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel)}（当前 / 已隐藏）</option>`
     : "";
   select.innerHTML = currentOption + (groups || `<option value="" data-configured="false">尚未加载模型</option>`);
   if (currentModel) {
     select.value = currentModel;
   }
   updateModelConfiguredState();
+  updateWorkspaceMetaPills();
 }
 
 function settingProviderByName(name) {
@@ -4553,6 +4819,15 @@ function modelProvidersForUI() {
     configured: provider.configured,
     apiKeyOptional: provider.apiKeyOptional,
   }));
+}
+
+function selectableModelProviders() {
+  return modelProvidersForUI()
+    .map((provider) => ({
+      ...provider,
+      models: providerModelList(provider).filter((model) => isModelSelectable(provider, model)),
+    }))
+    .filter((provider) => provider.models.length);
 }
 
 function normalizeModelProvider(provider) {
@@ -4617,6 +4892,81 @@ function cliProxyProvider() {
     || null;
 }
 
+function renderEmptyWorkspaceCard({ title = "选择资料夹，让 AI 开始工作", text = "CodeHarbor 会在该资料夹内读取、编辑文件，并按权限执行命令。", action = "选择资料夹", hint = "也可以点击左侧 AI 代理右侧的 ＋。", icon = "☻" } = {}) {
+  return `
+    <div class="empty-workspace-card">
+      <div class="empty-workspace-icon">${escapeHtml(icon)}</div>
+      <div class="empty-workspace-title">${escapeHtml(title)}</div>
+      <div class="empty-workspace-text">${escapeHtml(text)}</div>
+      <button class="empty-workspace-action" type="button" data-open-directory-shortcut="new">${escapeHtml(action)}</button>
+      <div class="empty-workspace-hint">${escapeHtml(hint)}</div>
+    </div>
+  `;
+}
+
+function showEmptyWorkspaceState(options = {}) {
+  const el = $("messages");
+  if (!el) return;
+  el.classList.add("empty");
+  el.innerHTML = renderEmptyWorkspaceCard(options);
+}
+
+function canonicalLocalPath(path) {
+  const value = String(path || "").trim();
+  if (!value) return "";
+  if (value.startsWith("/")) return value;
+  if (/^Users\//.test(value)) return `/${value}`;
+  return value;
+}
+
+function shortPath(path) {
+  const value = canonicalLocalPath(path);
+  if (!value) return "未设置目录";
+  const home = "/Users/aaa";
+  if (value === home) return "~";
+  if (value.startsWith(home + "/")) return `~/${value.slice(home.length + 1)}`;
+  return value;
+}
+
+function projectPathLabel(path) {
+  const value = canonicalLocalPath(path);
+  return value || "未设置路径";
+}
+
+function permissionLabel(value) {
+  const labels = {
+    readOnly: "只读",
+    acceptEdits: "可编辑",
+    bypassPermissions: "自动执行",
+    dontAsk: "少询问",
+    default: "默认",
+  };
+  return labels[value] || value || "默认";
+}
+
+function currentWorkspaceModel() {
+  return state.narrator?.model || selectedModelValue() || currentModelValue() || "未选择模型";
+}
+
+function updateWorkspaceMetaPills() {
+  const el = $("workspaceMetaPills");
+  if (!el) return;
+  if (!state.project && !state.narrator) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  const cwd = canonicalLocalPath(state.narrator?.cwd || state.project?.gitPath || "");
+  const permission = state.narrator?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits";
+  const model = currentWorkspaceModel();
+  el.innerHTML = `
+    <span class="workspace-pill" title="${escapeAttr(cwd)}">目录：${escapeHtml(shortPath(cwd))}</span>
+    <span class="workspace-pill">权限：${escapeHtml(permissionLabel(permission))}</span>
+    <span class="workspace-pill" title="${escapeAttr(model)}">模型：${escapeHtml(model)}</span>
+  `;
+  el.classList.remove("hidden");
+}
+
 async function loadProjects() {
   const seq = ++state.projectsLoadSeq;
   try {
@@ -4638,43 +4988,63 @@ function renderProjects() {
   });
   renderRecentSidebarDirectories();
   if (!state.projects.length) {
-    el.innerHTML = `<button class="project-card" type="button" id="emptyProjectHint"><div class="project-name">选择一个目录开始</div><div class="project-path">点击上方 +</div></button>`;
-    $("emptyProjectHint").addEventListener("click", () => openDirectoryModal().catch(showError));
+    el.innerHTML = `
+      <button class="project-card project-card-empty" type="button" id="emptyProjectHint" data-open-directory-shortcut="new">
+        <div class="project-name">选择资料夹开始</div>
+        <div class="project-path">点击 AI 代理右侧 ＋ 或中间按钮</div>
+      </button>
+    `;
     return;
   }
   if (!projects.length) {
     el.innerHTML = `<div class="empty-list">没有匹配“${escapeHtml(state.projectQuery.trim())}”的项目。</div>`;
     return;
   }
-  el.innerHTML = projects.map((project) => `
-
-    <button class="project-card ${state.project?.id === project.id ? "active" : ""}" type="button" data-project-id="${escapeAttr(project.id)}">
-      <div class="project-name">${escapeHtml(project.name)}</div>
-      <div class="project-path">${escapeHtml(project.gitPath || project.id)}</div>
-    </button>
-  `).join("");
+  el.innerHTML = projects.map((project, index) => {
+    const active = state.project?.id === project.id;
+    const status = active ? "当前" : (index === 0 ? "最近" : "");
+    const path = canonicalLocalPath(project.gitPath || project.id);
+    const pathLabel = projectPathLabel(path);
+    return `
+      <button class="project-card ${active ? "active" : ""}" type="button" data-project-id="${escapeAttr(project.id)}">
+        <span class="project-active-dot" aria-hidden="true"></span>
+        <span class="project-card-main">
+          <span class="project-card-top">
+            <span class="project-name">${escapeHtml(project.name)}</span>
+            ${status ? `<span class="project-badge ${active ? "active" : ""}">${escapeHtml(status)}</span>` : ""}
+          </span>
+          <span class="project-path" title="${escapeAttr(path)}">${escapeHtml(pathLabel)}</span>
+        </span>
+      </button>
+    `;
+  }).join("");
   el.querySelectorAll("[data-project-id]").forEach((node) => {
     node.addEventListener("click", () => selectProject(node.dataset.projectId).catch(showError));
   });
 }
 
-async function createProjectFromDirectory(path) {
+async function createProjectFromDirectory(path, options = {}) {
   saveCurrentChatDraft();
   hideSlashCommandPalette();
   if (state.projectCreating) return;
-  const normalizedPath = String(path || "").trim();
+  const normalizedPath = canonicalLocalPath(path);
   if (!normalizedPath) throw new Error("请先选择一个目录");
-  const button = $("chooseDirectoryBtn");
+  const modalOpen = elementVisible("folderModal");
+  const button = options.button || (modalOpen ? $("chooseDirectoryBtn") : null);
   const projects = Array.isArray(state.projects) ? state.projects : [];
-  const existing = projects.find((project) => project.gitPath === normalizedPath);
+  const existing = projects.find((project) => normalizePath(project.gitPath) === normalizePath(normalizedPath));
   const seq = ++state.projectCreateSeq;
   state.projectCreating = true;
-  setButtonBusy(button, true, existing ? "打开中" : "创建中");
+  const busyText = existing ? "打开中" : "创建中";
+  setButtonBusy(button, true, busyText);
+  setDirectoryStatus(`${existing ? "正在打开" : "正在创建"}：${normalizedPath}`, "busy");
+  showToast(`${existing ? "正在打开" : "正在创建"}资料夹：${shortPath(normalizedPath)}`, "info", { force: true });
   try {
     rememberDirectory(normalizedPath);
     if (existing) {
-      closeDirectoryModal();
+      if (modalOpen) closeDirectoryModal();
       await selectProject(existing.id);
+      showToast(`已打开：${shortPath(normalizedPath)}`, "success", { force: true });
       return;
     }
     const name = basename(normalizedPath) || "Project";
@@ -4684,7 +5054,7 @@ async function createProjectFromDirectory(path) {
       body: JSON.stringify({ name, gitPath: normalizedPath, ...(model ? { model } : {}) }),
     });
     if (seq !== state.projectCreateSeq) return;
-    closeDirectoryModal();
+    if (modalOpen) closeDirectoryModal();
     await loadProjects();
     if (seq !== state.projectCreateSeq) return;
     if (created.project?.id && !state.projects.some((project) => project.id === created.project.id)) {
@@ -4697,12 +5067,17 @@ async function createProjectFromDirectory(path) {
     state.chapterNarrators = created.narrator ? [created.narrator] : [];
     renderProjects();
     await enterNarrator();
+    showToast(`已选择资料夹：${shortPath(created.project?.gitPath || normalizedPath)}`, "success", { force: true });
     appendTerminal(`Created project: ${created.project.name}\nPath: ${created.project.gitPath}\n`);
   } catch (err) {
-    if (seq === state.projectCreateSeq) throw err;
+    if (seq === state.projectCreateSeq) {
+      const message = err.message || String(err);
+      setDirectoryStatus(`打开失败：${message}`, "error");
+      throw err;
+    }
   } finally {
     state.projectCreating = false;
-    setButtonBusy(button, false, "创建中");
+    setButtonBusy(button, false, busyText);
   }
 }
 
@@ -4724,11 +5099,21 @@ async function selectProject(id) {
   state.projectChapters = [];
   state.chapterNarrators = [];
   renderProjects();
-  if (!state.project) return;
+  if (!state.project) {
+    updateWorkspaceMetaPills();
+    showEmptyWorkspaceState();
+    return;
+  }
   $("currentTitle").textContent = state.project.name;
-  $("currentMeta").textContent = "Loading project...";
-  $("messages").classList.add("empty");
-  $("messages").textContent = "正在加载章节和代理…";
+  $("currentMeta").textContent = "正在加载项目…";
+  updateWorkspaceMetaPills();
+  showEmptyWorkspaceState({
+    title: "正在加载项目",
+    text: "CodeHarbor 正在准备章节和 AI 代理。",
+    action: "选择其他资料夹",
+    hint: state.project.gitPath || "",
+    icon: "…",
+  });
   try {
     const chapters = await api(`/api/projects/${id}/chapters`);
     if (seq !== state.projectSelectSeq || state.project?.id !== id) return;
@@ -4736,9 +5121,9 @@ async function selectProject(id) {
     state.chapter = state.projectChapters[0] || null;
     if (!state.chapter) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "No chapter";
-      $("messages").classList.add("empty");
-      $("messages").textContent = "此项目还没有可用章节。";
+      $("currentMeta").textContent = "此项目还没有可用章节";
+      updateWorkspaceMetaPills();
+      showEmptyWorkspaceState({ title: "此项目还没有可用章节", text: "你可以重新选择一个资料夹，或稍后在章节管理中创建工作线。", action: "选择其他资料夹", icon: "◇" });
       return;
     }
     const chapterId = state.chapter.id;
@@ -4749,8 +5134,8 @@ async function selectProject(id) {
     if (!state.narrator) {
       $("currentTitle").textContent = state.project.name;
       $("currentMeta").textContent = "未选择 CodeHarbor 代理";
-      $("messages").classList.add("empty");
-      $("messages").textContent = "此章节还没有可用代理。";
+      updateWorkspaceMetaPills();
+      showEmptyWorkspaceState({ title: "此章节还没有可用代理", text: "你可以重新选择一个资料夹，或稍后在代理管理中创建代理。", action: "选择其他资料夹", icon: "♧" });
       return;
     }
     await enterNarrator();
@@ -4764,8 +5149,9 @@ async function enterNarrator() {
   if (!state.narrator) return;
   const narratorId = state.narrator.id;
   $("currentTitle").textContent = state.project?.name || state.narrator.title;
-  $("currentMeta").textContent = `${state.narrator.cwd || state.project?.gitPath || "No directory"} · ${state.narrator.permissionMode}`;
+  $("currentMeta").textContent = state.narrator.title || "AI 代理已就绪";
   $("permissionMode").value = state.narrator.permissionMode || "acceptEdits";
+  updateWorkspaceMetaPills();
   renderModelOptions();
   restoreCurrentChatDraft();
   syncMessageComposerBusy();
@@ -4801,11 +5187,51 @@ async function loadMessages(narratorId = state.narrator?.id) {
         <button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="复制消息原文">复制</button>
       </div>
       <div class="message-content">${renderMarkdown(friendlyMessageText(message.contentText || ""))}</div>
+      ${renderMessageAttachments(message)}
     </div>
   `).join("");
   bindMessageActionButtons(el);
   bindCopyCodeButtons(el);
   el.scrollTop = el.scrollHeight;
+}
+
+function renderMessageAttachments(message) {
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  if (!attachments.length) return "";
+  return `
+    <div class="message-attachments">
+      ${attachments.map((attachment) => renderSentAttachmentCard(message, attachment)).join("")}
+    </div>
+  `;
+}
+
+function renderSentAttachmentCard(message, attachment) {
+  const kind = attachment.kind || attachmentKind({ name: attachment.filename || "", type: attachment.mimeType || "" });
+  const url = attachmentURL(message, attachment);
+  const subtitle = [attachmentKindLabel(kind), formatBytes(attachment.sizeBytes || 0)].filter(Boolean).join(" · ");
+  const thumb = kind === "image"
+    ? `<img class="attachment-thumb" src="${escapeAttr(url)}" alt="" loading="lazy" />`
+    : `<span class="attachment-thumb">${escapeHtml(attachmentIcon(kind))}</span>`;
+  return `
+    <a class="attachment-card" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">
+      ${thumb}
+      <div class="attachment-meta">
+        <div class="attachment-name" title="${escapeAttr(attachment.filename || "附件")}">${escapeHtml(attachment.filename || "附件")}</div>
+        <div class="attachment-subtitle">${escapeHtml(subtitle)}</div>
+      </div>
+    </a>
+  `;
+}
+
+function attachmentURL(message, attachment) {
+  return `/api/narrators/${encodeURIComponent(message.narratorId || state.narrator?.id || "")}/messages/${encodeURIComponent(message.id || attachment.messageId || "")}/attachments/${encodeURIComponent(attachment.id || "")}`;
+}
+
+function messageAttachmentsMarkdown(message) {
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  if (!attachments.length) return "";
+  const lines = attachments.map((attachment) => `- ${attachment.filename || "附件"}（${attachmentKindLabel(attachment.kind)}, ${formatBytes(attachment.sizeBytes || 0)}）`);
+  return `\n\n附件：\n${lines.join("\n")}`;
 }
 
 function updateConversationCopyButton() {
@@ -4832,7 +5258,7 @@ function conversationMarkdown() {
   const body = messages.map((message, index) => {
     const role = String(message.role || "message").toUpperCase();
     const text = String(message.contentText || "").trim() || "（空消息）";
-    return `## ${index + 1}. ${role}\n\n${text}`;
+    return `## ${index + 1}. ${role}\n\n${text}${messageAttachmentsMarkdown(message)}`;
   });
   return [...meta, ...body].join("\n");
 }
@@ -4877,6 +5303,10 @@ function syncMessageComposerBusy() {
   const busy = isMessageSendingFor();
   const input = $("messageText");
   if (input) input.disabled = busy;
+  const attachButton = $("attachFileBtn");
+  if (attachButton) attachButton.disabled = busy;
+  const attachInput = $("attachFileInput");
+  if (attachInput) attachInput.disabled = busy;
   setButtonBusy($("sendMessageBtn"), busy, "发送中");
 }
 
@@ -4892,7 +5322,7 @@ function setMessageSendingFor(narratorId, sending) {
 async function sendMessage(event) {
   event.preventDefault();
   if (!state.narrator) {
-    await openDirectoryModal();
+    await openDirectoryChooser();
     return;
   }
   const narratorId = state.narrator.id;
@@ -4900,7 +5330,8 @@ async function sendMessage(event) {
   const draftKey = currentChatDraftKey();
   const input = $("messageText");
   const text = input.value.trim();
-  if (!text) return;
+  const attachments = [...(state.pendingAttachments || [])];
+  if (!text && !attachments.length) return;
   if (!isCurrentModelConfigured()) {
     showModelSetupNotice();
     return;
@@ -4909,12 +5340,23 @@ async function sendMessage(event) {
   input.value = "";
   autoResizeMessageInput();
   try {
-    await api(`/api/narrators/${narratorId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-    rememberPromptHistory(text);
+    if (attachments.length) {
+      const form = new FormData();
+      form.append("text", text);
+      attachments.forEach((item) => form.append("files", item.file, item.file?.name || "attachment"));
+      await api(`/api/narrators/${narratorId}/messages`, {
+        method: "POST",
+        body: form,
+      });
+    } else {
+      await api(`/api/narrators/${narratorId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+    }
+    if (text) rememberPromptHistory(text);
     clearChatDraftForKey(draftKey);
+    if (attachments.length) clearPendingAttachments();
     await loadMessages(narratorId);
     scheduleMessageRefresh(1200, narratorId);
   } catch (err) {
@@ -5162,13 +5604,57 @@ function toggleTerminal(collapsed) {
   const shouldCollapse = collapsed ?? !$("appShell").classList.contains("terminal-collapsed");
   $("appShell").classList.toggle("terminal-collapsed", shouldCollapse);
   $("expandTerminalBtn").classList.toggle("hidden", !shouldCollapse);
+  $("toggleTerminalBtn")?.classList.toggle("active", !shouldCollapse);
   if (shouldCollapse) document.body.classList.remove("mobile-terminal-open");
+}
+
+async function openDirectoryChooser(path = "", { trigger = null, preferNative = true } = {}) {
+  const defaultPath = String(path || "").trim();
+  if (preferNative) {
+    try {
+      const picked = await selectNativeDirectory(defaultPath, { trigger });
+      if (picked?.canceled) return;
+      if (picked?.path) {
+        await createProjectFromDirectory(picked.path, { button: trigger });
+        return;
+      }
+    } catch (err) {
+      notifyTerminal(`[warn] 原生资料夹选择器不可用：${err.message || err}\n`);
+      showToast("原生选择器不可用，已切换到内置目录浏览器。", "warn", { force: true });
+    }
+  }
+  await openDirectoryModal(defaultPath);
+}
+
+async function selectNativeDirectory(path = "", { trigger = null } = {}) {
+  if (state.nativeDirectorySelecting) return { canceled: true };
+  state.nativeDirectorySelecting = true;
+  const label = trigger?.textContent || "";
+  setButtonBusy(trigger, true, "…");
+  showToast("正在打开 macOS 资料夹选择器…", "info", { force: true });
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const data = await api(`/api/fs/native-directory${query}`, { method: "POST", body: JSON.stringify({}) });
+    if (data.canceled) {
+      showToast("已取消选择资料夹。", "info", { force: true });
+      return { canceled: true };
+    }
+    if (data.path) {
+      showToast(`已选择：${shortPath(data.path)}`, "success", { force: true });
+      return data;
+    }
+    return { canceled: true };
+  } finally {
+    state.nativeDirectorySelecting = false;
+    setButtonBusy(trigger, false, label || "…");
+  }
 }
 
 async function openDirectoryModal(path = "") {
   $("folderModal").classList.remove("hidden");
   hideNewFolderInline();
   renderRecentModalDirectories();
+  setDirectoryStatus("正在载入目录…", "busy");
   await browseDirectories(path);
 }
 
@@ -5176,16 +5662,35 @@ function closeDirectoryModal() {
   state.directoryBrowseSeq++;
   setDirectoryBrowserBusy(false);
   hideNewFolderInline();
+  setDirectoryStatus("选择当前目录后会创建或打开项目。", "");
   $("folderModal").classList.add("hidden");
 }
 
 function setDirectoryBrowserBusy(busy) {
-  ["folderModal", "directoryList"].forEach((id) => {
+  ["folderModal", "directoryList", "manualDirectoryPath", "goDirectoryBtn"].forEach((id) => {
     const el = $(id);
     if (!el) return;
     if (busy) el.setAttribute("aria-busy", "true");
     else el.removeAttribute("aria-busy");
   });
+}
+
+function setDirectoryStatus(message, variant = "") {
+  const el = $("directoryStatus");
+  if (!el) return;
+  el.textContent = message || "选择当前目录后会创建或打开项目。";
+  el.classList.toggle("busy", variant === "busy");
+  el.classList.toggle("error", variant === "error");
+  el.classList.toggle("success", variant === "success");
+}
+
+function updateDirectoryPathDisplay(path) {
+  const value = String(path || "").trim();
+  const name = basename(value) || value || "选择目录";
+  if ($("directoryPath")) $("directoryPath").textContent = value || "Loading...";
+  if ($("manualDirectoryPath")) $("manualDirectoryPath").value = value;
+  if ($("folderLocationName")) $("folderLocationName").textContent = name;
+  if ($("folderLocationPill")) $("folderLocationPill").title = value || "当前路径";
 }
 
 async function browseDirectories(path = "") {
@@ -5199,12 +5704,15 @@ async function browseDirectories(path = "") {
     state.directoryPath = data.path;
     state.directoryParent = data.parent || "";
     state.directoryShortcuts = data.shortcuts || [];
-    $("directoryPath").textContent = data.path;
-    $("manualDirectoryPath").value = data.path;
+    updateDirectoryPathDisplay(data.path);
+    setDirectoryStatus("选择当前目录后会创建或打开项目。", "");
     renderDirectoryShortcuts(state.directoryShortcuts);
     renderDirectoryList(data);
   } catch (err) {
-    if (seq === state.directoryBrowseSeq && elementVisible("folderModal")) throw err;
+    if (seq === state.directoryBrowseSeq && elementVisible("folderModal")) {
+      setDirectoryStatus(`载入失败：${err.message || err}`, "error");
+      throw err;
+    }
   } finally {
     if (seq === state.directoryBrowseSeq) setDirectoryBrowserBusy(false);
   }
@@ -5254,9 +5762,9 @@ function getRecentDirectories() {
 }
 
 function rememberDirectory(path) {
-  const normalized = String(path || "").trim();
+  const normalized = canonicalLocalPath(path);
   if (!normalized) return;
-  const next = [normalized, ...getRecentDirectories().filter((item) => item !== normalized)].slice(0, 8);
+  const next = [normalized, ...getRecentDirectories().filter((item) => normalizePath(item) !== normalizePath(normalized))].slice(0, 8);
   localStorage.setItem(recentDirectoriesKey, JSON.stringify(next));
   renderRecentSidebarDirectories();
   renderRecentModalDirectories();
@@ -5266,12 +5774,15 @@ function renderRecentSidebarDirectories() {
   const el = $("recentSidebarDirectories");
   if (!el) return;
   const recent = getRecentDirectories();
-  el.innerHTML = recent.length ? recent.map((path) => `
-    <button class="recent-item" type="button" data-path="${escapeAttr(path)}">
-      <span>${escapeHtml(basename(path) || path)}</span>
-      <small>${escapeHtml(path)}</small>
-    </button>
-  `).join("") : `<div class="empty-list">暂无最近目录</div>`;
+  el.innerHTML = recent.length ? recent.map((rawPath) => {
+    const path = canonicalLocalPath(rawPath);
+    return `
+      <button class="recent-item" type="button" data-path="${escapeAttr(path)}">
+        <span>${escapeHtml(basename(path) || path)}</span>
+        <small>${escapeHtml(projectPathLabel(path))}</small>
+      </button>
+    `;
+  }).join("") : `<div class="empty-list">暂无最近目录</div>`;
   el.querySelectorAll("[data-path]").forEach((node) => {
     node.addEventListener("click", () => createProjectFromDirectory(node.dataset.path).catch(showError));
   });
@@ -5281,12 +5792,15 @@ function renderRecentModalDirectories() {
   const el = $("recentModalDirectories");
   if (!el) return;
   const recent = getRecentDirectories();
-  el.innerHTML = recent.length ? recent.map((path) => `
-    <button class="folder-shortcut" type="button" data-path="${escapeAttr(path)}">
-      <span class="folder-shortcut-icon">☆</span>
-      <span>${escapeHtml(basename(path) || path)}</span>
-    </button>
-  `).join("") : `<div class="folder-empty-note">暂无收藏</div>`;
+  el.innerHTML = recent.length ? recent.map((rawPath) => {
+    const path = canonicalLocalPath(rawPath);
+    return `
+      <button class="folder-shortcut" type="button" data-path="${escapeAttr(path)}" title="${escapeAttr(path)}">
+        <span class="folder-shortcut-icon">☆</span>
+        <span>${escapeHtml(basename(path) || path)}</span>
+      </button>
+    `;
+  }).join("") : `<div class="folder-empty-note">暂无收藏</div>`;
   el.querySelectorAll("[data-path]").forEach((node) => {
     node.addEventListener("click", () => browseDirectories(node.dataset.path).catch(showError));
   });
@@ -5431,6 +5945,163 @@ function autoResizeMessageInput() {
   updatePromptHistoryHint();
 }
 
+function openAttachmentPicker() {
+  const input = $("attachFileInput");
+  if (!input || input.disabled) return;
+  input.value = "";
+  input.click();
+}
+
+function attachmentId() {
+  return `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function attachmentKind(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (name.endsWith(".docx") || type.includes("wordprocessingml.document")) return "docx";
+  if (type.startsWith("text/") || /\.(txt|md|markdown|json|jsonl|csv|tsv|log|xml|ya?ml|toml|ini|env|go|js|jsx|ts|tsx|css|html?|py|rb|rs|java|c|h|cpp|hpp|cs|php|sh|zsh|bash|sql|swift|kt|kts|dart|vue|svelte)$/i.test(name)) return "text";
+  return "binary";
+}
+
+function attachmentIcon(kind) {
+  if (kind === "image") return "🖼";
+  if (kind === "pdf") return "PDF";
+  if (kind === "docx") return "DOC";
+  if (kind === "text") return "TXT";
+  return "FILE";
+}
+
+function addPendingAttachmentFiles(files) {
+  const pickedFiles = Array.from(files || []).filter(Boolean);
+  if (!pickedFiles.length) return;
+  const maxFileBytes = 10 * 1024 * 1024;
+  const maxTotalBytes = 25 * 1024 * 1024;
+  const currentTotal = state.pendingAttachments.reduce((sum, item) => sum + (item.file?.size || 0), 0);
+  let nextTotal = currentTotal;
+  const skipped = [];
+  const added = [];
+  for (const file of pickedFiles) {
+    const name = file.name || "未命名文件";
+    if (file.size > maxFileBytes) {
+      skipped.push(`${name}（${formatBytes(file.size)}）`);
+      continue;
+    }
+    if (nextTotal + file.size > maxTotalBytes) {
+      skipped.push(`${name}（总大小超过 ${formatBytes(maxTotalBytes)}）`);
+      continue;
+    }
+    nextTotal += file.size;
+    const kind = attachmentKind(file);
+    added.push({
+      id: attachmentId(),
+      file,
+      kind,
+      previewUrl: kind === "image" ? URL.createObjectURL(file) : "",
+    });
+  }
+  if (added.length) {
+    state.pendingAttachments = [...state.pendingAttachments, ...added];
+    renderPendingAttachments();
+    showToast(`已加入 ${added.length} 个待发送附件。`, "success", { force: true });
+  }
+  if (skipped.length) {
+    const preview = skipped.slice(0, 3).join("、");
+    showToast(`已跳过 ${skipped.length} 个文件：${preview}${skipped.length > 3 ? " 等" : ""}。`, "warn", { force: true });
+  }
+}
+
+async function importAttachmentFiles(event) {
+  const picker = event?.target;
+  addPendingAttachmentFiles(picker?.files || []);
+  if (picker) picker.value = "";
+}
+
+function removePendingAttachment(id) {
+  const removed = state.pendingAttachments.find((item) => item.id === id);
+  if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  state.pendingAttachments = state.pendingAttachments.filter((item) => item.id !== id);
+  renderPendingAttachments();
+}
+
+function clearPendingAttachments() {
+  state.pendingAttachments.forEach((item) => {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+  });
+  state.pendingAttachments = [];
+  renderPendingAttachments();
+}
+
+function renderPendingAttachments() {
+  const wrap = $("pendingAttachments");
+  if (!wrap) return;
+  const attachments = state.pendingAttachments || [];
+  wrap.classList.toggle("hidden", attachments.length === 0);
+  wrap.innerHTML = attachments.map((item) => pendingAttachmentCardHTML(item)).join("");
+  wrap.querySelectorAll("[data-remove-attachment]").forEach((button) => {
+    button.addEventListener("click", () => removePendingAttachment(button.dataset.removeAttachment));
+  });
+}
+
+function pendingAttachmentCardHTML(item) {
+  const file = item.file || {};
+  const name = file.name || "未命名文件";
+  if (item.kind === "image" && item.previewUrl) {
+    return `
+      <div class="pending-image-card" title="${escapeAttr(name)}">
+        <img class="pending-image-thumb" src="${escapeAttr(item.previewUrl)}" alt="${escapeAttr(name)}" />
+        <button class="pending-attachment-remove" type="button" title="移除附件" aria-label="移除附件" data-remove-attachment="${escapeAttr(item.id)}">×</button>
+      </div>
+    `;
+  }
+  const subtitle = formatBytes(file.size || 0);
+  return `
+    <div class="pending-file-chip" title="${escapeAttr(name)}">
+      <span class="pending-file-icon">▯</span>
+      <span class="pending-file-name">${escapeHtml(name)}</span>
+      <span class="pending-file-size">${escapeHtml(subtitle)}</span>
+      <button class="pending-attachment-remove" type="button" title="移除附件" aria-label="移除附件" data-remove-attachment="${escapeAttr(item.id)}">×</button>
+    </div>
+  `;
+}
+
+function attachmentKindLabel(kind) {
+  if (kind === "image") return "图片";
+  if (kind === "pdf") return "PDF";
+  if (kind === "docx") return "Word";
+  if (kind === "text") return "文本";
+  return "文件";
+}
+
+function setComposerDragging(active) {
+  $("composerInputShell")?.classList.toggle("dragging", Boolean(active));
+}
+
+function eventHasFiles(event) {
+  return Array.from(event?.dataTransfer?.types || []).includes("Files");
+}
+
+function handleAttachmentDragOver(event) {
+  if (!eventHasFiles(event)) return;
+  event.preventDefault();
+  setComposerDragging(true);
+}
+
+function handleAttachmentDragLeave(event) {
+  const shell = $("composerInputShell");
+  if (!shell || shell.contains(event.relatedTarget)) return;
+  setComposerDragging(false);
+}
+
+function handleAttachmentDrop(event) {
+  if (!eventHasFiles(event)) return;
+  event.preventDefault();
+  setComposerDragging(false);
+  addPendingAttachmentFiles(event.dataTransfer?.files || []);
+}
+
 function setMessageInputValue(value, { saveDraft = true } = {}) {
   const input = $("messageText");
   input.value = value;
@@ -5452,10 +6123,10 @@ function updatePromptHistoryHint() {
   hint.textContent = active
     ? `历史 ${state.promptHistoryIndex + 1}/${count} · ↑ 更早，↓ 更新，Enter 发送，Esc 返回草稿。`
     : commandCount
-      ? `输入 / 可使用 ${commandCount} 个本地技能命令；草稿会自动保存，空输入时 ↑/↓ 召回历史。`
+      ? `输入 / 可使用 ${commandCount} 个本地技能命令；空输入时 ↑/↓ 召回历史。`
       : count
-        ? `草稿会自动保存；空输入时 ↑ 查看上一条提示，↓ 返回草稿。本地已保存 ${count}/30 条。`
-        : "草稿会自动保存；输入框为空时 ↑/↓ 可召回最近提示。";
+        ? `空输入时 ↑ 查看上一条提示，↓ 返回草稿。本地已保存 ${count}/30 条。`
+        : "输入框为空时 ↑/↓ 可召回最近提示。";
 }
 
 function enabledSlashCommands() {
@@ -5630,6 +6301,7 @@ function openMobileSidebar() {
 }
 
 function closeMobileSidebar() {
+  closeSidebarSettingsMenu();
   document.body.classList.remove("mobile-sidebar-open");
 }
 
@@ -5641,13 +6313,35 @@ function toggleMobileTerminal() {
   }
 }
 
+function openProjectSearch({ focus = true } = {}) {
+  $("projectSearchWrap")?.classList.remove("hidden");
+  $("projectSearchToggleBtn")?.classList.add("active");
+  if (focus) setTimeout(() => $("projectSearch")?.focus(), 30);
+}
+
+function closeProjectSearch({ clear = false } = {}) {
+  if (clear) {
+    state.projectQuery = "";
+    if ($("projectSearch")) $("projectSearch").value = "";
+    renderProjects();
+  }
+  $("projectSearchWrap")?.classList.add("hidden");
+  $("projectSearchToggleBtn")?.classList.remove("active");
+}
+
+function toggleProjectSearch() {
+  const wrap = $("projectSearchWrap");
+  if (!wrap || wrap.classList.contains("hidden")) openProjectSearch();
+  else closeProjectSearch({ clear: !state.projectQuery.trim() });
+}
+
 function focusMobileSearch() {
   openMobileSidebar();
-  setTimeout(() => $("projectSearch").focus(), 160);
+  setTimeout(() => openProjectSearch(), 160);
 }
 
 function normalizePath(path) {
-  return String(path || "").replace(/\/+$/, "") || "/";
+  return canonicalLocalPath(path).replace(/\/+$/, "") || "/";
 }
 
 function homeShortcutPath() {
@@ -5710,7 +6404,7 @@ async function createFolderInCurrentDirectory() {
   const path = base === "/" ? `/${trimmed}` : `${base}/${trimmed}`;
   const previousLabel = button?.textContent || "创建";
   if (button) {
-    button.textContent = "创建中";
+    button.textContent = button.classList.contains("composer-send-btn") ? "…" : "发送中";
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
   }
@@ -5797,7 +6491,7 @@ function showToast(message, variant = "info", options = {}) {
 
 function showError(err) {
   const message = err.message || String(err);
-  showToast(message, "error");
+  showToast(message, "error", { force: true });
   notifyTerminal(`[error] ${message}\n`);
 }
 
@@ -5808,9 +6502,19 @@ function escapeAttr(value) { return escapeHtml(value).replace(/'/g, "&#39;"); }
 
 document.addEventListener("keydown", handleGlobalEscape);
 document.addEventListener("keydown", handleSettingsSearchShortcut);
+document.addEventListener("click", handleDirectoryShortcutClick);
+document.addEventListener("click", handleSidebarSettingsMenuDocumentClick);
 $("refreshBtn").addEventListener("click", () => init().catch(showError));
-$("settingsBtn").addEventListener("click", () => openSettingsModal("profile"));
-$("logoutBtn")?.addEventListener("click", () => showToast("本地 MVP 暂未启用完整账户系统，无需退出登录。", "info"));
+$("sidebarAccountBtn")?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleSidebarSettingsMenu();
+});
+$("settingsBtn").addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("profile"); });
+$("providerSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("providers"); });
+$("modelSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("models"); });
+$("runtimeSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("servers-system"); });
+$("aboutSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("about"); });
+$("logoutBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); showToast("本地 MVP 暂未启用完整账户系统，无需退出登录。", "info"); });
 $("settingsSearchInput")?.addEventListener("input", (event) => updateSettingsSearchQuery(event.target.value));
 $("settingsSearchInput")?.addEventListener("keydown", (event) => {
   if (isComposingInput(event)) return;
@@ -5823,11 +6527,11 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
 $("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
-$("settingsWizardBtn").addEventListener("click", () => {
+$("settingsWizardBtn").addEventListener("click", (event) => {
   closeSettingsModal();
-  openDirectoryModal().catch(showError);
+  openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError);
 });
-$("manageBackendsBtn").addEventListener("click", openBackendsModal);
+$("manageBackendsBtn").addEventListener("click", () => { closeSidebarSettingsMenu(); openBackendsModal(); });
 $("closeBackendsModalBtn").addEventListener("click", closeBackendsModal);
 $("backendsModal").addEventListener("click", (event) => { if (event.target.id === "backendsModal") closeBackendsModal(); });
 $("backendForm").addEventListener("submit", (event) => saveBackend(event).catch(showError));
@@ -5836,16 +6540,43 @@ $("mobileMenuBtn").addEventListener("click", openMobileSidebar);
 $("mobileSidebarBackdrop").addEventListener("click", closeMobileSidebar);
 $("mobileTerminalBtn").addEventListener("click", toggleMobileTerminal);
 $("mobileSearchBtn").addEventListener("click", focusMobileSearch);
-$("newProjectBtn").addEventListener("click", () => openDirectoryModal().catch(showError));
-$("projectSearch").addEventListener("input", (event) => { state.projectQuery = event.target.value; renderProjects(); });
+$("projectSearchToggleBtn")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  toggleProjectSearch();
+});
+$("projectSearchClearBtn")?.addEventListener("click", () => closeProjectSearch({ clear: true }));
+$("projectSearch").addEventListener("input", (event) => {
+  state.projectQuery = event.target.value;
+  renderProjects();
+});
+$("projectSearch").addEventListener("keydown", (event) => {
+  if (isComposingInput(event)) return;
+  if (event.key === "Escape") {
+    closeProjectSearch({ clear: true });
+    event.preventDefault();
+  }
+});
 $("copyConversationBtn")?.addEventListener("click", () => copyCurrentConversationMarkdown().catch(showError));
-$("openFolderBtn").addEventListener("click", () => openDirectoryModal(state.narrator?.cwd || state.project?.gitPath || "").catch(showError));
 $("closeFolderModalBtn").addEventListener("click", closeDirectoryModal);
 $("cancelDirectoryBtn").addEventListener("click", closeDirectoryModal);
 $("folderModal").addEventListener("click", (event) => { if (event.target.id === "folderModal") closeDirectoryModal(); });
 $("folderHomeBtn").addEventListener("click", () => browseHomeDirectory().catch(showError));
 $("folderParentBtn").addEventListener("click", () => browseParentDirectory().catch(showError));
 $("folderRefreshBtn").addEventListener("click", () => refreshDirectory().catch(showError));
+$("nativeDirectoryBtn")?.addEventListener("click", (event) => {
+  selectNativeDirectory(state.directoryPath, { trigger: event.currentTarget }).then(async (picked) => {
+    if (!picked?.path) return;
+    updateDirectoryPathDisplay(picked.path);
+    setDirectoryStatus(`已从 Finder 选择：${picked.path}，正在打开…`, "busy");
+    await createProjectFromDirectory(picked.path, { button: $("chooseDirectoryBtn") });
+  }).catch(showError);
+});
+$("folderLocationPill")?.addEventListener("click", () => {
+  const input = $("manualDirectoryPath");
+  input?.focus();
+  input?.select();
+});
 $("newFolderBtn").addEventListener("click", showNewFolderInline);
 $("confirmNewFolderBtn").addEventListener("click", () => createFolderInCurrentDirectory().catch(showError));
 $("cancelNewFolderBtn").addEventListener("click", hideNewFolderInline);
@@ -5867,6 +6598,12 @@ $("manualDirectoryPath").addEventListener("keydown", (event) => {
 });
 $("chooseDirectoryBtn").addEventListener("click", () => createProjectFromDirectory(state.directoryPath).catch(showError));
 $("messageForm").addEventListener("submit", (event) => sendMessage(event).catch(showError));
+$("attachFileBtn")?.addEventListener("click", openAttachmentPicker);
+$("attachFileInput")?.addEventListener("change", (event) => importAttachmentFiles(event).catch(showError));
+$("composerInputShell")?.addEventListener("dragenter", handleAttachmentDragOver);
+$("composerInputShell")?.addEventListener("dragover", handleAttachmentDragOver);
+$("composerInputShell")?.addEventListener("dragleave", handleAttachmentDragLeave);
+$("composerInputShell")?.addEventListener("drop", handleAttachmentDrop);
 $("messageText").addEventListener("input", handleMessageInput);
 $("messageText").addEventListener("keydown", handleMessageKeydown);
 $("messageText").addEventListener("focus", updateSlashCommandPalette);
@@ -5881,7 +6618,7 @@ $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", resizeTerminal);
 window.addEventListener("beforeunload", saveCurrentChatDraft);
 $("saveNarratorBtn").addEventListener("click", () => saveNarratorSettings().catch(showError));
-$("refreshModelsBtn").addEventListener("click", () => refreshModelCatalog().catch(showError));
+$("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
 $("openProviderLoginBtn").addEventListener("click", () => openSettingsModal("providers"));
 $("modelSelect").addEventListener("change", () => {
   updateModelConfiguredState();

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,71 @@ func TestOpenAICompatibleListModelsAllowsOptionalAPIKey(t *testing.T) {
 	}
 	if len(models) != 2 || models[0] != "gpt-a" || models[1] != "gpt-b" {
 		t.Fatalf("unexpected models: %+v", models)
+	}
+}
+
+func TestOpenAICompatibleSendsImageBlocks(t *testing.T) {
+	var requestBody struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				ImageURL struct {
+					URL string `json:"url"`
+				} `json:"image_url"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]string{"content": "ok"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatible(config.ProviderConfig{
+		Name:           "cliproxyapi",
+		Type:           "openai-compatible",
+		BaseURL:        server.URL,
+		Model:          "gpt-5.5",
+		APIKeyOptional: true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{
+		Role: "user",
+		Blocks: []ContentBlock{
+			{Type: "text", Text: "看这张图"},
+			{Type: "image", MIMEType: "image/png", Data: []byte{1, 2, 3}, Filename: "a.png"},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error: %s", event.Text)
+		}
+	}
+	if len(requestBody.Messages) != 1 || len(requestBody.Messages[0].Content) != 2 {
+		t.Fatalf("unexpected messages payload: %+v", requestBody.Messages)
+	}
+	if requestBody.Messages[0].Content[0].Type != "text" || requestBody.Messages[0].Content[0].Text != "看这张图" {
+		t.Fatalf("expected text block, got %+v", requestBody.Messages[0].Content[0])
+	}
+	imageURL := requestBody.Messages[0].Content[1].ImageURL.URL
+	if requestBody.Messages[0].Content[1].Type != "image_url" || !strings.HasPrefix(imageURL, "data:image/png;base64,") {
+		t.Fatalf("expected image_url data URL, got %+v", requestBody.Messages[0].Content[1])
 	}
 }
 

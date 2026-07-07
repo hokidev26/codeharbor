@@ -16,7 +16,11 @@ func (s *Server) mountUI(r interface {
 }) {
 	r.Get("/", s.index)
 	static, _ := fs.Sub(staticFiles, "static")
-	r.Handle("/ui/*", http.StripPrefix("/ui/", http.FileServer(http.FS(static))))
+	fileServer := http.StripPrefix("/ui/", http.FileServer(http.FS(static)))
+	r.Handle("/ui/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setNoStore(w)
+		fileServer.ServeHTTP(w, r)
+	}))
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +33,13 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setNoStore(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
+}
+
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 }

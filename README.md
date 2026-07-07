@@ -20,11 +20,28 @@ The project is currently an experimental MVP. It is intended for local developme
   - Bash
   - Glob
   - Grep
-- WebSocket agent event stream: `/ws/narrator`
-- Interactive PTY terminal WebSocket: `/ws/terminal`
+- WebSocket agent event stream: `/ws/narrator` with Settings → AI Agents current narrator controls for model, permission mode, and working directory
+- Settings → Chapters & Containers project workline view backed by existing project chapter and narrator APIs
+- Interactive PTY terminal WebSocket: `/ws/terminal` with Settings → Terminal management controls and browser-local retention/focus preferences
 - Filesystem browse/preview/mkdir APIs
-- Agent Server backend registry with health checks for compatible OpenHands Agent Server endpoints
-- Development-time dependency license endpoint: `/api/licenses`
+- Agent Server backend registry with sidebar and Settings → Agent Admin management UI for compatible OpenHands Agent Server endpoints
+- Settings modal search/filter with keyboard focus shortcut for quickly locating growing product configuration panels
+- Chat message copy actions for exporting individual messages and the current conversation as Markdown
+- Browser-local chat draft autosave/restore per narrator, including migration through local preference backups
+- Browser-local prompt history for the chat composer, with empty-input ↑/↓ recall and migration through local preference backups
+- Chat composer slash command palette backed by enabled local Skills command templates
+- Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
+- Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules
+- Browser-local Settings → IM Gateway integration policy preferences for webhook/bot presets, confirmation, signatures, redaction, and event routing
+- Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export
+- Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices
+- Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and agent event log display
+- Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and agent limits
+- Settings → Users read-only auth status panel backed by `/api/auth/status`
+- Local storage summary endpoint and Settings → Storage panel for config, database, home, and project directory footprint
+- Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, backends, and background tasks
+- Settings → About dependency license panel backed by the development-time `/api/licenses` endpoint
+- Settings → About browser-local preferences backup/import for migrating profile, skills, chat drafts, prompt history, search, IM, notification, appearance, terminal, recent directory, model, and relay protocol settings
 
 ## Requirements
 
@@ -99,7 +116,7 @@ Base URL: http://127.0.0.1:8317/v1
 Model:    gpt-5.5
 ```
 
-Start CLIProxyAPI, then use **Settings → Providers → Codex** inside CodeHarbor to add credentials. CodeHarbor can start CLIProxyAPI's browser OAuth flow, device-code login flow, or import a pasted Codex JSON/token without sending users to a separate dashboard project. After login/import, CodeHarbor refreshes CLIProxyAPI auth files and calls `/v1/models`, expanding every model available to the logged-in account under the `cliproxyapi:*` selector group. You can pick a preferred model before creating a project, and CodeHarbor will use it for the new narrator. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`. CodeHarbor uses `CLIPROXYAPI_MANAGEMENT_KEY` for local management API calls; local previews default to `codeharbor-local`.
+Start CLIProxyAPI, then use **Settings → Providers → Codex 凭证 + 中转站** inside CodeHarbor. Codex now uses credential import only: paste a Codex auth JSON, refresh token list, or token/account rows and import them directly into CLIProxyAPI; CodeHarbor refreshes CLIProxyAPI auth files and `/v1/models` afterwards. The same page also includes an embedded relay/provider form for API Key, Base URL, protocol selection, and default model. Saving the form updates CodeHarbor's runtime provider registry immediately and persists non-secret provider settings to `config.json`; API keys are intentionally not written to disk. You can pick a preferred model before creating a project, and CodeHarbor will use it for the new narrator. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`. CodeHarbor uses `CLIPROXYAPI_MANAGEMENT_KEY` for local management API calls; local previews default to `codeharbor-local`.
 
 Agent Server backend seed variables:
 
@@ -126,9 +143,12 @@ GET  /api/auth/status
 GET  /api/settings
 GET  /api/models
 GET  /api/licenses
+GET  /api/runtime/summary
+GET  /api/storage/summary
+GET  /api/usage/summary
 
-POST /api/providers/cliproxyapi/codex/login
-GET  /api/providers/cliproxyapi/login-jobs/{id}
+PUT  /api/providers/{name}/config
+
 GET  /api/providers/cliproxyapi/auth-files
 POST /api/providers/cliproxyapi/auth-files/import
 
@@ -188,6 +208,7 @@ CodeHarbor is a local development MVP.
 - Tools can read and write local files within their configured working directories.
 - Bash execution is intentionally restricted by permission mode, but it should still be treated as powerful local code execution.
 - Backend API keys are not returned by the public API; responses only include `apiKeyConfigured`.
+- Runtime and storage summary APIs intentionally expose local paths and process diagnostics, so keep the service bound to trusted local users.
 
 See `SECURITY.md` for reporting and operational guidance.
 

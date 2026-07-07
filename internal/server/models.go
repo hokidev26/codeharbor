@@ -23,6 +23,7 @@ type modelProviderResponse struct {
 	Type           string   `json:"type"`
 	BaseURL        string   `json:"baseUrl,omitempty"`
 	DefaultModel   string   `json:"defaultModel"`
+	MaxTokens      int64    `json:"maxTokens,omitempty"`
 	Models         []string `json:"models"`
 	Configured     bool     `json:"configured"`
 	APIKeyOptional bool     `json:"apiKeyOptional,omitempty"`
@@ -31,7 +32,7 @@ type modelProviderResponse struct {
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
-	providers := s.cfg.Providers.Summaries()
+	providers := s.configSnapshot().Providers.Summaries()
 	out := modelsResponse{Providers: make([]modelProviderResponse, 0, len(providers))}
 	for _, provider := range providers {
 		out.Providers = append(out.Providers, s.modelProviderResponse(r.Context(), provider))
@@ -45,6 +46,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		Type:           provider.Type,
 		BaseURL:        provider.BaseURL,
 		DefaultModel:   provider.Model,
+		MaxTokens:      provider.MaxTokens,
 		Models:         fallbackModels(provider.Model),
 		Configured:     provider.Configured,
 		APIKeyOptional: provider.APIKeyOptional,

@@ -80,6 +80,20 @@ type Message struct {
 	CommandText  string          `json:"commandText,omitempty"`
 	CreatedBy    string          `json:"createdBy,omitempty"`
 	CreatedAt    string          `json:"createdAt"`
+	Attachments  []Attachment    `json:"attachments,omitempty"`
+}
+
+type Attachment struct {
+	ID            string `json:"id"`
+	MessageID     string `json:"messageId"`
+	NarratorID    string `json:"narratorId"`
+	Filename      string `json:"filename"`
+	MIMEType      string `json:"mimeType"`
+	Kind          string `json:"kind"`
+	SizeBytes     int64  `json:"sizeBytes"`
+	Data          []byte `json:"-"`
+	ExtractedText string `json:"extractedText,omitempty"`
+	CreatedAt     string `json:"createdAt"`
 }
 
 type ToolCall struct {
@@ -168,7 +182,7 @@ func (s *Store) CreateProject(ctx context.Context, name, description, gitPath st
 	now := Now()
 	project := Project{ID: NewID(), Name: name, Description: description, Status: "active", FlowMode: "workspace", GitPath: gitPath, CreatedAt: now, UpdatedAt: now}
 	chapter := Chapter{ID: NewID(), ProjectID: project.ID, Title: "main", Status: "active", Role: "root", WorktreePath: gitPath, IsRoot: true, CreatedAt: now, UpdatedAt: now}
-	narrator := Narrator{ID: NewID(), ChapterID: chapter.ID, Type: "primary", Title: "Main agent", Model: defaultModel, PermissionMode: permissionMode, Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
+	narrator := Narrator{ID: NewID(), ChapterID: chapter.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -275,6 +289,10 @@ func (s *Store) ListNarratorsByChapter(ctx context.Context, chapterID string) ([
 }
 
 func (s *Store) AddMessage(ctx context.Context, msg Message) (Message, error) {
+	return s.AddMessageWithAttachments(ctx, msg, msg.Attachments)
+}
+
+func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, attachments []Attachment) (Message, error) {
 	if msg.ID == "" {
 		msg.ID = NewID()
 	}
@@ -285,15 +303,62 @@ func (s *Store) AddMessage(ctx context.Context, msg Message) (Message, error) {
 		content, _ := json.Marshal([]map[string]string{{"type": "text", "text": msg.ContentText}})
 		msg.ContentJSON = content
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO narrator_messages (id, narrator_id, parent_tool_use_id, role, content_json, content_text, command_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, msg.ID, msg.NarratorID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CreatedBy, msg.CreatedAt)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, err
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE narrators SET message_count = message_count + 1, last_message_at = ?, updated_at = ? WHERE id = ?`, msg.CreatedAt, msg.CreatedAt, msg.NarratorID)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO narrator_messages (id, narrator_id, parent_tool_use_id, role, content_json, content_text, command_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, msg.ID, msg.NarratorID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CreatedBy, msg.CreatedAt); err != nil {
+		return Message{}, err
+	}
+	storedAttachments := make([]Attachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		if attachment.ID == "" {
+			attachment.ID = NewID()
+		}
+		attachment.MessageID = msg.ID
+		attachment.NarratorID = msg.NarratorID
+		if attachment.CreatedAt == "" {
+			attachment.CreatedAt = msg.CreatedAt
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO narrator_message_attachments (id, message_id, narrator_id, filename, mime_type, kind, size_bytes, data_blob, extracted_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.MessageID, attachment.NarratorID, attachment.Filename, attachment.MIMEType, attachment.Kind, attachment.SizeBytes, attachment.Data, attachment.ExtractedText, attachment.CreatedAt); err != nil {
+			return Message{}, err
+		}
+		storedAttachments = append(storedAttachments, attachment)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE narrators SET message_count = message_count + 1, last_message_at = ?, updated_at = ? WHERE id = ?`, msg.CreatedAt, msg.CreatedAt, msg.NarratorID); err != nil {
+		return Message{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Message{}, err
+	}
+	msg.Attachments = attachmentMetadata(storedAttachments)
 	return msg, nil
 }
 
 func (s *Store) ListMessages(ctx context.Context, narratorID string) ([]Message, error) {
+	messages, err := s.listMessages(ctx, narratorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.populateMessageAttachments(ctx, messages, false); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (s *Store) ListMessagesWithAttachmentData(ctx context.Context, narratorID string) ([]Message, error) {
+	messages, err := s.listMessages(ctx, narratorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.populateMessageAttachments(ctx, messages, true); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (s *Store) listMessages(ctx context.Context, narratorID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, narrator_id, role, COALESCE(content_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(created_by,''), created_at FROM narrator_messages WHERE narrator_id = ? ORDER BY created_at ASC`, narratorID)
 	if err != nil {
 		return nil, err
@@ -312,6 +377,63 @@ func (s *Store) ListMessages(ctx context.Context, narratorID string) ([]Message,
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+func (s *Store) populateMessageAttachments(ctx context.Context, messages []Message, includeData bool) error {
+	for i := range messages {
+		attachments, err := s.ListMessageAttachments(ctx, messages[i].ID, includeData)
+		if err != nil {
+			return err
+		}
+		messages[i].Attachments = attachments
+	}
+	return nil
+}
+
+func (s *Store) ListMessageAttachments(ctx context.Context, messageID string, includeData bool) ([]Attachment, error) {
+	selectData := `X''`
+	selectText := `''`
+	if includeData {
+		selectData = `data_blob`
+		selectText = `COALESCE(extracted_text,'')`
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, message_id, narrator_id, filename, COALESCE(mime_type,''), kind, size_bytes, `+selectData+`, `+selectText+`, created_at FROM narrator_message_attachments WHERE message_id = ? ORDER BY created_at ASC`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	attachments := make([]Attachment, 0)
+	for rows.Next() {
+		var attachment Attachment
+		var data []byte
+		if err := rows.Scan(&attachment.ID, &attachment.MessageID, &attachment.NarratorID, &attachment.Filename, &attachment.MIMEType, &attachment.Kind, &attachment.SizeBytes, &data, &attachment.ExtractedText, &attachment.CreatedAt); err != nil {
+			return nil, err
+		}
+		if includeData {
+			attachment.Data = data
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, rows.Err()
+}
+
+func (s *Store) GetAttachment(ctx context.Context, narratorID, messageID, attachmentID string) (Attachment, error) {
+	var attachment Attachment
+	err := s.db.QueryRowContext(ctx, `SELECT id, message_id, narrator_id, filename, COALESCE(mime_type,''), kind, size_bytes, data_blob, COALESCE(extracted_text,''), created_at FROM narrator_message_attachments WHERE narrator_id = ? AND message_id = ? AND id = ?`, narratorID, messageID, attachmentID).Scan(&attachment.ID, &attachment.MessageID, &attachment.NarratorID, &attachment.Filename, &attachment.MIMEType, &attachment.Kind, &attachment.SizeBytes, &attachment.Data, &attachment.ExtractedText, &attachment.CreatedAt)
+	return attachment, err
+}
+
+func attachmentMetadata(attachments []Attachment) []Attachment {
+	if len(attachments) == 0 {
+		return nil
+	}
+	out := make([]Attachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		attachment.Data = nil
+		attachment.ExtractedText = ""
+		out = append(out, attachment)
+	}
+	return out
 }
 
 func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error) {
