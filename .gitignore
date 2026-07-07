@@ -21,4 +21,5 @@ config.local.json
 # Logs and temporary files
 *.log
 tmp/
+.codeharbor-run-*.json
 .DS_Store

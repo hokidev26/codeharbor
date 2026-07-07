@@ -239,6 +239,7 @@ GET   /api/narrators/{id}
 PATCH /api/narrators/{id}/cwd
 PATCH /api/narrators/{id}/model
 PATCH /api/narrators/{id}/permission-mode
+POST  /api/narrators/{id}/interrupt
 GET   /api/narrators/{id}/messages
 POST  /api/narrators/{id}/messages
 GET   /api/narrators/{id}/tools
@@ -352,7 +353,7 @@ openai-compatible:gpt-4.1-mini
 cliproxyapi:gpt-5.5
 ```
 
-如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前官方 SDK provider 先使用非流式调用打通 MVP；流式输出、tool calling、usage/cost 统计保留为后续增强。
+如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前官方 SDK provider 先使用非流式调用打通 MVP；Anthropic Messages API 已支持非流式 tool calling 自动循环与 tool result 回灌。流式输出、OpenAI 官方 Responses API tool calling、OpenAI-compatible tool calling、完整 usage/cost 价格表保留为后续增强。
 
 环境变量：
 
@@ -650,9 +651,13 @@ THIRD_PARTY_NOTICES.md
 已有测试：
 
 ```txt
+internal/agent/loop_test.go
 internal/config/defaults_test.go
 internal/db/db_test.go
+internal/providers/anthropic_provider_test.go
+internal/providers/openai_compatible_test.go
 internal/server/backends_test.go
+internal/server/interrupt_test.go
 internal/tools/tools_test.go
 ```
 
@@ -699,10 +704,10 @@ node --check internal/server/static/app.js
 - [x] `PATCH /api/narrators/{id}/cwd`
 - [x] `PATCH /api/narrators/{id}/model`
 - [x] `PATCH /api/narrators/{id}/permission-mode`
-- [ ] `POST /api/narrators/{id}/interrupt`
+- [x] `POST /api/narrators/{id}/interrupt`
 - [x] 工具调用 WebSocket 事件
-- [ ] provider request/response 记录到 `api_requests`
-- [ ] narrator status 更细化：`idle/running/error/interrupted`
+- [x] provider request/response 记录到 `api_requests`
+- [x] narrator status 更细化：`idle/running/error/interrupted`
 
 ---
 
@@ -733,12 +738,12 @@ node --check internal/server/static/app.js
 - [ ] OpenAI-compatible streaming
 - [ ] OpenAI 官方 Responses API streaming
 - [ ] Anthropic 官方 Messages API streaming
-- [ ] tool call parsing
-- [ ] tool result 回灌模型
+- [x] tool call parsing（Anthropic 非流式）
+- [x] tool result 回灌模型（Anthropic 非流式）
 - [x] Anthropic 官方 SDK provider（非流式 MVP）
 - [x] OpenAI 官方 Responses API provider（非流式 MVP）
 - [x] provider 前缀路由与基础 model list
-- [ ] usage/cost 统计
+- [ ] usage/cost 统计（usage 已写入 `api_requests`，cost 价格表待补）
 - [ ] retry/backoff
 - [ ] first token timeout
 

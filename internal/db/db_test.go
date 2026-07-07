@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -45,6 +46,64 @@ func TestListProjectsReturnsEmptySlice(t *testing.T) {
 	}
 	if len(projects) != 0 {
 		t.Fatalf("expected no projects, got %d", len(projects))
+	}
+}
+
+func TestAddAPIRequestPersistsUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.AddMessage(ctx, Message{NarratorID: narrator.ID, Role: "user", ContentText: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"id": "raw"})
+	request, err := store.AddAPIRequest(ctx, APIRequest{NarratorID: narrator.ID, MessageID: message.ID, Provider: "openai", Model: "gpt-test", InputTokens: 10, OutputTokens: 4, CachedInputTokens: 2, ReasoningTokens: 1, DurationMS: 123, ErrorMessage: "", RawDumpJSON: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ID == "" || request.Kind != "model" || request.CreatedAt == "" {
+		t.Fatalf("unexpected request metadata: %+v", request)
+	}
+	var count, inputTokens, outputTokens int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM api_requests WHERE narrator_id = ? AND message_id = ?`, narrator.ID, message.ID).Scan(&count, &inputTokens, &outputTokens); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || inputTokens != 10 || outputTokens != 4 {
+		t.Fatalf("unexpected stored api request stats: count=%d input=%d output=%d", count, inputTokens, outputTokens)
+	}
+}
+
+func TestAddMessageRoundTripsToolContentJSON(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`[{"type":"tool_result","toolUseId":"tool-1","toolName":"Read","output":"ok","isError":true}]`)
+	message, err := store.AddMessage(ctx, Message{NarratorID: narrator.ID, Role: "user", ContentText: "tool result", ContentJSON: raw, ParentToolID: "tool-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.ListMessages(ctx, narrator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != message.ID || string(messages[0].ContentJSON) != string(raw) || messages[0].ParentToolID != "tool-1" {
+		t.Fatalf("unexpected round-trip message: %+v", messages)
 	}
 }
 

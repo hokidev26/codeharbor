@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -22,12 +23,31 @@ type ContentBlock struct {
 	Data     []byte `json:"-"`
 	Filename string `json:"filename,omitempty"`
 	Kind     string `json:"kind,omitempty"`
+
+	ToolUseID string          `json:"toolUseId,omitempty"`
+	ToolName  string          `json:"toolName,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	Output    string          `json:"output,omitempty"`
+	IsError   bool            `json:"isError,omitempty"`
 }
 
 type ToolSpec struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Schema      any    `json:"schema,omitempty"`
+}
+
+type ToolCall struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+type Usage struct {
+	InputTokens       int64 `json:"inputTokens,omitempty"`
+	OutputTokens      int64 `json:"outputTokens,omitempty"`
+	CachedInputTokens int64 `json:"cachedInputTokens,omitempty"`
+	ReasoningTokens   int64 `json:"reasoningTokens,omitempty"`
 }
 
 type GenerateRequest struct {
@@ -38,9 +58,12 @@ type GenerateRequest struct {
 }
 
 type Event struct {
-	Type string
-	Text string
-	Done bool
+	Type       string
+	Text       string
+	ToolCall   *ToolCall
+	Usage      *Usage
+	StopReason string
+	Done       bool
 }
 
 type Provider interface {

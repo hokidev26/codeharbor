@@ -99,6 +99,7 @@ func (s *Server) Routes() http.Handler {
 		r.Patch("/{id}/cwd", s.updateNarratorCWD)
 		r.Patch("/{id}/model", s.updateNarratorModel)
 		r.Patch("/{id}/permission-mode", s.updateNarratorPermissionMode)
+		r.Post("/{id}/interrupt", s.interruptNarrator)
 		r.Get("/{id}/messages", s.listMessages)
 		r.Post("/{id}/messages", s.postMessage)
 		r.Get("/{id}/messages/{messageId}/attachments/{attachmentId}", s.getMessageAttachment)

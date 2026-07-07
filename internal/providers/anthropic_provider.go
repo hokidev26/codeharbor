@@ -2,10 +2,13 @@ package providers
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"codeharbor/internal/config"
 )
@@ -63,7 +66,7 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 		defer close(out)
 		if p.cfg.APIKey == "" {
 			out <- Event{Type: "text", Text: "Anthropic provider is not configured. Set ANTHROPIC_API_KEY to enable Messages API calls."}
-			out <- Event{Type: "done", Done: true}
+			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
 			return
 		}
 		model := req.Model
@@ -79,20 +82,33 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 			MaxTokens: p.cfg.MaxTokens,
 			Messages:  messages,
 			System:    system,
+			Tools:     anthropicTools(req.Tools),
 		}
 		res, err := p.client.Messages.New(ctx, params)
 		if err != nil {
 			out <- Event{Type: "error", Text: err.Error()}
 			return
 		}
-		var builder strings.Builder
+		usage := Usage{
+			InputTokens:       res.Usage.InputTokens,
+			OutputTokens:      res.Usage.OutputTokens,
+			CachedInputTokens: res.Usage.CacheReadInputTokens,
+			ReasoningTokens:   res.Usage.OutputTokensDetails.ThinkingTokens,
+		}
+		out <- Event{Type: "usage", Usage: &usage}
 		for _, block := range res.Content {
-			if block.Type == "text" {
-				builder.WriteString(block.Text)
+			switch block.Type {
+			case "text":
+				out <- Event{Type: "text", Text: block.Text}
+			case "tool_use":
+				input := block.Input
+				if len(input) == 0 {
+					input = json.RawMessage(`{}`)
+				}
+				out <- Event{Type: "tool_call", ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input}}
 			}
 		}
-		out <- Event{Type: "text", Text: builder.String()}
-		out <- Event{Type: "done", Done: true}
+		out <- Event{Type: "done", Done: true, StopReason: string(res.StopReason)}
 	}()
 	return out, nil
 }
@@ -104,18 +120,119 @@ func anthropicMessages(messages []Message, systemPrompt string) ([]anthropic.Mes
 		system = append(system, anthropic.TextBlockParam{Text: systemPrompt})
 	}
 	for _, message := range messages {
-		content := strings.TrimSpace(contentBlocksText(normalizeContentBlocks(message)))
-		if content == "" {
+		blocks := normalizeContentBlocks(message)
+		if len(blocks) == 0 {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(message.Role)) {
 		case "assistant":
-			out = append(out, anthropic.NewAssistantMessage(anthropic.NewTextBlock(content)))
+			content := anthropicContentBlocks(blocks)
+			if len(content) > 0 {
+				out = append(out, anthropic.NewAssistantMessage(content...))
+			}
 		case "system":
-			system = append(system, anthropic.TextBlockParam{Text: content})
+			content := strings.TrimSpace(contentBlocksText(blocks))
+			if content != "" {
+				system = append(system, anthropic.TextBlockParam{Text: content})
+			}
 		default:
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(content)))
+			content := anthropicContentBlocks(blocks)
+			if len(content) > 0 {
+				out = append(out, anthropic.NewUserMessage(content...))
+			}
 		}
 	}
 	return out, system
+}
+
+func anthropicContentBlocks(blocks []ContentBlock) []anthropic.ContentBlockParamUnion {
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
+	for _, block := range blocks {
+		switch block.Type {
+		case "tool_use":
+			input := any(map[string]any{})
+			if len(block.Input) > 0 {
+				input = json.RawMessage(block.Input)
+			}
+			if block.ToolUseID != "" && block.ToolName != "" {
+				out = append(out, anthropic.NewToolUseBlock(block.ToolUseID, input, block.ToolName))
+			}
+		case "tool_result":
+			if block.ToolUseID != "" {
+				out = append(out, anthropic.NewToolResultBlock(block.ToolUseID, block.Output, block.IsError))
+			}
+		case "image":
+			if len(block.Data) > 0 {
+				mimeType := strings.TrimSpace(block.MIMEType)
+				if mimeType == "" {
+					mimeType = "image/png"
+				}
+				out = append(out, anthropic.NewImageBlockBase64(mimeType, base64.StdEncoding.EncodeToString(block.Data)))
+				continue
+			}
+			name := strings.TrimSpace(block.Filename)
+			if name == "" {
+				name = "image"
+			}
+			out = append(out, anthropic.NewTextBlock("[图片附件 "+name+" 已上传；当前缺少可传递的图片数据。]"))
+		default:
+			text := strings.TrimSpace(block.Text)
+			if text != "" {
+				out = append(out, anthropic.NewTextBlock(text))
+			}
+		}
+	}
+	return out
+}
+
+func anthropicTools(specs []ToolSpec) []anthropic.ToolUnionParam {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]anthropic.ToolUnionParam, 0, len(specs))
+	for _, spec := range specs {
+		name := strings.TrimSpace(spec.Name)
+		if name == "" {
+			continue
+		}
+		schema := anthropicToolInputSchema(spec.Schema)
+		tool := anthropic.ToolUnionParamOfTool(schema, name)
+		if tool.OfTool != nil && strings.TrimSpace(spec.Description) != "" {
+			tool.OfTool.Description = param.NewOpt(spec.Description)
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
+func anthropicToolInputSchema(schema any) anthropic.ToolInputSchemaParam {
+	input := anthropic.ToolInputSchemaParam{Properties: map[string]any{}}
+	if object, ok := schema.(map[string]any); ok {
+		if properties, ok := object["properties"]; ok {
+			input.Properties = properties
+		}
+		if required, ok := stringSlice(object["required"]); ok {
+			input.Required = required
+		}
+	}
+	return input
+}
+
+func stringSlice(value any) ([]string, bool) {
+	switch typed := value.(type) {
+	case []string:
+		return typed, true
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, text)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }

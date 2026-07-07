@@ -125,6 +125,12 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 			"choices": []map[string]any{{
 				"message": map[string]string{"content": "ok"},
 			}},
+			"usage": map[string]any{
+				"prompt_tokens":             12,
+				"completion_tokens":         4,
+				"prompt_tokens_details":     map[string]any{"cached_tokens": 3},
+				"completion_tokens_details": map[string]any{"reasoning_tokens": 1},
+			},
 		})
 	}))
 	defer server.Close()
@@ -145,9 +151,13 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	var text string
+	var usage Usage
 	for event := range events {
 		if event.Type == "error" {
 			t.Fatalf("unexpected error event: %s", event.Text)
+		}
+		if event.Type == "usage" && event.Usage != nil {
+			usage = *event.Usage
 		}
 		if event.Type == "text" {
 			text += event.Text
@@ -155,5 +165,8 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 	}
 	if text != "ok" {
 		t.Fatalf("expected ok response, got %q", text)
+	}
+	if usage.InputTokens != 12 || usage.OutputTokens != 4 || usage.CachedInputTokens != 3 || usage.ReasoningTokens != 1 {
+		t.Fatalf("unexpected usage: %+v", usage)
 	}
 }

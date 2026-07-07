@@ -138,12 +138,21 @@ func contentBlocksText(blocks []ContentBlock) string {
 			parts = append(parts, strings.TrimSpace(block.Text))
 			continue
 		}
-		if block.Type == "image" {
+		switch block.Type {
+		case "image":
 			name := strings.TrimSpace(block.Filename)
 			if name == "" {
 				name = "image"
 			}
 			parts = append(parts, fmt.Sprintf("[图片附件 %s 已上传；当前 provider adapter 未以视觉格式传递该图片。]", name))
+		case "tool_use":
+			parts = append(parts, fmt.Sprintf("[Tool requested: %s (%s)]", block.ToolName, block.ToolUseID))
+		case "tool_result":
+			status := "completed"
+			if block.IsError {
+				status = "error"
+			}
+			parts = append(parts, fmt.Sprintf("[Tool result for %s (%s), %s]\n%s", block.ToolName, block.ToolUseID, status, strings.TrimSpace(block.Output)))
 		}
 	}
 	return strings.Join(parts, "\n\n")
@@ -156,7 +165,7 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 		if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
 			text := "OpenAI-compatible provider is not configured. Set OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY to enable real model calls."
 			out <- Event{Type: "text", Text: text}
-			out <- Event{Type: "done", Done: true}
+			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
 			return
 		}
 		model := req.Model
@@ -195,11 +204,39 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 					Content string `json:"content"`
 				} `json:"message"`
 			} `json:"choices"`
+			Usage struct {
+				PromptTokens        int64 `json:"prompt_tokens"`
+				CompletionTokens    int64 `json:"completion_tokens"`
+				InputTokens         int64 `json:"input_tokens"`
+				OutputTokens        int64 `json:"output_tokens"`
+				PromptTokensDetails struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
+				CompletionTokensDetails struct {
+					ReasoningTokens int64 `json:"reasoning_tokens"`
+				} `json:"completion_tokens_details"`
+				InputTokensDetails struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+				OutputTokensDetails struct {
+					ReasoningTokens int64 `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+			} `json:"usage"`
 		}
 		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 			out <- Event{Type: "error", Text: err.Error()}
 			return
 		}
+		usage := Usage{InputTokens: body.Usage.InputTokens, OutputTokens: body.Usage.OutputTokens, CachedInputTokens: body.Usage.InputTokensDetails.CachedTokens, ReasoningTokens: body.Usage.OutputTokensDetails.ReasoningTokens}
+		if usage.InputTokens == 0 {
+			usage.InputTokens = body.Usage.PromptTokens
+			usage.CachedInputTokens = body.Usage.PromptTokensDetails.CachedTokens
+		}
+		if usage.OutputTokens == 0 {
+			usage.OutputTokens = body.Usage.CompletionTokens
+			usage.ReasoningTokens = body.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		out <- Event{Type: "usage", Usage: &usage}
 		text := ""
 		if len(body.Choices) > 0 {
 			text = body.Choices[0].Message.Content

@@ -113,6 +113,19 @@ func validPermissionMode(mode string) bool {
 	}
 }
 
+func (s *Server) interruptNarrator(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
+		return
+	}
+	interrupted, err := s.runner.Interrupt(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interrupted": interrupted})
+}
+
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	messages, err := s.store.ListMessages(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {

@@ -63,7 +63,7 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 		defer close(out)
 		if p.cfg.APIKey == "" {
 			out <- Event{Type: "text", Text: "OpenAI official provider is not configured. Set OPENAI_API_KEY to enable Responses API calls."}
-			out <- Event{Type: "done", Done: true}
+			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
 			return
 		}
 		model := req.Model
@@ -90,6 +90,13 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 			out <- Event{Type: "error", Text: fmt.Sprintf("openai response error: %s", res.Error.Message)}
 			return
 		}
+		usage := Usage{
+			InputTokens:       res.Usage.InputTokens,
+			OutputTokens:      res.Usage.OutputTokens,
+			CachedInputTokens: res.Usage.InputTokensDetails.CachedTokens,
+			ReasoningTokens:   res.Usage.OutputTokensDetails.ReasoningTokens,
+		}
+		out <- Event{Type: "usage", Usage: &usage}
 		text := res.OutputText()
 		out <- Event{Type: "text", Text: text}
 		out <- Event{Type: "done", Done: true}

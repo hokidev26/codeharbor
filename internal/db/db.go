@@ -110,6 +110,25 @@ type ToolCall struct {
 	CreatedAt    string          `json:"createdAt"`
 }
 
+type APIRequest struct {
+	ID                string          `json:"id"`
+	NarratorID        string          `json:"narratorId,omitempty"`
+	MessageID         string          `json:"messageId,omitempty"`
+	Kind              string          `json:"kind"`
+	Provider          string          `json:"provider,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	InputTokens       int64           `json:"inputTokens,omitempty"`
+	OutputTokens      int64           `json:"outputTokens,omitempty"`
+	CachedInputTokens int64           `json:"cachedInputTokens,omitempty"`
+	ReasoningTokens   int64           `json:"reasoningTokens,omitempty"`
+	TTFTMS            int64           `json:"ttftMs,omitempty"`
+	DurationMS        int64           `json:"durationMs,omitempty"`
+	CostUSD           float64         `json:"costUsd,omitempty"`
+	ErrorMessage      string          `json:"errorMessage,omitempty"`
+	RawDumpJSON       json.RawMessage `json:"rawDumpJson,omitempty"`
+	CreatedAt         string          `json:"createdAt"`
+}
+
 type Backend struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -461,6 +480,23 @@ func (s *Store) GetToolCallByUseID(ctx context.Context, narratorID, toolUseID st
 		c.OutputJSON = json.RawMessage(output)
 	}
 	return c, err
+}
+
+func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIRequest, error) {
+	if request.ID == "" {
+		request.ID = NewID()
+	}
+	if request.CreatedAt == "" {
+		request.CreatedAt = Now()
+	}
+	if request.Kind == "" {
+		request.Kind = "model"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, narrator_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, request.ID, request.NarratorID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.CreatedAt)
+	if err != nil {
+		return APIRequest{}, err
+	}
+	return request, nil
 }
 
 func (s *Store) SetNarratorStatus(ctx context.Context, narratorID, status, errorMessage string) error {
