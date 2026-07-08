@@ -34,6 +34,7 @@ The repository `.gitignore` excludes common local secret and runtime files, but 
 - The embedded UI is served by the same local Go service.
 - Browser-originated API calls must pass a per-process local token injected into the UI; cross-site `Origin` requests are rejected, and `Sec-Fetch-Site: cross-site` is rejected even when `Origin` is absent.
 - WebSocket upgrades require the same local token and same-origin checks before the connection is accepted.
+- The local token is a browser cross-site protection, not a multi-user authentication system. A process or user that can read the local UI response on the same machine can also obtain the token.
 - Git status/diff/log/commit and chapter workflow APIs reject repositories outside the current project path, configured default project directory, or CodeHarbor-created chapter worktree.
 - Tools can interact with the local filesystem within configured working directories.
 - Bash and stdio MCP execution are permission-gated but remain powerful local code execution.
@@ -44,6 +45,7 @@ The repository `.gitignore` excludes common local secret and runtime files, but 
 
 Planned security improvements include:
 
+- Real login sessions, per-user authorization scopes, and audit trails before exposing CodeHarbor to other users or networks
 - Optional encryption for locally stored backend API keys and MCP environment values
 - A formal migration system for future schema changes
 - More granular tool approval and audit trails

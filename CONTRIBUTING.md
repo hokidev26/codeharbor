@@ -62,6 +62,7 @@ node --check internal/server/static/modules/settings-preferences.mjs
 node --check internal/server/static/modules/dom.mjs
 node --check internal/server/static/modules/settings-data.mjs
 node --check internal/server/static/modules/preferences-data.mjs
+node --test internal/server/static/modules/*.test.mjs
 ```
 
 CI also runs `golangci-lint`; keep warnings fixed before opening a pull request. Tagged releases are packaged by GoReleaser through `.github/workflows/release.yml`.

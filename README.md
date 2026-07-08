@@ -110,6 +110,8 @@ After commit: clean=true, remainingFiles=[]
 
 An earlier untracked-file smoke also created and committed `demo/notes.md` with commit `2484ab7 Dogfood CodeHarbor API workflow`.
 
+The README hero currently uses a lightweight tracked `docs/demo.gif` workflow preview. To replace it with a real product recording, capture a 15-20 second browser flow (create/open project → send task → approve tool call → review diff → commit selected path), compress it to a small GIF, and overwrite `docs/demo.gif`.
+
 To reproduce manually, start CodeHarbor with a temporary config, create or open a local Git repository as the project worktree, use the UI or tool-call API to write a small file, verify Git status, inspect the diff in the Git panel, select the file checkbox, enter a commit message, and submit the commit. The commit API stages only the selected paths and does not push, amend, reset, clean, force, or auto-stage the full worktree.
 
 ## Usage cost estimates
@@ -273,6 +275,7 @@ node --check internal/server/static/modules/settings-preferences.mjs
 node --check internal/server/static/modules/dom.mjs
 node --check internal/server/static/modules/settings-data.mjs
 node --check internal/server/static/modules/preferences-data.mjs
+node --test internal/server/static/modules/*.test.mjs
 ```
 
 CI additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the narrator WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing archives, not for local validation.

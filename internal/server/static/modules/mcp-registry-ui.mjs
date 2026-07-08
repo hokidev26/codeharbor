@@ -68,39 +68,63 @@ export function createMCPRegistryUIController({
     }
   }
 
-  async function createMCPRegistryServerFromPanel(event) {
+  async function saveMCPRegistryServerFromPanel(event) {
     event.preventDefault();
-    const payload = readMCPRegistryFormPayload();
-    setMCPRegistryActionBusy("new", "create", true);
+    const editingId = state.mcpRegistryEditingId || "";
+    const payload = readMCPRegistryFormPayload({ omitEmptyEnv: Boolean(editingId) });
+    const actionId = editingId || "new";
+    const action = editingId ? "update" : "create";
+    setMCPRegistryActionBusy(actionId, action, true);
     try {
-      await api("/api/mcp/servers", { method: "POST", body: JSON.stringify(payload) });
+      if (editingId) {
+        await api(`/api/mcp/servers/${editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
+        showToast?.("已更新后端 MCP server。", "success");
+      } else {
+        await api("/api/mcp/servers", { method: "POST", body: JSON.stringify(payload) });
+        showToast?.("已创建后端 MCP server。", "success");
+      }
       clearMCPRegistryForm();
       state.mcpRegistryLoaded = false;
       await loadMCPRegistryServers({ force: true });
-      showToast?.("已创建后端 MCP server。", "success");
     } finally {
-      setMCPRegistryActionBusy("new", "create", false);
+      setMCPRegistryActionBusy(actionId, action, false);
     }
   }
 
-  function readMCPRegistryFormPayload() {
-    return buildMCPRegistryPayload({
+  function readMCPRegistryFormPayload({ omitEmptyEnv = false } = {}) {
+    const envText = $("mcpRegistryEnv")?.value || "";
+    const payload = buildMCPRegistryPayload({
       name: $("mcpRegistryName")?.value || "",
       command: $("mcpRegistryCommand")?.value || "",
       argsText: $("mcpRegistryArgs")?.value || "",
       cwd: $("mcpRegistryCWD")?.value || "",
-      envText: $("mcpRegistryEnv")?.value || "",
+      envText,
       enabled: String($("mcpRegistryEnabled")?.value || "true") !== "false",
     });
+    if (omitEmptyEnv && !String(envText || "").trim()) delete payload.env;
+    return payload;
   }
 
   function clearMCPRegistryForm() {
+    state.mcpRegistryEditingId = "";
     ["mcpRegistryName", "mcpRegistryCommand", "mcpRegistryArgs", "mcpRegistryCWD", "mcpRegistryEnv"].forEach((id) => {
       const node = $(id);
       if (node) node.value = "";
     });
     const enabled = $("mcpRegistryEnabled");
     if (enabled) enabled.value = "true";
+  }
+
+  function editMCPRegistryServer(id) {
+    const server = state.mcpRegistryServers.find((item) => item.id === id);
+    if (!server) throw new Error("MCP server 不存在");
+    state.mcpRegistryEditingId = id;
+    if (shouldRefreshMCPRegistryPanel()) refreshActiveSettingsPanel?.();
+  }
+
+  function cancelMCPRegistryEdit() {
+    clearMCPRegistryForm();
+    if (shouldRefreshMCPRegistryPanel()) refreshActiveSettingsPanel?.();
   }
 
   async function toggleMCPRegistryServer(id) {
@@ -125,6 +149,7 @@ export function createMCPRegistryUIController({
       const nextTools = { ...(state.mcpRegistryTools || {}) };
       delete nextTools[id];
       state.mcpRegistryTools = nextTools;
+      if (state.mcpRegistryEditingId === id) state.mcpRegistryEditingId = "";
       await loadMCPRegistryServers({ force: true });
       showToast?.("已删除后端 MCP server。", "success");
     } finally {
@@ -183,6 +208,7 @@ export function createMCPRegistryUIController({
       </div>
       <div class="settings-action-row">
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-tools="${escapeAttr(server.id)}" ${discovering || !server.enabled ? "disabled" : ""}>${discovering ? "发现中" : "发现工具"}</button>
+        <button class="settings-action-btn subtle" type="button" data-mcp-registry-edit="${escapeAttr(server.id)}" ${discovering || toggling || deleting ? "disabled" : ""}>编辑</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-toggle="${escapeAttr(server.id)}" ${toggling || deleting ? "disabled" : ""}>${toggling ? "切换中" : (server.enabled ? "停用" : "启用")}</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-copy="${escapeAttr(server.id)}">复制 serverId</button>
         <button class="settings-action-btn danger" type="button" data-mcp-registry-delete="${escapeAttr(server.id)}" ${deleting ? "disabled" : ""}>${deleting ? "删除中" : "删除"}</button>
@@ -204,10 +230,12 @@ export function createMCPRegistryUIController({
 
   function bindMCPRegistryActions(body = $("settingsContentBody")) {
     if (state.activeSkillTab === "mcp-tools" && !state.mcpRegistryLoaded && !state.mcpRegistryLoading) loadMCPRegistryServers().catch(showError);
-    $("mcpRegistryForm")?.addEventListener("submit", (event) => createMCPRegistryServerFromPanel(event).catch(showError));
+    $("mcpRegistryForm")?.addEventListener("submit", (event) => saveMCPRegistryServerFromPanel(event).catch(showError));
+    $("cancelMCPRegistryEditBtn")?.addEventListener("click", cancelMCPRegistryEdit);
     $("refreshMCPRegistryBtn")?.addEventListener("click", () => loadMCPRegistryServers({ force: true }).catch(showError));
     body?.querySelectorAll("[data-mcp-register]").forEach((node) => node.addEventListener("click", () => registerMCPDraftServer(node.dataset.mcpRegister).catch(showError)));
     body?.querySelectorAll("[data-mcp-registry-tools]").forEach((node) => node.addEventListener("click", () => discoverMCPRegistryTools(node.dataset.mcpRegistryTools).catch(showError)));
+    body?.querySelectorAll("[data-mcp-registry-edit]").forEach((node) => node.addEventListener("click", () => editMCPRegistryServer(node.dataset.mcpRegistryEdit)));
     body?.querySelectorAll("[data-mcp-registry-toggle]").forEach((node) => node.addEventListener("click", () => toggleMCPRegistryServer(node.dataset.mcpRegistryToggle).catch(showError)));
     body?.querySelectorAll("[data-mcp-registry-copy]").forEach((node) => node.addEventListener("click", () => copyText(node.dataset.mcpRegistryCopy)));
     body?.querySelectorAll("[data-mcp-registry-delete]").forEach((node) => node.addEventListener("click", () => deleteMCPRegistryServer(node.dataset.mcpRegistryDelete).catch(showError)));

@@ -186,7 +186,6 @@ narrator_messages
 narrator_tool_calls
 api_requests
 agent_backends
-background_tasks
 ```
 
 这些表的命名与字段风格尽量贴近 AI 编程工作台数据模型，方便后续迁移或扩展。
@@ -582,7 +581,7 @@ GET /ui/app.js
 - 在设置 → 关于中复制、下载、导入浏览器本地偏好备份，迁移个人资料、技能草案、聊天草稿、提示词历史、搜索/IM/通知/外观/终端/模型和中转协议设置
 - 查看 `/api/runtime/summary` 驱动的服务器与系统、运行资源、Go runtime、内存和 Agent 限制概览
 - 查看 `/api/storage/summary` 驱动的储存空间、数据库、配置文件和默认项目目录容量统计
-- 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求和成本统计（未实现真实后台任务前不展示 background_tasks 僵尸计数）
+- 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求和成本统计；未实现真实后台任务前不创建/展示 background_tasks 僵尸模型
 - 查看 `/api/auth/status` 驱动的用户初始化和注册开放状态
 - 从 `/api/models` 动态刷新 CLIProxyAPI 凭证账号可用模型
 - 在 Git 变更面板中查看 status/diff/log，并显式选择文件创建本地 commit（不自动 push）
@@ -750,6 +749,7 @@ node --check internal/server/static/modules/settings-preferences.mjs
 node --check internal/server/static/modules/dom.mjs
 node --check internal/server/static/modules/settings-data.mjs
 node --check internal/server/static/modules/preferences-data.mjs
+node --test internal/server/static/modules/*.test.mjs
 ```
 
 短启动验证包括：

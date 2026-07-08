@@ -222,26 +222,4 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
-
-CREATE TABLE IF NOT EXISTS background_tasks (
-  id TEXT PRIMARY KEY,
-  parent_narrator_id TEXT REFERENCES narrators(id) ON DELETE CASCADE,
-  type TEXT NOT NULL,
-  status TEXT NOT NULL,
-  command TEXT,
-  exit_code INTEGER,
-  subagent_narrator_id TEXT REFERENCES narrators(id) ON DELETE SET NULL,
-  subagent_type TEXT,
-  tool_use_id TEXT,
-  alias TEXT,
-  title TEXT,
-  output TEXT,
-  output_bytes INTEGER,
-  output_truncated INTEGER NOT NULL DEFAULT 0,
-  notified INTEGER NOT NULL DEFAULT 0,
-  started_at TEXT,
-  completed_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
 `

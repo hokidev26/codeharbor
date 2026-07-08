@@ -187,11 +187,16 @@ func Load(path string) (Config, error) {
 }
 
 func normalizeConfig(cfg Config) Config {
+	cfg = migrateConfig(cfg)
+	cfg.Providers = normalizeProviders(cfg.Providers)
+	cfg.Backends = normalizeBackends(cfg.Backends)
+	return cfg
+}
+
+func migrateConfig(cfg Config) Config {
 	if cfg.SchemaVersion <= 0 {
 		cfg.SchemaVersion = CurrentConfigVersion
 	}
-	cfg.Providers = normalizeProviders(cfg.Providers)
-	cfg.Backends = normalizeBackends(cfg.Backends)
 	return cfg
 }
 

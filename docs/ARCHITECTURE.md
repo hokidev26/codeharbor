@@ -38,7 +38,7 @@ internal/db SQLite store
 2. `internal/server/security.go` rejects cross-site browser requests using `Origin`, rejects `Sec-Fetch-Site: cross-site` even when `Origin` is absent, and requires the local token for browser-originated API requests.
 3. `internal/server/ws.go` and `internal/server/terminal.go` apply the WebSocket-specific same-origin and token checks before accepting upgrades.
 
-The guard is intended to prevent a random web page from driving the local agent through `http://localhost:7788` while the user is browsing.
+The guard is intended to prevent a random web page from driving the local agent through `http://localhost:7788` while the user is browsing. It is not a replacement for real multi-user authentication: any local process or user that can read the served UI can also read the bootstrap token. Before exposing CodeHarbor beyond a trusted local loopback workflow, add login sessions, scoped authorization, audit trails, and stronger secret storage.
 
 ### 3. Chat message submission
 
@@ -191,6 +191,7 @@ node --check internal/server/static/modules/settings-preferences.mjs
 node --check internal/server/static/modules/dom.mjs
 node --check internal/server/static/modules/settings-data.mjs
 node --check internal/server/static/modules/preferences-data.mjs
+node --test internal/server/static/modules/*.test.mjs
 ```
 
 CI additionally runs `golangci-lint`. The server package includes an end-to-end smoke for HTTP message submission, narrator WebSocket events, approval routing, Bash execution, provider feedback, and persistence. Release tags matching `v*` trigger GoReleaser to build macOS, Linux, and Windows archives.

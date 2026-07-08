@@ -27,7 +27,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-          args: --timeout=5m
+          args: --config=.golangci.yml --timeout=5m
 
   test:
     name: Test
@@ -72,10 +72,12 @@ jobs:
           node --check internal/server/static/modules/chat-rendering.mjs
           node --check internal/server/static/modules/directory-browser.mjs
           node --check internal/server/static/modules/formatters.mjs
+          node --check internal/server/static/modules/formatters.test.mjs
           node --check internal/server/static/modules/git-workflow.mjs
           node --check internal/server/static/modules/terminal.mjs
           node --check internal/server/static/modules/runtime.mjs
           node --check internal/server/static/modules/mcp-registry.mjs
+          node --check internal/server/static/modules/mcp-registry.test.mjs
           node --check internal/server/static/modules/mcp-registry-ui.mjs
           node --check internal/server/static/modules/model-provider-settings.mjs
           node --check internal/server/static/modules/local-preferences-settings.mjs
@@ -87,3 +89,6 @@ jobs:
           node --check internal/server/static/modules/dom.mjs
           node --check internal/server/static/modules/settings-data.mjs
           node --check internal/server/static/modules/preferences-data.mjs
+
+      - name: Run embedded JavaScript tests
+        run: node --test internal/server/static/modules/*.test.mjs

@@ -72,6 +72,20 @@ func TestLoadBackfillsLegacyConfigVersion(t *testing.T) {
 	}
 }
 
+func TestMigrateConfigBackfillsLegacyVersion(t *testing.T) {
+	cfg := migrateConfig(Config{})
+	if cfg.SchemaVersion != CurrentConfigVersion {
+		t.Fatalf("expected legacy config to migrate to %d, got %d", CurrentConfigVersion, cfg.SchemaVersion)
+	}
+}
+
+func TestMigrateConfigKeepsFutureVersion(t *testing.T) {
+	cfg := migrateConfig(Config{SchemaVersion: CurrentConfigVersion + 1})
+	if cfg.SchemaVersion != CurrentConfigVersion+1 {
+		t.Fatalf("expected future config version to be preserved, got %d", cfg.SchemaVersion)
+	}
+}
+
 func TestDefaultBackendsFromEnv(t *testing.T) {
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_URL", "http://127.0.0.1:8000/")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_API_KEY", "secret")

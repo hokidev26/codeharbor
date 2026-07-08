@@ -66,6 +66,13 @@ func TestMCPServersCRUDAndToolDiscovery(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected patch 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
+	patched, err := store.GetMCPServer(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patched.Env["TOKEN"] != "secret" {
+		t.Fatalf("expected patch without env to preserve stored env, got %+v", patched.Env)
+	}
 
 	recorder = httptest.NewRecorder()
 	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/mcp/servers/"+created.ID+"/tools", nil))

@@ -28,9 +28,11 @@ All notable changes to CodeHarbor are tracked here. The project is still an expe
 
 ### Changed
 
-- Removed the unused `background_tasks` metric from the usage summary and UI until real background task execution exists.
+- Removed the unused `background_tasks` metric from the usage summary and UI until real background task execution exists, and stopped creating the unused table for new databases.
+- Added edit/update/cancel support to the MCP registry UI without echoing stored environment values.
 - Documented the current local security model, Git workflow boundaries, and dogfood reproduction path.
 - Added CI lint/release scaffolding for `golangci-lint` and GoReleaser binary releases.
+- Added an explicit `.golangci.yml` and front-end `node --test` module coverage for formatter and MCP registry parsing helpers.
 - Added an end-to-end server smoke covering HTTP message submission, narrator WebSocket events, tool approval, Bash execution, tool-result feedback, and persistence.
 - Continued frontend ES module extraction: `app.js` is now a small bootstrap, with main UI logic, Agent Server backend registry/modal/Admin behavior, chat sending/drafts/history/attachments/slash command behavior, chat message rendering/approval/Markdown behavior, directory chooser/browser/recent-directory behavior, shared formatters, Git workflow modal behavior, terminal preferences/settings/WebSocket behavior, API/WebSocket runtime helpers, MCP registry parsing helpers, backend MCP registry UI/actions, Settings Models/Providers UI/model helpers, Settings local preference panels rendering/actions, Settings system/storage/usage/users/about panels, Settings AI Agents/Chapters workspace panels, Settings Skills workbench rendering/actions, global shortcut/sidebar/mobile shell behavior, browser-local settings preference/backup/import behavior, DOM helpers, Settings/Skills static data, and local preference defaults split under `static/modules/`.
 

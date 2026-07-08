@@ -139,6 +139,7 @@ const state = {
   mcpRegistryLoaded: false,
   mcpRegistryLoading: false,
   mcpRegistryActionBusy: {},
+  mcpRegistryEditingId: "",
   projectChapters: [],
   chapterNarrators: [],
   chaptersError: "",

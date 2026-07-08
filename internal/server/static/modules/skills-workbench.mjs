@@ -87,6 +87,10 @@ export function createSkillsWorkbenchController({
 
   function renderLocalMCPTools(active) {
     const prefs = currentSkillsPreferences();
+    const editingRegistryId = state.mcpRegistryEditingId || "";
+    const editingRegistryServer = editingRegistryId ? state.mcpRegistryServers.find((server) => server.id === editingRegistryId) : null;
+    const editingRegistryArgs = Array.isArray(editingRegistryServer?.args) ? editingRegistryServer.args.join(" ") : "";
+    const registrySubmitting = editingRegistryId ? isMCPRegistryActionBusy(editingRegistryId, "update") : isMCPRegistryActionBusy("new", "create");
     return `
     <p class="skills-description">${escapeHtml(active.description)}</p>
     <section class="settings-provider-section">
@@ -98,21 +102,25 @@ export function createSkillsWorkbenchController({
         <button id="refreshMCPRegistryBtn" class="settings-action-btn subtle" type="button">${state.mcpRegistryLoading ? "刷新中" : "刷新 registry"}</button>
       </div>
       ${renderMCPRegistryList()}
-      <form id="mcpRegistryForm" class="skill-command-form">
-        <div class="settings-provider-title">新增后端 MCP server</div>
+      <form id="mcpRegistryForm" class="skill-command-form" data-mcp-registry-editing="${escapeAttr(editingRegistryId)}">
+        <div class="settings-provider-title">${editingRegistryId ? "编辑后端 MCP server" : "新增后端 MCP server"}</div>
+        ${editingRegistryId ? `<div class="settings-provider-meta">正在编辑 serverId: <code>${escapeHtml(editingRegistryId)}</code>。Env value 不会回显；如需修改环境变量，请重新填写 Env JSON。</div>` : ""}
         <div class="settings-provider-form-grid">
-          <label>名称<input id="mcpRegistryName" class="settings-field" placeholder="filesystem" /></label>
+          <label>名称<input id="mcpRegistryName" class="settings-field" value="${escapeAttr(editingRegistryServer?.name || "")}" placeholder="filesystem" /></label>
           <label>启用
-            <select id="mcpRegistryEnabled" class="settings-field"><option value="true">enabled</option><option value="false">disabled</option></select>
+            <select id="mcpRegistryEnabled" class="settings-field"><option value="true" ${editingRegistryServer?.enabled === false ? "" : "selected"}>enabled</option><option value="false" ${editingRegistryServer?.enabled === false ? "selected" : ""}>disabled</option></select>
           </label>
-          <label>Command<input id="mcpRegistryCommand" class="settings-field" placeholder="npx" /></label>
-          <label>Args<input id="mcpRegistryArgs" class="settings-field" placeholder="@modelcontextprotocol/server-filesystem ~/projects" /></label>
-          <label class="settings-form-span-2">CWD（可选）<input id="mcpRegistryCWD" class="settings-field" placeholder="/Users/me/project" /></label>
+          <label>Command<input id="mcpRegistryCommand" class="settings-field" value="${escapeAttr(editingRegistryServer?.command || "")}" placeholder="npx" /></label>
+          <label>Args<input id="mcpRegistryArgs" class="settings-field" value="${escapeAttr(editingRegistryArgs)}" placeholder="@modelcontextprotocol/server-filesystem ~/projects" /></label>
+          <label class="settings-form-span-2">CWD（可选）<input id="mcpRegistryCWD" class="settings-field" value="${escapeAttr(editingRegistryServer?.cwd || "")}" placeholder="/Users/me/project" /></label>
           <label class="settings-form-span-2">Env JSON（可选；响应只显示 key）
             <textarea id="mcpRegistryEnv" class="settings-field settings-textarea" rows="3" placeholder='{"TOKEN":"..."}'></textarea>
           </label>
         </div>
-        <div class="settings-action-row settings-form-actions"><button class="settings-action-btn primary" type="submit" ${isMCPRegistryActionBusy("new", "create") ? "disabled" : ""}>${isMCPRegistryActionBusy("new", "create") ? "创建中" : "创建后端 server"}</button></div>
+        <div class="settings-action-row settings-form-actions">
+          ${editingRegistryId ? `<button id="cancelMCPRegistryEditBtn" class="settings-action-btn subtle" type="button">取消编辑</button>` : ""}
+          <button class="settings-action-btn primary" type="submit" ${registrySubmitting ? "disabled" : ""}>${registrySubmitting ? (editingRegistryId ? "更新中" : "创建中") : (editingRegistryId ? "更新后端 server" : "创建后端 server")}</button>
+        </div>
       </form>
     </section>
     <section class="settings-provider-section">
