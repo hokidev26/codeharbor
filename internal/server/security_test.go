@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nhooyr.io/websocket"
 
@@ -256,6 +257,39 @@ func TestRemoteAccessGateUsesStandardForwardedHostForSameOrigin(t *testing.T) {
 	}
 }
 
+func postRemoteAccessPassword(app *Server, remoteAddr string, password string, headers http.Header) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password="+password))
+	request.Host = "demo.trycloudflare.com"
+	if remoteAddr != "" {
+		request.RemoteAddr = remoteAddr
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
+	}
+	app.Routes().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func postRemoteAccessLogout(app *Server, remoteAddr string, headers http.Header) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access/logout", nil)
+	request.Host = "demo.trycloudflare.com"
+	if remoteAddr != "" {
+		request.RemoteAddr = remoteAddr
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
+	}
+	app.Routes().ServeHTTP(recorder, request)
+	return recorder
+}
+
 func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	for i := 0; i < remoteAccessMaxFailures; i++ {
@@ -281,6 +315,110 @@ func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected locked correct password to remain 429, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLockoutUsesForwardedClientIPFromLocalProxy(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	a := http.Header{"CF-Connecting-IP": []string{"203.0.113.21"}}
+	b := http.Header{"CF-Connecting-IP": []string{"203.0.113.22"}}
+
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		recorder := postRemoteAccessPassword(app, "127.0.0.1:5555", "wrong", a)
+		if i < remoteAccessMaxFailures-1 && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+		if i == remoteAccessMaxFailures-1 && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d expected 429, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	recorder := postRemoteAccessPassword(app, "127.0.0.1:5555", "secret", b)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("expected different forwarded client to avoid shared tunnel lock, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLockoutIgnoresForgedForwardedForFromDirectRemote(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	forgedForwardedFor := []string{
+		"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4", "198.51.100.5",
+		"198.51.100.6", "198.51.100.7", "198.51.100.8", "198.51.100.9", "198.51.100.10",
+	}
+	if len(forgedForwardedFor) < remoteAccessMaxFailures {
+		t.Fatalf("test needs at least %d forged client IPs", remoteAccessMaxFailures)
+	}
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		recorder := postRemoteAccessPassword(app, "203.0.113.23:5555", "wrong", http.Header{"X-Forwarded-For": []string{forgedForwardedFor[i]}})
+		if i < remoteAccessMaxFailures-1 && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+		if i == remoteAccessMaxFailures-1 && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d expected 429 despite changing forged XFF, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRemoteAccessLockoutExpires(t *testing.T) {
+	current := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	app.clock = func() time.Time { return current }
+
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		postRemoteAccessPassword(app, "203.0.113.24:5555", "wrong", nil)
+	}
+	locked := postRemoteAccessPassword(app, "203.0.113.24:5555", "secret", nil)
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected correct password to be locked before expiry, got %d: %s", locked.Code, locked.Body.String())
+	}
+
+	current = current.Add(remoteAccessLockDuration + time.Second)
+	unlocked := postRemoteAccessPassword(app, "203.0.113.24:5555", "secret", nil)
+	if unlocked.Code != http.StatusSeeOther {
+		t.Fatalf("expected lockout to expire, got %d: %s", unlocked.Code, unlocked.Body.String())
+	}
+}
+
+func TestRemoteAccessFailureWindowResetsCount(t *testing.T) {
+	current := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	app.clock = func() time.Time { return current }
+
+	for i := 0; i < remoteAccessMaxFailures-1; i++ {
+		recorder := postRemoteAccessPassword(app, "203.0.113.25:5555", "wrong", nil)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("initial attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+	current = current.Add(remoteAccessFailureWindow + time.Second)
+	recorder := postRemoteAccessPassword(app, "203.0.113.25:5555", "wrong", nil)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected first attempt after window reset to stay 401, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLogoutOnlyClearsFailuresWhenAuthenticated(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		postRemoteAccessPassword(app, "203.0.113.26:5555", "wrong", nil)
+	}
+
+	unauthLogout := postRemoteAccessLogout(app, "203.0.113.26:5555", http.Header{"Accept": []string{"application/json"}})
+	if unauthLogout.Code != http.StatusOK {
+		t.Fatalf("expected unauthenticated logout to still clear cookie, got %d: %s", unauthLogout.Code, unauthLogout.Body.String())
+	}
+	stillLocked := postRemoteAccessPassword(app, "203.0.113.26:5555", "secret", nil)
+	if stillLocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected unauthenticated logout not to clear failure lock, got %d: %s", stillLocked.Code, stillLocked.Body.String())
+	}
+
+	authLogout := postRemoteAccessLogout(app, "203.0.113.26:5555", http.Header{"Authorization": []string{"Bearer secret"}, "Accept": []string{"application/json"}})
+	if authLogout.Code != http.StatusOK {
+		t.Fatalf("expected authenticated logout, got %d: %s", authLogout.Code, authLogout.Body.String())
+	}
+	unlocked := postRemoteAccessPassword(app, "203.0.113.26:5555", "secret", nil)
+	if unlocked.Code != http.StatusSeeOther {
+		t.Fatalf("expected authenticated logout to clear failure lock, got %d: %s", unlocked.Code, unlocked.Body.String())
 	}
 }
 
@@ -314,8 +452,11 @@ func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
 	badAgainReq.RemoteAddr = "203.0.113.11:5555"
 	badAgainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	app.Routes().ServeHTTP(badAgain, badAgainReq)
-	if badAgain.Code != http.StatusUnauthorized || !strings.Contains(badAgain.Body.String(), "剩余 9 次") {
+	if badAgain.Code != http.StatusUnauthorized || !strings.Contains(badAgain.Body.String(), "密码不正确") {
 		t.Fatalf("expected counter reset after success, got %d: %s", badAgain.Code, badAgain.Body.String())
+	}
+	if strings.Contains(badAgain.Body.String(), "剩余") {
+		t.Fatalf("expected login failure page not to reveal remaining attempts, got %s", badAgain.Body.String())
 	}
 }
 

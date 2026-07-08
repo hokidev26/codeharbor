@@ -25,6 +25,7 @@ const remoteAccessLogoutPath = "/auth/remote-access/logout"
 const remoteAccessMaxFailures = 10
 const remoteAccessFailureWindow = 15 * time.Minute
 const remoteAccessLockDuration = 15 * time.Minute
+const remoteAccessFailureMaxEntries = 2048
 
 type remoteAccessFailure struct {
 	Count       int
@@ -38,6 +39,13 @@ func newLocalToken() string {
 		return base64.RawURLEncoding.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func (s *Server) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 func (s *Server) localRequestGuard(next http.Handler) http.Handler {
@@ -223,7 +231,7 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if locked, until := s.remoteAccessLocked(r); locked {
-		s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误次数过多，请在 %s 后重试。", until.Local().Format("15:04:05")))
+		s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, s.remoteAccessLockMessage(until))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -231,12 +239,12 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !constantTimeEqualToken(r.FormValue("password"), password) {
-		remaining, lockedUntil := s.recordRemoteAccessFailure(r)
+		lockedUntil := s.recordRemoteAccessFailure(r)
 		if !lockedUntil.IsZero() {
-			s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误次数已达 %d 次，请在 %s 后重试。", remoteAccessMaxFailures, lockedUntil.Local().Format("15:04:05")))
+			s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, s.remoteAccessLockMessage(lockedUntil))
 			return
 		}
-		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, fmt.Sprintf("密码不正确，请重试。剩余 %d 次。", remaining))
+		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "密码不正确，请重试。")
 		return
 	}
 	s.clearRemoteAccessFailures(r)
@@ -250,7 +258,9 @@ func (s *Server) handleRemoteAccessLogout(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	s.clearRemoteAccessFailures(r)
+	if s.validRemoteAccess(r) {
+		s.clearRemoteAccessFailures(r)
+	}
 	s.clearRemoteAccessCookie(w, r)
 	if acceptsHTML(r) {
 		http.Redirect(w, r, remoteAccessPath, http.StatusSeeOther)
@@ -261,34 +271,32 @@ func (s *Server) handleRemoteAccessLogout(w http.ResponseWriter, r *http.Request
 
 func (s *Server) remoteAccessLocked(r *http.Request) (bool, time.Time) {
 	key := remoteAccessClientKey(r)
-	now := time.Now()
+	now := s.now()
 	s.remoteAccessMu.Lock()
 	defer s.remoteAccessMu.Unlock()
 	failure, ok := s.remoteAccessFailure[key]
 	if !ok {
 		return false, time.Time{}
 	}
-	if !failure.LockedUntil.IsZero() {
-		if now.Before(failure.LockedUntil) {
-			return true, failure.LockedUntil
-		}
+	if remoteAccessFailureExpired(failure, now) {
 		delete(s.remoteAccessFailure, key)
 		return false, time.Time{}
 	}
-	if now.Sub(failure.FirstFailed) > remoteAccessFailureWindow {
-		delete(s.remoteAccessFailure, key)
+	if !failure.LockedUntil.IsZero() {
+		return true, failure.LockedUntil
 	}
 	return false, time.Time{}
 }
 
-func (s *Server) recordRemoteAccessFailure(r *http.Request) (int, time.Time) {
+func (s *Server) recordRemoteAccessFailure(r *http.Request) time.Time {
 	key := remoteAccessClientKey(r)
-	now := time.Now()
+	now := s.now()
 	s.remoteAccessMu.Lock()
 	defer s.remoteAccessMu.Unlock()
 	if s.remoteAccessFailure == nil {
 		s.remoteAccessFailure = make(map[string]remoteAccessFailure)
 	}
+	s.pruneRemoteAccessFailuresLocked(now)
 	failure := s.remoteAccessFailure[key]
 	if failure.FirstFailed.IsZero() || now.Sub(failure.FirstFailed) > remoteAccessFailureWindow {
 		failure = remoteAccessFailure{FirstFailed: now}
@@ -298,11 +306,8 @@ func (s *Server) recordRemoteAccessFailure(r *http.Request) (int, time.Time) {
 		failure.LockedUntil = now.Add(remoteAccessLockDuration)
 	}
 	s.remoteAccessFailure[key] = failure
-	remaining := remoteAccessMaxFailures - failure.Count
-	if remaining < 0 {
-		remaining = 0
-	}
-	return remaining, failure.LockedUntil
+	s.trimRemoteAccessFailuresLocked()
+	return failure.LockedUntil
 }
 
 func (s *Server) clearRemoteAccessFailures(r *http.Request) {
@@ -312,11 +317,127 @@ func (s *Server) clearRemoteAccessFailures(r *http.Request) {
 	delete(s.remoteAccessFailure, key)
 }
 
+func (s *Server) remoteAccessLockMessage(until time.Time) string {
+	remaining := until.Sub(s.now())
+	if remaining <= time.Minute {
+		return "密码错误次数过多，请稍后重试。"
+	}
+	minutes := int((remaining + time.Minute - 1) / time.Minute)
+	return fmt.Sprintf("密码错误次数过多，请约 %d 分钟后重试。", minutes)
+}
+
+func (s *Server) pruneRemoteAccessFailuresLocked(now time.Time) {
+	for key, failure := range s.remoteAccessFailure {
+		if remoteAccessFailureExpired(failure, now) {
+			delete(s.remoteAccessFailure, key)
+		}
+	}
+}
+
+func (s *Server) trimRemoteAccessFailuresLocked() {
+	for len(s.remoteAccessFailure) > remoteAccessFailureMaxEntries {
+		oldestKey := ""
+		oldest := time.Time{}
+		for key, failure := range s.remoteAccessFailure {
+			if failure.FirstFailed.IsZero() {
+				oldestKey = key
+				break
+			}
+			if oldestKey == "" || failure.FirstFailed.Before(oldest) {
+				oldestKey = key
+				oldest = failure.FirstFailed
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.remoteAccessFailure, oldestKey)
+	}
+}
+
+func remoteAccessFailureExpired(failure remoteAccessFailure, now time.Time) bool {
+	if !failure.LockedUntil.IsZero() {
+		return !now.Before(failure.LockedUntil)
+	}
+	if failure.FirstFailed.IsZero() {
+		return true
+	}
+	return now.Sub(failure.FirstFailed) > remoteAccessFailureWindow
+}
+
 func remoteAccessClientKey(r *http.Request) string {
+	if isLoopbackHost(r.RemoteAddr) {
+		if ip := trustedForwardedClientIP(r); ip != "" {
+			return "ip:" + ip
+		}
+	}
+	if ip := headerClientIP(r.RemoteAddr); ip != "" {
+		return "ip:" + ip
+	}
 	if host := hostOnly(r.RemoteAddr); host != "" {
-		return host
+		return "host:" + host
 	}
 	return "unknown"
+}
+
+func trustedForwardedClientIP(r *http.Request) string {
+	if ip := firstHeaderClientIP(r.Header.Values("CF-Connecting-IP")); ip != "" {
+		return ip
+	}
+	if ip := firstForwardedForClientIP(r.Header.Values("Forwarded")); ip != "" {
+		return ip
+	}
+	if ip := firstHeaderClientIP(r.Header.Values("X-Forwarded-For")); ip != "" {
+		return ip
+	}
+	if ip := firstHeaderClientIP(r.Header.Values("True-Client-IP")); ip != "" {
+		return ip
+	}
+	return firstHeaderClientIP(r.Header.Values("X-Real-IP"))
+}
+
+func firstForwardedForClientIP(values []string) string {
+	for _, value := range values {
+		for _, part := range splitCommaList(value) {
+			for _, param := range strings.Split(part, ";") {
+				key, raw, ok := strings.Cut(strings.TrimSpace(param), "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(key), "for") {
+					continue
+				}
+				if ip := headerClientIP(raw); ip != "" {
+					return ip
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func firstHeaderClientIP(values []string) string {
+	for _, value := range values {
+		for _, item := range splitCommaList(value) {
+			if ip := headerClientIP(item); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+func headerClientIP(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "\"")
+	if value == "" || strings.EqualFold(value, "unknown") || strings.HasPrefix(value, "_") {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	value = strings.Trim(value, "[]")
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func (s *Server) validRemoteAccess(r *http.Request) bool {

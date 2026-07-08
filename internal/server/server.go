@@ -21,6 +21,7 @@ type Server struct {
 	cfgMu               sync.RWMutex
 	configPath          string
 	startedAt           time.Time
+	clock               func() time.Time
 	localToken          string
 	remoteAccessToken   string
 	remoteAccessFailure map[string]remoteAccessFailure
@@ -36,7 +37,18 @@ func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hu
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
 	}
-	return &Server{cfg: cfg, startedAt: time.Now().UTC(), localToken: newLocalToken(), remoteAccessToken: newLocalToken(), remoteAccessFailure: make(map[string]remoteAccessFailure), store: store, runner: runner, hub: hub, providers: providerRegistry}
+	return &Server{
+		cfg:                 cfg,
+		startedAt:           time.Now().UTC(),
+		clock:               time.Now,
+		localToken:          newLocalToken(),
+		remoteAccessToken:   newLocalToken(),
+		remoteAccessFailure: make(map[string]remoteAccessFailure),
+		store:               store,
+		runner:              runner,
+		hub:                 hub,
+		providers:           providerRegistry,
+	}
 }
 
 func (s *Server) SetConfigPath(path string) {
@@ -54,10 +66,10 @@ func (s *Server) configSnapshot() config.Config {
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(s.localRequestGuard)
+	r.Use(middleware.RealIP)
 	s.mountUI(r)
 
 	r.Get("/api/health", s.health)
