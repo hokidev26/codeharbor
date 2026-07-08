@@ -13,16 +13,17 @@ import (
 )
 
 type runtimeSummaryResponse struct {
-	GeneratedAt string                `json:"generatedAt"`
-	Version     string                `json:"version"`
-	Server      runtimeServerSummary  `json:"server"`
-	Process     runtimeProcessSummary `json:"process"`
-	Go          runtimeGoSummary      `json:"go"`
-	Memory      runtimeMemorySummary  `json:"memory"`
-	Paths       []runtimePathSummary  `json:"paths"`
-	Agent       runtimeAgentSummary   `json:"agent"`
-	Providers   runtimeProviderStats  `json:"providers"`
-	Backends    runtimeBackendStats   `json:"backends"`
+	GeneratedAt string                 `json:"generatedAt"`
+	Version     string                 `json:"version"`
+	Server      runtimeServerSummary   `json:"server"`
+	Process     runtimeProcessSummary  `json:"process"`
+	Go          runtimeGoSummary       `json:"go"`
+	Memory      runtimeMemorySummary   `json:"memory"`
+	Paths       []runtimePathSummary   `json:"paths"`
+	Agent       runtimeAgentSummary    `json:"agent"`
+	Security    runtimeSecuritySummary `json:"security"`
+	Providers   runtimeProviderStats   `json:"providers"`
+	Backends    runtimeBackendStats    `json:"backends"`
 }
 
 type runtimeServerSummary struct {
@@ -84,8 +85,20 @@ type runtimeBackendStats struct {
 	Active     int `json:"active"`
 }
 
+type runtimeSecuritySummary struct {
+	Exposed                  bool   `json:"exposed"`
+	CurrentRequestRemote     bool   `json:"currentRequestRemote"`
+	RemoteAccessRequired     bool   `json:"remoteAccessRequired"`
+	AccessPasswordConfigured bool   `json:"accessPasswordConfigured"`
+	BypassPermissionsAllowed bool   `json:"bypassPermissionsAllowed"`
+	MaxPermissionMode        string `json:"maxPermissionMode"`
+	Mode                     string `json:"mode"`
+	Message                  string `json:"message"`
+}
+
 func (s *Server) runtimeSummary(w http.ResponseWriter, r *http.Request) {
 	summary := buildRuntimeSummary(s.configSnapshot(), s.configPathSnapshot(), s.startedAt)
+	summary.Security = s.runtimeSecuritySummaryForRequest(r)
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -120,6 +133,12 @@ func buildRuntimeSummary(cfg config.Config, configPath string, startedAt time.Ti
 		if backend.Active {
 			backendStats.Active++
 		}
+	}
+
+	securityHardening := cfg.Security.Exposed
+	securityMessage := "本地模式：允许使用完整权限模式。"
+	if securityHardening {
+		securityMessage = "显式暴露模式已启用：需要访问密码，且禁用 bypassPermissions。"
 	}
 
 	return runtimeSummaryResponse{
@@ -169,6 +188,15 @@ func buildRuntimeSummary(cfg config.Config, configPath string, startedAt time.Ti
 			FirstTokenTimeoutMs:    cfg.Agent.FirstTokenTimeoutMs,
 			MaxTransientRetries:    cfg.Agent.MaxTransientRetries,
 		},
+		Security: runtimeSecuritySummary{
+			Exposed:                  cfg.Security.Exposed,
+			RemoteAccessRequired:     securityHardening,
+			AccessPasswordConfigured: strings.TrimSpace(cfg.Security.AccessPassword) != "",
+			BypassPermissionsAllowed: !securityHardening,
+			MaxPermissionMode:        mapBoolString(securityHardening, "acceptEdits", "bypassPermissions"),
+			Mode:                     mapBoolString(securityHardening, "remote-hardened", "local"),
+			Message:                  securityMessage,
+		},
 		Providers: providerStats,
 		Backends:  backendStats,
 	}
@@ -191,4 +219,37 @@ func runtimeServerPort(cfg config.Config) int {
 		return 7788
 	}
 	return cfg.Server.Port
+}
+
+func mapBoolString(condition bool, whenTrue, whenFalse string) string {
+	if condition {
+		return whenTrue
+	}
+	return whenFalse
+}
+
+func (s *Server) runtimeSecuritySummaryForRequest(r *http.Request) runtimeSecuritySummary {
+	cfg := s.configSnapshot()
+	remoteRequest := !isLoopbackHost(r.Host)
+	hardening := cfg.Security.Exposed || remoteRequest
+	accessPasswordConfigured := strings.TrimSpace(cfg.Security.AccessPassword) != ""
+	summary := runtimeSecuritySummary{
+		Exposed:                  cfg.Security.Exposed,
+		CurrentRequestRemote:     remoteRequest,
+		RemoteAccessRequired:     hardening,
+		AccessPasswordConfigured: accessPasswordConfigured,
+		BypassPermissionsAllowed: !hardening,
+		MaxPermissionMode:        "bypassPermissions",
+		Mode:                     "local",
+		Message:                  "本地模式：允许使用完整权限模式。",
+	}
+	if hardening {
+		summary.MaxPermissionMode = "acceptEdits"
+		summary.Mode = "remote-hardened"
+		summary.Message = "远程收紧已启用：需要访问密码，且禁用 bypassPermissions。"
+		if !accessPasswordConfigured {
+			summary.Message = "远程收紧已启用：请配置 CODEHARBOR_ACCESS_PASSWORD 或仅通过已认证边缘访问。"
+		}
+	}
+	return summary
 }

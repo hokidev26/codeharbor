@@ -93,11 +93,12 @@ func (s *Server) updateNarratorPermissionMode(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !validPermissionMode(req.PermissionMode) {
-		writeError(w, http.StatusBadRequest, "invalid permissionMode")
+	permissionMode, ok, message := s.permissionModeAllowedForRequest(r, req.PermissionMode)
+	if !ok {
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	narrator, err := s.store.UpdateNarratorPermissionMode(r.Context(), chi.URLParam(r, "id"), req.PermissionMode)
+	narrator, err := s.store.UpdateNarratorPermissionMode(r.Context(), chi.URLParam(r, "id"), permissionMode)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -155,6 +156,10 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "text is required")
 		return
 	}
+	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), req.Text, req.CreatedBy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -172,6 +177,10 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
+		writeError(w, statusFromError(err), err.Error())
 		return
 	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), text, createdBy, attachments...)
@@ -232,6 +241,10 @@ func (s *Server) executeTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Input) == 0 {
 		req.Input = json.RawMessage(`{}`)
+	}
+	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
 	}
 	result, err := s.runner.ExecuteTool(r.Context(), chi.URLParam(r, "id"), tools.Call{ID: req.ToolUseID, Name: req.ToolName, Input: req.Input})
 	if err != nil {

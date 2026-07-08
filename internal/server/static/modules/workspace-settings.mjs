@@ -148,8 +148,14 @@ export function createWorkspaceSettingsController({
   }
 
   function renderPermissionModeOptions(selected) {
+    const bypassDisabled = Boolean(state.runtimeSummary?.security?.bypassPermissionsAllowed === false);
+    const effectiveSelected = bypassDisabled && selected === "bypassPermissions" ? "acceptEdits" : selected;
     return ["readOnly", "acceptEdits", "bypassPermissions", "default", "dontAsk"]
-      .map((mode) => `<option value="${escapeAttr(mode)}" ${mode === selected ? "selected" : ""}>${escapeHtml(mode)}</option>`)
+      .map((mode) => {
+        const disabled = bypassDisabled && mode === "bypassPermissions";
+        const label = disabled ? `${mode}（远程禁用）` : mode;
+        return `<option value="${escapeAttr(mode)}" ${mode === effectiveSelected ? "selected" : ""} ${disabled ? "disabled" : ""}>${escapeHtml(label)}</option>`;
+      })
       .join("");
   }
 

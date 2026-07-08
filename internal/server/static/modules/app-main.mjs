@@ -755,11 +755,13 @@ async function loadRuntimeSummary({ notify = false } = {}) {
     if (seq !== state.runtimeSeq) return;
     state.runtimeSummary = summary;
     state.runtimeError = "";
+    updateSecurityModeUI();
     if (notify) notifyTerminal("[info] 运行时状态已刷新。\n");
   } catch (err) {
     if (seq !== state.runtimeSeq) return;
     state.runtimeSummary = null;
     state.runtimeError = err.message || String(err);
+    updateSecurityModeUI();
     if (notify) notifyTerminal(`[warn] 运行时状态刷新失败：${state.runtimeError}\n`);
   } finally {
     if (seq === state.runtimeSeq) setButtonBusy(button, false, "刷新中");
@@ -1058,6 +1060,67 @@ function permissionLabel(value) {
   return labels[value] || value || "默认";
 }
 
+function currentSecuritySummary() {
+  return state.runtimeSummary?.security || null;
+}
+
+function remoteSecurityHardeningActive() {
+  const security = currentSecuritySummary();
+  if (!security) return false;
+  return Boolean(security.remoteAccessRequired || security.exposed || security.currentRequestRemote || security.bypassPermissionsAllowed === false);
+}
+
+function bypassDisabledBySecurity() {
+  const security = currentSecuritySummary();
+  return remoteSecurityHardeningActive() && security?.bypassPermissionsAllowed === false;
+}
+
+function effectivePermissionForDisplay(value) {
+  if (value === "bypassPermissions" && bypassDisabledBySecurity()) return "acceptEdits";
+  return value;
+}
+
+function enforcePermissionSelectCap() {
+  const select = $("permissionMode");
+  if (!select) return;
+  const disabled = bypassDisabledBySecurity();
+  const option = Array.from(select.options).find((item) => item.value === "bypassPermissions");
+  if (option) {
+    option.disabled = disabled;
+    option.textContent = disabled ? "bypassPermissions（远程禁用）" : "bypassPermissions";
+  }
+  if (disabled && select.value === "bypassPermissions") {
+    select.value = "acceptEdits";
+  }
+}
+
+function updateSecurityModeUI() {
+  const security = currentSecuritySummary();
+  const active = remoteSecurityHardeningActive();
+  const badge = $("securityModeBadge");
+  if (badge) {
+    badge.textContent = active ? "隧道收紧" : "本地";
+    badge.title = security?.message || (active ? "远程收紧已启用" : "本地模式");
+    badge.classList.toggle("warn", active);
+    badge.classList.toggle("ok", !active);
+  }
+  const banner = $("remoteSecurityBanner");
+  if (banner) {
+    if (active) {
+      const passwordText = security?.accessPasswordConfigured ? "访问密码已启用" : "未配置访问密码";
+      banner.innerHTML = `<strong>远程收紧</strong><span>${escapeHtml(passwordText)} · 已禁用自动执行</span>`;
+      banner.classList.remove("hidden");
+      banner.classList.toggle("danger", !security?.accessPasswordConfigured);
+    } else {
+      banner.classList.add("hidden");
+      banner.innerHTML = "";
+      banner.classList.remove("danger");
+    }
+  }
+  enforcePermissionSelectCap();
+  updateWorkspaceMetaPills();
+}
+
 function currentWorkspaceModel() {
   return state.narrator?.model || selectedModelValue() || currentModelValue() || "未选择模型";
 }
@@ -1071,11 +1134,13 @@ function updateWorkspaceMetaPills() {
     return;
   }
   const cwd = canonicalLocalPath(state.narrator?.cwd || state.project?.gitPath || "");
-  const permission = state.narrator?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits";
+  const permission = effectivePermissionForDisplay(state.narrator?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
   const model = currentWorkspaceModel();
+  const securityText = remoteSecurityHardeningActive() ? "隧道收紧" : "本地";
   el.innerHTML = `
     <span class="workspace-pill" title="${escapeAttr(cwd)}">目录：${escapeHtml(shortPath(cwd))}</span>
     <span class="workspace-pill">权限：${escapeHtml(permissionLabel(permission))}</span>
+    <span class="workspace-pill security-workspace-pill">模式：${escapeHtml(securityText)}</span>
     <span class="workspace-pill" title="${escapeAttr(model)}">模型：${escapeHtml(model)}</span>
   `;
   el.classList.remove("hidden");
@@ -1266,6 +1331,7 @@ async function enterNarrator() {
   $("currentTitle").textContent = state.project?.name || state.narrator.title;
   $("currentMeta").textContent = state.narrator.title || "AI 代理已就绪";
   $("permissionMode").value = state.narrator.permissionMode || "acceptEdits";
+  enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
   renderModelOptions();
   restoreCurrentChatDraft();
@@ -1596,7 +1662,7 @@ async function init() {
     autoResizeMessageInput();
     renderRecentSidebarDirectories();
     await loadHealth();
-    await Promise.all([loadSettings(), loadModelCatalog(), loadProjects(), loadBackends()]);
+    await Promise.all([loadSettings(), loadRuntimeSummary(), loadModelCatalog(), loadProjects(), loadBackends()]);
     if (seq !== state.initSeq) return;
     if (!state.narrator && state.projects.length) {
       await selectProject(state.projects[0].id);

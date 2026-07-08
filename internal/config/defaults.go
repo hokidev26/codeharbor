@@ -20,6 +20,7 @@ type Config struct {
 	Paths         PathsConfig     `json:"paths"`
 	Agent         AgentConfig     `json:"agent"`
 	Auth          AuthConfig      `json:"auth"`
+	Security      SecurityConfig  `json:"security"`
 	Providers     ProvidersConfig `json:"providers"`
 	Backends      BackendsConfig  `json:"backends"`
 }
@@ -49,6 +50,11 @@ type AgentConfig struct {
 type AuthConfig struct {
 	JWTSecret        string `json:"jwtSecret"`
 	RegistrationOpen bool   `json:"registrationOpen"`
+}
+
+type SecurityConfig struct {
+	Exposed        bool   `json:"exposed"`
+	AccessPassword string `json:"accessPassword,omitempty"`
 }
 
 type ProvidersConfig struct {
@@ -115,7 +121,8 @@ func Default() (Config, error) {
 			FirstTokenTimeoutMs:    60000,
 			MaxTransientRetries:    10,
 		},
-		Auth: AuthConfig{RegistrationOpen: true},
+		Auth:     AuthConfig{RegistrationOpen: true},
+		Security: SecurityConfig{Exposed: getenvBool("CODEHARBOR_EXPOSED", false), AccessPassword: os.Getenv("CODEHARBOR_ACCESS_PASSWORD")},
 		Providers: ProvidersConfig{Instances: []ProviderConfig{
 			{
 				Name:   "openai",
@@ -188,6 +195,7 @@ func Load(path string) (Config, error) {
 
 func normalizeConfig(cfg Config) Config {
 	cfg = migrateConfig(cfg)
+	applySecurityEnvOverrides(&cfg.Security)
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)
 	return cfg
@@ -198,6 +206,15 @@ func migrateConfig(cfg Config) Config {
 		cfg.SchemaVersion = CurrentConfigVersion
 	}
 	return cfg
+}
+
+func applySecurityEnvOverrides(security *SecurityConfig) {
+	if value, ok := lookupBoolEnv("CODEHARBOR_EXPOSED"); ok {
+		security.Exposed = value
+	}
+	if value := os.Getenv("CODEHARBOR_ACCESS_PASSWORD"); value != "" {
+		security.AccessPassword = value
+	}
 }
 
 func (c Config) Addr() string {
@@ -350,6 +367,7 @@ func writeDefaultConfig(path string, cfg Config) error {
 func sanitizeConfigForDisk(cfg Config) Config {
 	cfg = normalizeConfig(cfg)
 	cfg.Auth.JWTSecret = ""
+	cfg.Security.AccessPassword = ""
 	if len(cfg.Providers.Instances) > 0 {
 		cfg.Providers.Instances = append([]ProviderConfig(nil), cfg.Providers.Instances...)
 		for i := range cfg.Providers.Instances {
@@ -443,4 +461,24 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvBool(key string, fallback bool) bool {
+	value, ok := lookupBoolEnv(key)
+	if !ok {
+		return fallback
+	}
+	return value
+}
+
+func lookupBoolEnv(key string) (bool, bool) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }

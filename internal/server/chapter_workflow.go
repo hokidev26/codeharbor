@@ -139,12 +139,16 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 	}
 	permissionMode := strings.TrimSpace(req.PermissionMode)
 	if permissionMode == "" {
-		permissionMode = s.configSnapshot().Agent.DefaultPermissionMode
-	}
-	if !validPermissionMode(permissionMode) {
-		_ = removeGitWorktree(context.Background(), repoRoot, worktreePath)
-		writeError(w, http.StatusBadRequest, "invalid permissionMode")
-		return
+		permissionMode = s.safeDefaultPermissionModeForRequest(r, s.configSnapshot().Agent.DefaultPermissionMode)
+	} else {
+		var ok bool
+		var message string
+		permissionMode, ok, message = s.permissionModeAllowedForRequest(r, permissionMode)
+		if !ok {
+			_ = removeGitWorktree(context.Background(), repoRoot, worktreePath)
+			writeError(w, http.StatusBadRequest, message)
+			return
+		}
 	}
 	chapter, narrator, err := s.store.CreateChapterFork(r.Context(), parent, title, branch, worktreePath, baseRef, forkPoint, model, permissionMode)
 	if err != nil {

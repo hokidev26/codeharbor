@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,12 +13,14 @@ import (
 
 	"codeharbor/internal/agent"
 	"codeharbor/internal/config"
+	"codeharbor/internal/db"
 )
 
 func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "localhost:7788"
 	request.Header.Set("Origin", "http://evil.test")
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -29,6 +34,7 @@ func TestLocalRequestGuardRejectsFetchSiteCrossSiteWithoutOrigin(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "localhost:7788"
 	request.Header.Set("Sec-Fetch-Site", "cross-site")
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -43,6 +49,7 @@ func TestLocalRequestGuardRequiresTokenForFetchSiteBrowserAPI(t *testing.T) {
 
 	missing := httptest.NewRecorder()
 	missingReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	missingReq.Host = "localhost:7788"
 	missingReq.Header.Set("Sec-Fetch-Site", "same-origin")
 	app.Routes().ServeHTTP(missing, missingReq)
 	if missing.Code != http.StatusUnauthorized {
@@ -51,6 +58,7 @@ func TestLocalRequestGuardRequiresTokenForFetchSiteBrowserAPI(t *testing.T) {
 
 	ok := httptest.NewRecorder()
 	okReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	okReq.Host = "localhost:7788"
 	okReq.Header.Set("Sec-Fetch-Site", "same-origin")
 	okReq.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(ok, okReq)
@@ -64,8 +72,8 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 
 	missing := httptest.NewRecorder()
 	missingReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-	missingReq.Header.Set("Origin", "http://example.com")
-	missingReq.Host = "example.com"
+	missingReq.Header.Set("Origin", "http://localhost:7788")
+	missingReq.Host = "localhost:7788"
 	app.Routes().ServeHTTP(missing, missingReq)
 	if missing.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without token, got %d: %s", missing.Code, missing.Body.String())
@@ -73,9 +81,9 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 
 	ok := httptest.NewRecorder()
 	okReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-	okReq.Header.Set("Origin", "http://example.com")
+	okReq.Header.Set("Origin", "http://localhost:7788")
 	okReq.Header.Set(localTokenHeader, app.localToken)
-	okReq.Host = "example.com"
+	okReq.Host = "localhost:7788"
 	app.Routes().ServeHTTP(ok, okReq)
 	if ok.Code != http.StatusOK {
 		t.Fatalf("expected 200 with token, got %d: %s", ok.Code, ok.Body.String())
@@ -86,6 +94,7 @@ func TestLocalRequestGuardAllowsNonBrowserLocalAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "localhost:7788"
 
 	app.Routes().ServeHTTP(recorder, request)
 
@@ -98,6 +107,7 @@ func TestIndexInjectsLocalToken(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Host = "localhost:7788"
 
 	app.Routes().ServeHTTP(recorder, request)
 
@@ -127,5 +137,132 @@ func TestWebSocketRejectsBadOriginAndMissingToken(t *testing.T) {
 	_, _, err = websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{server.URL}}})
 	if err == nil {
 		t.Fatal("expected missing token websocket dial to fail")
+	}
+}
+
+func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Host = "demo.trycloudflare.com"
+	request.Header.Set("Accept", "text/html")
+
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 login page, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "CODEHARBOR_ACCESS_PASSWORD") {
+		t.Fatalf("expected password configuration guidance, got %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "window.CODEHARBOR_LOCAL_TOKEN=") {
+		t.Fatal("remote login page must not leak local token")
+	}
+}
+
+func TestRemoteAccessGateAllowsRemoteRequestAfterPasswordLogin(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+
+	login := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	loginReq.Host = "demo.trycloudflare.com"
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(login, loginReq)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %d: %s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected remote access cookie")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "demo.trycloudflare.com"
+	request.Header.Set("Origin", "http://demo.trycloudflare.com")
+	request.Header.Set(localTokenHeader, app.localToken)
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 after remote login, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessGateAllowsBearerPasswordForAPI(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "demo.trycloudflare.com"
+	request.Header.Set("Authorization", "Bearer secret")
+
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 with bearer password, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteHardeningRejectsBypassPermissionMode(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, store, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/narrators/"+narrator.ID+"/permission-mode", strings.NewReader(`{"permissionMode":"bypassPermissions"}`))
+	request.Host = "localhost:7788"
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "bypassPermissions is disabled") {
+		t.Fatalf("expected bypass disabled error, got %s", recorder.Body.String())
+	}
+}
+
+func TestRemoteHardeningClampsDefaultBypassForNewProject(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectDir := filepath.Join(t.TempDir(), "project")
+	cfg := config.Config{
+		Paths:    config.PathsConfig{DefaultProjectDir: t.TempDir()},
+		Agent:    config.AgentConfig{DefaultModel: "fake:test", DefaultPermissionMode: "bypassPermissions"},
+		Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"},
+	}
+	app := New(cfg, store, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", strings.NewReader(`{"name":"Demo","gitPath":"`+projectDir+`"}`))
+	request.Host = "localhost:7788"
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Narrator db.Narrator `json:"narrator"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Narrator.PermissionMode != "acceptEdits" {
+		t.Fatalf("expected acceptEdits cap, got %q", body.Narrator.PermissionMode)
 	}
 }

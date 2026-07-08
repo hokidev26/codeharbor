@@ -28,6 +28,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Agent.ContextTokenLimit <= 0 {
 		t.Fatalf("expected positive context token limit, got %d", cfg.Agent.ContextTokenLimit)
 	}
+	if cfg.Security.Exposed || cfg.Security.AccessPassword != "" {
+		t.Fatalf("expected local security defaults, got %+v", cfg.Security)
+	}
 	provider := providerByName(cfg, "cliproxyapi")
 	if provider == nil {
 		t.Fatal("expected CLIProxyAPI provider preset")
@@ -45,6 +48,18 @@ func TestContextTokenLimitFromEnv(t *testing.T) {
 	}
 	if cfg.Agent.ContextTokenLimit != 12345 {
 		t.Fatalf("expected env context token limit, got %d", cfg.Agent.ContextTokenLimit)
+	}
+}
+
+func TestSecurityConfigFromEnv(t *testing.T) {
+	t.Setenv("CODEHARBOR_EXPOSED", "true")
+	t.Setenv("CODEHARBOR_ACCESS_PASSWORD", "remote-secret")
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Security.Exposed || cfg.Security.AccessPassword != "remote-secret" {
+		t.Fatalf("expected security env overrides, got %+v", cfg.Security)
 	}
 }
 
@@ -110,6 +125,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	t.Setenv("CLIPROXYAPI_API_KEY", "cliproxy-secret")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_URL", "http://127.0.0.1:8000")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_API_KEY", "backend-secret")
+	t.Setenv("CODEHARBOR_ACCESS_PASSWORD", "remote-access-secret")
 
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg, err := Load(path)
@@ -135,7 +151,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"openai-secret", "anthropic-secret", "cliproxy-secret", "compatible-secret", "backend-secret"} {
+	for _, secret := range []string{"openai-secret", "anthropic-secret", "cliproxy-secret", "compatible-secret", "backend-secret", "remote-access-secret"} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("persisted config contains secret %q", secret)
 		}
@@ -157,6 +173,9 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 		if backend.APIKey != "" {
 			t.Fatalf("expected persisted backend api key to be empty for %s", backend.Name)
 		}
+	}
+	if persisted.Security.AccessPassword != "" {
+		t.Fatal("expected persisted remote access password to be empty")
 	}
 }
 

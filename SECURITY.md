@@ -35,11 +35,35 @@ The repository `.gitignore` excludes common local secret and runtime files, but 
 - Browser-originated API calls must pass a per-process local token injected into the UI; cross-site `Origin` requests are rejected, and `Sec-Fetch-Site: cross-site` is rejected even when `Origin` is absent.
 - WebSocket upgrades require the same local token and same-origin checks before the connection is accepted.
 - The local token is a browser cross-site protection, not a multi-user authentication system. A process or user that can read the local UI response on the same machine can also obtain the token.
+- Requests whose `Host` is not loopback, or any request while `security.exposed` / `CODEHARBOR_EXPOSED=true` is active, enter remote hardening mode. Remote hardening requires the shared `CODEHARBOR_ACCESS_PASSWORD` gate before serving the UI/API and caps permission modes at `acceptEdits` by disabling `bypassPermissions`.
+- Remote access cookies are process-local and rotate on restart. API clients may also send `Authorization: Bearer $CODEHARBOR_ACCESS_PASSWORD` or `X-CodeHarbor-Access: $CODEHARBOR_ACCESS_PASSWORD`.
 - Git status/diff/log/commit and chapter workflow APIs reject repositories outside the current project path, configured default project directory, or CodeHarbor-created chapter worktree.
 - Tools can interact with the local filesystem within configured working directories.
 - Bash and stdio MCP execution are permission-gated but remain powerful local code execution.
 - MCP registry entries can launch local stdio processes; registry API responses expose environment variable names only, not stored values.
 - Backend API keys are stored locally and are never returned by API responses; responses expose only whether a key is configured.
+
+## Remote tunnel checklist
+
+Do not expose a raw `localhost:7788` URL to the public Internet without an authentication layer.
+
+Recommended personal setup:
+
+1. Configure Cloudflare Tunnel as a named tunnel, not a temporary `trycloudflare.com` URL.
+2. In Cloudflare Zero Trust, create a self-hosted Access application for the tunnel hostname.
+3. Add an Access policy that only allows your email, identity provider group, or one-time PIN identity.
+4. Start CodeHarbor in explicit exposed mode with a second local password gate:
+
+   ```sh
+   CODEHARBOR_EXPOSED=true CODEHARBOR_ACCESS_PASSWORD='use-a-long-random-password' ./codeharbor
+   ```
+
+5. Confirm the UI header shows `隧道收紧`. In this mode `bypassPermissions` is unavailable; use `acceptEdits` plus approvals for Bash.
+
+Cloudflare's current dashboard flow is documented in their official Zero Trust docs for creating a remote tunnel and adding a self-hosted Access application:
+
+- https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/
+- https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/
 
 ## Known hardening work
 

@@ -78,7 +78,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = cfg.Agent.DefaultModel
 	}
-	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, cfg.Agent.DefaultPermissionMode)
+	permissionMode := s.safeDefaultPermissionModeForRequest(r, cfg.Agent.DefaultPermissionMode)
+	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, permissionMode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

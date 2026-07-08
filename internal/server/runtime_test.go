@@ -53,6 +53,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/runtime/summary", nil)
+	request.Host = "localhost:7788"
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -83,6 +84,9 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 	if len(body.Paths) != 4 || body.Agent.DefaultModel != "openai:gpt-4.1-mini" || body.Agent.MaxTurns != 120 {
 		t.Fatalf("unexpected config summary: paths=%+v agent=%+v", body.Paths, body.Agent)
 	}
+	if body.Security.RemoteAccessRequired || !body.Security.BypassPermissionsAllowed || body.Security.MaxPermissionMode != "bypassPermissions" {
+		t.Fatalf("unexpected local security summary: %+v", body.Security)
+	}
 }
 
 func TestBuildRuntimeSummaryUsesSafeDefaults(t *testing.T) {
@@ -96,5 +100,15 @@ func TestBuildRuntimeSummaryUsesSafeDefaults(t *testing.T) {
 	}
 	if summary.Version != config.Version || summary.GeneratedAt == "" {
 		t.Fatalf("unexpected metadata: %+v", summary)
+	}
+}
+
+func TestBuildRuntimeSummaryReflectsExposedSecurityDefaults(t *testing.T) {
+	summary := buildRuntimeSummary(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, "", time.Now())
+	if !summary.Security.RemoteAccessRequired || summary.Security.BypassPermissionsAllowed || summary.Security.MaxPermissionMode != "acceptEdits" {
+		t.Fatalf("unexpected exposed security summary: %+v", summary.Security)
+	}
+	if !summary.Security.AccessPasswordConfigured {
+		t.Fatalf("expected access password to be reported as configured: %+v", summary.Security)
 	}
 }

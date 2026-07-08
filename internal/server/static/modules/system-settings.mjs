@@ -53,9 +53,13 @@ export function createSystemSettingsController({
     const go = summary.go || {};
     const providers = summary.providers || {};
     const backends = summary.backends || {};
+    const security = summary.security || {};
     return `
     <div class="usage-summary-grid">
       ${renderUsageMetricCard("监听地址", server.address || "未配置", "当前 Web UI 与 API 服务地址")}
+      ${renderUsageMetricCard("访问模式", security.remoteAccessRequired ? "隧道收紧" : "本地", security.message || "当前请求的安全状态")}
+      ${renderUsageMetricCard("自动执行", security.bypassPermissionsAllowed ? "允许" : "禁用", `权限上限：${security.maxPermissionMode || "bypassPermissions"}`)}
+      ${renderUsageMetricCard("访问密码", security.accessPasswordConfigured ? "已配置" : "未配置", "CODEHARBOR_ACCESS_PASSWORD")}
       ${renderUsageMetricCard("运行时长", formatUptime(process.uptimeSeconds || 0), `启动：${formatTimestamp(process.startedAt)}`)}
       ${renderUsageMetricCard("CPU", go.cpus || 0, `${go.os || "unknown"}/${go.arch || "unknown"}`)}
       ${renderUsageMetricCard("Provider", providers.total || 0, `${formatNumber(providers.configured || 0)} 个已配置`)}
@@ -113,6 +117,7 @@ export function createSystemSettingsController({
     const memory = summary.memory || {};
     const go = summary.go || {};
     const agent = summary.agent || {};
+    const security = summary.security || {};
     return `
     <div class="usage-summary-grid">
       ${renderUsageMetricCard("当前分配", formatBytes(memory.allocBytes || 0), "仍在使用的 Go 堆对象")}
@@ -129,6 +134,7 @@ export function createSystemSettingsController({
           ${renderRuntimeKeyValue("默认模型", agent.defaultModel || "未配置")}
           ${renderRuntimeKeyValue("摘要模型", agent.summaryModel || "未配置")}
           ${renderRuntimeKeyValue("默认权限", agent.defaultPermissionMode || "acceptEdits")}
+          ${renderRuntimeKeyValue("当前权限上限", security.maxPermissionMode || "bypassPermissions")}
           ${renderRuntimeKeyValue("默认计划模式", agent.defaultStartInPlanMode ? "开启" : "关闭")}
         </div>
       </section>

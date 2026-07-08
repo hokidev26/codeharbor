@@ -404,6 +404,38 @@ body.ui-density-compact .terminal-header { height: 38px; }
   padding: 3px 8px;
   font-size: 11px;
 }
+.security-mode-pill {
+  border-color: rgba(85, 209, 125, .24);
+  background: rgba(85, 209, 125, .08);
+  color: #8fe9aa;
+  white-space: nowrap;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.security-mode-pill.warn {
+  border-color: rgba(255, 184, 108, .32);
+  background: rgba(255, 184, 108, .12);
+  color: #ffd39b;
+}
+.remote-security-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 18px;
+  border-bottom: 1px solid rgba(255, 184, 108, .26);
+  background: linear-gradient(90deg, rgba(255, 184, 108, .14), rgba(127, 145, 255, .08));
+  color: #ffe5c2;
+  font-size: 12px;
+}
+.remote-security-banner strong { color: #ffd39b; }
+.remote-security-banner span { color: var(--text-soft); }
+.remote-security-banner.danger {
+  border-color: rgba(255, 107, 107, .32);
+  background: rgba(255, 107, 107, .12);
+}
+.remote-security-banner.danger strong { color: #ffb0b0; }
+.security-workspace-pill { border-color: rgba(255, 184, 108, .24); color: #ffd39b; }
 .chat-title { font-size: 16px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-subtitle { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60vw; }
 .workspace-meta-pills {
@@ -3101,6 +3133,30 @@ body.theme-light .effort-pill { color: #52525b; }
 
   .header-actions .pill {
     display: none;
+  }
+
+  .header-actions .security-mode-pill {
+    display: inline-flex;
+    max-width: 94px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+  }
+
+  .remote-security-banner {
+    min-height: 36px;
+    padding: 7px 14px;
+    gap: 7px;
+    font-size: 12px;
+    background: rgba(255, 184, 108, .10);
+    border-bottom-color: rgba(255, 184, 108, .2);
+  }
+
+  .remote-security-banner span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .icon-btn,

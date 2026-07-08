@@ -17,15 +17,16 @@ import (
 )
 
 type Server struct {
-	cfg        config.Config
-	cfgMu      sync.RWMutex
-	configPath string
-	startedAt  time.Time
-	localToken string
-	store      *db.Store
-	runner     *agent.Runner
-	hub        *agent.Hub
-	providers  *providers.Registry
+	cfg               config.Config
+	cfgMu             sync.RWMutex
+	configPath        string
+	startedAt         time.Time
+	localToken        string
+	remoteAccessToken string
+	store             *db.Store
+	runner            *agent.Runner
+	hub               *agent.Hub
+	providers         *providers.Registry
 }
 
 func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -33,7 +34,7 @@ func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hu
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
 	}
-	return &Server{cfg: cfg, startedAt: time.Now().UTC(), localToken: newLocalToken(), store: store, runner: runner, hub: hub, providers: providerRegistry}
+	return &Server{cfg: cfg, startedAt: time.Now().UTC(), localToken: newLocalToken(), remoteAccessToken: newLocalToken(), store: store, runner: runner, hub: hub, providers: providerRegistry}
 }
 
 func (s *Server) SetConfigPath(path string) {
