@@ -336,23 +336,39 @@ func (s *Server) pruneRemoteAccessFailuresLocked(now time.Time) {
 
 func (s *Server) trimRemoteAccessFailuresLocked() {
 	for len(s.remoteAccessFailure) > remoteAccessFailureMaxEntries {
-		oldestKey := ""
-		oldest := time.Time{}
-		for key, failure := range s.remoteAccessFailure {
-			if failure.FirstFailed.IsZero() {
-				oldestKey = key
-				break
-			}
-			if oldestKey == "" || failure.FirstFailed.Before(oldest) {
-				oldestKey = key
-				oldest = failure.FirstFailed
-			}
-		}
-		if oldestKey == "" {
+		candidate := remoteAccessFailureTrimCandidate(s.remoteAccessFailure)
+		if candidate == "" {
 			return
 		}
-		delete(s.remoteAccessFailure, oldestKey)
+		delete(s.remoteAccessFailure, candidate)
 	}
+}
+
+func remoteAccessFailureTrimCandidate(failures map[string]remoteAccessFailure) string {
+	oldestUnlockedKey := ""
+	oldestUnlocked := time.Time{}
+	oldestLockedKey := ""
+	oldestLocked := time.Time{}
+	for key, failure := range failures {
+		if failure.FirstFailed.IsZero() {
+			return key
+		}
+		if failure.LockedUntil.IsZero() {
+			if oldestUnlockedKey == "" || failure.FirstFailed.Before(oldestUnlocked) {
+				oldestUnlockedKey = key
+				oldestUnlocked = failure.FirstFailed
+			}
+			continue
+		}
+		if oldestLockedKey == "" || failure.FirstFailed.Before(oldestLocked) {
+			oldestLockedKey = key
+			oldestLocked = failure.FirstFailed
+		}
+	}
+	if oldestUnlockedKey != "" {
+		return oldestUnlockedKey
+	}
+	return oldestLockedKey
 }
 
 func remoteAccessFailureExpired(failure remoteAccessFailure, now time.Time) bool {

@@ -69,7 +69,6 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(s.localRequestGuard)
-	r.Use(middleware.RealIP)
 	s.mountUI(r)
 
 	r.Get("/api/health", s.health)

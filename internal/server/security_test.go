@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -394,6 +395,68 @@ func TestRemoteAccessFailureWindowResetsCount(t *testing.T) {
 	recorder := postRemoteAccessPassword(app, "203.0.113.25:5555", "wrong", nil)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected first attempt after window reset to stay 401, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessFailureTrimPreservesLockedEntries(t *testing.T) {
+	current := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	app.clock = func() time.Time { return current }
+
+	lockedReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	lockedReq.RemoteAddr = "203.0.113.30:5555"
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		app.recordRemoteAccessFailure(lockedReq)
+	}
+	if locked, _ := app.remoteAccessLocked(lockedReq); !locked {
+		t.Fatal("expected seeded victim entry to be locked")
+	}
+
+	for i := 1; i <= remoteAccessFailureMaxEntries+25; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+		req.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:5555", (i/65536)%256, (i/256)%256, i%256)
+		app.recordRemoteAccessFailure(req)
+	}
+
+	app.remoteAccessMu.Lock()
+	entryCount := len(app.remoteAccessFailure)
+	_, retained := app.remoteAccessFailure[remoteAccessClientKey(lockedReq)]
+	app.remoteAccessMu.Unlock()
+	if entryCount > remoteAccessFailureMaxEntries {
+		t.Fatalf("expected at most %d failure entries, got %d", remoteAccessFailureMaxEntries, entryCount)
+	}
+	if !retained {
+		t.Fatal("expected locked entry to be retained during capacity trim")
+	}
+	if locked, _ := app.remoteAccessLocked(lockedReq); !locked {
+		t.Fatal("expected locked entry to remain active after capacity trim")
+	}
+}
+
+func TestRemoteAccessFailurePrunesExpiredEntries(t *testing.T) {
+	current := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	app.clock = func() time.Time { return current }
+
+	expiredReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	expiredReq.RemoteAddr = "203.0.113.31:5555"
+	app.recordRemoteAccessFailure(expiredReq)
+	expiredKey := remoteAccessClientKey(expiredReq)
+
+	current = current.Add(remoteAccessFailureWindow + time.Second)
+	freshReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	freshReq.RemoteAddr = "203.0.113.32:5555"
+	app.recordRemoteAccessFailure(freshReq)
+
+	app.remoteAccessMu.Lock()
+	_, expiredRetained := app.remoteAccessFailure[expiredKey]
+	_, freshRetained := app.remoteAccessFailure[remoteAccessClientKey(freshReq)]
+	app.remoteAccessMu.Unlock()
+	if expiredRetained {
+		t.Fatal("expected expired failure entry to be pruned")
+	}
+	if !freshRetained {
+		t.Fatal("expected fresh failure entry to be retained")
 	}
 }
 
