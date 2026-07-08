@@ -22,6 +22,16 @@ const remoteAccessHeader = "X-CodeHarbor-Access"
 const remoteAccessPath = "/auth/remote-access"
 const remoteAccessLogoutPath = "/auth/remote-access/logout"
 
+const remoteAccessMaxFailures = 10
+const remoteAccessFailureWindow = 15 * time.Minute
+const remoteAccessLockDuration = 15 * time.Minute
+
+type remoteAccessFailure struct {
+	Count       int
+	FirstFailed time.Time
+	LockedUntil time.Time
+}
+
 func newLocalToken() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -212,14 +222,24 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "请先在启动环境中配置 CODEHARBOR_ACCESS_PASSWORD。")
 		return
 	}
+	if locked, until := s.remoteAccessLocked(r); locked {
+		s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误次数过多，请在 %s 后重试。", until.Local().Format("15:04:05")))
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		s.writeRemoteAccessLoginPage(w, http.StatusBadRequest, "无法读取密码表单。")
 		return
 	}
 	if !constantTimeEqualToken(r.FormValue("password"), password) {
-		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "密码不正确，请重试。")
+		remaining, lockedUntil := s.recordRemoteAccessFailure(r)
+		if !lockedUntil.IsZero() {
+			s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误次数已达 %d 次，请在 %s 后重试。", remoteAccessMaxFailures, lockedUntil.Local().Format("15:04:05")))
+			return
+		}
+		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, fmt.Sprintf("密码不正确，请重试。剩余 %d 次。", remaining))
 		return
 	}
+	s.clearRemoteAccessFailures(r)
 	s.setRemoteAccessCookie(w, r, s.remoteAccessToken)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -230,12 +250,73 @@ func (s *Server) handleRemoteAccessLogout(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	s.clearRemoteAccessFailures(r)
 	s.clearRemoteAccessCookie(w, r)
 	if acceptsHTML(r) {
 		http.Redirect(w, r, remoteAccessPath, http.StatusSeeOther)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) remoteAccessLocked(r *http.Request) (bool, time.Time) {
+	key := remoteAccessClientKey(r)
+	now := time.Now()
+	s.remoteAccessMu.Lock()
+	defer s.remoteAccessMu.Unlock()
+	failure, ok := s.remoteAccessFailure[key]
+	if !ok {
+		return false, time.Time{}
+	}
+	if !failure.LockedUntil.IsZero() {
+		if now.Before(failure.LockedUntil) {
+			return true, failure.LockedUntil
+		}
+		delete(s.remoteAccessFailure, key)
+		return false, time.Time{}
+	}
+	if now.Sub(failure.FirstFailed) > remoteAccessFailureWindow {
+		delete(s.remoteAccessFailure, key)
+	}
+	return false, time.Time{}
+}
+
+func (s *Server) recordRemoteAccessFailure(r *http.Request) (int, time.Time) {
+	key := remoteAccessClientKey(r)
+	now := time.Now()
+	s.remoteAccessMu.Lock()
+	defer s.remoteAccessMu.Unlock()
+	if s.remoteAccessFailure == nil {
+		s.remoteAccessFailure = make(map[string]remoteAccessFailure)
+	}
+	failure := s.remoteAccessFailure[key]
+	if failure.FirstFailed.IsZero() || now.Sub(failure.FirstFailed) > remoteAccessFailureWindow {
+		failure = remoteAccessFailure{FirstFailed: now}
+	}
+	failure.Count++
+	if failure.Count >= remoteAccessMaxFailures {
+		failure.LockedUntil = now.Add(remoteAccessLockDuration)
+	}
+	s.remoteAccessFailure[key] = failure
+	remaining := remoteAccessMaxFailures - failure.Count
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, failure.LockedUntil
+}
+
+func (s *Server) clearRemoteAccessFailures(r *http.Request) {
+	key := remoteAccessClientKey(r)
+	s.remoteAccessMu.Lock()
+	defer s.remoteAccessMu.Unlock()
+	delete(s.remoteAccessFailure, key)
+}
+
+func remoteAccessClientKey(r *http.Request) string {
+	if host := hostOnly(r.RemoteAddr); host != "" {
+		return host
+	}
+	return "unknown"
 }
 
 func (s *Server) validRemoteAccess(r *http.Request) bool {

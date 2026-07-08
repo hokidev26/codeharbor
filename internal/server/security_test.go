@@ -256,6 +256,69 @@ func TestRemoteAccessGateUsesStandardForwardedHostForSameOrigin(t *testing.T) {
 	}
 }
 
+func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+		request.Host = "demo.trycloudflare.com"
+		request.RemoteAddr = "203.0.113.10:5555"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		app.Routes().ServeHTTP(recorder, request)
+		if i < remoteAccessMaxFailures-1 && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+		if i == remoteAccessMaxFailures-1 && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d expected 429, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	request.Host = "demo.trycloudflare.com"
+	request.RemoteAddr = "203.0.113.10:5555"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected locked correct password to remain 429, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	for i := 0; i < remoteAccessMaxFailures-1; i++ {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+		request.Host = "demo.trycloudflare.com"
+		request.RemoteAddr = "203.0.113.11:5555"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		app.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	success := httptest.NewRecorder()
+	successReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	successReq.Host = "demo.trycloudflare.com"
+	successReq.RemoteAddr = "203.0.113.11:5555"
+	successReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(success, successReq)
+	if success.Code != http.StatusSeeOther {
+		t.Fatalf("expected successful login after bad attempts, got %d: %s", success.Code, success.Body.String())
+	}
+
+	badAgain := httptest.NewRecorder()
+	badAgainReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+	badAgainReq.Host = "demo.trycloudflare.com"
+	badAgainReq.RemoteAddr = "203.0.113.11:5555"
+	badAgainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(badAgain, badAgainReq)
+	if badAgain.Code != http.StatusUnauthorized || !strings.Contains(badAgain.Body.String(), "剩余 9 次") {
+		t.Fatalf("expected counter reset after success, got %d: %s", badAgain.Code, badAgain.Body.String())
+	}
+}
+
 func TestRemoteAccessLogoutClearsCookie(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
