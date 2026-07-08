@@ -24,6 +24,10 @@ type terminalMessage struct {
 }
 
 func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
+	if s.remoteHardeningActive(r) && !s.configSnapshot().Security.AllowRemoteTerminal {
+		writeError(w, http.StatusForbidden, "remote terminal is disabled while remote access hardening is active")
+		return
+	}
 	narratorID := r.URL.Query().Get("narratorId")
 	if narratorID == "" {
 		writeError(w, http.StatusBadRequest, "narratorId query parameter is required")

@@ -91,6 +91,7 @@ type runtimeSecuritySummary struct {
 	RemoteAccessRequired     bool   `json:"remoteAccessRequired"`
 	AccessPasswordConfigured bool   `json:"accessPasswordConfigured"`
 	BypassPermissionsAllowed bool   `json:"bypassPermissionsAllowed"`
+	RemoteTerminalAllowed    bool   `json:"remoteTerminalAllowed"`
 	MaxPermissionMode        string `json:"maxPermissionMode"`
 	Mode                     string `json:"mode"`
 	Message                  string `json:"message"`
@@ -193,6 +194,7 @@ func buildRuntimeSummary(cfg config.Config, configPath string, startedAt time.Ti
 			RemoteAccessRequired:     securityHardening,
 			AccessPasswordConfigured: strings.TrimSpace(cfg.Security.AccessPassword) != "",
 			BypassPermissionsAllowed: !securityHardening,
+			RemoteTerminalAllowed:    !securityHardening || cfg.Security.AllowRemoteTerminal,
 			MaxPermissionMode:        mapBoolString(securityHardening, "acceptEdits", "bypassPermissions"),
 			Mode:                     mapBoolString(securityHardening, "remote-hardened", "local"),
 			Message:                  securityMessage,
@@ -230,7 +232,7 @@ func mapBoolString(condition bool, whenTrue, whenFalse string) string {
 
 func (s *Server) runtimeSecuritySummaryForRequest(r *http.Request) runtimeSecuritySummary {
 	cfg := s.configSnapshot()
-	remoteRequest := !isLoopbackHost(r.Host)
+	remoteRequest := !isLoopbackHost(r.Host) || requestHasRemoteForwardingHeaders(r)
 	hardening := cfg.Security.Exposed || remoteRequest
 	accessPasswordConfigured := strings.TrimSpace(cfg.Security.AccessPassword) != ""
 	summary := runtimeSecuritySummary{
@@ -239,6 +241,7 @@ func (s *Server) runtimeSecuritySummaryForRequest(r *http.Request) runtimeSecuri
 		RemoteAccessRequired:     hardening,
 		AccessPasswordConfigured: accessPasswordConfigured,
 		BypassPermissionsAllowed: !hardening,
+		RemoteTerminalAllowed:    !hardening || cfg.Security.AllowRemoteTerminal,
 		MaxPermissionMode:        "bypassPermissions",
 		Mode:                     "local",
 		Message:                  "本地模式：允许使用完整权限模式。",

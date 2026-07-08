@@ -82,7 +82,21 @@ export function createTerminalController({
     notifyTerminal("[warn] 复制终端输出失败。\n");
   }
 
+  function remoteTerminalLocked() {
+    const security = state.runtimeSummary?.security || {};
+    return Boolean(security.remoteAccessRequired && security.remoteTerminalAllowed === false);
+  }
+
+  function remoteTerminalLockedMessage() {
+    return "远程收紧模式已禁用交互式终端；如确需远程 shell，请在可信边缘认证后显式设置 CODEHARBOR_REMOTE_TERMINAL=true。";
+  }
+
   function focusTerminalPanel() {
+    if (remoteTerminalLocked()) {
+      showToast(remoteTerminalLockedMessage(), "warn", { force: true });
+      appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
+      return;
+    }
     toggleTerminal(false);
     $("terminalOutput")?.focus();
     resizeTerminal();
@@ -91,6 +105,12 @@ export function createTerminalController({
   function reconnectTerminalFromSettings() {
     if (!state.narrator) {
       showToast("请先选择一个 AI 代理再连接终端。", "warn");
+      return;
+    }
+    if (remoteTerminalLocked()) {
+      showToast(remoteTerminalLockedMessage(), "warn", { force: true });
+      appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
+      setTerminalStatus("remote-locked");
       return;
     }
     connectTerminal();
@@ -112,21 +132,23 @@ export function createTerminalController({
     const collapsed = $("appShell")?.classList.contains("terminal-collapsed") || false;
     const wsLabel = terminalConnectionLabel();
     const cwd = state.narrator?.cwd || state.project?.gitPath || "未选择代理";
+    const locked = remoteTerminalLocked();
     return `
       <div class="settings-live-page terminal-settings-page">
         <section class="settings-hero-card terminal-hero-card">
           <div>
             <div class="settings-hero-kicker">终端管理</div>
             <div class="settings-hero-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? "面板已收起" : "面板已展开")}</div>
-            <p>管理当前 AI 代理的交互式 PTY 终端，支持重连、清空、复制输出和控制本地输出保留策略。</p>
+            <p>${escapeHtml(locked ? remoteTerminalLockedMessage() : "管理当前 AI 代理的交互式 PTY 终端，支持重连、清空、复制输出和控制本地输出保留策略。")}</p>
           </div>
           <div class="settings-action-row">
-            <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button">重连终端</button>
-            <button id="terminalFocusSettingsBtn" class="settings-action-btn subtle" type="button">聚焦终端</button>
+            <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button" ${locked ? "disabled" : ""}>重连终端</button>
+            <button id="terminalFocusSettingsBtn" class="settings-action-btn subtle" type="button" ${locked ? "disabled" : ""}>聚焦终端</button>
           </div>
         </section>
         <div class="settings-status-strip">
           <div><strong>${escapeHtml(wsLabel)}</strong><span>连接状态</span></div>
+          <div><strong>${escapeHtml(locked ? "远程禁用" : "可用")}</strong><span>终端策略</span></div>
           <div><strong>${escapeHtml(formatNumber(stats.lines))}</strong><span>输出行数</span></div>
           <div><strong>${escapeHtml(formatNumber(stats.chars))}</strong><span>字符数</span></div>
         </div>
@@ -139,11 +161,11 @@ export function createTerminalController({
             <span class="settings-status-pill ${state.narrator ? "ok" : "warn"}">${escapeHtml(state.narrator ? "已选择代理" : "未选择代理")}</span>
           </div>
           <div class="terminal-control-grid">
-            <button class="terminal-control-card" type="button" data-terminal-action="reconnect">
-              <span>重连</span><small>重新建立 `/ws/terminal` 连接。</small>
+            <button class="terminal-control-card" type="button" data-terminal-action="reconnect" ${locked ? "disabled" : ""}>
+              <span>重连</span><small>${escapeHtml(locked ? "远程收紧下默认关闭 PTY。" : "重新建立 `/ws/terminal` 连接。")}</small>
             </button>
-            <button class="terminal-control-card" type="button" data-terminal-action="toggle">
-              <span>${escapeHtml(collapsed ? "展开" : "收起")}</span><small>切换右侧终端面板显示状态。</small>
+            <button class="terminal-control-card" type="button" data-terminal-action="toggle" ${locked ? "disabled" : ""}>
+              <span>${escapeHtml(collapsed ? "展开" : "收起")}</span><small>${escapeHtml(locked ? "终端面板已被远程策略锁定。" : "切换右侧终端面板显示状态。")}</small>
             </button>
             <button class="terminal-control-card" type="button" data-terminal-action="clear">
               <span>清空</span><small>清空当前浏览器中的终端输出。</small>
@@ -248,6 +270,12 @@ export function createTerminalController({
 
   function connectTerminal() {
     if (!state.narrator) return;
+    if (remoteTerminalLocked()) {
+      if (state.terminalWS) state.terminalWS.close();
+      appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
+      setTerminalStatus("remote-locked");
+      return;
+    }
     if (state.terminalWS) state.terminalWS.close();
     const narratorId = state.narrator.id;
     const output = $("terminalOutput");
@@ -291,6 +319,7 @@ export function createTerminalController({
   }
 
   function sendTerminalInput(data) {
+    if (remoteTerminalLocked()) return;
     if (!state.narrator || !state.terminalWS || state.terminalWS.readyState !== WebSocket.OPEN) return;
     state.terminalWS.send(JSON.stringify({ type: "input", data }));
   }
@@ -305,7 +334,7 @@ export function createTerminalController({
   }
 
   function handleTerminalKeydown(event) {
-    if (!state.narrator) return;
+    if (!state.narrator || remoteTerminalLocked()) return;
     const keyMap = {
       Enter: "\r",
       Backspace: "\x7f",
@@ -355,6 +384,12 @@ export function createTerminalController({
   }
 
   function toggleTerminal(collapsed) {
+    if (remoteTerminalLocked() && collapsed === false) {
+      showToast(remoteTerminalLockedMessage(), "warn", { force: true });
+      appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
+      setTerminalStatus("remote-locked");
+      return;
+    }
     const shouldCollapse = collapsed ?? !$("appShell").classList.contains("terminal-collapsed");
     $("appShell").classList.toggle("terminal-collapsed", shouldCollapse);
     $("expandTerminalBtn").classList.toggle("hidden", !shouldCollapse);

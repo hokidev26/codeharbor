@@ -58,8 +58,16 @@ func TestSecurityConfigFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Security.Exposed || cfg.Security.AccessPassword != "remote-secret" {
-		t.Fatalf("expected security env overrides, got %+v", cfg.Security)
+	if !cfg.Security.Exposed || cfg.Security.AccessPassword != "remote-secret" || cfg.Security.AllowRemoteTerminal {
+		t.Fatalf("expected security env overrides without remote terminal, got %+v", cfg.Security)
+	}
+	t.Setenv("CODEHARBOR_REMOTE_TERMINAL", "true")
+	cfg, err = Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Security.AllowRemoteTerminal {
+		t.Fatalf("expected remote terminal env override, got %+v", cfg.Security)
 	}
 }
 

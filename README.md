@@ -287,7 +287,7 @@ CodeHarbor is a local development MVP.
 - Do not commit `.env`, local config files, SQLite databases, or API keys.
 - The embedded UI and APIs are intended for trusted local use.
 - Browser-originated API calls require a per-process local token injected into the UI, and WebSocket upgrades are restricted by Origin/Sec-Fetch-Site plus the same token.
-- Public tunnel usage must add authentication. Non-loopback hosts, or explicit `CODEHARBOR_EXPOSED=true`, enter remote hardening mode: the UI/API require `CODEHARBOR_ACCESS_PASSWORD`, and `bypassPermissions` is disabled.
+- Public tunnel usage must add authentication. Non-loopback hosts, forwarded tunnel headers, or explicit `CODEHARBOR_EXPOSED=true`, enter remote hardening mode: the UI/API require `CODEHARBOR_ACCESS_PASSWORD`, `bypassPermissions` is disabled, and the interactive terminal is off unless `CODEHARBOR_REMOTE_TERMINAL=true` is set.
 - Git status/diff/log/commit APIs resolve the narrator repository and reject repositories outside the project path, configured default project directory, or the narrator chapter worktree path created by CodeHarbor.
 - Tools can read and write local files within their configured working directories.
 - Bash and stdio MCP execution are intentionally restricted by permission mode, but both should still be treated as powerful local code execution.

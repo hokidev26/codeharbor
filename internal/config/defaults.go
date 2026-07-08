@@ -53,8 +53,9 @@ type AuthConfig struct {
 }
 
 type SecurityConfig struct {
-	Exposed        bool   `json:"exposed"`
-	AccessPassword string `json:"accessPassword,omitempty"`
+	Exposed             bool   `json:"exposed"`
+	AccessPassword      string `json:"accessPassword,omitempty"`
+	AllowRemoteTerminal bool   `json:"allowRemoteTerminal,omitempty"`
 }
 
 type ProvidersConfig struct {
@@ -121,8 +122,12 @@ func Default() (Config, error) {
 			FirstTokenTimeoutMs:    60000,
 			MaxTransientRetries:    10,
 		},
-		Auth:     AuthConfig{RegistrationOpen: true},
-		Security: SecurityConfig{Exposed: getenvBool("CODEHARBOR_EXPOSED", false), AccessPassword: os.Getenv("CODEHARBOR_ACCESS_PASSWORD")},
+		Auth: AuthConfig{RegistrationOpen: true},
+		Security: SecurityConfig{
+			Exposed:             getenvBool("CODEHARBOR_EXPOSED", false),
+			AccessPassword:      os.Getenv("CODEHARBOR_ACCESS_PASSWORD"),
+			AllowRemoteTerminal: getenvBool("CODEHARBOR_REMOTE_TERMINAL", false),
+		},
 		Providers: ProvidersConfig{Instances: []ProviderConfig{
 			{
 				Name:   "openai",
@@ -214,6 +219,9 @@ func applySecurityEnvOverrides(security *SecurityConfig) {
 	}
 	if value := os.Getenv("CODEHARBOR_ACCESS_PASSWORD"); value != "" {
 		security.AccessPassword = value
+	}
+	if value, ok := lookupBoolEnv("CODEHARBOR_REMOTE_TERMINAL"); ok {
+		security.AllowRemoteTerminal = value
 	}
 }
 

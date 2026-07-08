@@ -1094,9 +1094,21 @@ function enforcePermissionSelectCap() {
   }
 }
 
+async function logoutRemoteAccess() {
+  closeSidebarSettingsMenu();
+  if (!remoteSecurityHardeningActive()) {
+    showToast("本地 MVP 暂未启用完整账户系统，无需退出登录。", "info");
+    return;
+  }
+  await api("/auth/remote-access/logout", { method: "POST" });
+  showToast("已退出远程访问，请重新输入访问密码。", "success", { force: true });
+  location.reload();
+}
+
 function updateSecurityModeUI() {
   const security = currentSecuritySummary();
   const active = remoteSecurityHardeningActive();
+  const terminalLocked = Boolean(security?.remoteAccessRequired && security?.remoteTerminalAllowed === false);
   const badge = $("securityModeBadge");
   if (badge) {
     badge.textContent = active ? "隧道收紧" : "本地";
@@ -1108,7 +1120,8 @@ function updateSecurityModeUI() {
   if (banner) {
     if (active) {
       const passwordText = security?.accessPasswordConfigured ? "访问密码已启用" : "未配置访问密码";
-      banner.innerHTML = `<strong>远程收紧</strong><span>${escapeHtml(passwordText)} · 已禁用自动执行</span>`;
+      const terminalText = terminalLocked ? "终端已锁定" : "终端显式开放";
+      banner.innerHTML = `<strong>远程收紧</strong><span>${escapeHtml(passwordText)} · 已禁用自动执行 · ${escapeHtml(terminalText)}</span>`;
       banner.classList.remove("hidden");
       banner.classList.toggle("danger", !security?.accessPasswordConfigured);
     } else {
@@ -1117,6 +1130,12 @@ function updateSecurityModeUI() {
       banner.classList.remove("danger");
     }
   }
+  [$("toggleTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn")].forEach((button) => {
+    if (!button) return;
+    if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.title || "";
+    button.disabled = terminalLocked;
+    button.title = terminalLocked ? "远程收紧模式默认禁用交互式终端" : button.dataset.defaultTitle;
+  });
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
 }
@@ -1523,7 +1542,7 @@ $("providerSettingsBtn")?.addEventListener("click", () => { closeSidebarSettings
 $("modelSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("models"); });
 $("runtimeSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("servers-system"); });
 $("aboutSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("about"); });
-$("logoutBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); showToast("本地 MVP 暂未启用完整账户系统，无需退出登录。", "info"); });
+$("logoutBtn")?.addEventListener("click", () => logoutRemoteAccess().catch(showError));
 $("settingsSearchInput")?.addEventListener("input", (event) => updateSettingsSearchQuery(event.target.value));
 $("settingsSearchInput")?.addEventListener("keydown", (event) => {
   if (isComposingInput(event)) return;

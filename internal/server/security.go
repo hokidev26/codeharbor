@@ -19,6 +19,9 @@ const localTokenQuery = "token"
 const remoteAccessCookieName = "codeharbor_remote_access"
 const remoteAccessHeader = "X-CodeHarbor-Access"
 
+const remoteAccessPath = "/auth/remote-access"
+const remoteAccessLogoutPath = "/auth/remote-access/logout"
+
 func newLocalToken() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -101,7 +104,12 @@ func (s *Server) sameOriginRequest(r *http.Request) bool {
 	if err != nil || parsed.Host == "" {
 		return false
 	}
-	return sameHost(parsed.Host, r.Host)
+	for _, candidate := range requestHostCandidates(r) {
+		if sameHost(parsed.Host, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameHost(a, b string) bool {
@@ -131,7 +139,7 @@ func defaultPort(port string) bool {
 
 func (s *Server) remoteAccessGateRequired(r *http.Request) bool {
 	cfg := s.configSnapshot()
-	if cfg.Security.Exposed {
+	if cfg.Security.Exposed || requestHasRemoteForwardingHeaders(r) {
 		return true
 	}
 	if strings.TrimSpace(cfg.Server.Host) == "" && hostOnly(r.Host) == "example.com" {
@@ -167,7 +175,7 @@ func (s *Server) handleRemoteAccessGate(w http.ResponseWriter, r *http.Request) 
 }
 
 func isRemoteAccessLoginPath(path string) bool {
-	return path == "/auth/remote-access"
+	return path == remoteAccessPath || path == remoteAccessLogoutPath
 }
 
 func shouldRenderRemoteAccessPage(r *http.Request) bool {
@@ -177,11 +185,19 @@ func shouldRenderRemoteAccessPage(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/ws/") {
 		return false
 	}
+	return acceptsHTML(r) || r.URL.Path == "/"
+}
+
+func acceptsHTML(r *http.Request) bool {
 	accept := strings.ToLower(r.Header.Get("Accept"))
-	return accept == "" || strings.Contains(accept, "text/html") || r.URL.Path == "/"
+	return accept == "" || strings.Contains(accept, "text/html")
 }
 
 func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == remoteAccessLogoutPath {
+		s.handleRemoteAccessLogout(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		if r.Method == http.MethodGet {
 			s.writeRemoteAccessLoginPage(w, http.StatusOK, "")
@@ -204,8 +220,22 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "密码不正确，请重试。")
 		return
 	}
-	setRemoteAccessCookie(w, r, s.remoteAccessToken)
+	s.setRemoteAccessCookie(w, r, s.remoteAccessToken)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) handleRemoteAccessLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.clearRemoteAccessCookie(w, r)
+	if acceptsHTML(r) {
+		http.Redirect(w, r, remoteAccessPath, http.StatusSeeOther)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) validRemoteAccess(r *http.Request) bool {
@@ -226,14 +256,26 @@ func (s *Server) validRemoteAccess(r *http.Request) bool {
 	return false
 }
 
-func setRemoteAccessCookie(w http.ResponseWriter, r *http.Request, token string) {
+func (s *Server) setRemoteAccessCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     remoteAccessCookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
+		MaxAge:   int((24 * time.Hour).Seconds()),
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   requestIsHTTPS(r) || s.remoteAccessGateRequired(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) clearRemoteAccessCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     remoteAccessCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   requestIsHTTPS(r) || s.remoteAccessGateRequired(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -304,6 +346,116 @@ func disabledAttr(disabled bool) string {
 		return "disabled"
 	}
 	return ""
+}
+
+func requestHasRemoteForwardingHeaders(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("CF-Connecting-IP")) != "" || strings.TrimSpace(r.Header.Get("Cf-Ray")) != "" {
+		return true
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("Forwarded")); forwarded != "" {
+		return forwardedHeaderLooksRemote(forwarded)
+	}
+	if host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); host != "" {
+		return anyForwardedHostRemote(host)
+	}
+	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		return anyForwardedForRemote(forwardedFor)
+	}
+	return false
+}
+
+func requestHostCandidates(r *http.Request) []string {
+	candidates := []string{r.Host}
+	for _, value := range splitHeaderList(r.Header.Values("X-Forwarded-Host")) {
+		if strings.TrimSpace(value) != "" {
+			candidates = append(candidates, value)
+		}
+	}
+	candidates = append(candidates, forwardedHeaderHostCandidates(r.Header.Values("Forwarded"))...)
+	return candidates
+}
+
+func forwardedHeaderHostCandidates(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		for _, part := range splitCommaList(value) {
+			for _, param := range strings.Split(part, ";") {
+				key, raw, ok := strings.Cut(strings.TrimSpace(param), "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(key), "host") {
+					continue
+				}
+				raw = strings.Trim(strings.TrimSpace(raw), "\"")
+				if raw != "" {
+					out = append(out, raw)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func anyForwardedHostRemote(value string) bool {
+	for _, host := range splitCommaList(value) {
+		if host != "" && !isLoopbackHost(host) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyForwardedForRemote(value string) bool {
+	for _, item := range splitCommaList(value) {
+		item = strings.Trim(strings.TrimSpace(item), "[]\"")
+		if item == "" || strings.EqualFold(item, "unknown") {
+			continue
+		}
+		if host, _, err := net.SplitHostPort(item); err == nil {
+			item = host
+		}
+		ip := net.ParseIP(strings.Trim(item, "[]"))
+		if ip == nil || !ip.IsLoopback() {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardedHeaderLooksRemote(value string) bool {
+	for _, part := range splitCommaList(value) {
+		params := strings.Split(part, ";")
+		for _, param := range params {
+			key, raw, ok := strings.Cut(strings.TrimSpace(param), "=")
+			if !ok {
+				continue
+			}
+			key = strings.ToLower(strings.TrimSpace(key))
+			raw = strings.Trim(strings.TrimSpace(raw), "\"")
+			if key == "host" && raw != "" && !isLoopbackHost(raw) {
+				return true
+			}
+			if key == "for" && raw != "" && anyForwardedForRemote(raw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func splitHeaderList(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		out = append(out, splitCommaList(value)...)
+	}
+	return out
+}
+
+func splitCommaList(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, strings.TrimSpace(part))
+	}
+	return out
 }
 
 func isLoopbackHost(value string) bool {

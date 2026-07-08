@@ -59,6 +59,7 @@ export function createSystemSettingsController({
       ${renderUsageMetricCard("监听地址", server.address || "未配置", "当前 Web UI 与 API 服务地址")}
       ${renderUsageMetricCard("访问模式", security.remoteAccessRequired ? "隧道收紧" : "本地", security.message || "当前请求的安全状态")}
       ${renderUsageMetricCard("自动执行", security.bypassPermissionsAllowed ? "允许" : "禁用", `权限上限：${security.maxPermissionMode || "bypassPermissions"}`)}
+      ${renderUsageMetricCard("远程终端", security.remoteTerminalAllowed ? "允许" : "禁用", "CODEHARBOR_REMOTE_TERMINAL")}
       ${renderUsageMetricCard("访问密码", security.accessPasswordConfigured ? "已配置" : "未配置", "CODEHARBOR_ACCESS_PASSWORD")}
       ${renderUsageMetricCard("运行时长", formatUptime(process.uptimeSeconds || 0), `启动：${formatTimestamp(process.startedAt)}`)}
       ${renderUsageMetricCard("CPU", go.cpus || 0, `${go.os || "unknown"}/${go.arch || "unknown"}`)}
