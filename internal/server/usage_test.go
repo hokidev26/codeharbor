@@ -44,10 +44,6 @@ func TestUsageSummaryRouteReturnsDatabaseStats(t *testing.T) {
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO api_requests (id, narrator_id, message_id, kind, provider, model, input_tokens, output_tokens, reasoning_tokens, cached_input_tokens, duration_ms, cost_usd, error_message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, db.NewID(), narrator.ID, userMessage.ID, "model", "openai", "gpt-4.1-mini", 100, 40, 5, 12, 250, 0.03, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO background_tasks (id, parent_narrator_id, type, status, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, db.NewID(), narrator.ID, "command", "running", "build", now, now); err != nil {
-		t.Fatal(err)
-	}
-
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/usage/summary", nil)
@@ -77,8 +73,5 @@ func TestUsageSummaryRouteReturnsDatabaseStats(t *testing.T) {
 	}
 	if body.Backends.Active != 1 || body.Backends.APIKeyConfigured != 1 {
 		t.Fatalf("unexpected backend stats: %+v", body.Backends)
-	}
-	if body.BackgroundTasks.ByStatus["running"] != 1 {
-		t.Fatalf("unexpected background task stats: %+v", body.BackgroundTasks)
 	}
 }

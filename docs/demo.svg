@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">CodeHarbor local agent workflow demo</title>
+  <desc id="desc">A compact visual walkthrough: create a project, send a task, approve a tool call, review a Git diff, and commit selected paths.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f2937"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#020617" flood-opacity="0.55"/>
+    </filter>
+    <style>
+      .label { font: 600 16px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e5e7eb; }
+      .muted { font: 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #94a3b8; }
+      .tiny { font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; fill: #cbd5e1; }
+      .code { font: 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; fill: #d1fae5; }
+      .accent { fill: #38bdf8; }
+      .ok { fill: #34d399; }
+      .warn { fill: #fbbf24; }
+      .line { stroke: #334155; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect width="960" height="540" rx="28" fill="url(#bg)"/>
+  <circle cx="92" cy="80" r="110" fill="#2563eb" opacity="0.20"/>
+  <circle cx="860" cy="438" r="150" fill="#0ea5e9" opacity="0.16"/>
+
+  <text x="52" y="62" class="label" font-size="26">CodeHarbor local agent workflow</text>
+  <text x="52" y="88" class="muted">Create a project, approve local tools, inspect diffs, and commit explicit paths.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="48" y="118" width="864" height="360" rx="22" fill="#020617" stroke="#334155"/>
+    <rect x="48" y="118" width="864" height="38" rx="22" fill="#0f172a"/>
+    <circle cx="76" cy="137" r="6" fill="#ef4444"/>
+    <circle cx="96" cy="137" r="6" fill="#f59e0b"/>
+    <circle cx="116" cy="137" r="6" fill="#22c55e"/>
+    <text x="145" y="142" class="tiny">http://localhost:7788</text>
+
+    <rect x="68" y="176" width="180" height="282" rx="16" fill="url(#panel)" stroke="#334155"/>
+    <text x="88" y="206" class="label">Projects</text>
+    <rect x="88" y="224" width="136" height="34" rx="10" fill="#0f172a" stroke="#38bdf8"/>
+    <text x="104" y="246" class="tiny">codeharbor-demo</text>
+    <rect x="88" y="276" width="136" height="28" rx="8" fill="#111827" stroke="#334155"/>
+    <text x="104" y="294" class="tiny">main worktree</text>
+    <rect x="88" y="314" width="136" height="28" rx="8" fill="#111827" stroke="#334155"/>
+    <text x="104" y="332" class="tiny">chapter fork</text>
+
+    <rect x="270" y="176" width="394" height="282" rx="16" fill="#0b1120" stroke="#334155"/>
+    <text x="292" y="207" class="label">Narrator chat</text>
+    <rect x="292" y="226" width="326" height="44" rx="14" fill="#172554" stroke="#2563eb"/>
+    <text x="310" y="252" class="tiny">User: add docs and tests for this feature</text>
+    <rect x="292" y="288" width="346" height="70" rx="14" fill="#052e2b" stroke="#0f766e"/>
+    <text x="310" y="314" class="tiny">Agent requests Write + Bash</text>
+    <text x="310" y="338" class="code">approval required: exec risk</text>
+    <rect x="292" y="378" width="326" height="44" rx="14" fill="#1e293b" stroke="#475569"/>
+    <text x="310" y="405" class="tiny">Tool result returns to the model</text>
+
+    <rect x="686" y="176" width="206" height="282" rx="16" fill="url(#panel)" stroke="#334155"/>
+    <text x="708" y="207" class="label">Git review</text>
+    <text x="708" y="238" class="tiny">status: worktree=M</text>
+    <line x1="708" y1="256" x2="870" y2="256" class="line"/>
+    <text x="708" y="282" class="code">+ Updated docs</text>
+    <text x="708" y="306" class="code">+ Added tests</text>
+    <text x="708" y="336" class="tiny">paths:</text>
+    <rect x="708" y="348" width="150" height="28" rx="8" fill="#064e3b" stroke="#34d399"/>
+    <text x="724" y="367" class="tiny">demo/notes.md</text>
+    <rect x="708" y="394" width="150" height="34" rx="10" fill="#075985" stroke="#38bdf8"/>
+    <text x="737" y="416" class="tiny">Commit</text>
+  </g>
+
+  <g>
+    <rect x="72" y="494" width="180" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+    <circle cx="91" cy="508" r="5" class="accent"/>
+    <text x="106" y="513" class="tiny">1. Create project</text>
+    <rect x="274" y="494" width="170" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+    <circle cx="293" cy="508" r="5" class="warn"/>
+    <text x="308" y="513" class="tiny">2. Approve tools</text>
+    <rect x="466" y="494" width="170" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+    <circle cx="485" cy="508" r="5" class="accent"/>
+    <text x="500" y="513" class="tiny">3. Review diff</text>
+    <rect x="658" y="494" width="176" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+    <circle cx="677" cy="508" r="5" class="ok"/>
+    <text x="692" y="513" class="tiny">4. Commit paths</text>
+  </g>
+</svg>

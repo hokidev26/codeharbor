@@ -2,12 +2,13 @@ package server
 
 import (
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"strings"
 )
 
-//go:embed static/*
+//go:embed static/* static/modules/*
 var staticFiles embed.FS
 
 func (s *Server) mountUI(r interface {
@@ -34,8 +35,35 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setNoStore(w)
+	setLocalTokenCookie(w, r, s.localToken)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(data)
+	_, _ = w.Write(injectLocalToken(data, s.localToken))
+}
+
+func injectLocalToken(data []byte, token string) []byte {
+	encoded, err := json.Marshal(token)
+	if err != nil {
+		encoded = []byte(`""`)
+	}
+	snippet := `<script>window.CODEHARBOR_LOCAL_TOKEN=` + string(encoded) + `;</script>`
+	text := string(data)
+	if strings.Contains(text, "</head>") {
+		text = strings.Replace(text, "</head>", snippet+"\n  </head>", 1)
+	} else {
+		text = snippet + text
+	}
+	return []byte(text)
+}
+
+func setLocalTokenCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     localTokenCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 func setNoStore(w http.ResponseWriter) {

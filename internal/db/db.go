@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,18 +40,26 @@ type Project struct {
 }
 
 type Chapter struct {
-	ID           string `json:"id"`
-	ProjectID    string `json:"projectId"`
-	Title        string `json:"title"`
-	Description  string `json:"description,omitempty"`
-	Status       string `json:"status"`
-	Role         string `json:"role"`
-	Branch       string `json:"branch,omitempty"`
-	WorktreePath string `json:"worktreePath,omitempty"`
-	BaseBranch   string `json:"baseBranch,omitempty"`
-	IsRoot       bool   `json:"isRoot"`
-	CreatedAt    string `json:"createdAt"`
-	UpdatedAt    string `json:"updatedAt"`
+	ID                  string `json:"id"`
+	ProjectID           string `json:"projectId"`
+	Title               string `json:"title"`
+	Description         string `json:"description,omitempty"`
+	Status              string `json:"status"`
+	Role                string `json:"role"`
+	Branch              string `json:"branch,omitempty"`
+	WorktreePath        string `json:"worktreePath,omitempty"`
+	BaseBranch          string `json:"baseBranch,omitempty"`
+	ParentChapterID     string `json:"parentChapterId,omitempty"`
+	ForkPoint           string `json:"forkPoint,omitempty"`
+	MergedIntoChapterID string `json:"mergedIntoChapterId,omitempty"`
+	MergeCommitSHA      string `json:"mergeCommitSha,omitempty"`
+	MergeStrategy       string `json:"mergeStrategy,omitempty"`
+	PreMergeTargetSHA   string `json:"preMergeTargetSha,omitempty"`
+	HeadCommitSHA       string `json:"headCommitSha,omitempty"`
+	StartCommitSHA      string `json:"startCommitSha,omitempty"`
+	IsRoot              bool   `json:"isRoot"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type Narrator struct {
@@ -148,6 +157,19 @@ type Backend struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+type MCPServer struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Transport string            `json:"transport"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	CWD       string            `json:"cwd,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Enabled   bool              `json:"enabled"`
+	CreatedAt string            `json:"createdAt"`
+	UpdatedAt string            `json:"updatedAt"`
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -238,7 +260,7 @@ func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {
 }
 
 func (s *Store) ListChaptersByProject(ctx context.Context, projectID string) ([]Chapter, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, COALESCE(description,''), status, role, COALESCE(branch,''), COALESCE(worktree_path,''), COALESCE(base_branch,''), is_root, created_at, updated_at FROM chapters WHERE project_id = ? ORDER BY is_root DESC, created_at ASC`, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, COALESCE(description,''), status, role, COALESCE(branch,''), COALESCE(worktree_path,''), COALESCE(base_branch,''), COALESCE(parent_chapter_id,''), COALESCE(fork_point,''), COALESCE(merged_into_chapter_id,''), COALESCE(merge_commit_sha,''), COALESCE(merge_strategy,''), COALESCE(pre_merge_target_sha,''), COALESCE(head_commit_sha,''), COALESCE(start_commit_sha,''), is_root, created_at, updated_at FROM chapters WHERE project_id = ? ORDER BY is_root DESC, created_at ASC`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +269,7 @@ func (s *Store) ListChaptersByProject(ctx context.Context, projectID string) ([]
 	for rows.Next() {
 		var c Chapter
 		var isRoot int
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Title, &c.Description, &c.Status, &c.Role, &c.Branch, &c.WorktreePath, &c.BaseBranch, &isRoot, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Title, &c.Description, &c.Status, &c.Role, &c.Branch, &c.WorktreePath, &c.BaseBranch, &c.ParentChapterID, &c.ForkPoint, &c.MergedIntoChapterID, &c.MergeCommitSHA, &c.MergeStrategy, &c.PreMergeTargetSHA, &c.HeadCommitSHA, &c.StartCommitSHA, &isRoot, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		c.IsRoot = isRoot != 0
@@ -259,9 +281,67 @@ func (s *Store) ListChaptersByProject(ctx context.Context, projectID string) ([]
 func (s *Store) GetChapter(ctx context.Context, id string) (Chapter, error) {
 	var c Chapter
 	var isRoot int
-	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, title, COALESCE(description,''), status, role, COALESCE(branch,''), COALESCE(worktree_path,''), COALESCE(base_branch,''), is_root, created_at, updated_at FROM chapters WHERE id = ?`, id).Scan(&c.ID, &c.ProjectID, &c.Title, &c.Description, &c.Status, &c.Role, &c.Branch, &c.WorktreePath, &c.BaseBranch, &isRoot, &c.CreatedAt, &c.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, title, COALESCE(description,''), status, role, COALESCE(branch,''), COALESCE(worktree_path,''), COALESCE(base_branch,''), COALESCE(parent_chapter_id,''), COALESCE(fork_point,''), COALESCE(merged_into_chapter_id,''), COALESCE(merge_commit_sha,''), COALESCE(merge_strategy,''), COALESCE(pre_merge_target_sha,''), COALESCE(head_commit_sha,''), COALESCE(start_commit_sha,''), is_root, created_at, updated_at FROM chapters WHERE id = ?`, id).Scan(&c.ID, &c.ProjectID, &c.Title, &c.Description, &c.Status, &c.Role, &c.Branch, &c.WorktreePath, &c.BaseBranch, &c.ParentChapterID, &c.ForkPoint, &c.MergedIntoChapterID, &c.MergeCommitSHA, &c.MergeStrategy, &c.PreMergeTargetSHA, &c.HeadCommitSHA, &c.StartCommitSHA, &isRoot, &c.CreatedAt, &c.UpdatedAt)
 	c.IsRoot = isRoot != 0
 	return c, err
+}
+
+func (s *Store) CreateChapterFork(ctx context.Context, parent Chapter, title, branch, worktreePath, baseBranch, forkPoint, model, permissionMode string) (Chapter, Narrator, error) {
+	if parent.ID == "" || parent.ProjectID == "" {
+		return Chapter{}, Narrator{}, errors.New("parent chapter is required")
+	}
+	if title == "" {
+		title = branch
+	}
+	if title == "" {
+		return Chapter{}, Narrator{}, errors.New("chapter title is required")
+	}
+	if branch == "" {
+		return Chapter{}, Narrator{}, errors.New("branch is required")
+	}
+	if worktreePath == "" {
+		return Chapter{}, Narrator{}, errors.New("worktree path is required")
+	}
+	now := Now()
+	chapter := Chapter{ID: NewID(), ProjectID: parent.ProjectID, Title: title, Status: "active", Role: "worktree", Branch: branch, WorktreePath: worktreePath, BaseBranch: baseBranch, ParentChapterID: parent.ID, ForkPoint: forkPoint, HeadCommitSHA: forkPoint, StartCommitSHA: forkPoint, IsRoot: false, CreatedAt: now, UpdatedAt: now}
+	narrator := Narrator{ID: NewID(), ChapterID: chapter.ID, Type: "primary", Title: title, Model: model, PermissionMode: permissionMode, Status: "idle", CWD: worktreePath, CreatedAt: now, UpdatedAt: now}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Chapter{}, Narrator{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO chapters (id, project_id, title, status, role, branch, worktree_path, base_branch, parent_chapter_id, fork_point, head_commit_sha, start_commit_sha, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, chapter.ID, chapter.ProjectID, chapter.Title, chapter.Status, chapter.Role, chapter.Branch, chapter.WorktreePath, chapter.BaseBranch, chapter.ParentChapterID, chapter.ForkPoint, chapter.HeadCommitSHA, chapter.StartCommitSHA, boolInt(chapter.IsRoot), chapter.CreatedAt, chapter.UpdatedAt); err != nil {
+		return Chapter{}, Narrator{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO narrators (id, chapter_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, narrator.ID, narrator.ChapterID, narrator.Type, narrator.Title, narrator.Model, narrator.PermissionMode, narrator.Status, narrator.CWD, narrator.CreatedAt, narrator.UpdatedAt); err != nil {
+		return Chapter{}, Narrator{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Chapter{}, Narrator{}, err
+	}
+	return chapter, narrator, nil
+}
+
+func (s *Store) MarkChapterMerged(ctx context.Context, sourceChapterID, targetChapterID, preMergeTargetSHA, mergeCommitSHA, strategy string) (Chapter, error) {
+	if sourceChapterID == "" || targetChapterID == "" || mergeCommitSHA == "" {
+		return Chapter{}, errors.New("source chapter, target chapter, and merge commit are required")
+	}
+	now := Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Chapter{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE chapters SET status = 'merged', merged_into_chapter_id = ?, merge_commit_sha = ?, merge_strategy = NULLIF(?, ''), pre_merge_target_sha = NULLIF(?, ''), head_commit_sha = ?, updated_at = ? WHERE id = ?`, targetChapterID, mergeCommitSHA, strategy, preMergeTargetSHA, mergeCommitSHA, now, sourceChapterID); err != nil {
+		return Chapter{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chapters SET head_commit_sha = ?, updated_at = ? WHERE id = ?`, mergeCommitSHA, now, targetChapterID); err != nil {
+		return Chapter{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Chapter{}, err
+	}
+	return s.GetChapter(ctx, sourceChapterID)
 }
 
 func (s *Store) GetNarrator(ctx context.Context, id string) (Narrator, error) {
@@ -529,6 +609,79 @@ func (s *Store) SetNarratorStatus(ctx context.Context, narratorID, status, error
 	return err
 }
 
+func (s *Store) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, transport, command, COALESCE(args_json,''), COALESCE(cwd,''), COALESCE(env_json,''), enabled, created_at, updated_at FROM mcp_servers ORDER BY enabled DESC, created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	servers := make([]MCPServer, 0)
+	for rows.Next() {
+		server, err := scanMCPServer(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		servers = append(servers, server)
+	}
+	return servers, rows.Err()
+}
+
+func (s *Store) GetMCPServer(ctx context.Context, id string) (MCPServer, error) {
+	return scanMCPServer(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, name, transport, command, COALESCE(args_json,''), COALESCE(cwd,''), COALESCE(env_json,''), enabled, created_at, updated_at FROM mcp_servers WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+func (s *Store) CreateMCPServer(ctx context.Context, server MCPServer) (MCPServer, error) {
+	if server.ID == "" {
+		server.ID = NewID()
+	}
+	if server.Transport == "" {
+		server.Transport = "stdio"
+	}
+	if server.Env == nil {
+		server.Env = map[string]string{}
+	}
+	now := Now()
+	server.CreatedAt = now
+	server.UpdatedAt = now
+	argsJSON, _ := json.Marshal(server.Args)
+	envJSON, _ := json.Marshal(server.Env)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO mcp_servers (id, name, transport, command, args_json, cwd, env_json, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, server.ID, server.Name, server.Transport, server.Command, string(argsJSON), server.CWD, string(envJSON), boolInt(server.Enabled), server.CreatedAt, server.UpdatedAt)
+	if err != nil {
+		return MCPServer{}, err
+	}
+	return server, nil
+}
+
+func (s *Store) UpdateMCPServer(ctx context.Context, server MCPServer) (MCPServer, error) {
+	if server.Env == nil {
+		server.Env = map[string]string{}
+	}
+	now := Now()
+	argsJSON, _ := json.Marshal(server.Args)
+	envJSON, _ := json.Marshal(server.Env)
+	result, err := s.db.ExecContext(ctx, `UPDATE mcp_servers SET name = ?, transport = ?, command = ?, args_json = NULLIF(?, ''), cwd = NULLIF(?, ''), env_json = NULLIF(?, ''), enabled = ?, updated_at = ? WHERE id = ?`, server.Name, server.Transport, server.Command, string(argsJSON), server.CWD, string(envJSON), boolInt(server.Enabled), now, server.ID)
+	if err != nil {
+		return MCPServer{}, err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return MCPServer{}, sql.ErrNoRows
+	}
+	return s.GetMCPServer(ctx, server.ID)
+}
+
+func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM mcp_servers WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) SeedBackends(ctx context.Context, backends []Backend) error {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM agent_backends`).Scan(&count); err != nil {
@@ -698,6 +851,32 @@ func (s *Store) DeleteBackend(ctx context.Context, id string) error {
 }
 
 type backendScanner func(dest ...any) error
+
+type mcpServerScanner func(dest ...any) error
+
+func scanMCPServer(scan mcpServerScanner) (MCPServer, error) {
+	var server MCPServer
+	var argsJSON, envJSON string
+	var enabled int
+	if err := scan(&server.ID, &server.Name, &server.Transport, &server.Command, &argsJSON, &server.CWD, &envJSON, &enabled, &server.CreatedAt, &server.UpdatedAt); err != nil {
+		return MCPServer{}, err
+	}
+	if strings.TrimSpace(argsJSON) != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &server.Args); err != nil {
+			return MCPServer{}, err
+		}
+	}
+	if strings.TrimSpace(envJSON) != "" {
+		if err := json.Unmarshal([]byte(envJSON), &server.Env); err != nil {
+			return MCPServer{}, err
+		}
+	}
+	if server.Env == nil {
+		server.Env = map[string]string{}
+	}
+	server.Enabled = enabled != 0
+	return server, nil
+}
 
 func scanBackend(scan backendScanner) (Backend, error) {
 	var backend Backend

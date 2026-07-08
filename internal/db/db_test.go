@@ -170,3 +170,48 @@ func TestBackendRegistryActivatesSingleBackend(t *testing.T) {
 		t.Fatalf("expected exactly one active backend, got %d", activeCount)
 	}
 }
+
+func TestMCPServerRegistryRoundTripsConfig(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	created, err := store.CreateMCPServer(ctx, MCPServer{Name: "Fake", Transport: "stdio", Command: "node", Args: []string{"server.js"}, CWD: "/tmp", Env: map[string]string{"TOKEN": "secret"}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetMCPServer(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Command != "node" || got.Args[0] != "server.js" || got.Env["TOKEN"] != "secret" || !got.Enabled {
+		t.Fatalf("unexpected MCP server round trip: %+v", got)
+	}
+
+	got.Enabled = false
+	got.Args = []string{"other.js"}
+	updated, err := store.UpdateMCPServer(ctx, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Enabled || updated.Args[0] != "other.js" {
+		t.Fatalf("unexpected MCP server update: %+v", updated)
+	}
+
+	servers, err := store.ListMCPServers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].ID != created.ID {
+		t.Fatalf("expected one MCP server, got %+v", servers)
+	}
+	if err := store.DeleteMCPServer(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetMCPServer(ctx, created.ID); !IsNotFound(err) {
+		t.Fatalf("expected deleted MCP server to be missing, got %v", err)
+	}
+}

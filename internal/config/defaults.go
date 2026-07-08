@@ -12,14 +12,16 @@ import (
 )
 
 const Version = "0.1.0-dev"
+const CurrentConfigVersion = 1
 
 type Config struct {
-	Server    ServerConfig    `json:"server"`
-	Paths     PathsConfig     `json:"paths"`
-	Agent     AgentConfig     `json:"agent"`
-	Auth      AuthConfig      `json:"auth"`
-	Providers ProvidersConfig `json:"providers"`
-	Backends  BackendsConfig  `json:"backends"`
+	SchemaVersion int             `json:"version"`
+	Server        ServerConfig    `json:"server"`
+	Paths         PathsConfig     `json:"paths"`
+	Agent         AgentConfig     `json:"agent"`
+	Auth          AuthConfig      `json:"auth"`
+	Providers     ProvidersConfig `json:"providers"`
+	Backends      BackendsConfig  `json:"backends"`
 }
 
 type ServerConfig struct {
@@ -96,7 +98,8 @@ func Default() (Config, error) {
 	}
 	appHome := filepath.Join(home, ".codeharbor")
 	return Config{
-		Server: ServerConfig{Host: "localhost", Port: 7788},
+		SchemaVersion: CurrentConfigVersion,
+		Server:        ServerConfig{Host: "localhost", Port: 7788},
 		Paths: PathsConfig{
 			HomeDir:           appHome,
 			DatabasePath:      filepath.Join(appHome, "codeharbor.db"),
@@ -179,9 +182,17 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg = normalizeConfig(cfg)
+	return cfg, nil
+}
+
+func normalizeConfig(cfg Config) Config {
+	if cfg.SchemaVersion <= 0 {
+		cfg.SchemaVersion = CurrentConfigVersion
+	}
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)
-	return cfg, nil
+	return cfg
 }
 
 func (c Config) Addr() string {
@@ -332,6 +343,7 @@ func writeDefaultConfig(path string, cfg Config) error {
 }
 
 func sanitizeConfigForDisk(cfg Config) Config {
+	cfg = normalizeConfig(cfg)
 	cfg.Auth.JWTSecret = ""
 	if len(cfg.Providers.Instances) > 0 {
 		cfg.Providers.Instances = append([]ProviderConfig(nil), cfg.Providers.Instances...)

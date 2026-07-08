@@ -119,6 +119,7 @@ internal/config/defaults.go
 
 当前默认配置包含：
 
+- config schema version（当前 `version = 1`，老配置缺字段时加载回填）
 - server host / port
 - home dir
 - database path
@@ -403,6 +404,7 @@ Edit
 Bash
 Glob
 Grep
+WebFetch
 ```
 
 工具接口：
@@ -522,10 +524,31 @@ internal/db/schema.go
 internal/server/ui.go
 internal/server/static/index.html
 internal/server/static/styles.css
-internal/server/static/app.js
+internal/server/static/app.js                  # 轻量 bootstrap
+internal/server/static/modules/app-main.mjs    # 当前主 UI 模块
+internal/server/static/modules/backend-registry.mjs # Agent Server backend registry/modal/Admin controller
+internal/server/static/modules/chat-composer.mjs # chat send/draft/history/attachments/slash command controller
+internal/server/static/modules/chat-rendering.mjs # chat message rendering/approval/markdown controller
+internal/server/static/modules/directory-browser.mjs # directory chooser/browser/recent paths controller
+internal/server/static/modules/formatters.mjs  # shared number/size/money/time formatters
+internal/server/static/modules/git-workflow.mjs # Git status/diff/log/commit modal controller
+internal/server/static/modules/terminal.mjs    # terminal preferences/settings/WebSocket controller
+internal/server/static/modules/runtime.mjs     # API/token/WebSocket helper
+internal/server/static/modules/mcp-registry.mjs # MCP registry form parsing helpers
+internal/server/static/modules/mcp-registry-ui.mjs # backend MCP registry UI/actions controller
+internal/server/static/modules/model-provider-settings.mjs # Settings Models/Providers UI and model helpers
+internal/server/static/modules/local-preferences-settings.mjs # Settings local preference panels UI/actions controller
+internal/server/static/modules/system-settings.mjs # Settings system/storage/usage/users/about panels controller
+internal/server/static/modules/workspace-settings.mjs # Settings AI Agents/Chapters workspace panels controller
+internal/server/static/modules/skills-workbench.mjs # Settings Skills workbench UI/actions controller
+internal/server/static/modules/ui-shell.mjs     # global shortcuts/sidebar/mobile shell/project search
+internal/server/static/modules/settings-preferences.mjs # browser-local settings preferences/backup/import
+internal/server/static/modules/dom.mjs          # DOM/query/escape/button helpers
+internal/server/static/modules/settings-data.mjs # settings/skills static navigation data
+internal/server/static/modules/preferences-data.mjs # localStorage keys/default preference data
 ```
 
-当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。
+当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。前端已开始无构建 ES module 拆分：`app.js` 只负责 bootstrap，业务主模块在 `modules/app-main.mjs`，Agent Server backend registry/弹窗/Agent Admin controller 在 `modules/backend-registry.mjs`，Chat 发送/草稿/历史/附件/slash command controller 在 `modules/chat-composer.mjs`，Chat 消息渲染/审批/Markdown controller 在 `modules/chat-rendering.mjs`，目录选择/浏览/最近目录/路径格式化 controller 在 `modules/directory-browser.mjs`，通用格式化函数在 `modules/formatters.mjs`，Git status/diff/log/commit modal controller 在 `modules/git-workflow.mjs`，终端偏好/设置页/WebSocket controller 在 `modules/terminal.mjs`，API/token/WebSocket helper 在 `modules/runtime.mjs`，后端 MCP registry UI/action controller 在 `modules/mcp-registry-ui.mjs`，Settings Models/Providers UI 与模型选择 helper 在 `modules/model-provider-settings.mjs`，Settings 本地偏好面板（Profile/Network Search/IM Gateway/Notifications/Appearance）UI/action controller 在 `modules/local-preferences-settings.mjs`，Settings 系统/存储/使用/用户/About 面板 controller 在 `modules/system-settings.mjs`，Settings AI Agents/Chapters 工作区面板 controller 在 `modules/workspace-settings.mjs`，Settings Skills 工作台 UI/action controller 在 `modules/skills-workbench.mjs`，全局快捷键/侧栏/移动端 shell/项目搜索 controller 在 `modules/ui-shell.mjs`，浏览器本地 Settings 偏好/备份/导入 controller 在 `modules/settings-preferences.mjs`。
 
 当前路由：
 
@@ -559,15 +582,15 @@ GET /ui/app.js
 - 在设置 → 关于中复制、下载、导入浏览器本地偏好备份，迁移个人资料、技能草案、聊天草稿、提示词历史、搜索/IM/通知/外观/终端/模型和中转协议设置
 - 查看 `/api/runtime/summary` 驱动的服务器与系统、运行资源、Go runtime、内存和 Agent 限制概览
 - 查看 `/api/storage/summary` 驱动的储存空间、数据库、配置文件和默认项目目录容量统计
-- 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求/后台任务统计
+- 查看 `/api/usage/summary` 驱动的使用历史、消息/工具/模型请求和成本统计（未实现真实后台任务前不展示 background_tasks 僵尸计数）
 - 查看 `/api/auth/status` 驱动的用户初始化和注册开放状态
 - 从 `/api/models` 动态刷新 CLIProxyAPI 凭证账号可用模型
 - 在 Git 变更面板中查看 status/diff/log，并显式选择文件创建本地 commit（不自动 push）
 
 - 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
-- 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略
+- 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略；Agent 工具层已提供 `WebSearch` 公网搜索结果工具和 `WebFetch` 公网 HTTP(S) 文档抓取工具
 - 设置 → IM 网关页内完成浏览器本地 Webhook/Discord/Slack/Telegram/Lark/企业微信预设、入站确认、签名、脱敏和事件路由策略
-- 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出
+- 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出；已接入后端 MCP registry，可创建/启停/删除 server 并运行 tools/list discovery；后端已提供 stdio MCP discovery/execution core tools（exec-risk 审批）
 - 设置 → 章节与容器页内完成当前项目章节/workline、当前章节 narrator、worktree/branch/容器隔离边界概览和快速切换
 - 设置 → AI 代理页内完成默认 Agent 策略概览、当前 narrator 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
@@ -639,15 +662,22 @@ LICENSE
 SECURITY.md
 CONTRIBUTING.md
 THIRD_PARTY_NOTICES.md
+CHANGELOG.md
+docs/ARCHITECTURE.md
 .github/workflows/ci.yml
+.github/workflows/release.yml
+.goreleaser.yaml
 ```
 
 说明：
 
 - 仓库入口以 `README.md` 为准。
 - `PROJECT_PLAN.md` 用于开发规划和实现状态跟踪。
+- `CHANGELOG.md` 记录 tag 级用户可见变更、安全边界和已知缺口。
+- `docs/ARCHITECTURE.md` 面向贡献者说明请求如何流过 server、agent、provider、tools、WebSocket 和 SQLite。
 - `THIRD_PARTY_NOTICES.md` 是直接依赖初版说明，不是法律意见；正式发布前仍应生成完整 transitive notice。
-- CI 会检查 Go 格式、测试、vet、构建和内嵌 JavaScript 语法。
+- CI 会检查 Go 格式、测试、vet、构建、内嵌 JavaScript 语法，并通过 `golangci-lint` 增加 static analysis。
+- `v*` tag 会触发 GoReleaser release workflow，构建 macOS/Linux/Windows archives；README 顶部已有轻量 `docs/demo.gif` 工作流预览；后续仍可替换为真实产品录屏。
 
 ---
 
@@ -663,8 +693,12 @@ internal/providers/anthropic_provider_test.go
 internal/providers/openai_compatible_test.go
 internal/providers/openai_official_test.go
 internal/server/backends_test.go
+internal/server/chapter_workflow_test.go
+internal/server/e2e_test.go
 internal/server/git_test.go
 internal/server/interrupt_test.go
+internal/server/mcp_servers_test.go
+internal/server/security_test.go
 internal/tools/tools_test.go
 ```
 
@@ -676,9 +710,16 @@ internal/tools/tools_test.go
 - OpenHands Agent Server 健康检查
 - 工具路径越界检查
 - Write 后 Read
+- WebFetch HTML 简化与 local/private host 拒绝
+- WebSearch query 校验、DuckDuckGo HTML 结果解析、格式化输出和 core 注册
+- MCP stdio client 初始化、tools/list、tools/call、文本结果格式化、registered serverId 查找和 core 注册
+- MCP server registry：SQLite CRUD、HTTP CRUD、Settings UI 创建/启停/删除/发现工具、env value 响应脱敏、`GET /api/mcp/servers/{id}/tools` discovery
+- 本地 token、Origin、Sec-Fetch-Site 与 WebSocket 握手防护
 - 官方 Anthropic/OpenAI SDK provider 流式事件、usage 与 fallback 行为
 - usage cost 估算：OpenAI、Anthropic Sonnet/Opus 与未知模型分支
 - Git commit API 的显式 paths 提交、安全路径拒绝、空仓库 diff 降级
+- 全链路 E2E：真实 httptest server、WebSocket narrator stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
+- Chapter workflow：fork API 创建 Git worktree/child chapter/narrator，fork narrator Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
 
 当前验证命令：
 
@@ -688,6 +729,27 @@ go test ./...
 go vet ./...
 go build ./...
 node --check internal/server/static/app.js
+node --check internal/server/static/modules/app-main.mjs
+node --check internal/server/static/modules/backend-registry.mjs
+node --check internal/server/static/modules/chat-composer.mjs
+node --check internal/server/static/modules/chat-rendering.mjs
+node --check internal/server/static/modules/directory-browser.mjs
+node --check internal/server/static/modules/formatters.mjs
+node --check internal/server/static/modules/git-workflow.mjs
+node --check internal/server/static/modules/terminal.mjs
+node --check internal/server/static/modules/runtime.mjs
+node --check internal/server/static/modules/mcp-registry.mjs
+node --check internal/server/static/modules/mcp-registry-ui.mjs
+node --check internal/server/static/modules/model-provider-settings.mjs
+node --check internal/server/static/modules/local-preferences-settings.mjs
+node --check internal/server/static/modules/system-settings.mjs
+node --check internal/server/static/modules/workspace-settings.mjs
+node --check internal/server/static/modules/skills-workbench.mjs
+node --check internal/server/static/modules/ui-shell.mjs
+node --check internal/server/static/modules/settings-preferences.mjs
+node --check internal/server/static/modules/dom.mjs
+node --check internal/server/static/modules/settings-data.mjs
+node --check internal/server/static/modules/preferences-data.mjs
 ```
 
 短启动验证包括：
@@ -696,6 +758,8 @@ node --check internal/server/static/app.js
 - `/api/licenses`
 - `/api/backends`
 - `/api/backends/{id}/health`
+- `/api/mcp/servers`
+- `/api/mcp/servers/{id}/tools`
 - `POST /api/projects`
 - `POST /api/narrators/{id}/tool-calls`
 - `GET /api/narrators/{id}/git/status`
@@ -760,6 +824,7 @@ node --check internal/server/static/app.js
 - [x] OpenAI 官方 Responses API provider（非流式 MVP）
 - [x] provider 前缀路由与基础 model list
 - [x] usage/cost 统计（usage 写入 `api_requests`，cost 使用内置 per-model USD/MTok 价格表估算；价格来源在 `internal/agent/loop.go` 注释和 README 中记录，未知模型估算为 0）
+- [x] Anthropic prompt caching（足够大的 system/tool/message 请求自动添加 5m cache_control breakpoint，小请求跳过以避免额外 cache write 成本）
 - [ ] retry/backoff
 - [ ] first token timeout
 
@@ -774,11 +839,11 @@ node --check internal/server/static/app.js
 - [x] Git status/diff/log API（只读）
 - [x] UI diff 查看器（只读 Git 变更面板）
 - [x] Git commit API
-- [ ] project git path 检查
-- [ ] chapter fork
-- [ ] git worktree 创建
-- [ ] chapter merge-check
-- [ ] merge
+- [x] project git path 检查（repo root 必须位于项目路径或 default project dir 内）
+- [x] chapter fork（后端 API 创建 child chapter + primary narrator）
+- [x] git worktree 创建（`POST /api/chapters/{id}/fork` 使用 sibling `.codeharbor-worktrees`，避免嵌套进主 repo）
+- [x] chapter merge-check（`GET /api/chapters/{id}/merge-check` 使用临时 worktree 做非破坏性冲突预检）
+- [x] merge（`POST /api/chapters/{id}/merge` 要求 source/target clean，冲突时 abort 并返回 409，成功后记录 merge metadata）
 - [ ] AI resolve conflict
 - [ ] review chapter
 
@@ -790,9 +855,11 @@ node --check internal/server/static/app.js
 
 待做：
 
-- [ ] MCP server registry
-- [ ] MCP tool discovery
-- [ ] MCP tool execution
+- [x] WebFetch 公网 HTTP(S) 文档抓取工具（local/private host 默认拒绝）
+- [x] WebSearch 公网搜索结果工具（默认 DuckDuckGo HTML，query/limit 校验，local/private search endpoint 防护）
+- [x] MCP server registry（后端持久注册表/API + Settings UI 创建/启停/删除/发现工具：CRUD、env value 脱敏响应、registered server tools/list discovery）
+- [x] MCP tool discovery（`MCPListTools` 通过 stdio initialize + tools/list，并支持 `serverId` 引用已注册 server）
+- [x] MCP tool execution（`MCPCallTool` 通过 stdio initialize + tools/call，支持 `serverId`，exec-risk 审批）
 - [x] PTY terminal
 - [x] `/ws/terminal`
 - [ ] background tasks
@@ -890,15 +957,17 @@ license
 
 当前 MVP 仍有这些限制：
 
-- 前端 UI 仍是内嵌 HTML/CSS/JS MVP，不是完整 React/shadcn 实现
+- 前端 UI 已开始无构建 ES module 拆分（bootstrap + app-main + 多个 feature controller/helper），但仍有大量业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现
 - 没有真实权限审批流程
 - Agent loop 暂未支持所有 provider 的完整模型 tool calling（Anthropic 路径已具备自动工具循环基础）
 - OpenAI-compatible provider 暂未流式输出；官方 OpenAI/Anthropic provider 已支持 SDK streaming
 - Bash 工具默认在 `acceptEdits` 下不可执行
 - `/api/fs` 当前以 default project dir 为边界，尚未按 narrator cwd 动态限制
+- Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址
+- Git API 与 chapter merge API 已限制 repo root 位于项目路径、default project dir 或 CodeHarbor 创建的 chapter worktree 内；后续 AI conflict resolve 需要延续同一边界
 - license API 只确认了部分依赖协议
-- 没有 Git worktree/fork/merge
-- 没有 MCP
+- 已有后端 Git worktree/fork/merge-check/merge；尚未实现 AI resolve conflict 和前端完整操作面板
+- 已有 stdio MCP discovery/execution core tools、后端 MCP server registry，以及 Settings 创建/启停/删除/发现工具接入；尚未实现 MCP 长连接复用和完整编辑/update UI
 
 ---
 

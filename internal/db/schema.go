@@ -209,6 +209,20 @@ CREATE TABLE IF NOT EXISTS agent_backends (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_backends_active ON agent_backends(active);
 
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'stdio',
+  command TEXT NOT NULL,
+  args_json TEXT,
+  cwd TEXT,
+  env_json TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
+
 CREATE TABLE IF NOT EXISTS background_tasks (
   id TEXT PRIMARY KEY,
   parent_narrator_id TEXT REFERENCES narrators(id) ON DELETE CASCADE,

@@ -21,6 +21,7 @@ type Server struct {
 	cfgMu      sync.RWMutex
 	configPath string
 	startedAt  time.Time
+	localToken string
 	store      *db.Store
 	runner     *agent.Runner
 	hub        *agent.Hub
@@ -32,7 +33,7 @@ func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hu
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
 	}
-	return &Server{cfg: cfg, startedAt: time.Now().UTC(), store: store, runner: runner, hub: hub, providers: providerRegistry}
+	return &Server{cfg: cfg, startedAt: time.Now().UTC(), localToken: newLocalToken(), store: store, runner: runner, hub: hub, providers: providerRegistry}
 }
 
 func (s *Server) SetConfigPath(path string) {
@@ -53,6 +54,7 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(s.localRequestGuard)
 	s.mountUI(r)
 
 	r.Get("/api/health", s.health)
@@ -77,6 +79,14 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/{id}/activate", s.activateBackend)
 		r.Get("/{id}/health", s.backendHealth)
 	})
+	r.Route("/api/mcp/servers", func(r chi.Router) {
+		r.Get("/", s.listMCPServers)
+		r.Post("/", s.createMCPServer)
+		r.Get("/{id}", s.getMCPServer)
+		r.Patch("/{id}", s.updateMCPServer)
+		r.Delete("/{id}", s.deleteMCPServer)
+		r.Get("/{id}/tools", s.listMCPServerTools)
+	})
 
 	r.Route("/api/fs", func(r chi.Router) {
 		r.Get("/browse", s.fsBrowse)
@@ -93,6 +103,9 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/chapters", s.listProjectChapters)
 	})
 	r.Get("/api/chapters/{id}", s.getChapter)
+	r.Post("/api/chapters/{id}/fork", s.forkChapter)
+	r.Get("/api/chapters/{id}/merge-check", s.chapterMergeCheck)
+	r.Post("/api/chapters/{id}/merge", s.chapterMerge)
 	r.Get("/api/chapters/{id}/narrators", s.listChapterNarrators)
 	r.Route("/api/narrators", func(r chi.Router) {
 		r.Get("/{id}", s.getNarrator)

@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+
+	"codeharbor/internal/db"
 )
 
 const (
@@ -318,7 +320,64 @@ func (s *Server) resolveNarratorGitRepo(ctx context.Context, narratorID string) 
 	if err != nil {
 		return "", "", err
 	}
-	return cwd, strings.TrimSpace(repoRoot), nil
+	repoRoot = strings.TrimSpace(repoRoot)
+	if err := s.validateNarratorGitRepoBoundary(ctx, narrator, repoRoot); err != nil {
+		return "", "", err
+	}
+	return cwd, repoRoot, nil
+}
+
+func (s *Server) validateNarratorGitRepoBoundary(ctx context.Context, narrator db.Narrator, repoRoot string) error {
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return gitCommandError{Status: http.StatusConflict, Msg: "git repository root is not configured"}
+	}
+	allowedRoots := make([]string, 0, 2)
+	if narrator.ChapterID != "" {
+		if chapter, err := s.store.GetChapter(ctx, narrator.ChapterID); err == nil {
+			if strings.TrimSpace(chapter.WorktreePath) != "" {
+				allowedRoots = append(allowedRoots, chapter.WorktreePath)
+			}
+			if project, err := s.store.GetProject(ctx, chapter.ProjectID); err == nil && strings.TrimSpace(project.GitPath) != "" {
+				allowedRoots = append(allowedRoots, project.GitPath)
+			}
+		}
+	}
+	if defaultDir := strings.TrimSpace(s.configSnapshot().Paths.DefaultProjectDir); defaultDir != "" {
+		allowedRoots = append(allowedRoots, defaultDir)
+	}
+	for _, root := range allowedRoots {
+		if pathWithin(root, repoRoot) {
+			return nil
+		}
+	}
+	return gitCommandError{Status: http.StatusForbidden, Msg: "git repository is outside the configured project boundary"}
+}
+
+func pathWithin(root, path string) bool {
+	root = strings.TrimSpace(root)
+	path = strings.TrimSpace(path)
+	if root == "" || path == "" {
+		return false
+	}
+	root = canonicalPath(root)
+	path = canonicalPath(path)
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+func canonicalPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
 }
 
 func cleanGitCommitPaths(repoRoot string, rawPaths []string) ([]string, error) {

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	anthropic "github.com/anthropics/anthropic-sdk-go"
+
 	"codeharbor/internal/config"
 )
 
@@ -159,6 +161,55 @@ func TestAnthropicProviderWithoutAPIKeyStillReturnsNotConfigured(t *testing.T) {
 	}
 	if !strings.Contains(text, "not configured") || stopReason != "not_configured" {
 		t.Fatalf("unexpected not configured events: text=%q stop=%q", text, stopReason)
+	}
+}
+
+func TestAnthropicPromptCachingMarksLargeRequests(t *testing.T) {
+	messages, system := anthropicMessages([]Message{{Role: "user", Content: strings.Repeat("please inspect the repository context. ", 120)}}, strings.Repeat("stable coding agent instructions. ", 120))
+	params := anthropic.MessageNewParams{
+		MaxTokens: 128,
+		Model:     anthropic.Model("claude-sonnet-4-5"),
+		Messages:  messages,
+		System:    system,
+		Tools: anthropicTools([]ToolSpec{{
+			Name:        "Read",
+			Description: strings.Repeat("Read a file from the bounded workspace. ", 30),
+			Schema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+				"required":   []string{"file_path"},
+			},
+		}}),
+	}
+	if anthropicPromptCacheFootprint(params) < anthropicPromptCacheMinBytes {
+		t.Fatalf("test request should be large enough for prompt caching")
+	}
+	applyAnthropicPromptCaching(&params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if count := strings.Count(text, `"cache_control"`); count < 3 {
+		t.Fatalf("expected system, tool, and message cache controls, got %d in %s", count, text)
+	}
+	for _, want := range []string{`"ttl":"5m"`, `"type":"ephemeral"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %s in cached request: %s", want, text)
+		}
+	}
+}
+
+func TestAnthropicPromptCachingSkipsSmallRequests(t *testing.T) {
+	messages, system := anthropicMessages([]Message{{Role: "user", Content: "hello"}}, "short system")
+	params := anthropic.MessageNewParams{MaxTokens: 128, Model: anthropic.Model("claude-sonnet-4-5"), Messages: messages, System: system}
+	applyAnthropicPromptCaching(&params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"cache_control"`) {
+		t.Fatalf("small request should not include cache_control: %s", string(data))
 	}
 }
 

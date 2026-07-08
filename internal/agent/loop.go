@@ -964,7 +964,7 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 		return result, nil
 	}
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narratorID, CWD: narrator.CWD})
+	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narratorID, CWD: narrator.CWD, Store: r.store})
 	duration := time.Since(started).Milliseconds()
 	output, _ := json.Marshal(result)
 	status := "completed"
@@ -987,7 +987,7 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 func (r *Runner) executeApprovedTool(ctx context.Context, narrator db.Narrator, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool) (tools.Result, error) {
 	r.publish(Event{Type: "tool.started", NarratorID: narrator.ID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}})
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD})
+	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD, Store: r.store})
 	duration := time.Since(started).Milliseconds()
 	status := "completed"
 	errMsg := ""
@@ -1098,21 +1098,20 @@ func (r *Runner) canAutoExecuteTool(narratorID, mode, toolName string, risk tool
 	if allowed(mode, toolName, risk) {
 		return true
 	}
-	if risk != tools.RiskExec || toolName != "Bash" {
+	if risk != tools.RiskExec {
 		return false
 	}
 	if mode != "acceptEdits" && mode != "default" && mode != "dontAsk" {
 		return false
 	}
-	command := tools.BashCommand(input)
-	if isWhitelistedExecCommand(command) {
+	if toolName == "Bash" && isWhitelistedExecCommand(tools.BashCommand(input)) {
 		return true
 	}
 	return r.hasSessionGrant(narratorID, sessionGrantKey(toolName, input))
 }
 
 func approvalRequired(mode, toolName string, risk tools.Risk) bool {
-	if risk != tools.RiskExec || toolName != "Bash" {
+	if risk != tools.RiskExec {
 		return false
 	}
 	switch mode {
@@ -1150,10 +1149,14 @@ func approvalEventData(narrator db.Narrator, call tools.Call, risk tools.Risk, w
 }
 
 func toolCommand(toolName string, input json.RawMessage) string {
-	if toolName == "Bash" {
+	switch toolName {
+	case "Bash":
 		return tools.BashCommand(input)
+	case "MCPListTools", "MCPCallTool":
+		return tools.MCPCommand(input)
+	default:
+		return ""
 	}
-	return ""
 }
 
 func toolRiskWarning(toolName string, input json.RawMessage) string {

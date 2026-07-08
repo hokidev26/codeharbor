@@ -13,6 +13,9 @@ func TestDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.SchemaVersion != CurrentConfigVersion {
+		t.Fatalf("expected config version %d, got %d", CurrentConfigVersion, cfg.SchemaVersion)
+	}
 	if cfg.Server.Port != 7788 {
 		t.Fatalf("expected default port 7788, got %d", cfg.Server.Port)
 	}
@@ -42,6 +45,30 @@ func TestContextTokenLimitFromEnv(t *testing.T) {
 	}
 	if cfg.Agent.ContextTokenLimit != 12345 {
 		t.Fatalf("expected env context token limit, got %d", cfg.Agent.ContextTokenLimit)
+	}
+}
+
+func TestLoadBackfillsLegacyConfigVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "server": {"host": "127.0.0.1", "port": 9000},
+  "paths": {"homeDir": "/tmp/codeharbor", "databasePath": "/tmp/codeharbor/db.sqlite", "defaultProjectDir": "/tmp/codeharbor/projects"},
+  "agent": {"defaultModel": "openai:test", "summaryModel": "openai:test", "defaultPermissionMode": "acceptEdits", "maxTurns": 3, "contextTokenLimit": 1000},
+  "auth": {"registrationOpen": true},
+  "providers": {"instances": []},
+  "backends": {"instances": []}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchemaVersion != CurrentConfigVersion {
+		t.Fatalf("expected legacy config version backfill to %d, got %d", CurrentConfigVersion, cfg.SchemaVersion)
+	}
+	if cfg.Server.Port != 9000 {
+		t.Fatalf("expected loaded legacy server port, got %d", cfg.Server.Port)
 	}
 }
 
@@ -103,6 +130,9 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	var persisted Config
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatal(err)
+	}
+	if persisted.SchemaVersion != CurrentConfigVersion {
+		t.Fatalf("expected persisted config version %d, got %d", CurrentConfigVersion, persisted.SchemaVersion)
 	}
 	for _, provider := range persisted.Providers.Instances {
 		if provider.APIKey != "" {

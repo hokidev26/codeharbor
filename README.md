@@ -1,6 +1,8 @@
 # CodeHarbor
 
-CodeHarbor is a local-first Go MVP for an AI coding agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, an Agent Server backend registry, and a simple embedded web UI.
+![CodeHarbor local agent workflow demo](docs/demo.gif)
+
+CodeHarbor is a local-first Go MVP for an AI coding agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, Agent Server and MCP server registries, and a simple embedded web UI.
 
 The project is currently an experimental MVP. It is intended for local development and iteration, not for untrusted multi-user or production deployments.
 
@@ -8,11 +10,11 @@ The project is currently an experimental MVP. It is intended for local developme
 
 ## Features
 
-- Local HTTP server with embedded HTML/CSS/JS UI
-- SQLite persistence for projects, chapters, narrators, messages, tool calls, and backend registry entries
+- Local HTTP server with embedded HTML/CSS/JS UI, using a no-build ES module seam for frontend bootstrap/runtime helpers and extracted Settings local preference panels
+- SQLite persistence for projects, chapters, narrators, messages, tool calls, backend registry entries, and stdio MCP server registry entries
 - Provider abstraction for:
   - OpenAI official Responses API with SDK streaming text deltas and usage capture
-  - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, and usage capture
+  - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, usage capture, and automatic 5m prompt-cache breakpoints for sufficiently large requests
   - OpenAI-compatible Chat Completions APIs
   - CLIProxyAPI local OpenAI-compatible preset
 - Core tools:
@@ -22,9 +24,13 @@ The project is currently an experimental MVP. It is intended for local developme
   - Bash
   - Glob
   - Grep
+  - WebFetch
+  - WebSearch
+  - MCPListTools
+  - MCPCallTool
 - Git workspace APIs and UI for status, diff, log, and explicit-path commits without automatic push, amend, reset, clean, force, or `git add -A`
 - WebSocket agent event stream: `/ws/narrator` with Settings → AI Agents current narrator controls for model, permission mode, and working directory
-- Settings → Chapters & Containers project workline view backed by existing project chapter and narrator APIs
+- Settings → Chapters & Containers project workline view backed by project chapter/narrator APIs, with backend chapter fork support that creates Git worktrees, merge-check preflight, and clean-worktree merge APIs
 - Interactive PTY terminal WebSocket: `/ws/terminal` with Settings → Terminal management controls and browser-local retention/focus preferences
 - Filesystem browse/preview/mkdir APIs
 - Agent Server backend registry with sidebar and Settings → Agent Admin management UI for compatible OpenHands Agent Server endpoints
@@ -34,15 +40,15 @@ The project is currently an experimental MVP. It is intended for local developme
 - Browser-local prompt history for the chat composer, with empty-input ↑/↓ recall and migration through local preference backups
 - Chat composer slash command palette backed by enabled local Skills command templates
 - Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
-- Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules
+- Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules, plus `WebSearch` and `WebFetch` core tools for public web/documentation lookup
 - Browser-local Settings → IM Gateway integration policy preferences for webhook/bot presets, confirmation, signatures, redaction, and event routing
-- Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export
+- Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export; it can create/enable/delete persisted stdio MCP registry entries, run `tools/list` discovery, and let core tools list/call registered MCP servers with explicit exec-risk approval
 - Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices
 - Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and agent event log display
 - Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and agent limits
 - Settings → Users read-only auth status panel backed by `/api/auth/status`
 - Local storage summary endpoint and Settings → Storage panel for config, database, home, and project directory footprint
-- Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, estimated token cost, backends, and background tasks
+- Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, estimated token cost, and backends
 - Settings → About dependency license panel backed by the development-time `/api/licenses` endpoint
 - Settings → About browser-local preferences backup/import for migrating profile, skills, chat drafts, prompt history, search, IM, notification, appearance, terminal, recent directory, model, and relay protocol settings
 
@@ -50,9 +56,13 @@ The project is currently an experimental MVP. It is intended for local developme
 
 - Go 1.26 or newer, as declared in `go.mod`
 - SQLite is provided through the pure-Go `modernc.org/sqlite` driver
-- Node.js is optional and only used for `node --check internal/server/static/app.js` during validation
+- Node.js is optional and only used for `node --check` on embedded frontend scripts during validation
 
-## Quick start
+## Install
+
+For tagged releases, the GoReleaser workflow builds macOS, Linux, and Windows archives named like `codeharbor_<version>_<os>_<arch>`. Download the matching archive from GitHub Releases, unpack it, then run the `codeharbor` binary.
+
+From source:
 
 ```bash
 go run ./cmd/codeharbor
@@ -108,7 +118,7 @@ CodeHarbor records provider usage in `api_requests` and shows aggregate estimate
 
 ## Configuration
 
-On first run, CodeHarbor creates a local config file if it does not exist. Runtime secrets can be supplied through environment variables.
+On first run, CodeHarbor creates a local config file if it does not exist. Runtime secrets can be supplied through environment variables. `config.json` includes a schema `version` field; legacy configs without it are loaded as version `1` and normalized in memory.
 
 Agent model environment variables:
 
@@ -191,12 +201,22 @@ DELETE /api/backends/{id}
 POST   /api/backends/{id}/activate
 GET    /api/backends/{id}/health
 
+GET    /api/mcp/servers
+POST   /api/mcp/servers
+GET    /api/mcp/servers/{id}
+PATCH  /api/mcp/servers/{id}
+DELETE /api/mcp/servers/{id}
+GET    /api/mcp/servers/{id}/tools
+
 GET  /api/projects
 POST /api/projects
 GET  /api/projects/{id}
 GET  /api/projects/{id}/chapters
 
 GET  /api/chapters/{id}
+POST /api/chapters/{id}/fork
+GET  /api/chapters/{id}/merge-check?targetChapterId=...
+POST /api/chapters/{id}/merge
 GET  /api/chapters/{id}/narrators
 
 GET   /api/narrators/{id}
@@ -232,7 +252,30 @@ go test ./...
 go vet ./...
 go build ./...
 node --check internal/server/static/app.js
+node --check internal/server/static/modules/app-main.mjs
+node --check internal/server/static/modules/backend-registry.mjs
+node --check internal/server/static/modules/chat-composer.mjs
+node --check internal/server/static/modules/chat-rendering.mjs
+node --check internal/server/static/modules/directory-browser.mjs
+node --check internal/server/static/modules/formatters.mjs
+node --check internal/server/static/modules/git-workflow.mjs
+node --check internal/server/static/modules/terminal.mjs
+node --check internal/server/static/modules/runtime.mjs
+node --check internal/server/static/modules/mcp-registry.mjs
+node --check internal/server/static/modules/mcp-registry-ui.mjs
+node --check internal/server/static/modules/model-provider-settings.mjs
+node --check internal/server/static/modules/local-preferences-settings.mjs
+node --check internal/server/static/modules/system-settings.mjs
+node --check internal/server/static/modules/workspace-settings.mjs
+node --check internal/server/static/modules/skills-workbench.mjs
+node --check internal/server/static/modules/ui-shell.mjs
+node --check internal/server/static/modules/settings-preferences.mjs
+node --check internal/server/static/modules/dom.mjs
+node --check internal/server/static/modules/settings-data.mjs
+node --check internal/server/static/modules/preferences-data.mjs
 ```
+
+CI additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the narrator WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing archives, not for local validation.
 
 ## Security notes
 
@@ -240,8 +283,11 @@ CodeHarbor is a local development MVP.
 
 - Do not commit `.env`, local config files, SQLite databases, or API keys.
 - The embedded UI and APIs are intended for trusted local use.
+- Browser-originated API calls require a per-process local token injected into the UI, and WebSocket upgrades are restricted by Origin/Sec-Fetch-Site plus the same token.
+- Git status/diff/log/commit APIs resolve the narrator repository and reject repositories outside the project path, configured default project directory, or the narrator chapter worktree path created by CodeHarbor.
 - Tools can read and write local files within their configured working directories.
-- Bash execution is intentionally restricted by permission mode, but it should still be treated as powerful local code execution.
+- Bash and stdio MCP execution are intentionally restricted by permission mode, but both should still be treated as powerful local code execution.
+- MCP server registry responses list environment variable names only; stored values are used for local process launch and are not returned by the public API.
 - Backend API keys are not returned by the public API; responses only include `apiKeyConfigured`.
 - Runtime and storage summary APIs intentionally expose local paths and process diagnostics, so keep the service bound to trusted local users.
 
@@ -250,6 +296,11 @@ See `SECURITY.md` for reporting and operational guidance.
 ## Third-party notices
 
 See `THIRD_PARTY_NOTICES.md` for the initial direct dependency notice. It is a development aid and not legal advice. Before formal distribution, regenerate a complete transitive dependency notice with a license scanner such as `go-licenses`.
+
+## Contributor docs
+
+- `docs/ARCHITECTURE.md` explains how requests flow through server, agent, provider, tools, WebSocket events, and persistence.
+- `CHANGELOG.md` tracks user-visible changes, security boundaries, and known release gaps.
 
 ## Roadmap
 

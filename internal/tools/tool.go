@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+
+	"codeharbor/internal/db"
 )
 
 type Risk string
@@ -29,6 +31,7 @@ type Result struct {
 type Env struct {
 	NarratorID string
 	CWD        string
+	Store      *db.Store
 }
 
 type Tool interface {

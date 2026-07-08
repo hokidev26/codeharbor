@@ -84,6 +84,7 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 			System:    system,
 			Tools:     anthropicTools(req.Tools),
 		}
+		applyAnthropicPromptCaching(&params)
 		stream := p.client.Messages.NewStreaming(ctx, params)
 		defer stream.Close()
 		var acc anthropic.Message
@@ -255,6 +256,68 @@ func anthropicTools(specs []ToolSpec) []anthropic.ToolUnionParam {
 		out = append(out, tool)
 	}
 	return out
+}
+
+const anthropicPromptCacheMinBytes = 4096
+
+func applyAnthropicPromptCaching(params *anthropic.MessageNewParams) {
+	if params == nil || anthropicPromptCacheFootprint(*params) < anthropicPromptCacheMinBytes {
+		return
+	}
+	cacheControl := anthropic.NewCacheControlEphemeralParam()
+	cacheControl.TTL = anthropic.CacheControlEphemeralTTLTTL5m
+	if len(params.System) > 0 {
+		params.System[len(params.System)-1].CacheControl = cacheControl
+	}
+	setLastAnthropicToolCache(params.Tools, cacheControl)
+	setLastAnthropicMessageCache(params.Messages, cacheControl)
+}
+
+func anthropicPromptCacheFootprint(params anthropic.MessageNewParams) int {
+	total := 0
+	for _, block := range params.System {
+		total += len(strings.TrimSpace(block.Text))
+	}
+	total += marshaledAnthropicParamLen(params.Tools)
+	total += marshaledAnthropicParamLen(params.Messages)
+	return total
+}
+
+func marshaledAnthropicParamLen(value any) int {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0
+	}
+	return len(data)
+}
+
+func setLastAnthropicToolCache(tools []anthropic.ToolUnionParam, cacheControl anthropic.CacheControlEphemeralParam) bool {
+	for i := len(tools) - 1; i >= 0; i-- {
+		if control := tools[i].GetCacheControl(); control != nil {
+			*control = cacheControl
+			return true
+		}
+	}
+	return false
+}
+
+func setLastAnthropicMessageCache(messages []anthropic.MessageParam, cacheControl anthropic.CacheControlEphemeralParam) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if setLastAnthropicContentCache(messages[i].Content, cacheControl) {
+			return true
+		}
+	}
+	return false
+}
+
+func setLastAnthropicContentCache(blocks []anthropic.ContentBlockParamUnion, cacheControl anthropic.CacheControlEphemeralParam) bool {
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if control := blocks[i].GetCacheControl(); control != nil {
+			*control = cacheControl
+			return true
+		}
+	}
+	return false
 }
 
 func anthropicToolInputSchema(schema any) anthropic.ToolInputSchemaParam {

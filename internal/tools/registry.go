@@ -52,4 +52,8 @@ func RegisterCore(registry *Registry) {
 	registry.Register(BashTool{})
 	registry.Register(GlobTool{})
 	registry.Register(GrepTool{})
+	registry.Register(WebFetchTool{})
+	registry.Register(WebSearchTool{})
+	registry.Register(MCPListToolsTool{})
+	registry.Register(MCPCallToolTool{})
 }

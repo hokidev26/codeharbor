@@ -9,24 +9,22 @@ import (
 )
 
 type usageSummaryResponse struct {
-	GeneratedAt     string                   `json:"generatedAt"`
-	Counts          usageCounts              `json:"counts"`
-	Messages        usageMessageStats        `json:"messages"`
-	ToolCalls       usageToolCallStats       `json:"toolCalls"`
-	APIRequests     usageAPIRequestStats     `json:"apiRequests"`
-	Backends        usageBackendStats        `json:"backends"`
-	BackgroundTasks usageBackgroundTaskStats `json:"backgroundTasks"`
+	GeneratedAt string               `json:"generatedAt"`
+	Counts      usageCounts          `json:"counts"`
+	Messages    usageMessageStats    `json:"messages"`
+	ToolCalls   usageToolCallStats   `json:"toolCalls"`
+	APIRequests usageAPIRequestStats `json:"apiRequests"`
+	Backends    usageBackendStats    `json:"backends"`
 }
 
 type usageCounts struct {
-	Projects        int64 `json:"projects"`
-	Chapters        int64 `json:"chapters"`
-	Narrators       int64 `json:"narrators"`
-	Messages        int64 `json:"messages"`
-	ToolCalls       int64 `json:"toolCalls"`
-	APIRequests     int64 `json:"apiRequests"`
-	Backends        int64 `json:"backends"`
-	BackgroundTasks int64 `json:"backgroundTasks"`
+	Projects    int64 `json:"projects"`
+	Chapters    int64 `json:"chapters"`
+	Narrators   int64 `json:"narrators"`
+	Messages    int64 `json:"messages"`
+	ToolCalls   int64 `json:"toolCalls"`
+	APIRequests int64 `json:"apiRequests"`
+	Backends    int64 `json:"backends"`
 }
 
 type usageMessageStats struct {
@@ -59,11 +57,6 @@ type usageBackendStats struct {
 	APIKeyConfigured int64 `json:"apiKeyConfigured"`
 }
 
-type usageBackgroundTaskStats struct {
-	ByStatus map[string]int64 `json:"byStatus"`
-	LatestAt string           `json:"latestAt,omitempty"`
-}
-
 type usageNamedCount struct {
 	Name  string `json:"name"`
 	Count int64  `json:"count"`
@@ -84,11 +77,10 @@ func (s *Server) usageSummary(w http.ResponseWriter, r *http.Request) {
 
 func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryResponse, error) {
 	summary := usageSummaryResponse{
-		GeneratedAt:     db.Now(),
-		Messages:        usageMessageStats{ByRole: map[string]int64{}},
-		ToolCalls:       usageToolCallStats{ByStatus: map[string]int64{}, TopTools: []usageNamedCount{}},
-		APIRequests:     usageAPIRequestStats{ByProvider: map[string]int64{}, ByKind: map[string]int64{}},
-		BackgroundTasks: usageBackgroundTaskStats{ByStatus: map[string]int64{}},
+		GeneratedAt: db.Now(),
+		Messages:    usageMessageStats{ByRole: map[string]int64{}},
+		ToolCalls:   usageToolCallStats{ByStatus: map[string]int64{}, TopTools: []usageNamedCount{}},
+		APIRequests: usageAPIRequestStats{ByProvider: map[string]int64{}, ByKind: map[string]int64{}},
 	}
 
 	queries := []struct {
@@ -102,7 +94,6 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 		{`SELECT COUNT(*) FROM narrator_tool_calls`, &summary.Counts.ToolCalls},
 		{`SELECT COUNT(*) FROM api_requests`, &summary.Counts.APIRequests},
 		{`SELECT COUNT(*) FROM agent_backends`, &summary.Counts.Backends},
-		{`SELECT COUNT(*) FROM background_tasks`, &summary.Counts.BackgroundTasks},
 		{`SELECT COUNT(*) FROM agent_backends WHERE active != 0`, &summary.Backends.Active},
 		{`SELECT COUNT(*) FROM agent_backends WHERE COALESCE(api_key, '') != ''`, &summary.Backends.APIKeyConfigured},
 		{`SELECT COUNT(*) FROM api_requests WHERE COALESCE(error_message, '') != ''`, &summary.APIRequests.Errors},
@@ -126,9 +117,6 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 	if summary.APIRequests.ByKind, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(kind, ''), 'unknown'), COUNT(*) FROM api_requests GROUP BY COALESCE(NULLIF(kind, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
 		return usageSummaryResponse{}, err
 	}
-	if summary.BackgroundTasks.ByStatus, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(status, ''), 'unknown'), COUNT(*) FROM background_tasks GROUP BY COALESCE(NULLIF(status, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
-		return usageSummaryResponse{}, err
-	}
 	if summary.ToolCalls.TopTools, err = queryNamedCounts(ctx, database, `SELECT COALESCE(NULLIF(tool_name, ''), 'unknown'), COUNT(*) FROM narrator_tool_calls GROUP BY COALESCE(NULLIF(tool_name, ''), 'unknown') ORDER BY 2 DESC, 1 ASC LIMIT 8`); err != nil {
 		return usageSummaryResponse{}, err
 	}
@@ -149,10 +137,6 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 	if summary.APIRequests.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM api_requests`); err != nil {
 		return usageSummaryResponse{}, err
 	}
-	if summary.BackgroundTasks.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(updated_at), '') FROM background_tasks`); err != nil {
-		return usageSummaryResponse{}, err
-	}
-
 	return summary, nil
 }
 

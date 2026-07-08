@@ -264,6 +264,57 @@ func TestGitCommitRouteRejectsStagedOutsideSelection(t *testing.T) {
 	}
 }
 
+func TestGitStatusRouteRejectsRepoOutsideProjectBoundary(t *testing.T) {
+	ctx := context.Background()
+	projectRoot := t.TempDir()
+	outsideRepo := newGitTestRepo(t)
+	writeGitTestFile(t, outsideRepo, "tracked.txt", "one\n")
+	runGitTestCommand(t, outsideRepo, "add", "tracked.txt")
+	runGitTestCommand(t, outsideRepo, "commit", "-m", "outside")
+	store, narrator := newGitRouteStore(t, ctx, projectRoot)
+	defer store.Close()
+	if _, err := store.UpdateNarratorCWD(ctx, narrator.ID, outsideRepo); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/git/status", nil)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGitStatusRouteAllowsRepoUnderDefaultProjectDir(t *testing.T) {
+	ctx := context.Background()
+	defaultRoot := t.TempDir()
+	repo := filepath.Join(defaultRoot, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repo, "init", "-b", "main")
+	runGitTestCommand(t, repo, "config", "user.name", "CodeHarbor Test")
+	runGitTestCommand(t, repo, "config", "user.email", "test@example.com")
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "inside")
+	projectRoot := t.TempDir()
+	store, narrator := newGitRouteStore(t, ctx, projectRoot)
+	defer store.Close()
+	if _, err := store.UpdateNarratorCWD(ctx, narrator.ID, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{Paths: config.PathsConfig{DefaultProjectDir: defaultRoot}}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/git/status", nil)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestGitStatusRouteRejectsNonGitRepo(t *testing.T) {
 	ctx := context.Background()
 	store, narrator := newGitRouteStore(t, ctx, t.TempDir())

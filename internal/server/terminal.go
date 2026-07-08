@@ -34,7 +34,10 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if !s.validateWebSocketRequest(w, r) {
+		return
+	}
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
