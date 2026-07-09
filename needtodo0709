@@ -18,6 +18,26 @@
 - Run 通知与回顾很有产品价值，但前置条件是先建立 run 对象、run_id、run 状态机与可恢复审批。
 - 仓库卫生整体比原报告预期更好：当前 `.gitignore` 已覆盖主要产物；真正更需要做的是统一检查脚本、清理/说明本地残留和空目录。
 
+### 0.1 2026-07-09 当前执行进度更新
+
+大部分 P0/P1 基础项已经完成或进入收尾：
+
+- 已建立 SQLite migration 框架，并使用 `PRAGMA user_version` 管理版本。
+- 已新增 runs / run_id / RunSummary 后端能力。
+- 已补齐 provider 层的 OpenAI official / OpenAI-compatible 工具与流式方向，retry/backoff 与 first token timeout 也已有测试覆盖。
+- 已支持 `AGENTS.md` / `CLAUDE.md` 项目指令加载。
+- 已把 RunSummary 接到前端聊天区，形成“任务完成 → 回顾 → 查看 Git 变更 → 提交”的产品闭环入口。
+- 已完成 Bash 输出流式事件，长时间运行的测试/构建命令会通过 narrator WebSocket 推送实时输出，并在聊天区显示实时输出卡片。
+- 已完成 Webhook 通知 MVP：服务端持久化通知配置，等待审批、任务完成、错误/中断/被替代时可异步 POST 到用户配置端点，设置页支持保存与测试发送。
+
+因此，本文件后续旧风险段落可视为历史审查记录；新的执行重点调整为：
+
+1. checkpoint / rollback。
+2. 工具权限规则表与服务端化工作流偏好。
+3. Skills 服务端化与全文搜索。
+4. 成本预算与首次运行引导。
+5. 通知签名、重试队列与通知历史。
+
 ## 1. 产品目标
 
 CodeHarbor 应继续围绕“本地优先的 AI 编码代理服务器”演进，定位类似自托管版 Claude Code / OpenHands 工作台，但差异化不应只是更多设置项，而是：

@@ -244,4 +244,15 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
+
+CREATE TABLE IF NOT EXISTS notification_settings (
+  id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  webhook_url TEXT,
+  notify_on_approval INTEGER NOT NULL DEFAULT 1,
+  notify_on_done INTEGER NOT NULL DEFAULT 1,
+  notify_on_error INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `

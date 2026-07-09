@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -66,6 +67,30 @@ func TestBashRiskAllowsOrdinaryExecCommands(t *testing.T) {
 		input, _ := json.Marshal(map[string]string{"command": command})
 		if got := (BashTool{}).Risk(input); got != RiskExec {
 			t.Fatalf("expected %q to be exec, got %s", command, got)
+		}
+	}
+}
+
+func TestBashToolStreamsOutputAndReturnsFinalResult(t *testing.T) {
+	command := "printf stream-one; printf stream-two >&2"
+	if runtime.GOOS == "windows" {
+		command = "echo stream-one && echo stream-two 1>&2"
+	}
+	input, _ := json.Marshal(map[string]string{"command": command})
+	var chunks []string
+	result, err := (BashTool{}).Execute(context.Background(), Call{ID: "bash-stream", Name: "Bash", Input: input}, Env{Output: func(chunk OutputChunk) {
+		chunks = append(chunks, chunk.Text)
+	}})
+	if err != nil || result.IsError {
+		t.Fatalf("bash failed: result=%+v err=%v", result, err)
+	}
+	streamed := strings.Join(chunks, "")
+	for _, want := range []string{"stream-one", "stream-two"} {
+		if !strings.Contains(streamed, want) {
+			t.Fatalf("expected streamed output to contain %q, got %q", want, streamed)
+		}
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("expected final output to contain %q, got %q", want, result.Output)
 		}
 	}
 }

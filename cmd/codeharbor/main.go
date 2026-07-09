@@ -68,7 +68,10 @@ func main() {
 
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
+	notifier := server.NewWebhookNotifier(store)
+	runner.SetNotifier(notifier)
 	app := server.New(cfg, store, runner, hub, providerRegistry)
+	app.SetWebhookNotifier(notifier)
 	app.SetConfigPath(resolvedConfigPath)
 
 	httpServer := &http.Server{

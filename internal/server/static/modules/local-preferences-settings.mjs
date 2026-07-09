@@ -3,6 +3,7 @@ import { formatNumber } from "./formatters.mjs";
 import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs";
 
 export function createLocalPreferencesSettingsController({
+  state,
   copyText,
   currentAppearancePreferences,
   currentIMGatewayPreferences,
@@ -18,6 +19,9 @@ export function createLocalPreferencesSettingsController({
   resetNotificationPreferences,
   resetProfilePreferences,
   resetSearchPreferences,
+  loadServerNotificationSettings,
+  saveServerNotificationSettings,
+  testServerNotification,
   saveIMGatewayPreferences,
   saveProfilePreferences,
   saveSearchPreferences,
@@ -398,6 +402,10 @@ export function createLocalPreferencesSettingsController({
   }
   function renderNotificationSettingsContent() {
     const prefs = currentNotificationPreferences();
+    const serverSettings = state?.serverNotificationSettings || {};
+    if (!state?.serverNotificationSettings && !state?.serverNotificationLoading && !state?.serverNotificationError) {
+      loadServerNotificationSettings?.().catch(showError);
+    }
     const enabledCount = [prefs.infoToasts, prefs.successToasts, prefs.warningToasts, prefs.errorToasts].filter(Boolean).length;
     return `
     <div class="settings-live-page notification-page">
@@ -417,6 +425,34 @@ export function createLocalPreferencesSettingsController({
         <div><strong>${escapeHtml(formatNumber(enabledCount))}</strong><span>启用类型</span></div>
         <div><strong>${escapeHtml(notificationDurationLabel(prefs.duration))}</strong><span>显示时长</span></div>
       </div>
+      <section class="settings-provider-section highlighted">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">Webhook 任务通知</div>
+            <div class="settings-provider-meta">服务端保存并发送：等待审批、任务完成、错误或中断时向外部 webhook POST 摘要。</div>
+          </div>
+          <span class="settings-status-pill ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? "加载中" : (serverSettings.enabled ? "已启用" : "未启用"))}</span>
+        </div>
+        ${state?.serverNotificationError ? `<div class="settings-inline-alert">${escapeHtml(state.serverNotificationError)}</div>` : ""}
+        <form id="serverNotificationSettingsForm" class="settings-im-form">
+          <div class="appearance-toggle-list">
+            ${renderServerNotificationToggle("enabled", "启用 Webhook 通知", "关闭后不会向外部端点发送 run 事件。", serverSettings.enabled)}
+            ${renderServerNotificationToggle("notifyOnApproval", "等待审批时通知", "工具需要你批准时主动提醒。", serverSettings.notifyOnApproval !== false)}
+            ${renderServerNotificationToggle("notifyOnDone", "任务完成/中断时通知", "completed、interrupted、superseded 会走这一类通知。", serverSettings.notifyOnDone !== false)}
+            ${renderServerNotificationToggle("notifyOnError", "错误通知", "模型、工具或 agent loop 失败时发送。", serverSettings.notifyOnError !== false)}
+          </div>
+          <div class="settings-provider-form-grid im-form-grid">
+            <label class="settings-form-span-2">Webhook URL
+              <input id="serverNotificationWebhookUrl" class="settings-field" value="${escapeAttr(serverSettings.webhookUrl || "")}" placeholder="https://bot.example.com/webhook" />
+            </label>
+          </div>
+          <div class="settings-action-row settings-form-actions">
+            <button id="refreshServerNotificationSettingsBtn" class="settings-action-btn subtle" type="button">刷新服务端设置</button>
+            <button id="testServerNotificationBtn" class="settings-action-btn subtle" type="button" ${state?.serverNotificationTesting ? "disabled" : ""}>${state?.serverNotificationTesting ? "发送中…" : "发送测试 Webhook"}</button>
+            <button class="settings-action-btn primary" type="submit" ${state?.serverNotificationSaving ? "disabled" : ""}>${state?.serverNotificationSaving ? "保存中…" : "保存 Webhook 设置"}</button>
+          </div>
+        </form>
+      </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
@@ -472,6 +508,18 @@ export function createLocalPreferencesSettingsController({
   `;
   }
 
+  function renderServerNotificationToggle(field, title, description, checked) {
+    return `
+    <label class="appearance-toggle-row notification-toggle-row">
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(description)}</small>
+      </span>
+      <input type="checkbox" data-server-notification-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
+    </label>
+  `;
+  }
+
   function renderNotificationDurationChoice(value, title, description, current) {
     return `
     <button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-notification-duration="${escapeAttr(value)}">
@@ -488,6 +536,12 @@ export function createLocalPreferencesSettingsController({
   }
 
   function bindNotificationSettingsActions() {
+    $("serverNotificationSettingsForm")?.addEventListener("submit", (event) => saveServerNotificationSettingsFromPanel(event).catch(showError));
+    $("refreshServerNotificationSettingsBtn")?.addEventListener("click", () => loadServerNotificationSettings?.({ notify: true }).catch(showError));
+    $("testServerNotificationBtn")?.addEventListener("click", () => testServerNotification?.().catch(showError));
+    document.querySelectorAll("[data-server-notification-toggle]").forEach((node) => {
+      node.addEventListener("change", () => saveServerNotificationSettingsFromPanel().catch(showError));
+    });
     document.querySelectorAll("[data-notification-toggle]").forEach((node) => {
       node.addEventListener("change", () => setNotificationPreference(node.dataset.notificationToggle, node.checked));
     });
@@ -499,6 +553,18 @@ export function createLocalPreferencesSettingsController({
       notifyTerminal?.("[info] 测试通知已触发。\n");
     });
     $("resetNotificationPrefsBtn")?.addEventListener("click", resetNotificationPreferences);
+  }
+
+  async function saveServerNotificationSettingsFromPanel(event) {
+    event?.preventDefault();
+    const payload = {
+      enabled: Boolean(document.querySelector('[data-server-notification-toggle="enabled"]')?.checked),
+      notifyOnApproval: Boolean(document.querySelector('[data-server-notification-toggle="notifyOnApproval"]')?.checked),
+      notifyOnDone: Boolean(document.querySelector('[data-server-notification-toggle="notifyOnDone"]')?.checked),
+      notifyOnError: Boolean(document.querySelector('[data-server-notification-toggle="notifyOnError"]')?.checked),
+      webhookUrl: $("serverNotificationWebhookUrl")?.value || "",
+    };
+    await saveServerNotificationSettings?.(payload);
   }
   function renderAppearanceSettingsContent() {
     const prefs = currentAppearancePreferences();

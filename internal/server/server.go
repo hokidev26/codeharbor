@@ -30,6 +30,7 @@ type Server struct {
 	runner              *agent.Runner
 	hub                 *agent.Hub
 	providers           *providers.Registry
+	notifier            *WebhookNotifier
 }
 
 func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -55,6 +56,10 @@ func (s *Server) SetConfigPath(path string) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	s.configPath = path
+}
+
+func (s *Server) SetWebhookNotifier(notifier *WebhookNotifier) {
+	s.notifier = notifier
 }
 
 func (s *Server) configSnapshot() config.Config {
@@ -101,6 +106,11 @@ func (s *Server) Routes() http.Handler {
 		r.Delete("/{id}", s.deleteMCPServer)
 		r.Get("/{id}/tools", s.listMCPServerTools)
 	})
+	r.Route("/api/notifications", func(r chi.Router) {
+		r.Get("/settings", s.getNotificationSettings)
+		r.Put("/settings", s.updateNotificationSettings)
+		r.Post("/test", s.testNotification)
+	})
 
 	r.Route("/api/fs", func(r chi.Router) {
 		r.Get("/browse", s.fsBrowse)
@@ -132,6 +142,7 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/messages/{messageId}/attachments/{attachmentId}", s.getMessageAttachment)
 		r.Get("/{id}/runs", s.listRuns)
 		r.Get("/{id}/runs/{runId}", s.getRunSummary)
+		r.Post("/{id}/runs/{runId}/rollback", s.rollbackRun)
 		r.Get("/{id}/runs/{runId}/tool-calls", s.listRunToolCalls)
 		r.Get("/{id}/tools", s.listTools)
 		r.Post("/{id}/tool-calls", s.executeTool)

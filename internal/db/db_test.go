@@ -354,6 +354,58 @@ func TestOpenMigratesVersionOneDatabaseToRunTracking(t *testing.T) {
 	}
 }
 
+func TestNotificationSettingsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	settings, err := store.GetNotificationSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ID != "default" || settings.Enabled || !settings.NotifyOnApproval || !settings.NotifyOnDone || !settings.NotifyOnError {
+		t.Fatalf("unexpected default notification settings: %+v", settings)
+	}
+	updated, err := store.UpdateNotificationSettings(ctx, NotificationSettings{Enabled: true, WebhookURL: " https://example.test/hook ", NotifyOnApproval: true, NotifyOnDone: false, NotifyOnError: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Enabled || updated.WebhookURL != "https://example.test/hook" || updated.NotifyOnDone {
+		t.Fatalf("unexpected updated notification settings: %+v", updated)
+	}
+}
+
+func TestOpenMigratesVersionTwoDatabaseToNotificationSettings(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v2.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE notification_settings`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if version := readUserVersion(t, ctx, store.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated version %d, got %d", CurrentDBVersion, version)
+	}
+	if !testTableExists(t, ctx, store.DB(), "notification_settings") {
+		t.Fatal("expected notification_settings table after migration")
+	}
+}
+
 func TestOpenRejectsFutureDatabaseVersion(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "future.db")

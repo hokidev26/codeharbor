@@ -2,6 +2,18 @@
 
 All notable changes to CodeHarbor are tracked here. The project is still an experimental local-first MVP, so entries focus on user-visible behavior, security boundaries, and contributor-facing workflow changes.
 
+## Unreleased
+
+### Added
+
+- Added a frontend Run Summary card that loads completed/error/interrupted run summaries, shows tool/message/token/cost metrics, and links the review flow to the existing Git changes modal.
+- Added streaming Bash tool output over narrator WebSocket events, with a live output card in the chat UI while commands run.
+- Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block.
+
+### Changed
+
+- Updated the July 9 planning notes and project roadmap to reflect completed provider reliability, database migration, project instruction loading, and run tracking work.
+
 ## v0.1.0 - 2026-07-07
 
 ### Added

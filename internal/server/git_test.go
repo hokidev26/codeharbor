@@ -264,6 +264,159 @@ func TestGitCommitRouteRejectsStagedOutsideSelection(t *testing.T) {
 	}
 }
 
+func TestRollbackRunRouteRestoresCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	baseHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed", BaseHead: baseHead, EndHead: baseHead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, repo, "tracked.txt", "one\ntwo\n")
+	writeGitTestFile(t, repo, "nested/new.txt", "new\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body gitRollbackResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.RunID != run.ID || body.BaseHead != baseHead || !body.Status.Clean || len(body.Status.Files) != 0 {
+		t.Fatalf("unexpected rollback body: %+v", body)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "tracked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "one\n" {
+		t.Fatalf("expected tracked file to be restored, got %q", string(content))
+	}
+	if _, err := os.Stat(filepath.Join(repo, "nested/new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected untracked file to be removed, stat err=%v", err)
+	}
+	status := strings.TrimSpace(runGitTestOutput(t, repo, "status", "--porcelain=v1", "--untracked-files=all"))
+	if status != "" {
+		t.Fatalf("expected clean status after rollback, got %q", status)
+	}
+}
+
+func TestRollbackRunRouteRequiresConfirmation(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	baseHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed", BaseHead: baseHead, EndHead: baseHead})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":false}`))
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRollbackRunRouteRejectsMissingCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRollbackRunRouteRejectsCurrentHeadMismatch(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	baseHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	writeGitTestFile(t, repo, "tracked.txt", "one\ntwo\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "second")
+	currentHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed", BaseHead: baseHead})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if head := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD")); head != currentHead {
+		t.Fatalf("expected HEAD to remain at %s, got %s", currentHead, head)
+	}
+}
+
+func TestRollbackRunRouteRejectsCommitChangingRun(t *testing.T) {
+	ctx := context.Background()
+	repo := newGitTestRepo(t)
+	writeGitTestFile(t, repo, "tracked.txt", "one\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	baseHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	writeGitTestFile(t, repo, "tracked.txt", "one\ntwo\n")
+	runGitTestCommand(t, repo, "add", "tracked.txt")
+	runGitTestCommand(t, repo, "commit", "-m", "second")
+	endHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	store, narrator := newGitRouteStore(t, ctx, repo)
+	defer store.Close()
+	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed", BaseHead: baseHead, EndHead: endHead})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	currentHead := strings.TrimSpace(runGitTestOutput(t, repo, "rev-parse", "HEAD"))
+	if currentHead != endHead {
+		t.Fatalf("expected HEAD to remain at %s, got %s", endHead, currentHead)
+	}
+}
+
 func TestGitStatusRouteRejectsRepoOutsideProjectBoundary(t *testing.T) {
 	ctx := context.Background()
 	projectRoot := t.TempDir()

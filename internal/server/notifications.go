@@ -1,0 +1,234 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"codeharbor/internal/agent"
+	"codeharbor/internal/db"
+)
+
+const webhookNotifyTimeout = 5 * time.Second
+
+type WebhookNotifier struct {
+	store  *db.Store
+	client *http.Client
+}
+
+type notificationSettingsPayload struct {
+	Enabled          bool   `json:"enabled"`
+	WebhookURL       string `json:"webhookUrl"`
+	NotifyOnApproval bool   `json:"notifyOnApproval"`
+	NotifyOnDone     bool   `json:"notifyOnDone"`
+	NotifyOnError    bool   `json:"notifyOnError"`
+}
+
+type webhookPayload struct {
+	Kind       string                 `json:"kind"`
+	Event      string                 `json:"event"`
+	RunID      string                 `json:"runId,omitempty"`
+	NarratorID string                 `json:"narratorId,omitempty"`
+	Status     string                 `json:"status,omitempty"`
+	Error      string                 `json:"errorMessage,omitempty"`
+	Summary    *webhookRunSummary     `json:"summary,omitempty"`
+	Tool       *webhookToolSummary    `json:"tool,omitempty"`
+	CreatedAt  string                 `json:"createdAt"`
+	Meta       map[string]interface{} `json:"meta,omitempty"`
+}
+
+type webhookRunSummary struct {
+	MessageCount     int64   `json:"messageCount"`
+	ToolCallCount    int64   `json:"toolCallCount"`
+	PendingApprovals int64   `json:"pendingApprovals"`
+	DeniedToolCalls  int64   `json:"deniedToolCalls"`
+	ErrorToolCalls   int64   `json:"errorToolCalls"`
+	APIRequestCount  int64   `json:"apiRequestCount"`
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CostUSD          float64 `json:"costUsd"`
+}
+
+type webhookToolSummary struct {
+	ToolUseID string `json:"toolUseId,omitempty"`
+	ToolName  string `json:"toolName,omitempty"`
+}
+
+func NewWebhookNotifier(store *db.Store) *WebhookNotifier {
+	return &WebhookNotifier{store: store, client: &http.Client{Timeout: webhookNotifyTimeout}}
+}
+
+func (n *WebhookNotifier) Notify(ctx context.Context, event agent.NotificationEvent) {
+	if n == nil || n.store == nil {
+		return
+	}
+	settings, err := n.store.GetNotificationSettings(ctx)
+	if err != nil {
+		slog.Warn("load notification settings failed", "event", event.Event, "runId", event.RunID, "error", err)
+		return
+	}
+	if !shouldSendNotification(settings, event.Event) {
+		return
+	}
+	if err := n.send(ctx, settings.WebhookURL, n.payload(ctx, event)); err != nil {
+		slog.Warn("send webhook notification failed", "event", event.Event, "runId", event.RunID, "error", err)
+	}
+}
+
+func (n *WebhookNotifier) SendTest(ctx context.Context) error {
+	if n == nil || n.store == nil {
+		return errors.New("webhook notifier is not initialized")
+	}
+	settings, err := n.store.GetNotificationSettings(ctx)
+	if err != nil {
+		return err
+	}
+	payload := webhookPayload{Kind: "notification.test", Event: "test", Status: "test", CreatedAt: db.Now(), Meta: map[string]interface{}{"source": "CodeHarbor"}}
+	return n.send(ctx, settings.WebhookURL, payload)
+}
+
+func (n *WebhookNotifier) payload(ctx context.Context, event agent.NotificationEvent) webhookPayload {
+	payload := webhookPayload{
+		Kind:       "run." + notificationEventKind(event.Event),
+		Event:      event.Event,
+		RunID:      event.RunID,
+		NarratorID: event.NarratorID,
+		Status:     event.Status,
+		Error:      event.Error,
+		CreatedAt:  db.Now(),
+	}
+	if event.ToolUseID != "" || event.ToolName != "" {
+		payload.Tool = &webhookToolSummary{ToolUseID: event.ToolUseID, ToolName: event.ToolName}
+	}
+	if event.RunID != "" && event.NarratorID != "" {
+		if summary, err := n.store.RunSummary(ctx, event.NarratorID, event.RunID); err == nil {
+			payload.Summary = &webhookRunSummary{
+				MessageCount: summary.MessageCount, ToolCallCount: summary.ToolCallCount,
+				PendingApprovals: summary.PendingApprovals, DeniedToolCalls: summary.DeniedToolCalls, ErrorToolCalls: summary.ErrorToolCalls,
+				APIRequestCount: summary.APIRequestCount, InputTokens: summary.InputTokens, OutputTokens: summary.OutputTokens, CostUSD: summary.CostUSD,
+			}
+		}
+	}
+	return payload
+}
+
+func (n *WebhookNotifier) send(ctx context.Context, webhookURL string, payload webhookPayload) error {
+	webhookURL = strings.TrimSpace(webhookURL)
+	if err := validateWebhookURL(webhookURL, true); err != nil {
+		return err
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, webhookNotifyTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, webhookURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "CodeHarbor-Webhook/1.0")
+	response, err := n.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("webhook returned status %d", response.StatusCode)
+	}
+	return nil
+}
+
+func shouldSendNotification(settings db.NotificationSettings, event string) bool {
+	if !settings.Enabled || strings.TrimSpace(settings.WebhookURL) == "" {
+		return false
+	}
+	switch event {
+	case "approval_required":
+		return settings.NotifyOnApproval
+	case "completed", "interrupted", "superseded":
+		return settings.NotifyOnDone
+	case "error":
+		return settings.NotifyOnError
+	default:
+		return false
+	}
+}
+
+func notificationEventKind(event string) string {
+	switch event {
+	case "approval_required":
+		return "approval_required"
+	case "completed", "error", "interrupted", "superseded":
+		return event
+	default:
+		return "event"
+	}
+}
+
+func (s *Server) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.store.GetNotificationSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	var req notificationSettingsPayload
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateWebhookURL(req.WebhookURL, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated, err := s.store.UpdateNotificationSettings(r.Context(), db.NotificationSettings{
+		Enabled: req.Enabled, WebhookURL: strings.TrimSpace(req.WebhookURL), NotifyOnApproval: req.NotifyOnApproval, NotifyOnDone: req.NotifyOnDone, NotifyOnError: req.NotifyOnError,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
+	notifier := s.notifier
+	if notifier == nil {
+		notifier = NewWebhookNotifier(s.store)
+	}
+	if err := notifier.SendTest(r.Context()); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentAt": db.Now()})
+}
+
+func validateWebhookURL(raw string, required bool) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if required {
+			return errors.New("webhookUrl is required")
+		}
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("webhookUrl must be an absolute http(s) URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("webhookUrl must use http or https")
+	}
+	return nil
+}

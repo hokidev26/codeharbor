@@ -31,6 +31,9 @@ type Runner struct {
 	approvalMu    sync.Mutex
 	approvals     map[string]*pendingApproval
 	sessionGrants map[string]map[string]struct{}
+
+	notifierMu sync.RWMutex
+	notifier   Notifier
 }
 
 type activeRun struct {
@@ -41,6 +44,20 @@ type activeRun struct {
 	triggerMessageID        string
 	pendingRunID            string
 	pendingTriggerMessageID string
+}
+
+type NotificationEvent struct {
+	Event      string
+	RunID      string
+	NarratorID string
+	Status     string
+	Error      string
+	ToolUseID  string
+	ToolName   string
+}
+
+type Notifier interface {
+	Notify(context.Context, NotificationEvent)
 }
 
 type runCompletion struct {
@@ -83,6 +100,22 @@ func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *too
 	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]struct{})}
 }
 
+func (r *Runner) SetNotifier(notifier Notifier) {
+	r.notifierMu.Lock()
+	defer r.notifierMu.Unlock()
+	r.notifier = notifier
+}
+
+func (r *Runner) notify(event NotificationEvent) {
+	r.notifierMu.RLock()
+	notifier := r.notifier
+	r.notifierMu.RUnlock()
+	if notifier == nil {
+		return
+	}
+	go notifier.Notify(context.Background(), event)
+}
+
 func (r *Runner) SubmitUserMessage(ctx context.Context, narratorID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
 	msg, err := r.store.AddMessageWithAttachments(ctx, db.Message{NarratorID: narratorID, Role: "user", ContentText: text, CreatedBy: createdBy}, attachments)
 	if err != nil {
@@ -115,9 +148,11 @@ func (r *Runner) runWithRun(ctx context.Context, narratorID, runID, triggerMessa
 		slog.Error("register agent run failed", "narratorId", narratorID, "runId", runID, "error", registerErr)
 		_ = r.store.SetNarratorStatus(context.Background(), narratorID, "error", registerErr.Error())
 		if runID != "" {
+			r.captureRunEndHead(runID)
 			_ = r.store.CompleteRun(context.Background(), runID, "error", registerErr.Error())
 		}
 		r.publish(Event{Type: "agent.error", NarratorID: narratorID, Text: registerErr.Error(), Data: runEventData(runID)})
+		r.notify(NotificationEvent{Event: "error", RunID: runID, NarratorID: narratorID, Status: "error", Error: registerErr.Error()})
 		return
 	}
 	if !started {
@@ -132,13 +167,17 @@ func (r *Runner) runWithRun(ctx context.Context, narratorID, runID, triggerMessa
 				slog.Info("agent loop interrupted", "narratorId", narratorID, "runId", activeRunID(active))
 				_ = r.store.SetNarratorStatus(context.Background(), narratorID, "interrupted", "")
 				if active != nil && active.runID != "" {
+					r.captureRunEndHead(active.runID)
 					_ = r.store.CompleteRun(context.Background(), active.runID, "interrupted", "")
 				}
 				r.publish(Event{Type: "agent.interrupted", NarratorID: narratorID, Data: runEventData(activeRunID(active))})
+				r.notify(NotificationEvent{Event: "interrupted", RunID: activeRunID(active), NarratorID: narratorID, Status: "interrupted"})
 				return
 			}
 			if active != nil && active.runID != "" {
+				r.captureRunEndHead(active.runID)
 				_ = r.store.CompleteRun(context.Background(), active.runID, "superseded", "")
+				r.notify(NotificationEvent{Event: "superseded", RunID: active.runID, NarratorID: narratorID, Status: "superseded"})
 			}
 			go r.runWithRun(context.Background(), narratorID, completion.runID, completion.triggerMessageID)
 			return
@@ -146,9 +185,11 @@ func (r *Runner) runWithRun(ctx context.Context, narratorID, runID, triggerMessa
 		slog.Error("agent loop failed", "narratorId", narratorID, "runId", activeRunID(active), "error", err)
 		_ = r.store.SetNarratorStatus(context.Background(), narratorID, "error", err.Error())
 		if active != nil && active.runID != "" {
+			r.captureRunEndHead(active.runID)
 			_ = r.store.CompleteRun(context.Background(), active.runID, "error", err.Error())
 		}
 		r.publish(Event{Type: "agent.error", NarratorID: narratorID, Text: err.Error(), Data: runEventData(activeRunID(active))})
+		r.notify(NotificationEvent{Event: "error", RunID: activeRunID(active), NarratorID: narratorID, Status: "error", Error: err.Error()})
 		if completion.pending {
 			go r.runWithRun(context.Background(), narratorID, completion.runID, completion.triggerMessageID)
 		}
@@ -177,6 +218,7 @@ func (r *Runner) Interrupt(ctx context.Context, narratorID string) (bool, error)
 	}
 	r.runMu.Unlock()
 	if pendingRunID != "" {
+		r.captureRunEndHead(pendingRunID)
 		_ = r.store.CompleteRun(context.Background(), pendingRunID, "interrupted", "")
 	}
 	if cancel == nil {
@@ -292,6 +334,7 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 	if err != nil {
 		return err
 	}
+	r.captureRunCheckpoint(ctx, narrator, runID)
 	projectInstructions := loadProjectInstructions(narrator.CWD)
 	if strings.TrimSpace(projectInstructions.Text) != "" {
 		narrator.SystemPrompt = mergeProjectInstructions(narrator.SystemPrompt, projectInstructions)
@@ -337,10 +380,12 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 				return err
 			}
 			r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
+			r.captureRunEndHead(runID)
 			if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
 				return err
 			}
 			r.publish(Event{Type: "agent.done", NarratorID: narratorID, Data: mergeEventData(map[string]any{"stopReason": result.StopReason}, runID)})
+			r.notify(NotificationEvent{Event: "completed", RunID: runID, NarratorID: narratorID, Status: "completed"})
 			if err := r.store.SetNarratorStatus(ctx, narratorID, "idle", ""); err != nil {
 				return err
 			}
@@ -1003,6 +1048,7 @@ func (r *Runner) executeToolForLoop(ctx context.Context, narratorID, runID strin
 		result := tools.Result{Output: dangerBlockedMessage(warning), IsError: true}
 		r.recordImmediateToolResult(ctx, narratorID, runID, messageID, call, risk, result, "denied", warning)
 		r.publish(Event{Type: "tool.approval_required", NarratorID: narratorID, Data: mergeEventData(approvalEventData(narrator, call, risk, warning, "danger", time.Time{}), runID)})
+		r.notify(NotificationEvent{Event: "approval_required", RunID: runID, NarratorID: narratorID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
 		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "warning": warning}, runID)})
 		return result, nil
 	}
@@ -1065,7 +1111,7 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 		return result, nil
 	}
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narratorID, CWD: narrator.CWD, Store: r.store})
+	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narratorID, CWD: narrator.CWD, Store: r.store, Output: r.toolOutputPublisher(narratorID, "", call)})
 	duration := time.Since(started).Milliseconds()
 	output, _ := json.Marshal(result)
 	status := "completed"
@@ -1085,10 +1131,27 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 	return result, err
 }
 
+func (r *Runner) toolOutputPublisher(narratorID, runID string, call tools.Call) func(tools.OutputChunk) {
+	return func(chunk tools.OutputChunk) {
+		if chunk.Text == "" {
+			return
+		}
+		stream := strings.TrimSpace(chunk.Stream)
+		if stream == "" {
+			stream = "combined"
+		}
+		data := map[string]any{"toolUseId": call.ID, "toolName": call.Name, "stream": stream}
+		if chunk.Truncated {
+			data["truncated"] = true
+		}
+		r.publish(Event{Type: "tool.output", NarratorID: narratorID, Text: chunk.Text, Data: mergeEventData(data, runID)})
+	}
+}
+
 func (r *Runner) executeApprovedTool(ctx context.Context, narrator db.Narrator, runID string, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool) (tools.Result, error) {
 	r.publish(Event{Type: "tool.started", NarratorID: narrator.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}, runID)})
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD, Store: r.store})
+	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD, Store: r.store, Output: r.toolOutputPublisher(narrator.ID, runID, call)})
 	duration := time.Since(started).Milliseconds()
 	status := "completed"
 	errMsg := ""
@@ -1134,6 +1197,7 @@ func (r *Runner) waitForToolApproval(ctx context.Context, narrator db.Narrator, 
 	r.addPendingApproval(approval)
 	defer r.removePendingApproval(narrator.ID, call.ID)
 	r.publish(Event{Type: "tool.approval_required", NarratorID: narrator.ID, Data: mergeEventData(approvalEventData(narrator, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt), runID)})
+	r.notify(NotificationEvent{Event: "approval_required", RunID: runID, NarratorID: narrator.ID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
 
 	timer := time.NewTimer(toolApprovalTimeout)
 	defer timer.Stop()

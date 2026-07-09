@@ -1,5 +1,5 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
-import { formatBytes, formatTimestamp } from "./formatters.mjs";
+import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { api } from "./runtime.mjs";
 
 export function createChatRenderingController({
@@ -8,6 +8,8 @@ export function createChatRenderingController({
   attachmentKind,
   copyToClipboard,
   notifyTerminal,
+  openGitModal,
+  refreshGitWorkflow,
   selectedModelValue,
   shortPath,
   showError,
@@ -27,8 +29,10 @@ export function createChatRenderingController({
     state.currentMessages = messages;
     state.messageCopyTexts = messages.map((message) => String(message.contentText || ""));
     updateConversationCopyButton();
+    const liveToolCards = renderLiveToolOutputCardsHTML();
+    const runSummaryCard = renderRunSummaryCardHTML();
     const approvalCards = renderApprovalCardsHTML();
-    if (!messages.length && !approvalCards) {
+    if (!messages.length && !liveToolCards && !runSummaryCard && !approvalCards) {
       el.classList.add("empty");
       el.textContent = "还没有消息。输入你的需求开始对话。";
       return;
@@ -43,11 +47,535 @@ export function createChatRenderingController({
         <div class="message-content">${renderMarkdown(friendlyMessageText(message.contentText || ""))}</div>
         ${renderMessageAttachments(message)}
       </div>
-    `).join("")}${approvalCards}`;
+    `).join("")}${liveToolCards}${runSummaryCard}${approvalCards}`;
     bindMessageActionButtons(el);
+    bindRunSummaryButtons(el);
     bindApprovalButtons(el);
     bindCopyCodeButtons(el);
     el.scrollTop = el.scrollHeight;
+  }
+
+  function clearRunSummary() {
+    state.activeRunSummary = null;
+    state.activeRunSummaryRunId = "";
+    state.runSummaryLoading = false;
+    state.runSummaryError = "";
+    state.runRollbackBusy = false;
+    state.runSummarySeq = Number(state.runSummarySeq || 0) + 1;
+    renderRunSummaryCard();
+  }
+
+  async function loadLatestRunSummary(narratorId = state.narrator?.id) {
+    if (!narratorId) return null;
+    const seq = Number(state.runSummarySeq || 0) + 1;
+    state.runSummarySeq = seq;
+    state.activeRunSummary = null;
+    state.activeRunSummaryRunId = "";
+    state.runSummaryLoading = false;
+    state.runSummaryError = "";
+    state.runRollbackBusy = false;
+    try {
+      const runs = await api(`/api/narrators/${narratorId}/runs?limit=1`);
+      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      const run = Array.isArray(runs) ? runs[0] : null;
+      if (!run || !isTerminalRunStatus(run.status)) {
+        renderRunSummaryCard();
+        return null;
+      }
+      return await loadRunSummary(run.id, { narratorId });
+    } catch (err) {
+      if (seq === state.runSummarySeq && state.narrator?.id === narratorId) {
+        state.runSummaryError = err.message || String(err);
+        renderRunSummaryCard();
+      }
+      notifyTerminal?.(`[warn] 最近 Run 回顾加载失败：${err.message || err}\n`);
+      return null;
+    }
+  }
+
+  async function loadRunSummary(runId, options = {}) {
+    const narratorId = options.narratorId || state.narrator?.id;
+    if (!narratorId || !runId) return null;
+    const seq = Number(state.runSummarySeq || 0) + 1;
+    state.runSummarySeq = seq;
+    state.activeRunSummaryRunId = runId;
+    state.runSummaryLoading = true;
+    state.runSummaryError = "";
+    renderRunSummaryCard();
+    try {
+      const summary = await api(`/api/narrators/${narratorId}/runs/${encodeURIComponent(runId)}`);
+      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      state.activeRunSummary = summary;
+      state.activeRunSummaryRunId = summary?.run?.id || runId;
+      state.runSummaryLoading = false;
+      state.runSummaryError = "";
+      renderRunSummaryCard();
+      if (options.notify) showToast("Run 回顾已刷新。", "success");
+      return summary;
+    } catch (err) {
+      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      state.runSummaryLoading = false;
+      state.runSummaryError = err.message || String(err);
+      renderRunSummaryCard();
+      throw err;
+    }
+  }
+
+  function renderRunSummaryCard() {
+    const el = $("messages");
+    if (!el) return;
+    const existing = el.querySelector("[data-run-summary-card]");
+    if (existing) existing.remove();
+    const html = renderRunSummaryCardHTML();
+    if (!html) return;
+    if (el.classList.contains("empty")) {
+      el.classList.remove("empty");
+      el.innerHTML = html;
+    } else {
+      const approvalStack = el.querySelector("[data-approval-stack]");
+      if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
+      else el.insertAdjacentHTML("beforeend", html);
+    }
+    bindRunSummaryButtons(el);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function renderRunSummaryCardHTML() {
+    const summary = state.activeRunSummary;
+    const run = summary?.run;
+    const runId = state.activeRunSummaryRunId || run?.id || "";
+    if (!run && !runId && !state.runSummaryLoading && !state.runSummaryError) return "";
+    const status = run?.status || (state.runSummaryLoading ? "loading" : "unknown");
+    const checkpoint = runCheckpointState(run);
+    const toolCalls = Array.isArray(summary?.toolCalls) ? summary.toolCalls : [];
+    const recentMessages = Array.isArray(summary?.recentMessages) ? summary.recentMessages : [];
+    const tokenText = `${formatNumber(summary?.inputTokens || 0)} / ${formatNumber(summary?.outputTokens || 0)}`;
+    return `
+      <section class="run-summary-card ${escapeAttr(runStatusClass(status))}" data-run-summary-card data-run-id="${escapeAttr(runId)}">
+        <div class="run-summary-head">
+          <div>
+            <div class="run-summary-kicker">任务回顾</div>
+            <div class="run-summary-title">${escapeHtml(runStatusLabel(status))}${state.runSummaryLoading ? " · 正在刷新" : ""}</div>
+            <div class="run-summary-meta">${escapeHtml(runTimeRange(run))}${runId ? ` · ${escapeHtml(shortRunId(runId))}` : ""}</div>
+          </div>
+          <span class="run-summary-status">${escapeHtml(status)}</span>
+        </div>
+        ${state.runSummaryError ? `<div class="run-summary-alert">${escapeHtml(state.runSummaryError)}</div>` : ""}
+        ${renderRunCheckpoint(run, checkpoint)}
+        <div class="run-summary-metrics">
+          ${renderRunMetric("消息", summary?.messageCount)}
+          ${renderRunMetric("工具", summary?.toolCallCount)}
+          ${renderRunMetric("待审批", summary?.pendingApprovals, Number(summary?.pendingApprovals || 0) ? "warn" : "")}
+          ${renderRunMetric("拒绝 / 错误", `${formatNumber(summary?.deniedToolCalls || 0)} / ${formatNumber(summary?.errorToolCalls || 0)}`, Number(summary?.deniedToolCalls || 0) || Number(summary?.errorToolCalls || 0) ? "bad" : "")}
+          ${renderRunMetric("API", summary?.apiRequestCount)}
+          ${renderRunMetric("Tokens in / out", tokenText)}
+          ${renderRunMetric("成本", formatMoney(summary?.costUsd || 0))}
+        </div>
+        ${renderRunToolCalls(toolCalls)}
+        ${renderRunMessagePreviews(recentMessages)}
+        <div class="run-summary-actions">
+          <button class="ghost-btn mini" type="button" data-run-summary-open-git>查看 Git 变更</button>
+          <button class="ghost-btn mini danger" type="button" data-run-summary-rollback="${escapeAttr(runId)}" title="${escapeAttr(checkpoint.reason)}" ${checkpoint.available && runId && !state.runRollbackBusy ? "" : "disabled"}>${state.runRollbackBusy ? "回滚中…" : "回滚到开始前"}</button>
+          <button class="ghost-btn mini" type="button" data-run-summary-copy="${escapeAttr(runId)}" ${summary ? "" : "disabled"}>复制摘要</button>
+          <button class="ghost-btn mini" type="button" data-run-summary-refresh="${escapeAttr(runId)}" ${runId ? "" : "disabled"}>刷新回顾</button>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRunCheckpoint(run, checkpoint = runCheckpointState(run)) {
+    if (!run) return "";
+    const head = run.baseHead ? shortGitHash(run.baseHead) : "未记录";
+    return `
+      <div class="run-summary-checkpoint ${escapeAttr(checkpoint.tone)}">
+        <span>Git checkpoint</span>
+        <strong>${escapeHtml(head)}</strong>
+        <em>${escapeHtml(checkpoint.reason)}</em>
+      </div>
+    `;
+  }
+
+  function runCheckpointState(run) {
+    if (!run?.baseHead) {
+      return { available: false, tone: "muted", reason: "本轮开始时工作区不干净或无法读取 Git HEAD，不能自动回滚。" };
+    }
+    if (run.endHead && run.endHead !== run.baseHead) {
+      return { available: false, tone: "warn", reason: "本轮产生了提交，自动回滚不会跨 commit 执行。" };
+    }
+    return { available: true, tone: "ok", reason: `可恢复到 ${shortGitHash(run.baseHead)}，并清理 checkpoint 之后产生的未跟踪文件。` };
+  }
+
+  function shortGitHash(hash) {
+    const text = String(hash || "").trim();
+    return text ? text.slice(0, 8) : "";
+  }
+
+  function renderRunMetric(label, value, tone = "") {
+    const text = typeof value === "number" ? formatNumber(value) : String(value ?? "0");
+    return `<div class="run-summary-metric ${tone ? `tone-${escapeAttr(tone)}` : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(text)}</strong></div>`;
+  }
+
+  function renderRunToolCalls(toolCalls) {
+    if (!toolCalls.length) return `<div class="run-summary-empty">本轮没有工具调用。</div>`;
+    const visible = toolCalls.slice(0, 6);
+    const more = toolCalls.length > visible.length ? `<div class="run-summary-more">另有 ${escapeHtml(formatNumber(toolCalls.length - visible.length))} 个工具调用未显示。</div>` : "";
+    return `
+      <div class="run-summary-section">
+        <div class="run-summary-section-title">工具调用</div>
+        <div class="run-tool-list">
+          ${visible.map((call) => `
+            <div class="run-tool-row ${escapeAttr(toolStatusClass(call.status))}">
+              <span class="run-tool-name">${escapeHtml(call.toolName || "tool")}</span>
+              <span class="run-tool-status">${escapeHtml(toolStatusLabel(call.status))}</span>
+              <span class="run-tool-preview">${escapeHtml(toolCallPreview(call))}</span>
+            </div>
+          `).join("")}
+        </div>
+        ${more}
+      </div>
+    `;
+  }
+
+  function renderRunMessagePreviews(messages) {
+    if (!messages.length) return "";
+    return `
+      <div class="run-summary-section">
+        <div class="run-summary-section-title">最近消息</div>
+        <div class="run-message-preview-list">
+          ${messages.slice(-3).map((message) => `
+            <div class="run-message-preview">
+              <span>${escapeHtml(message.role || "message")}</span>
+              <strong>${escapeHtml(compactText(message.contentText || "", 120))}</strong>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function bindRunSummaryButtons(root) {
+    root.querySelectorAll("[data-run-summary-refresh]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const runId = button.dataset.runSummaryRefresh || state.activeRunSummaryRunId || "";
+        if (!runId) return;
+        loadRunSummary(runId, { notify: true }).catch(showError);
+      });
+    });
+    root.querySelectorAll("[data-run-summary-rollback]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const runId = button.dataset.runSummaryRollback || state.activeRunSummaryRunId || "";
+        if (!runId) return;
+        rollbackRunToCheckpoint(runId).catch(showError);
+      });
+    });
+    root.querySelectorAll("[data-run-summary-copy]").forEach((button) => {
+      button.addEventListener("click", () => copyActiveRunSummaryMarkdown(button));
+    });
+    root.querySelectorAll("[data-run-summary-open-git]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (typeof openGitModal === "function") openGitModal();
+        else showToast("Git 面板暂不可用。", "warn");
+      });
+    });
+  }
+
+  async function rollbackRunToCheckpoint(runId) {
+    const narratorId = state.narrator?.id;
+    const run = state.activeRunSummary?.run;
+    const checkpoint = runCheckpointState(run);
+    if (!narratorId || !runId || !checkpoint.available) {
+      showToast(checkpoint.reason || "当前 Run 没有可用 checkpoint。", "warn", { force: true });
+      return;
+    }
+    const confirmed = window.confirm("确认回滚到本轮开始前的 Git checkpoint？\n\n这会恢复 tracked/staged 文件，并删除 checkpoint 之后产生的未跟踪文件；不会 push，也不会跨 commit 回滚。");
+    if (!confirmed) return;
+    state.runRollbackBusy = true;
+    state.runSummaryError = "";
+    renderRunSummaryCard();
+    try {
+      const result = await api(`/api/narrators/${narratorId}/runs/${encodeURIComponent(runId)}/rollback`, {
+        method: "POST",
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (state.narrator?.id !== narratorId) return;
+      if (result?.status) {
+        state.gitStatus = result.status;
+        state.gitDiff = null;
+      }
+      showToast("已回滚到任务开始前 checkpoint。", "success", { force: true });
+      if (typeof refreshGitWorkflow === "function") {
+        try {
+          await refreshGitWorkflow({ silent: true });
+        } catch (err) {
+          notifyTerminal?.(`[warn] Git 状态刷新失败：${err.message || err}\n`);
+        }
+      }
+    } catch (err) {
+      if (state.narrator?.id !== narratorId) return;
+      state.runSummaryError = err.message || String(err);
+      renderRunSummaryCard();
+      throw err;
+    } finally {
+      if (state.narrator?.id === narratorId) {
+        state.runRollbackBusy = false;
+        renderRunSummaryCard();
+      }
+    }
+  }
+
+  async function copyActiveRunSummaryMarkdown(button) {
+    const summary = state.activeRunSummary;
+    if (!summary?.run || !copyToClipboard) {
+      showToast("当前没有可复制的 Run 回顾。", "warn");
+      return;
+    }
+    const original = button?.textContent || "复制摘要";
+    const ok = await copyToClipboard(runSummaryMarkdown(summary));
+    if (button) {
+      button.textContent = ok ? "已复制" : "复制失败";
+      window.setTimeout(() => { button.textContent = original; }, 1200);
+    }
+    showToast(ok ? "Run 回顾 Markdown 已复制。" : "复制 Run 回顾失败。", ok ? "success" : "warn");
+  }
+
+  function runSummaryMarkdown(summary) {
+    const run = summary.run || {};
+    const lines = [
+      `# Run 回顾 ${run.id || ""}`.trim(),
+      "",
+      `- 状态：${run.status || "unknown"}`,
+      `- 时间：${runTimeRange(run)}`,
+      `- 消息：${formatNumber(summary.messageCount || 0)}`,
+      `- 工具调用：${formatNumber(summary.toolCallCount || 0)}（待审批 ${formatNumber(summary.pendingApprovals || 0)}，拒绝 ${formatNumber(summary.deniedToolCalls || 0)}，错误 ${formatNumber(summary.errorToolCalls || 0)}）`,
+      `- API 请求：${formatNumber(summary.apiRequestCount || 0)}`,
+      `- Tokens：${formatNumber(summary.inputTokens || 0)} in / ${formatNumber(summary.outputTokens || 0)} out`,
+      `- 成本：${formatMoney(summary.costUsd || 0)}`,
+      "",
+      "## 工具调用",
+    ];
+    const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
+    if (!toolCalls.length) lines.push("- 无");
+    else toolCalls.forEach((call) => lines.push(`- ${call.toolName || "tool"}：${call.status || "unknown"}${call.errorMessage ? ` — ${call.errorMessage}` : ""}`));
+    const messages = Array.isArray(summary.recentMessages) ? summary.recentMessages : [];
+    if (messages.length) {
+      lines.push("", "## 最近消息");
+      messages.slice(-6).forEach((message) => lines.push(`- ${message.role || "message"}: ${compactText(message.contentText || "", 180)}`));
+    }
+    return lines.join("\n");
+  }
+
+  function isTerminalRunStatus(status) {
+    return ["completed", "error", "interrupted", "superseded"].includes(String(status || ""));
+  }
+
+  function runStatusLabel(status) {
+    const value = String(status || "unknown");
+    if (value === "completed") return "任务已完成";
+    if (value === "error") return "任务失败";
+    if (value === "interrupted") return "任务已中断";
+    if (value === "superseded") return "任务已被新请求替换";
+    if (value === "running") return "任务运行中";
+    if (value === "pending") return "任务等待运行";
+    if (value === "loading") return "正在加载任务回顾";
+    return "任务状态未知";
+  }
+
+  function runStatusClass(status) {
+    const value = String(status || "unknown");
+    if (value === "completed") return "status-completed";
+    if (value === "error") return "status-error";
+    if (value === "interrupted" || value === "superseded") return "status-warn";
+    return "status-neutral";
+  }
+
+  function toolStatusLabel(status) {
+    const value = String(status || "unknown");
+    if (value === "completed") return "完成";
+    if (value === "pending_approval") return "待审批";
+    if (value === "denied") return "拒绝";
+    if (value === "error") return "错误";
+    return value;
+  }
+
+  function toolStatusClass(status) {
+    const value = String(status || "unknown");
+    if (value === "completed") return "status-completed";
+    if (value === "pending_approval") return "status-warn";
+    if (value === "denied" || value === "error") return "status-error";
+    return "status-neutral";
+  }
+
+  function runTimeRange(run) {
+    if (!run) return "暂无时间";
+    const start = formatTimestamp(run.startedAt || run.createdAt);
+    const end = run.completedAt ? formatTimestamp(run.completedAt) : "未完成";
+    return `${start} → ${end}`;
+  }
+
+  function shortRunId(runId) {
+    const value = String(runId || "");
+    if (value.length <= 12) return value;
+    return `${value.slice(0, 8)}…${value.slice(-4)}`;
+  }
+
+  function compactText(text, max = 140) {
+    const value = String(text || "").replace(/\s+/g, " ").trim();
+    if (!value) return "（空）";
+    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  }
+
+  function toolCallPreview(call) {
+    if (call.errorMessage) return compactText(call.errorMessage, 120);
+    const input = call.inputJson;
+    if (input && typeof input === "object") {
+      if (input.command) return compactText(input.command, 120);
+      if (input.file_path) return compactText(input.file_path, 120);
+      if (input.pattern) return compactText(input.pattern, 120);
+    }
+    if (typeof input === "string") return compactText(input, 120);
+    try {
+      return compactText(JSON.stringify(input || {}), 120);
+    } catch {
+      return "";
+    }
+  }
+
+  function rememberToolStarted(event) {
+    const data = event.data || {};
+    const toolUseId = data.toolUseId || data.tool_use_id;
+    const toolName = data.toolName || "tool";
+    if (!toolUseId || toolName !== "Bash") return;
+    state.liveToolOutputs = {
+      ...(state.liveToolOutputs || {}),
+      [toolUseId]: {
+        narratorId: event.narratorId || state.narrator?.id,
+        runId: data.runId || "",
+        toolUseId,
+        toolName,
+        risk: data.risk || "exec",
+        status: "running",
+        output: "",
+        truncated: false,
+        createdAt: event.createdAt || new Date().toISOString(),
+      },
+    };
+    renderLiveToolOutputCards();
+  }
+
+  function appendToolOutput(event) {
+    const data = event.data || {};
+    const toolUseId = data.toolUseId || data.tool_use_id;
+    if (!toolUseId) return;
+    const current = state.liveToolOutputs?.[toolUseId] || {
+      narratorId: event.narratorId || state.narrator?.id,
+      runId: data.runId || "",
+      toolUseId,
+      toolName: data.toolName || "Bash",
+      risk: data.risk || "exec",
+      status: "running",
+      output: "",
+      truncated: false,
+      createdAt: event.createdAt || new Date().toISOString(),
+    };
+    const nextOutput = trimLiveToolOutput(`${current.output || ""}${event.text || ""}`);
+    state.liveToolOutputs = {
+      ...(state.liveToolOutputs || {}),
+      [toolUseId]: {
+        ...current,
+        toolName: data.toolName || current.toolName || "Bash",
+        status: current.status || "running",
+        output: nextOutput,
+        truncated: Boolean(current.truncated || data.truncated),
+      },
+    };
+    renderLiveToolOutputCards();
+  }
+
+  function finishToolOutput(event) {
+    const data = event.data || {};
+    const toolUseId = data.toolUseId || data.tool_use_id;
+    const current = toolUseId ? state.liveToolOutputs?.[toolUseId] : null;
+    if (!toolUseId || !current) return;
+    state.liveToolOutputs = {
+      ...(state.liveToolOutputs || {}),
+      [toolUseId]: {
+        ...current,
+        status: data.status || "completed",
+        durationMs: data.durationMs || current.durationMs || 0,
+      },
+    };
+    renderLiveToolOutputCards();
+    const narratorId = current.narratorId || state.narrator?.id || "";
+    window.setTimeout(() => {
+      const existing = state.liveToolOutputs?.[toolUseId];
+      if (!existing || (existing.narratorId && narratorId && existing.narratorId !== narratorId)) return;
+      const next = { ...(state.liveToolOutputs || {}) };
+      delete next[toolUseId];
+      state.liveToolOutputs = next;
+      renderLiveToolOutputCards();
+    }, 2500);
+  }
+
+  function currentLiveToolOutputList() {
+    const narratorId = state.narrator?.id || "";
+    return Object.values(state.liveToolOutputs || {})
+      .filter((item) => item && (!item.narratorId || item.narratorId === narratorId))
+      .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  }
+
+  function renderLiveToolOutputCardsHTML() {
+    const outputs = currentLiveToolOutputList();
+    if (!outputs.length) return "";
+    return `
+      <div class="live-tool-output-stack" data-live-tool-output-stack>
+        ${outputs.map(renderLiveToolOutputCard).join("")}
+      </div>
+    `;
+  }
+
+  function renderLiveToolOutputCard(item) {
+    const status = item.status || "running";
+    const output = item.output || "等待命令输出…";
+    return `
+      <section class="live-tool-output-card ${escapeAttr(toolStatusClass(status))}" data-live-tool-output-card="${escapeAttr(item.toolUseId || "")}">
+        <div class="live-tool-output-head">
+          <div>
+            <div class="live-tool-output-title">${escapeHtml(item.toolName || "Bash")} 实时输出</div>
+            <div class="live-tool-output-meta">${escapeHtml(status)}${item.durationMs ? ` · ${escapeHtml(formatNumber(item.durationMs))} ms` : ""}${item.runId ? ` · ${escapeHtml(shortRunId(item.runId))}` : ""}</div>
+          </div>
+          <span class="live-tool-output-dot">${status === "running" ? "运行中" : toolStatusLabel(status)}</span>
+        </div>
+        <pre class="live-tool-output-body">${escapeHtml(output)}</pre>
+        ${item.truncated ? `<div class="live-tool-output-note">实时输出过长，已截断；最终结果仍会保存为工具结果摘要。</div>` : ""}
+      </section>
+    `;
+  }
+
+  function renderLiveToolOutputCards() {
+    const el = $("messages");
+    if (!el) return;
+    const existing = el.querySelector("[data-live-tool-output-stack]");
+    if (existing) existing.remove();
+    const html = renderLiveToolOutputCardsHTML();
+    if (!html) return;
+    if (el.classList.contains("empty")) {
+      el.classList.remove("empty");
+      el.innerHTML = html;
+    } else {
+      const runSummary = el.querySelector("[data-run-summary-card]");
+      const approvalStack = el.querySelector("[data-approval-stack]");
+      if (runSummary) runSummary.insertAdjacentHTML("beforebegin", html);
+      else if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
+      else el.insertAdjacentHTML("beforeend", html);
+    }
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function trimLiveToolOutput(text) {
+    const max = 40000;
+    const value = String(text || "");
+    if (value.length <= max) return value;
+    return `...[earlier output truncated]\n${value.slice(value.length - max)}`;
   }
 
   function currentApprovalList() {
@@ -396,12 +924,18 @@ export function createChatRenderingController({
   }
 
   return {
+    appendToolOutput,
     clearCurrentNarratorApprovals,
     clearMessageRefreshTimer,
+    clearRunSummary,
     clearToolApproval,
     copyCurrentConversationMarkdown,
+    finishToolOutput,
+    loadLatestRunSummary,
     loadMessages,
+    loadRunSummary,
     rememberToolApproval,
+    rememberToolStarted,
     scheduleMessageRefresh,
     updateConversationCopyButton,
   };

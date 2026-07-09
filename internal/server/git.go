@@ -82,6 +82,18 @@ type gitCommitRequest struct {
 	Paths   []string `json:"paths"`
 }
 
+type gitRollbackRequest struct {
+	Confirm bool `json:"confirm"`
+}
+
+type gitRollbackResponse struct {
+	GeneratedAt string            `json:"generatedAt"`
+	RepoRoot    string            `json:"repoRoot"`
+	RunID       string            `json:"runId"`
+	BaseHead    string            `json:"baseHead"`
+	Status      gitStatusResponse `json:"status"`
+}
+
 type gitCommitResponse struct {
 	GeneratedAt    string          `json:"generatedAt"`
 	RepoRoot       string          `json:"repoRoot"`
@@ -113,35 +125,31 @@ func (s *Server) gitStatus(w http.ResponseWriter, r *http.Request) {
 		writeGitError(w, err)
 		return
 	}
-	statusOut, truncated, err := runGitCommand(r.Context(), repoRoot, gitStatusMaxBytes, 3*time.Second, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	status, err := s.gitStatusForRepo(r.Context(), repoRoot, cwd)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) gitStatusForRepo(ctx context.Context, repoRoot, cwd string) (gitStatusResponse, error) {
+	statusOut, truncated, err := runGitCommand(ctx, repoRoot, gitStatusMaxBytes, 3*time.Second, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return gitStatusResponse{}, err
+	}
 	files := parseGitPorcelainStatus(statusOut)
-	head, _, _ := runGitCommand(r.Context(), repoRoot, 256, 2*time.Second, nil, "rev-parse", "--short", "HEAD")
-	branch, _, _ := runGitCommand(r.Context(), repoRoot, 512, 2*time.Second, nil, "branch", "--show-current")
-	upstream, _, _ := runGitCommand(r.Context(), repoRoot, 512, 2*time.Second, nil, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	head, _, _ := runGitCommand(ctx, repoRoot, 256, 2*time.Second, nil, "rev-parse", "--short", "HEAD")
+	branch, _, _ := runGitCommand(ctx, repoRoot, 512, 2*time.Second, nil, "branch", "--show-current")
+	upstream, _, _ := runGitCommand(ctx, repoRoot, 512, 2*time.Second, nil, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	ahead, behind := 0, 0
 	if strings.TrimSpace(upstream) != "" {
-		counts, _, err := runGitCommand(r.Context(), repoRoot, 128, 2*time.Second, nil, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+		counts, _, err := runGitCommand(ctx, repoRoot, 128, 2*time.Second, nil, "rev-list", "--left-right", "--count", "HEAD...@{u}")
 		if err == nil {
 			ahead, behind = parseAheadBehind(counts)
 		}
 	}
-	writeJSON(w, http.StatusOK, gitStatusResponse{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		CWD:         cwd,
-		RepoRoot:    repoRoot,
-		Head:        strings.TrimSpace(head),
-		Branch:      strings.TrimSpace(branch),
-		Upstream:    strings.TrimSpace(upstream),
-		Ahead:       ahead,
-		Behind:      behind,
-		Clean:       len(files) == 0,
-		Files:       files,
-		Truncated:   truncated,
-	})
+	return gitStatusResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), CWD: cwd, RepoRoot: repoRoot, Head: strings.TrimSpace(head), Branch: strings.TrimSpace(branch), Upstream: strings.TrimSpace(upstream), Ahead: ahead, Behind: behind, Clean: len(files) == 0, Files: files, Truncated: truncated}, nil
 }
 
 func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +209,63 @@ func (s *Server) gitLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, gitLogResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), RepoRoot: repoRoot, Commits: parseGitLog(out), Truncated: truncated})
+}
+
+func (s *Server) rollbackRun(w http.ResponseWriter, r *http.Request) {
+	narratorID := chi.URLParam(r, "id")
+	runID := chi.URLParam(r, "runId")
+	cwd, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), narratorID)
+	if err != nil {
+		writeGitError(w, err)
+		return
+	}
+	var req gitRollbackRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.Confirm {
+		writeError(w, http.StatusBadRequest, "confirm must be true")
+		return
+	}
+	run, err := s.store.GetRun(r.Context(), narratorID, runID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	baseHead := strings.TrimSpace(run.BaseHead)
+	if baseHead == "" {
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "run has no clean-start checkpoint"})
+		return
+	}
+	endHead := strings.TrimSpace(run.EndHead)
+	if endHead != "" && endHead != baseHead {
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "run changed HEAD; refusing rollback across commits"})
+		return
+	}
+	currentHead, _, err := runGitCommand(r.Context(), repoRoot, 256, 3*time.Second, nil, "rev-parse", "HEAD")
+	if err != nil {
+		writeGitError(w, err)
+		return
+	}
+	if strings.TrimSpace(currentHead) != baseHead {
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "current HEAD differs from run checkpoint"})
+		return
+	}
+	if _, _, err := runGitCommand(r.Context(), repoRoot, gitCommitOutputMaxBytes, 10*time.Second, nil, "restore", "--source", baseHead, "--staged", "--worktree", "--", "."); err != nil {
+		writeGitError(w, err)
+		return
+	}
+	if _, _, err := runGitCommand(r.Context(), repoRoot, gitCommitOutputMaxBytes, 10*time.Second, nil, "clean", "-fd", "--", "."); err != nil {
+		writeGitError(w, err)
+		return
+	}
+	status, err := s.gitStatusForRepo(r.Context(), repoRoot, cwd)
+	if err != nil {
+		writeGitError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gitRollbackResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), RepoRoot: repoRoot, RunID: runID, BaseHead: baseHead, Status: status})
 }
 
 func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {

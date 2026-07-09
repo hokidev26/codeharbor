@@ -7,10 +7,16 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 type BashTool struct{}
+
+const (
+	bashResultMaxBytes = 20000
+	bashStreamMaxBytes = 100000
+)
 
 type bashInput struct {
 	Command string `json:"command"`
@@ -113,12 +119,18 @@ func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	if env.CWD != "" {
 		cmd.Dir = env.CWD
 	}
-	output, err := cmd.CombinedOutput()
-	text, cut := truncate(string(output), 20000)
+	collector := newBashOutputCollector(env.Output)
+	cmd.Stdout = collector
+	cmd.Stderr = collector
+	err := cmd.Run()
+	text, cut := collector.result()
 	result := Result{Output: text, Meta: map[string]any{"truncated": cut}}
 	if cmdCtx.Err() != nil {
 		result.IsError = true
 		result.Output += "\ncommand timed out"
+		if env.Output != nil {
+			env.Output(OutputChunk{Text: "\ncommand timed out\n", Stream: "combined"})
+		}
 		return result, nil
 	}
 	if err != nil {
@@ -128,4 +140,79 @@ func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 		}
 	}
 	return result, nil
+}
+
+type bashOutputCollector struct {
+	mu              sync.Mutex
+	resultBuilder   strings.Builder
+	resultBytes     int
+	resultTruncated bool
+	streamBytes     int
+	streamTruncated bool
+	output          func(OutputChunk)
+}
+
+func newBashOutputCollector(output func(OutputChunk)) *bashOutputCollector {
+	return &bashOutputCollector{output: output}
+}
+
+func (c *bashOutputCollector) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := len(p)
+	text := string(p)
+	emitText := ""
+	emitTruncationNotice := false
+	c.mu.Lock()
+	if c.resultBytes < bashResultMaxBytes {
+		remaining := bashResultMaxBytes - c.resultBytes
+		if n <= remaining {
+			c.resultBuilder.WriteString(text)
+			c.resultBytes += n
+		} else {
+			c.resultBuilder.WriteString(string(p[:remaining]))
+			c.resultBytes += remaining
+			c.resultTruncated = true
+		}
+	} else {
+		c.resultTruncated = true
+	}
+	if c.output != nil && !c.streamTruncated {
+		remaining := bashStreamMaxBytes - c.streamBytes
+		if remaining > 0 {
+			if n <= remaining {
+				emitText = text
+				c.streamBytes += n
+			} else {
+				emitText = string(p[:remaining])
+				c.streamBytes += remaining
+				c.streamTruncated = true
+				emitTruncationNotice = true
+			}
+		} else {
+			c.streamTruncated = true
+			emitTruncationNotice = true
+		}
+	}
+	c.mu.Unlock()
+	if c.output != nil {
+		if emitText != "" {
+			c.output(OutputChunk{Text: emitText, Stream: "combined"})
+		}
+		if emitTruncationNotice {
+			c.output(OutputChunk{Text: "\n...[stream truncated]\n", Stream: "combined", Truncated: true})
+		}
+	}
+	return n, nil
+}
+
+func (c *bashOutputCollector) result() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	text := c.resultBuilder.String()
+	if !c.resultTruncated {
+		return text, false
+	}
+	return text + "\n...[truncated]", true
 }

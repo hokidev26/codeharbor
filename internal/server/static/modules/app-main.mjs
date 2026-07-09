@@ -85,6 +85,11 @@ const state = {
   skillsPrefs: null,
   activeSkillTab: "commands",
   notifications: null,
+  serverNotificationSettings: null,
+  serverNotificationError: "",
+  serverNotificationLoading: false,
+  serverNotificationSaving: false,
+  serverNotificationTesting: false,
   appearance: null,
   terminalPrefs: null,
   chatDrafts: null,
@@ -103,6 +108,13 @@ const state = {
   messageRefreshTimersByNarrator: {},
   currentMessages: [],
   messageCopyTexts: [],
+  activeRunSummary: null,
+  activeRunSummaryRunId: "",
+  runSummaryLoading: false,
+  runSummaryError: "",
+  runRollbackBusy: false,
+  runSummarySeq: 0,
+  liveToolOutputs: {},
   pendingToolApprovals: {},
   gitStatus: null,
   gitDiff: null,
@@ -180,6 +192,8 @@ const chatRendering = createChatRenderingController({
   attachmentKind,
   copyToClipboard,
   notifyTerminal,
+  openGitModal: () => gitWorkflow.openGitModal?.(),
+  refreshGitWorkflow: (options) => gitWorkflow.refreshGitWorkflow?.(options),
   selectedModelValue: getSelectedModelValue,
   shortPath,
   showError,
@@ -220,10 +234,16 @@ const {
 const {
   clearCurrentNarratorApprovals,
   clearMessageRefreshTimer,
+  clearRunSummary,
   clearToolApproval,
   copyCurrentConversationMarkdown,
+  appendToolOutput,
+  finishToolOutput,
+  loadLatestRunSummary,
   loadMessages,
+  loadRunSummary,
   rememberToolApproval,
+  rememberToolStarted,
   scheduleMessageRefresh,
   updateConversationCopyButton,
 } = chatRendering;
@@ -455,6 +475,7 @@ const {
 } = settingsPreferences;
 
 const localPreferencesSettings = createLocalPreferencesSettingsController({
+  state,
   copyText,
   currentAppearancePreferences,
   currentIMGatewayPreferences,
@@ -470,6 +491,9 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   resetNotificationPreferences,
   resetProfilePreferences,
   resetSearchPreferences,
+  loadServerNotificationSettings,
+  saveServerNotificationSettings,
+  testServerNotification,
   saveIMGatewayPreferences,
   saveProfilePreferences,
   saveSearchPreferences,
@@ -609,6 +633,54 @@ async function loadSettings() {
     renderModelOptions();
   } catch (err) {
     if (seq === state.settingsLoadSeq) throw err;
+  }
+}
+
+async function loadServerNotificationSettings({ notify = false } = {}) {
+  state.serverNotificationLoading = true;
+  state.serverNotificationError = "";
+  try {
+    state.serverNotificationSettings = await api("/api/notifications/settings");
+    if (notify) notifyTerminal("[info] 服务端通知设置已刷新。\n");
+  } catch (err) {
+    state.serverNotificationSettings = null;
+    state.serverNotificationError = err.message || String(err);
+    if (notify) notifyTerminal(`[warn] 服务端通知设置刷新失败：${state.serverNotificationError}\n`);
+  } finally {
+    state.serverNotificationLoading = false;
+  }
+  if (state.activeSettingsPanel === "notifications") refreshActiveSettingsPanel();
+}
+
+async function saveServerNotificationSettings(payload) {
+  state.serverNotificationSaving = true;
+  state.serverNotificationError = "";
+  try {
+    state.serverNotificationSettings = await api("/api/notifications/settings", { method: "PUT", body: JSON.stringify(payload) });
+    showToast("Webhook 通知设置已保存。", "success", { force: true });
+    notifyTerminal("[info] Webhook 通知设置已保存。\n");
+  } catch (err) {
+    state.serverNotificationError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.serverNotificationSaving = false;
+    if (state.activeSettingsPanel === "notifications") refreshActiveSettingsPanel();
+  }
+}
+
+async function testServerNotification() {
+  state.serverNotificationTesting = true;
+  state.serverNotificationError = "";
+  try {
+    await api("/api/notifications/test", { method: "POST", body: JSON.stringify({}) });
+    showToast("Webhook 测试通知已发送。", "success", { force: true });
+    notifyTerminal("[info] Webhook 测试通知已发送。\n");
+  } catch (err) {
+    state.serverNotificationError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.serverNotificationTesting = false;
+    if (state.activeSettingsPanel === "notifications") refreshActiveSettingsPanel();
   }
 }
 
@@ -783,6 +855,7 @@ function warmSettingsData() {
   if (!state.authStatus && !state.authError) tasks.push(loadAuthStatus());
   if (!state.licenseSummary && !state.licenseError) tasks.push(loadLicenseSummary());
   if (!state.providerAuthFiles && !state.providerAuthError) tasks.push(loadProviderAuthFiles({ silent: true }));
+  if (!state.serverNotificationSettings && !state.serverNotificationError) tasks.push(loadServerNotificationSettings());
   Promise.allSettled(tasks).catch(() => {});
 }
 
@@ -1359,9 +1432,11 @@ async function enterNarrator() {
   renderModelOptions();
   restoreCurrentChatDraft();
   syncMessageComposerBusy();
+  clearRunSummary();
   connectWS();
   connectTerminal();
   loadGitStatus({ silent: true }).catch(() => {});
+  await loadLatestRunSummary(narratorId);
   await loadMessages(narratorId);
 }
 
@@ -1434,18 +1509,32 @@ function connectWS() {
     try {
       const event = JSON.parse(message.data);
       if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
+      const runId = event.data?.runId || "";
+      if (event.type === "agent.started") {
+        clearRunSummary();
+      }
+      if (event.type === "tool.started") {
+        rememberToolStarted(event);
+      }
+      if (event.type === "tool.output") {
+        appendToolOutput(event);
+      }
       if (event.type === "tool.approval_required") {
         rememberToolApproval(event);
         showToast(event.data?.risk === "danger" ? "危险工具调用已被阻止。" : "有工具调用等待审批。", event.data?.risk === "danger" ? "error" : "warn");
       }
       if (event.type === "tool.finished") {
         clearToolApproval(event.data?.toolUseId);
+        finishToolOutput(event);
       }
       if (event.type === "agent.interrupted") {
         clearCurrentNarratorApprovals();
       }
-      if (event.type === "message.created" || event.type === "agent.done") {
+      if (event.type === "message.created" || event.type === "agent.done" || event.type === "agent.error" || event.type === "agent.interrupted") {
         scheduleMessageRefresh(80, narratorId);
+      }
+      if ((event.type === "agent.done" || event.type === "agent.error" || event.type === "agent.interrupted") && runId) {
+        loadRunSummary(runId, { narratorId }).catch((err) => notifyTerminal(`[warn] Run 回顾加载失败：${err.message || err}\n`));
       }
     } catch {
       if (shouldLogAgentEvents()) appendTerminal(`[event] ${message.data}\n`);

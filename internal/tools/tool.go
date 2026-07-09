@@ -28,10 +28,17 @@ type Result struct {
 	Meta    map[string]any `json:"meta,omitempty"`
 }
 
+type OutputChunk struct {
+	Text      string
+	Stream    string
+	Truncated bool
+}
+
 type Env struct {
 	NarratorID string
 	CWD        string
 	Store      *db.Store
+	Output     func(OutputChunk)
 }
 
 type Tool interface {

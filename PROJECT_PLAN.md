@@ -593,7 +593,7 @@ GET /ui/app.js
 - 设置 → 章节与容器页内完成当前项目章节/workline、当前章节 narrator、worktree/branch/容器隔离边界概览和快速切换
 - 设置 → AI 代理页内完成默认 Agent 策略概览、当前 narrator 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
-- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好
+- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好，并接入服务端 Webhook 任务通知配置/测试发送
 - 设置 → 外观与界面页内完成浏览器本地主题、布局密度、终端默认展开和 Agent 事件日志显示偏好
 - 设置 → 关于页内完成浏览器本地偏好备份、下载、复制和导入恢复，便于跨浏览器或跨机器迁移工作台设置
 - 设置 → 模型/提供商页内完成模型刷新、Codex Token/JSON 凭证导入、账号列表刷新、中转站 API Key/Base URL/协议/默认模型保存、模型选择和首选模型保存
@@ -775,7 +775,7 @@ make check
 
 - [x] Edit 工具
 - [x] Bash 支持显式审批状态
-- [ ] Bash 输出流式事件
+- [x] Bash 输出流式事件
 - [ ] 工具执行超时配置
 - [ ] 工具输出截断策略配置
 - [ ] 工具输入 JSON schema 输出
@@ -791,18 +791,18 @@ make check
 
 待做：
 
-- [ ] OpenAI-compatible streaming
+- [x] OpenAI-compatible streaming
 - [x] OpenAI 官方 Responses API streaming
 - [x] Anthropic 官方 Messages API streaming
-- [x] tool call parsing（Anthropic 非流式）
-- [x] tool result 回灌模型（Anthropic 非流式）
+- [x] tool call parsing（Anthropic / OpenAI official / OpenAI-compatible）
+- [x] tool result 回灌模型（Anthropic / OpenAI official / OpenAI-compatible）
 - [x] Anthropic 官方 SDK provider（非流式 MVP）
 - [x] OpenAI 官方 Responses API provider（非流式 MVP）
 - [x] provider 前缀路由与基础 model list
 - [x] usage/cost 统计（usage 写入 `api_requests`，cost 使用内置 per-model USD/MTok 价格表估算；价格来源在 `internal/agent/loop.go` 注释和 README 中记录，未知模型估算为 0）
 - [x] Anthropic prompt caching（足够大的 system/tool/message 请求自动添加 5m cache_control breakpoint，小请求跳过以避免额外 cache write 成本）
-- [ ] retry/backoff
-- [ ] first token timeout
+- [x] retry/backoff
+- [x] first token timeout
 
 ---
 
@@ -838,6 +838,7 @@ make check
 - [x] MCP tool execution（`MCPCallTool` 通过 stdio initialize + tools/call，支持 `serverId`，exec-risk 审批）
 - [x] PTY terminal
 - [x] `/ws/terminal`
+- [x] Webhook run notifications（审批、完成、错误/中断事件异步 POST 到用户配置端点）
 - [ ] background tasks
 - [ ] process list
 - [ ] runtime cleanup
@@ -850,12 +851,13 @@ make check
 
 初版 UI 页面：
 
-- [ ] Project list
+- [x] Project list
 - [ ] Chapter detail
-- [ ] Narrator chat
+- [x] Narrator chat
+- [x] Run summary 回顾卡片（接入 `/api/narrators/{id}/runs/{runId}`，支持复制摘要与打开 Git 变更）
 - [ ] Tool calls panel
-- [ ] File browser
-- [ ] Settings
+- [x] File browser
+- [x] Settings
 - [ ] License report
 
 可选技术：

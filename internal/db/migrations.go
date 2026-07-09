@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const CurrentDBVersion = 2
+const CurrentDBVersion = 3
 
 type migration struct {
 	version int
@@ -18,6 +18,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, name: "baseline schema", up: migrateV1Baseline},
 	{version: 2, name: "run tracking", up: migrateV2RunTracking},
+	{version: 3, name: "notification settings", up: migrateV3NotificationSettings},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -115,6 +116,22 @@ CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_messages_run ON narrator_messages(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON narrator_tool_calls(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_api_requests_run ON api_requests(run_id, created_at);
+`)
+	return err
+}
+
+func migrateV3NotificationSettings(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS notification_settings (
+  id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  webhook_url TEXT,
+  notify_on_approval INTEGER NOT NULL DEFAULT 1,
+  notify_on_done INTEGER NOT NULL DEFAULT 1,
+  notify_on_error INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `)
 	return err
 }

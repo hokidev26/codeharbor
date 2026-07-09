@@ -65,6 +65,14 @@ func (p *e2eProvider) request(index int) providers.GenerateRequest {
 	return p.requests[index]
 }
 
+type captureNotifier struct {
+	events chan agent.NotificationEvent
+}
+
+func (n captureNotifier) Notify(_ context.Context, event agent.NotificationEvent) {
+	n.events <- event
+}
+
 func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -88,6 +96,8 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	tools.RegisterCore(toolRegistry)
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, config.AgentConfig{MaxTurns: 4})
+	notifications := make(chan agent.NotificationEvent, 4)
+	runner.SetNotifier(captureNotifier{events: notifications})
 	app := New(config.Config{}, store, runner, hub, providerRegistry)
 
 	httpServer := httptest.NewServer(app.Routes())
@@ -100,9 +110,10 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/narrators/"+narrator.ID+"/messages", app.localToken, httpServer.URL, map[string]string{"text": "run the approved command"})
 
 	approved := false
+	sawToolOutput := false
 	sawToolFinished := false
 	sawCompletion := false
-	for !(approved && sawToolFinished && sawCompletion) {
+	for !(approved && sawToolOutput && sawToolFinished && sawCompletion) {
 		event := readAgentWebSocketEvent(t, ctx, conn)
 		switch event.Type {
 		case "tool.approval_required":
@@ -112,6 +123,10 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 			if !approved {
 				postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/narrators/"+narrator.ID+"/tool-calls/e2e-bash/approval", app.localToken, httpServer.URL, map[string]string{"decision": "allow_once", "reason": "e2e approval"})
 				approved = true
+			}
+		case "tool.output":
+			if event.Data["toolUseId"] == "e2e-bash" && strings.Contains(event.Text, "e2e-approved") {
+				sawToolOutput = true
 			}
 		case "tool.finished":
 			if event.Data["toolUseId"] == "e2e-bash" && event.Data["status"] == "completed" {
@@ -127,6 +142,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	}
 
 	waitForNarratorIdle(t, store, narrator.ID)
+	assertE2ENotifications(t, notifications)
 	if got := provider.requestCount(); got != 2 {
 		t.Fatalf("expected provider to be called twice, got %d", got)
 	}
@@ -164,6 +180,26 @@ type wsAgentEvent struct {
 	Type string         `json:"type"`
 	Text string         `json:"text"`
 	Data map[string]any `json:"data"`
+}
+
+func assertE2ENotifications(t *testing.T, notifications <-chan agent.NotificationEvent) {
+	t.Helper()
+	sawApproval := false
+	sawCompleted := false
+	deadline := time.After(2 * time.Second)
+	for !(sawApproval && sawCompleted) {
+		select {
+		case event := <-notifications:
+			if event.Event == "approval_required" && event.ToolUseID == "e2e-bash" {
+				sawApproval = true
+			}
+			if event.Event == "completed" {
+				sawCompleted = true
+			}
+		case <-deadline:
+			t.Fatalf("expected approval and completed notifications, got approval=%v completed=%v", sawApproval, sawCompleted)
+		}
+	}
 }
 
 func dialNarratorWebSocket(t *testing.T, ctx context.Context, baseURL, token, narratorID string) *websocket.Conn {

@@ -210,6 +210,17 @@ type MCPServer struct {
 	UpdatedAt string            `json:"updatedAt"`
 }
 
+type NotificationSettings struct {
+	ID               string `json:"id"`
+	Enabled          bool   `json:"enabled"`
+	WebhookURL       string `json:"webhookUrl,omitempty"`
+	NotifyOnApproval bool   `json:"notifyOnApproval"`
+	NotifyOnDone     bool   `json:"notifyOnDone"`
+	NotifyOnError    bool   `json:"notifyOnError"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -246,6 +257,42 @@ func (s *Store) HasUsers(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+func DefaultNotificationSettings() NotificationSettings {
+	now := Now()
+	return NotificationSettings{ID: "default", NotifyOnApproval: true, NotifyOnDone: true, NotifyOnError: true, CreatedAt: now, UpdatedAt: now}
+}
+
+func (s *Store) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
+	settings, err := scanNotificationSettings(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, enabled, COALESCE(webhook_url,''), notify_on_approval, notify_on_done, notify_on_error, created_at, updated_at FROM notification_settings WHERE id = 'default'`).Scan(dest...)
+	})
+	if err == nil {
+		return settings, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return NotificationSettings{}, err
+	}
+	settings = DefaultNotificationSettings()
+	_, err = s.UpdateNotificationSettings(ctx, settings)
+	return settings, err
+}
+
+func (s *Store) UpdateNotificationSettings(ctx context.Context, settings NotificationSettings) (NotificationSettings, error) {
+	if settings.ID == "" {
+		settings.ID = "default"
+	}
+	now := Now()
+	if settings.CreatedAt == "" {
+		settings.CreatedAt = now
+	}
+	settings.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO notification_settings (id, enabled, webhook_url, notify_on_approval, notify_on_done, notify_on_error, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, webhook_url = excluded.webhook_url, notify_on_approval = excluded.notify_on_approval, notify_on_done = excluded.notify_on_done, notify_on_error = excluded.notify_on_error, updated_at = excluded.updated_at`, settings.ID, boolInt(settings.Enabled), strings.TrimSpace(settings.WebhookURL), boolInt(settings.NotifyOnApproval), boolInt(settings.NotifyOnDone), boolInt(settings.NotifyOnError), settings.CreatedAt, settings.UpdatedAt)
+	if err != nil {
+		return NotificationSettings{}, err
+	}
+	return s.GetNotificationSettings(ctx)
+}
+
 func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if run.ID == "" {
 		run.ID = NewID()
@@ -275,6 +322,16 @@ func (s *Store) UpdateRunStatus(ctx context.Context, runID, status, errorMessage
 	return err
 }
 
+func (s *Store) UpdateRunBaseHead(ctx context.Context, runID, baseHead string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET base_head = NULLIF(?, ''), updated_at = ? WHERE id = ?`, strings.TrimSpace(baseHead), Now(), runID)
+	return err
+}
+
+func (s *Store) UpdateRunEndHead(ctx context.Context, runID, endHead string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET end_head = NULLIF(?, ''), updated_at = ? WHERE id = ?`, strings.TrimSpace(endHead), Now(), runID)
+	return err
+}
+
 func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage string) error {
 	now := Now()
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, error_message = NULLIF(?, ''), updated_at = ? WHERE id = ?`, status, now, errorMessage, now, runID)
@@ -284,6 +341,12 @@ func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage str
 func (s *Store) GetRun(ctx context.Context, narratorID, runID string) (Run, error) {
 	var run Run
 	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), created_at, updated_at FROM runs WHERE narrator_id = ? AND id = ?`, narratorID, runID).Scan(&run.ID, &run.NarratorID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CreatedAt, &run.UpdatedAt)
+	return run, err
+}
+
+func (s *Store) GetRunByID(ctx context.Context, runID string) (Run, error) {
+	var run Run
+	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.NarratorID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
@@ -1055,6 +1118,21 @@ func (s *Store) DeleteBackend(ctx context.Context, id string) error {
 type backendScanner func(dest ...any) error
 
 type mcpServerScanner func(dest ...any) error
+
+type notificationSettingsScanner func(dest ...any) error
+
+func scanNotificationSettings(scan notificationSettingsScanner) (NotificationSettings, error) {
+	var settings NotificationSettings
+	var enabled, notifyOnApproval, notifyOnDone, notifyOnError int
+	if err := scan(&settings.ID, &enabled, &settings.WebhookURL, &notifyOnApproval, &notifyOnDone, &notifyOnError, &settings.CreatedAt, &settings.UpdatedAt); err != nil {
+		return NotificationSettings{}, err
+	}
+	settings.Enabled = enabled != 0
+	settings.NotifyOnApproval = notifyOnApproval != 0
+	settings.NotifyOnDone = notifyOnDone != 0
+	settings.NotifyOnError = notifyOnError != 0
+	return settings, nil
+}
 
 func scanMCPServer(scan mcpServerScanner) (MCPServer, error) {
 	var server MCPServer
