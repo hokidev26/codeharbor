@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CodeHarbor</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=mobile-dark-workbench-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=mobile-narrafork-4" />
   </head>
   <body>
     <main id="appShell" class="app-shell terminal-collapsed">
@@ -17,6 +17,12 @@
       </header>
       <button id="mobileSidebarBackdrop" class="mobile-backdrop hidden" type="button" aria-label="关闭菜单"></button>
       <aside class="sidebar">
+        <div class="mobile-drawer-header" aria-label="移动端菜单标题栏">
+          <button id="mobileSidebarCloseBtn" class="mobile-icon-btn mobile-drawer-close-btn" type="button" title="关闭菜单" aria-label="关闭菜单">×</button>
+          <div class="mobile-update-pill drawer-update-pill" aria-label="版本更新"><span class="mobile-update-icon">♙</span><span id="mobileDrawerVersionChip">更新: v0.1.0 → …</span></div>
+          <div class="mobile-drawer-brand">CodeHarbor</div>
+          <button id="mobileDrawerSearchBtn" class="mobile-icon-btn mobile-drawer-search-btn" type="button" title="搜索项目或目录" aria-label="搜索项目或目录">⌕</button>
+        </div>
         <div class="brand-row">
           <div>
             <div class="brand">CodeHarbor</div>
@@ -45,6 +51,15 @@
             <div id="recentSidebarDirectories" class="recent-list"></div>
           </div>
         </section>
+
+        <div class="mobile-sidebar-quick-actions" aria-label="移动端设置操作">
+          <button id="mobileSidebarSettingsBtn" class="mobile-sidebar-action" type="button">⚙ 设置</button>
+          <button id="mobileSidebarLogoutBtn" class="mobile-sidebar-action danger" type="button">⇥ 退出登录</button>
+        </div>
+        <div class="mobile-drawer-footer" aria-label="版本和开源协议">
+          <span id="mobileDrawerVersionText">v0.1.0-dev</span>
+          <span>开源协议</span>
+        </div>
 
         <div class="sidebar-footer">
           <div id="sidebarSettingsMenu" class="sidebar-settings-menu hidden" role="menu" aria-label="账户和设置菜单">
@@ -130,13 +145,17 @@
                 <input id="attachFileInput" class="attachment-native-input" type="file" multiple aria-label="导入文件到聊天框" />
               </div>
               <div class="message-input-frame">
-                <textarea id="messageText" class="message-input" rows="1" placeholder="" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
+                <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息…" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
               </div>
               <button id="sendMessageBtn" class="send-btn round composer-send-btn" type="submit" title="发送" aria-label="发送消息">↵</button>
             </div>
             <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
             <div id="promptHistoryHint" class="prompt-history-hint"></div>
             <div class="composer-toolbar">
+              <div class="composer-status" aria-live="polite">
+                <span id="composerStatusDot" class="composer-status-dot"></span>
+                <span id="composerStatusText">空闲</span>
+              </div>
               <div class="composer-controls">
                 <span class="select-pill mode-pill"><span class="mode-display">Auto</span><select id="permissionMode" class="select permission-select" title="权限模式" aria-label="权限模式">
                   <option value="readOnly">readOnly</option>
@@ -298,6 +317,6 @@
     </div>
 
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=mobile-dark-workbench-1"></script>
+    <script src="/ui/app.js?v=mobile-narrafork-1"></script>
   </body>
 </html>

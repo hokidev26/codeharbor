@@ -170,13 +170,17 @@ const gitWorkflow = createGitWorkflowController({
   showToast,
 });
 
+function getSelectedModelValue() {
+  return selectedModelValue();
+}
+
 const chatRendering = createChatRenderingController({
   state,
   attachmentIcon,
   attachmentKind,
   copyToClipboard,
   notifyTerminal,
-  selectedModelValue,
+  selectedModelValue: getSelectedModelValue,
   shortPath,
   showError,
   showToast,
@@ -1378,6 +1382,13 @@ function showModelSetupNotice() {
   $("openProviderSettingsNoticeBtn").addEventListener("click", () => openSettingsModal("providers"));
 }
 
+function setComposerConnectionStatus(text, ok = false) {
+  const label = $("composerStatusText");
+  const dot = $("composerStatusDot");
+  if (label) label.textContent = text;
+  if (dot) dot.classList.toggle("ok", ok);
+}
+
 function disconnectNarratorTransports() {
   clearMessageRefreshTimer(state.narrator?.id);
   if (state.ws) {
@@ -1395,6 +1406,7 @@ function disconnectNarratorTransports() {
     badge.textContent = "ws idle";
     badge.classList.remove("ok");
   }
+  setComposerConnectionStatus("空闲");
   setTerminalStatus("idle");
 }
 
@@ -1409,11 +1421,13 @@ function connectWS() {
     if (!isCurrentSocket()) return;
     $("wsBadge").textContent = "ws connected";
     $("wsBadge").classList.add("ok");
+    setComposerConnectionStatus("已连接", true);
   };
   socket.onclose = () => {
     if (!isCurrentSocket()) return;
     $("wsBadge").textContent = "ws closed";
     $("wsBadge").classList.remove("ok");
+    setComposerConnectionStatus("离线");
   };
   socket.onmessage = (message) => {
     if (!isCurrentSocket()) return;
@@ -1565,9 +1579,21 @@ $("backendsModal").addEventListener("click", (event) => { if (event.target.id ==
 $("backendForm").addEventListener("submit", (event) => saveBackend(event).catch(showError));
 $("resetBackendFormBtn").addEventListener("click", resetBackendForm);
 $("mobileMenuBtn").addEventListener("click", openMobileSidebar);
+$("mobileSidebarCloseBtn")?.addEventListener("click", closeMobileSidebar);
 $("mobileSidebarBackdrop").addEventListener("click", closeMobileSidebar);
 $("mobileTerminalBtn").addEventListener("click", toggleMobileTerminal);
 $("mobileSearchBtn").addEventListener("click", focusMobileSearch);
+$("mobileDrawerSearchBtn")?.addEventListener("click", focusMobileSearch);
+$("mobileSidebarSettingsBtn")?.addEventListener("click", () => {
+  closeMobileSidebar();
+  closeSidebarSettingsMenu();
+  openSettingsModal("profile");
+});
+$("mobileSidebarLogoutBtn")?.addEventListener("click", () => {
+  closeMobileSidebar();
+  closeSidebarSettingsMenu();
+  logoutRemoteAccess().catch(showError);
+});
 $("projectSearchToggleBtn")?.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();

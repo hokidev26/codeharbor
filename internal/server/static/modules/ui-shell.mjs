@@ -58,7 +58,9 @@ export function createUIShellController({
     const path = trigger.dataset.openDirectoryShortcut === "current"
       ? (state.narrator?.cwd || state.project?.gitPath || "")
       : "";
-    openDirectoryChooser(path, { trigger }).catch(showError);
+    const mobileViewport = window.matchMedia?.("(max-width: 760px)")?.matches;
+    if (document.body.classList.contains("mobile-sidebar-open")) closeMobileSidebar();
+    openDirectoryChooser(path, { trigger, preferNative: !mobileViewport }).catch(showError);
   }
 
   function handleGlobalEscape(event) {

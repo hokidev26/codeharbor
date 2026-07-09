@@ -111,6 +111,10 @@ export function createSettingsPreferencesController({
     if (meta) meta.textContent = `v${version} · ${backend?.name || "本地"}`;
     const mobileVersionChip = $("mobileVersionChip");
     if (mobileVersionChip) mobileVersionChip.textContent = `更新: v${version} → …`;
+    const mobileDrawerVersionChip = $("mobileDrawerVersionChip");
+    if (mobileDrawerVersionChip) mobileDrawerVersionChip.textContent = `更新: v${version} → …`;
+    const mobileDrawerVersionText = $("mobileDrawerVersionText");
+    if (mobileDrawerVersionText) mobileDrawerVersionText.textContent = `v${version}`;
   }
 
   function profileGitEnvExample(profile = currentProfilePreferences()) {
