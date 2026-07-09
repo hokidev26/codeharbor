@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -70,20 +71,24 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 		if model == "" {
 			model = p.cfg.Model
 		}
-		input := renderTranscript(req.Messages)
-		if input == "" {
-			input = "Continue."
-		}
-		params := responses.ResponseNewParams{
-			Model: model,
-			Input: responses.ResponseNewParamsInputUnion{OfString: param.NewOpt(input)},
-		}
+		params := responses.ResponseNewParams{Model: model}
 		if req.SystemPrompt != "" {
 			params.Instructions = param.NewOpt(req.SystemPrompt)
+		}
+		if len(req.Tools) > 0 {
+			params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: openAIResponseInput(req.Messages)}
+			params.Tools = openAIToolParams(req.Tools)
+		} else {
+			input := renderTranscript(req.Messages)
+			if input == "" {
+				input = "Continue."
+			}
+			params.Input = responses.ResponseNewParamsInputUnion{OfString: param.NewOpt(input)}
 		}
 		stream := p.client.Responses.NewStreaming(ctx, params)
 		defer stream.Close()
 		sawDelta := false
+		emittedToolCalls := map[string]bool{}
 		for stream.Next() {
 			event := stream.Current()
 			switch event.Type {
@@ -99,17 +104,22 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 					sawDelta = true
 					out <- Event{Type: "text", Text: done.Text}
 				}
+			case "response.output_item.done":
+				done := event.AsResponseOutputItemDone()
+				emitOpenAIFunctionToolCallFromOutputItem(out, done.Item, emittedToolCalls)
 			case "response.completed":
 				completed := event.AsResponseCompleted()
 				if errText := openAIResponseErrorText(completed.Response); errText != "" {
 					out <- Event{Type: "error", Text: errText}
 					return
 				}
+				emitOpenAIFunctionToolCallsFromResponse(out, completed.Response, emittedToolCalls)
 				emitOpenAIUsage(out, completed.Response)
 				out <- Event{Type: "done", Done: true}
 				return
 			case "response.incomplete":
 				incomplete := event.AsResponseIncomplete()
+				emitOpenAIFunctionToolCallsFromResponse(out, incomplete.Response, emittedToolCalls)
 				emitOpenAIUsage(out, incomplete.Response)
 				out <- Event{Type: "done", Done: true, StopReason: openAIIncompleteStopReason(incomplete.Response)}
 				return
@@ -135,6 +145,171 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 		out <- Event{Type: "done", Done: true}
 	}()
 	return out, nil
+}
+
+func openAIToolParams(tools []ToolSpec) []responses.ToolUnionParam {
+	params := make([]responses.ToolUnionParam, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		function := responses.FunctionToolParam{
+			Name:       name,
+			Parameters: openAIToolSchema(tool.Schema),
+			Strict:     openai.Bool(false),
+		}
+		if description := strings.TrimSpace(tool.Description); description != "" {
+			function.Description = openai.String(description)
+		}
+		params = append(params, responses.ToolUnionParam{OfFunction: &function})
+	}
+	return params
+}
+
+func openAIToolSchema(schema any) map[string]any {
+	if schema == nil {
+		return defaultOpenAIToolSchema()
+	}
+	if typed, ok := schema.(map[string]any); ok && len(typed) > 0 {
+		return typed
+	}
+	if raw, ok := schema.(json.RawMessage); ok && len(raw) > 0 {
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err == nil && len(decoded) > 0 {
+			return decoded
+		}
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return defaultOpenAIToolSchema()
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil || len(decoded) == 0 {
+		return defaultOpenAIToolSchema()
+	}
+	return decoded
+}
+
+func defaultOpenAIToolSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+func openAIResponseInput(messages []Message) responses.ResponseInputParam {
+	items := make([]responses.ResponseInputItemUnionParam, 0, len(messages))
+	for _, message := range messages {
+		role := openAIMessageRole(message.Role)
+		blocks := normalizeContentBlocks(message)
+		if len(blocks) == 0 {
+			continue
+		}
+		var textBlocks []ContentBlock
+		var toolUseBlocks []ContentBlock
+		var toolResultBlocks []ContentBlock
+		for _, block := range blocks {
+			switch block.Type {
+			case "tool_use":
+				toolUseBlocks = append(toolUseBlocks, block)
+			case "tool_result":
+				toolResultBlocks = append(toolResultBlocks, block)
+			default:
+				textBlocks = append(textBlocks, block)
+			}
+		}
+		if text := strings.TrimSpace(contentBlocksText(textBlocks)); text != "" {
+			items = append(items, responses.ResponseInputItemParamOfMessage(text, role))
+		}
+		for _, block := range toolUseBlocks {
+			callID := strings.TrimSpace(block.ToolUseID)
+			name := strings.TrimSpace(block.ToolName)
+			if callID == "" || name == "" {
+				continue
+			}
+			items = append(items, responses.ResponseInputItemParamOfFunctionCall(openAIToolArgumentsString(block.Input), callID, name))
+		}
+		for _, block := range toolResultBlocks {
+			callID := strings.TrimSpace(block.ToolUseID)
+			if callID == "" {
+				continue
+			}
+			items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(callID, openAIToolResultOutput(block)))
+		}
+	}
+	if len(items) == 0 {
+		items = append(items, responses.ResponseInputItemParamOfMessage("Continue.", responses.EasyInputMessageRoleUser))
+	}
+	return responses.ResponseInputParam(items)
+}
+
+func openAIMessageRole(role string) responses.EasyInputMessageRole {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "assistant":
+		return responses.EasyInputMessageRoleAssistant
+	case "system":
+		return responses.EasyInputMessageRoleSystem
+	case "developer":
+		return responses.EasyInputMessageRoleDeveloper
+	default:
+		return responses.EasyInputMessageRoleUser
+	}
+}
+
+func openAIToolArgumentsString(input json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(input))
+	if trimmed == "" || trimmed == "null" {
+		return "{}"
+	}
+	if json.Valid([]byte(trimmed)) {
+		return trimmed
+	}
+	fallback, _ := json.Marshal(map[string]string{"arguments": trimmed})
+	return string(fallback)
+}
+
+func openAIToolArgumentsRaw(arguments string) json.RawMessage {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(`{}`)
+	}
+	if json.Valid([]byte(trimmed)) {
+		return json.RawMessage(trimmed)
+	}
+	fallback, _ := json.Marshal(map[string]string{"arguments": trimmed})
+	return json.RawMessage(fallback)
+}
+
+func openAIToolResultOutput(block ContentBlock) string {
+	output := strings.TrimSpace(block.Output)
+	if output == "" {
+		output = "(empty output)"
+	}
+	if block.IsError {
+		return "ERROR: " + output
+	}
+	return output
+}
+
+func emitOpenAIFunctionToolCallsFromResponse(out chan<- Event, response responses.Response, emitted map[string]bool) {
+	for _, item := range response.Output {
+		emitOpenAIFunctionToolCallFromOutputItem(out, item, emitted)
+	}
+}
+
+func emitOpenAIFunctionToolCallFromOutputItem(out chan<- Event, item responses.ResponseOutputItemUnion, emitted map[string]bool) {
+	if item.Type != "function_call" {
+		return
+	}
+	call := item.AsFunctionCall()
+	id := strings.TrimSpace(call.CallID)
+	if id == "" {
+		id = strings.TrimSpace(call.ID)
+	}
+	name := strings.TrimSpace(call.Name)
+	if id == "" || name == "" || emitted[id] {
+		return
+	}
+	emitted[id] = true
+	out <- Event{Type: "tool_call", ToolCall: &ToolCall{ID: id, Name: name, Input: openAIToolArgumentsRaw(call.Arguments)}}
 }
 
 func emitOpenAIUsage(out chan<- Event, response responses.Response) {

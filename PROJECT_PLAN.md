@@ -720,37 +720,13 @@ internal/tools/tools_test.go
 - 全链路 E2E：真实 httptest server、WebSocket narrator stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
 - Chapter workflow：fork API 创建 Git worktree/child chapter/narrator，fork narrator Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
 
-当前验证命令：
+当前验证命令已收敛为统一入口：
 
 ```bash
-gofmt -w ./cmd ./internal
-go test ./...
-go vet ./...
-go build ./...
-node --check internal/server/static/app.js
-node --check internal/server/static/modules/app-main.mjs
-node --check internal/server/static/modules/backend-registry.mjs
-node --check internal/server/static/modules/chat-composer.mjs
-node --check internal/server/static/modules/chat-rendering.mjs
-node --check internal/server/static/modules/directory-browser.mjs
-node --check internal/server/static/modules/formatters.mjs
-node --check internal/server/static/modules/git-workflow.mjs
-node --check internal/server/static/modules/terminal.mjs
-node --check internal/server/static/modules/runtime.mjs
-node --check internal/server/static/modules/mcp-registry.mjs
-node --check internal/server/static/modules/mcp-registry-ui.mjs
-node --check internal/server/static/modules/model-provider-settings.mjs
-node --check internal/server/static/modules/local-preferences-settings.mjs
-node --check internal/server/static/modules/system-settings.mjs
-node --check internal/server/static/modules/workspace-settings.mjs
-node --check internal/server/static/modules/skills-workbench.mjs
-node --check internal/server/static/modules/ui-shell.mjs
-node --check internal/server/static/modules/settings-preferences.mjs
-node --check internal/server/static/modules/dom.mjs
-node --check internal/server/static/modules/settings-data.mjs
-node --check internal/server/static/modules/preferences-data.mjs
-node --test internal/server/static/modules/*.test.mjs
+make check
 ```
+
+如果本地没有 `make`，可直接运行 `./scripts/check.sh`。该脚本会检查 Go 格式但不自动改写，随后运行 Go tests/vet/build、前端 `node --check` 与前端 `node --test`。如需格式化 Go 代码，运行 `make fmt`。
 
 短启动验证包括：
 

@@ -170,3 +170,116 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 		t.Fatalf("unexpected usage: %+v", usage)
 	}
 }
+
+func TestOpenAICompatibleStreamsTextAndToolCalls(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"hel"}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":"lo"}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"path\":\"README"}}]}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".md\"}"}}]}}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatible(config.ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", BaseURL: server.URL, Model: "gpt-5.5", APIKeyOptional: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "read README"}},
+		Tools:    []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	var calls []ToolCall
+	for event := range events {
+		switch event.Type {
+		case "error":
+			t.Fatalf("unexpected error event: %s", event.Text)
+		case "text":
+			text += event.Text
+		case "tool_call":
+			if event.ToolCall != nil {
+				calls = append(calls, *event.ToolCall)
+			}
+		}
+	}
+	if text != "hello" {
+		t.Fatalf("expected streamed text hello, got %q", text)
+	}
+	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "Read" || string(calls[0].Input) != `{"path":"README.md"}` {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+	if requestBody["stream"] != true {
+		t.Fatalf("expected stream=true, got %+v", requestBody)
+	}
+	tools, ok := requestBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected tools payload, got %+v", requestBody["tools"])
+	}
+}
+
+func TestOpenAICompatibleSerializesToolHistory(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatible(config.ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", BaseURL: server.URL, Model: "gpt-5.5", APIKeyOptional: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{
+		Messages: []Message{
+			{Role: "assistant", Blocks: []ContentBlock{{Type: "tool_use", ToolUseID: "call_1", ToolName: "Read", Input: json.RawMessage(`{"path":"README.md"}`)}}},
+			{Role: "user", Blocks: []ContentBlock{{Type: "tool_result", ToolUseID: "call_1", ToolName: "Read", Output: "file contents"}}},
+		},
+		Tools: []ToolSpec{{Name: "Read", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error event: %s", event.Text)
+		}
+	}
+	messages, ok := requestBody["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("expected assistant tool call and tool result messages, got %+v", requestBody["messages"])
+	}
+	assistant, _ := messages[0].(map[string]any)
+	if assistant["role"] != "assistant" {
+		t.Fatalf("expected assistant tool call message, got %+v", assistant)
+	}
+	toolCalls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected one assistant tool call, got %+v", assistant["tool_calls"])
+	}
+	call, _ := toolCalls[0].(map[string]any)
+	function, _ := call["function"].(map[string]any)
+	if call["id"] != "call_1" || function["name"] != "Read" || function["arguments"] != `{"path":"README.md"}` {
+		t.Fatalf("unexpected assistant tool call payload: %+v", call)
+	}
+	toolResult, _ := messages[1].(map[string]any)
+	if toolResult["role"] != "tool" || toolResult["tool_call_id"] != "call_1" || toolResult["content"] != "file contents" {
+		t.Fatalf("unexpected tool result message: %+v", toolResult)
+	}
+}

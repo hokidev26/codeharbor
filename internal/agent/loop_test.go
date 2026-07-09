@@ -129,6 +129,50 @@ func TestRunnerAutoExecutesToolCallsAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestRunnerLoadsProjectInstructions(t *testing.T) {
+	ctx := context.Background()
+	projectDir := t.TempDir()
+	if err := writeTestFile(projectDir, "AGENTS.md", "Always follow the project agent rules."); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(projectDir, "CLAUDE.md", "Prefer concise implementation notes."); err != nil {
+		t.Fatal(err)
+	}
+	store, narrator := newAgentTestStore(t, projectDir, "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{{Type: "text", Text: "done"}, {Type: "done", Done: true}}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1})
+
+	runner.Run(ctx, narrator.ID)
+
+	if provider.requestCount() != 1 {
+		t.Fatalf("expected one provider request, got %d", provider.requestCount())
+	}
+	prompt := provider.request(0).SystemPrompt
+	for _, want := range []string{"Project instructions loaded by CodeHarbor", "AGENTS.md", "Always follow the project agent rules.", "CLAUDE.md", "Prefer concise implementation notes."} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected system prompt to contain %q, got %q", want, prompt)
+		}
+	}
+}
+
+func TestLoadProjectInstructionsTruncatesLargeFiles(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := writeTestFile(projectDir, "AGENTS.md", strings.Repeat("x", maxProjectInstructionFileRunes+200)); err != nil {
+		t.Fatal(err)
+	}
+	bundle := loadProjectInstructions(projectDir)
+	if len(bundle.Files) != 1 || !bundle.Files[0].Truncated {
+		t.Fatalf("expected one truncated instruction file, got %+v", bundle.Files)
+	}
+	if !strings.Contains(bundle.Text, "truncated to fit the safety limit") {
+		t.Fatalf("expected truncation note, got %q", bundle.Text)
+	}
+}
+
 func TestEstimateUsageCostUSD(t *testing.T) {
 	openAICost := estimateUsageCostUSD("openai", "gpt-4.1-mini", providers.Usage{InputTokens: 1_000_000, CachedInputTokens: 250_000, OutputTokens: 100_000})
 	if openAICost < 0.4849 || openAICost > 0.4851 {
@@ -161,7 +205,7 @@ func TestRunnerRecordsEstimatedCost(t *testing.T) {
 	defer store.Close()
 	provider := &scriptedProvider{}
 	runner := newAgentTestRunner(store, provider, config.AgentConfig{})
-	runner.recordAPIRequest(narrator.ID, "openai", "gpt-4.1-mini", time.Millisecond, providers.Usage{InputTokens: 1_000_000, OutputTokens: 100_000}, "")
+	runner.recordAPIRequest(narrator.ID, "", "openai", "gpt-4.1-mini", time.Millisecond, providers.Usage{InputTokens: 1_000_000, OutputTokens: 100_000}, "")
 	var cost float64
 	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM api_requests WHERE narrator_id = ?`, narrator.ID).Scan(&cost); err != nil {
 		t.Fatal(err)
@@ -450,9 +494,75 @@ func TestRunnerStopsAtMaxTurns(t *testing.T) {
 	}}
 	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 2})
 
-	err := runner.run(ctx, narrator.ID)
+	err := runner.run(ctx, narrator.ID, "")
 	if err == nil || !strings.Contains(err.Error(), "max turns") {
 		t.Fatalf("expected max turns error, got %v", err)
+	}
+}
+
+func TestRunnerRetriesTransientProviderErrorBeforeOutput(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "error", Text: "temporary 500 from provider"}},
+		{{Type: "text", Text: "recovered"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1, MaxTransientRetries: 1})
+
+	if err := runner.run(ctx, narrator.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if provider.requestCount() != 2 {
+		t.Fatalf("expected retry to make two provider requests, got %d", provider.requestCount())
+	}
+	messages, err := store.ListMessages(ctx, narrator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[1].ContentText != "recovered" {
+		t.Fatalf("expected recovered assistant message, got %+v", messages)
+	}
+}
+
+func TestRunnerDoesNotRetryAfterPartialProviderOutput(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{
+		{Type: "text", Text: "partial"},
+		{Type: "error", Text: "temporary 500 after text"},
+	}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1, MaxTransientRetries: 1})
+
+	err := runner.run(ctx, narrator.ID, "")
+	if err == nil || !strings.Contains(err.Error(), "temporary 500") {
+		t.Fatalf("expected provider error without retry, got %v", err)
+	}
+	if provider.requestCount() != 1 {
+		t.Fatalf("expected no retry after partial output, got %d requests", provider.requestCount())
+	}
+}
+
+func TestRunnerFailsOnFirstTokenTimeout(t *testing.T) {
+	ctx := context.Background()
+	store, narrator := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingProvider{started: make(chan struct{})}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1, FirstTokenTimeoutMs: 10})
+
+	err := runner.run(ctx, narrator.ID, "")
+	if err == nil || !strings.Contains(err.Error(), "first token timeout") {
+		t.Fatalf("expected first token timeout error, got %v", err)
 	}
 }
 

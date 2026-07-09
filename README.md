@@ -56,7 +56,7 @@ The project is currently an experimental MVP. It is intended for local developme
 
 - Go 1.26 or newer, as declared in `go.mod`
 - SQLite is provided through the pure-Go `modernc.org/sqlite` driver
-- Node.js is optional and only used for `node --check` on embedded frontend scripts during validation
+- Node.js is optional and only used for `node --check` and `node --test` on embedded frontend scripts during validation
 
 ## Install
 
@@ -246,39 +246,15 @@ GET  /ws/terminal?narratorId={narratorId}
 
 ## Validation
 
-Before committing changes, run:
+Before committing changes, run the unified local check:
 
 ```bash
-gofmt -w ./cmd ./internal
-go test ./...
-go vet ./...
-go build ./...
-node --check internal/server/static/app.js
-node --check internal/server/static/modules/app-main.mjs
-node --check internal/server/static/modules/backend-registry.mjs
-node --check internal/server/static/modules/chat-composer.mjs
-node --check internal/server/static/modules/chat-rendering.mjs
-node --check internal/server/static/modules/directory-browser.mjs
-node --check internal/server/static/modules/formatters.mjs
-node --check internal/server/static/modules/git-workflow.mjs
-node --check internal/server/static/modules/terminal.mjs
-node --check internal/server/static/modules/runtime.mjs
-node --check internal/server/static/modules/mcp-registry.mjs
-node --check internal/server/static/modules/mcp-registry-ui.mjs
-node --check internal/server/static/modules/model-provider-settings.mjs
-node --check internal/server/static/modules/local-preferences-settings.mjs
-node --check internal/server/static/modules/system-settings.mjs
-node --check internal/server/static/modules/workspace-settings.mjs
-node --check internal/server/static/modules/skills-workbench.mjs
-node --check internal/server/static/modules/ui-shell.mjs
-node --check internal/server/static/modules/settings-preferences.mjs
-node --check internal/server/static/modules/dom.mjs
-node --check internal/server/static/modules/settings-data.mjs
-node --check internal/server/static/modules/preferences-data.mjs
-node --test internal/server/static/modules/*.test.mjs
+make check
 ```
 
-CI additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the narrator WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing archives, not for local validation.
+If `make` is unavailable, run `./scripts/check.sh` directly. The check script verifies Go formatting without rewriting files, runs Go tests/vet/build, checks embedded JavaScript syntax, and runs embedded JavaScript tests. Use `make fmt` to apply Go formatting.
+
+CI runs the same check script and additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the narrator WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing archives, not for local validation.
 
 ## Security notes
 

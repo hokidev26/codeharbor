@@ -85,6 +85,7 @@ type Narrator struct {
 type Message struct {
 	ID           string          `json:"id"`
 	NarratorID   string          `json:"narratorId"`
+	RunID        string          `json:"runId,omitempty"`
 	Role         string          `json:"role"`
 	ContentJSON  json.RawMessage `json:"contentJson,omitempty"`
 	ContentText  string          `json:"contentText"`
@@ -93,6 +94,43 @@ type Message struct {
 	CreatedBy    string          `json:"createdBy,omitempty"`
 	CreatedAt    string          `json:"createdAt"`
 	Attachments  []Attachment    `json:"attachments,omitempty"`
+}
+
+type Run struct {
+	ID               string `json:"id"`
+	NarratorID       string `json:"narratorId"`
+	TriggerMessageID string `json:"triggerMessageId,omitempty"`
+	Status           string `json:"status"`
+	StartedAt        string `json:"startedAt"`
+	CompletedAt      string `json:"completedAt,omitempty"`
+	ErrorMessage     string `json:"errorMessage,omitempty"`
+	BaseHead         string `json:"baseHead,omitempty"`
+	EndHead          string `json:"endHead,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+type RunSummary struct {
+	Run              Run                 `json:"run"`
+	MessageCount     int64               `json:"messageCount"`
+	ToolCallCount    int64               `json:"toolCallCount"`
+	PendingApprovals int64               `json:"pendingApprovals"`
+	DeniedToolCalls  int64               `json:"deniedToolCalls"`
+	ErrorToolCalls   int64               `json:"errorToolCalls"`
+	APIRequestCount  int64               `json:"apiRequestCount"`
+	InputTokens      int64               `json:"inputTokens"`
+	OutputTokens     int64               `json:"outputTokens"`
+	CostUSD          float64             `json:"costUsd"`
+	ToolCalls        []ToolCall          `json:"toolCalls"`
+	RecentMessages   []RunMessagePreview `json:"recentMessages,omitempty"`
+}
+
+type RunMessagePreview struct {
+	ID           string `json:"id"`
+	Role         string `json:"role"`
+	ContentText  string `json:"contentText"`
+	ParentToolID string `json:"parentToolUseId,omitempty"`
+	CreatedAt    string `json:"createdAt"`
 }
 
 type Attachment struct {
@@ -111,6 +149,7 @@ type Attachment struct {
 type ToolCall struct {
 	ID                       string          `json:"id"`
 	NarratorID               string          `json:"narratorId"`
+	RunID                    string          `json:"runId,omitempty"`
 	MessageID                string          `json:"messageId,omitempty"`
 	ToolUseID                string          `json:"toolUseId"`
 	ToolName                 string          `json:"toolName"`
@@ -130,6 +169,7 @@ type ToolCall struct {
 type APIRequest struct {
 	ID                string          `json:"id"`
 	NarratorID        string          `json:"narratorId,omitempty"`
+	RunID             string          `json:"runId,omitempty"`
 	MessageID         string          `json:"messageId,omitempty"`
 	Kind              string          `json:"kind"`
 	Provider          string          `json:"provider,omitempty"`
@@ -192,8 +232,7 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schemaSQL)
-	return err
+	return runMigrations(ctx, s.db)
 }
 
 func Now() string   { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -205,6 +244,67 @@ func (s *Store) HasUsers(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
+	if run.ID == "" {
+		run.ID = NewID()
+	}
+	now := Now()
+	if run.CreatedAt == "" {
+		run.CreatedAt = now
+	}
+	if run.UpdatedAt == "" {
+		run.UpdatedAt = run.CreatedAt
+	}
+	if run.StartedAt == "" {
+		run.StartedAt = run.CreatedAt
+	}
+	if run.Status == "" {
+		run.Status = "running"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, narrator_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, run.ID, run.NarratorID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CreatedAt, run.UpdatedAt)
+	if err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) UpdateRunStatus(ctx context.Context, runID, status, errorMessage string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, error_message = NULLIF(?, ''), updated_at = ? WHERE id = ?`, status, errorMessage, Now(), runID)
+	return err
+}
+
+func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage string) error {
+	now := Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, error_message = NULLIF(?, ''), updated_at = ? WHERE id = ?`, status, now, errorMessage, now, runID)
+	return err
+}
+
+func (s *Store) GetRun(ctx context.Context, narratorID, runID string) (Run, error) {
+	var run Run
+	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), created_at, updated_at FROM runs WHERE narrator_id = ? AND id = ?`, narratorID, runID).Scan(&run.ID, &run.NarratorID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CreatedAt, &run.UpdatedAt)
+	return run, err
+}
+
+func (s *Store) ListRuns(ctx context.Context, narratorID string, limit int) ([]Run, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, narrator_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), created_at, updated_at FROM runs WHERE narrator_id = ? ORDER BY started_at DESC LIMIT ?`, narratorID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := make([]Run, 0)
+	for rows.Next() {
+		var run Run
+		if err := rows.Scan(&run.ID, &run.NarratorID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CreatedAt, &run.UpdatedAt); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
@@ -405,6 +505,11 @@ func (s *Store) AddMessage(ctx context.Context, msg Message) (Message, error) {
 	return s.AddMessageWithAttachments(ctx, msg, msg.Attachments)
 }
 
+func (s *Store) AssignMessageRun(ctx context.Context, narratorID, messageID, runID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE narrator_messages SET run_id = NULLIF(?, '') WHERE narrator_id = ? AND id = ?`, runID, narratorID, messageID)
+	return err
+}
+
 func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, attachments []Attachment) (Message, error) {
 	if msg.ID == "" {
 		msg.ID = NewID()
@@ -421,7 +526,7 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 		return Message{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO narrator_messages (id, narrator_id, parent_tool_use_id, role, content_json, content_text, command_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, msg.ID, msg.NarratorID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CreatedBy, msg.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO narrator_messages (id, narrator_id, run_id, parent_tool_use_id, role, content_json, content_text, command_text, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, msg.ID, msg.NarratorID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CreatedBy, msg.CreatedAt); err != nil {
 		return Message{}, err
 	}
 	storedAttachments := make([]Attachment, 0, len(attachments))
@@ -472,7 +577,7 @@ func (s *Store) ListMessagesWithAttachmentData(ctx context.Context, narratorID s
 }
 
 func (s *Store) listMessages(ctx context.Context, narratorID string) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, narrator_id, role, COALESCE(content_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(created_by,''), created_at FROM narrator_messages WHERE narrator_id = ? ORDER BY created_at ASC`, narratorID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, narrator_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(created_by,''), created_at FROM narrator_messages WHERE narrator_id = ? ORDER BY created_at ASC`, narratorID)
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +586,7 @@ func (s *Store) listMessages(ctx context.Context, narratorID string) ([]Message,
 	for rows.Next() {
 		var m Message
 		var raw string
-		if err := rows.Scan(&m.ID, &m.NarratorID, &m.Role, &raw, &m.ContentText, &m.ParentToolID, &m.CommandText, &m.CreatedBy, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.NarratorID, &m.RunID, &m.Role, &raw, &m.ContentText, &m.ParentToolID, &m.CommandText, &m.CreatedBy, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if raw != "" {
@@ -556,7 +661,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 	if call.CreatedAt == "" {
 		call.CreatedAt = Now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO narrator_tool_calls (id, narrator_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, call.ID, call.NarratorID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO narrator_tool_calls (id, narrator_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, call.ID, call.NarratorID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.CreatedAt)
 	if err != nil {
 		return ToolCall{}, err
 	}
@@ -566,7 +671,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 func (s *Store) GetToolCallByUseID(ctx context.Context, narratorID, toolUseID string) (ToolCall, error) {
 	var c ToolCall
 	var input, output string
-	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), created_at FROM narrator_tool_calls WHERE narrator_id = ? AND tool_use_id = ?`, narratorID, toolUseID).Scan(&c.ID, &c.NarratorID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, narrator_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), created_at FROM narrator_tool_calls WHERE narrator_id = ? AND tool_use_id = ?`, narratorID, toolUseID).Scan(&c.ID, &c.NarratorID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.CreatedAt)
 	if input != "" {
 		c.InputJSON = json.RawMessage(input)
 	}
@@ -587,6 +692,103 @@ func (s *Store) UpdateToolCallResult(ctx context.Context, narratorID, toolUseID 
 	return err
 }
 
+func (s *Store) ListPendingToolCalls(ctx context.Context, narratorID string) ([]ToolCall, error) {
+	return s.listToolCalls(ctx, `WHERE narrator_id = ? AND status = 'pending_approval' ORDER BY created_at ASC`, narratorID)
+}
+
+func (s *Store) ListToolCallsByRun(ctx context.Context, narratorID, runID string) ([]ToolCall, error) {
+	return s.listToolCalls(ctx, `WHERE narrator_id = ? AND run_id = ? ORDER BY created_at ASC`, narratorID, runID)
+}
+
+func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([]ToolCall, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, narrator_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), created_at FROM narrator_tool_calls `+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	calls := make([]ToolCall, 0)
+	for rows.Next() {
+		var c ToolCall
+		var input, output string
+		if err := rows.Scan(&c.ID, &c.NarratorID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if input != "" {
+			c.InputJSON = json.RawMessage(input)
+		}
+		if output != "" {
+			c.OutputJSON = json.RawMessage(output)
+		}
+		calls = append(calls, c)
+	}
+	return calls, rows.Err()
+}
+
+func (s *Store) RunSummary(ctx context.Context, narratorID, runID string) (RunSummary, error) {
+	run, err := s.GetRun(ctx, narratorID, runID)
+	if err != nil {
+		return RunSummary{}, err
+	}
+	summary := RunSummary{Run: run}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM narrator_messages WHERE narrator_id = ? AND run_id = ?`, narratorID, runID).Scan(&summary.MessageCount); err != nil {
+		return RunSummary{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),0) FROM narrator_tool_calls WHERE narrator_id = ? AND run_id = ?`, narratorID, runID).Scan(&summary.ToolCallCount, &summary.PendingApprovals, &summary.DeniedToolCalls, &summary.ErrorToolCalls); err != nil {
+		return RunSummary{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0) FROM api_requests WHERE narrator_id = ? AND run_id = ?`, narratorID, runID).Scan(&summary.APIRequestCount, &summary.InputTokens, &summary.OutputTokens, &summary.CostUSD); err != nil {
+		return RunSummary{}, err
+	}
+	summary.ToolCalls, err = s.ListToolCallsByRun(ctx, narratorID, runID)
+	if err != nil {
+		return RunSummary{}, err
+	}
+	summary.RecentMessages, err = s.listRunMessagePreviews(ctx, narratorID, runID, 6)
+	if err != nil {
+		return RunSummary{}, err
+	}
+	return summary, nil
+}
+
+func (s *Store) listRunMessagePreviews(ctx context.Context, narratorID, runID string, limit int) ([]RunMessagePreview, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 6
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, role, COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), created_at FROM narrator_messages WHERE narrator_id = ? AND run_id = ? ORDER BY created_at DESC LIMIT ?`, narratorID, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := make([]RunMessagePreview, 0)
+	for rows.Next() {
+		var message RunMessagePreview
+		if err := rows.Scan(&message.ID, &message.Role, &message.ContentText, &message.ParentToolID, &message.CreatedAt); err != nil {
+			return nil, err
+		}
+		message.ContentText = truncateRunes(message.ContentText, 280)
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, nil
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
+}
+
 func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIRequest, error) {
 	if request.ID == "" {
 		request.ID = NewID()
@@ -597,7 +799,7 @@ func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIReque
 	if request.Kind == "" {
 		request.Kind = "model"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, narrator_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, request.ID, request.NarratorID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, narrator_id, run_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, request.ID, request.NarratorID, request.RunID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.CreatedAt)
 	if err != nil {
 		return APIRequest{}, err
 	}

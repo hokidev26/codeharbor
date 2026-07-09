@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -214,4 +216,314 @@ func TestMCPServerRegistryRoundTripsConfig(t *testing.T) {
 	if _, err := store.GetMCPServer(ctx, created.ID); !IsNotFound(err) {
 		t.Fatalf("expected deleted MCP server to be missing, got %v", err)
 	}
+}
+
+func TestRunStoreRoundTripsAndSummarizes(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger, err := store.AddMessage(ctx, Message{NarratorID: narrator.ID, Role: "user", ContentText: "start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, Run{NarratorID: narrator.ID, TriggerMessageID: trigger.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := store.AddMessage(ctx, Message{NarratorID: narrator.ID, RunID: run.ID, Role: "assistant", ContentText: "tool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddToolCall(ctx, ToolCall{NarratorID: narrator.ID, RunID: run.ID, MessageID: assistant.ID, ToolUseID: "tool-1", ToolName: "Read", InputJSON: json.RawMessage(`{"file_path":"README.md"}`), Status: "pending_approval"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddAPIRequest(ctx, APIRequest{NarratorID: narrator.ID, RunID: run.ID, Provider: "openai", Model: "gpt", InputTokens: 10, OutputTokens: 5, CostUSD: 0.25}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.ListPendingToolCalls(ctx, narrator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].RunID != run.ID || pending[0].ToolUseID != "tool-1" {
+		t.Fatalf("unexpected pending calls: %+v", pending)
+	}
+	if err := store.CompleteRun(ctx, run.ID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.RunSummary(ctx, narrator.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Run.Status != "completed" || summary.MessageCount != 1 || summary.ToolCallCount != 1 || summary.PendingApprovals != 1 || summary.APIRequestCount != 1 || summary.InputTokens != 10 || summary.OutputTokens != 5 || summary.CostUSD != 0.25 {
+		t.Fatalf("unexpected run summary: %+v", summary)
+	}
+	runs, err := store.ListRuns(ctx, narrator.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("unexpected runs: %+v", runs)
+	}
+}
+
+func TestOpenInitializesUserVersionForNewDatabase(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	version := readUserVersion(t, ctx, store.DB())
+	if version != CurrentDBVersion {
+		t.Fatalf("expected database version %d, got %d", CurrentDBVersion, version)
+	}
+}
+
+func TestMigrateIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits"); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	version := readUserVersion(t, ctx, store.DB())
+	if version != CurrentDBVersion {
+		t.Fatalf("expected database version %d, got %d", CurrentDBVersion, version)
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].Name != "Demo" {
+		t.Fatalf("expected preserved project after idempotent open, got %+v", projects)
+	}
+}
+
+func TestOpenMigratesVersionOneDatabaseToRunTracking(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v1.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if version := readUserVersion(t, ctx, store.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated version %d, got %d", CurrentDBVersion, version)
+	}
+	for _, column := range []struct {
+		table  string
+		column string
+	}{
+		{"narrator_messages", "run_id"},
+		{"narrator_tool_calls", "run_id"},
+		{"api_requests", "run_id"},
+	} {
+		if !testColumnExists(t, ctx, store.DB(), column.table, column.column) {
+			t.Fatalf("expected column %s.%s to exist after migration", column.table, column.column)
+		}
+	}
+	if !testTableExists(t, ctx, store.DB(), "runs") {
+		t.Fatal("expected runs table after migration")
+	}
+}
+
+func TestOpenRejectsFutureDatabaseVersion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "future.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 999`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	store, err := Open(ctx, path)
+	if err == nil {
+		store.Close()
+		t.Fatal("expected future database version to be rejected")
+	}
+	if !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("expected clear future version error, got %v", err)
+	}
+}
+
+func TestOpenMigratesLegacyDatabaseMissingNarratorColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	raw := openRawDB(t, path)
+	_, err := raw.ExecContext(ctx, `
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  flow_mode TEXT NOT NULL DEFAULT 'workspace',
+  git_path TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE chapters (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  role TEXT NOT NULL DEFAULT 'root',
+  worktree_path TEXT,
+  is_root INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE narrators (
+  id TEXT PRIMARY KEY,
+  chapter_id TEXT,
+  type TEXT NOT NULL DEFAULT 'primary',
+  title TEXT NOT NULL,
+  model TEXT NOT NULL,
+  permission_mode TEXT NOT NULL DEFAULT 'acceptEdits',
+  status TEXT NOT NULL DEFAULT 'idle',
+  plan_mode INTEGER NOT NULL DEFAULT 0,
+  cwd TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO projects (id, name, description, status, flow_mode, git_path, created_at, updated_at)
+VALUES ('project-1', 'Legacy', '', 'active', 'workspace', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO chapters (id, project_id, title, status, role, worktree_path, is_root, created_at, updated_at)
+VALUES ('chapter-1', 'project-1', 'main', 'active', 'root', '', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO narrators (id, chapter_id, type, title, model, permission_mode, status, plan_mode, cwd, message_count, created_at, updated_at)
+VALUES ('narrator-1', 'chapter-1', 'primary', 'Legacy', 'openai:test', 'acceptEdits', 'idle', 0, '', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if version := readUserVersion(t, ctx, store.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated version %d, got %d", CurrentDBVersion, version)
+	}
+	for _, column := range []struct {
+		table  string
+		column string
+	}{
+		{"narrators", "subagent_type"},
+		{"narrators", "context_summary"},
+		{"narrators", "prune_boundary_message_id"},
+		{"narrators", "pruned_percent"},
+		{"narrators", "prune_enabled"},
+		{"narrators", "parent_narrator_id"},
+		{"api_requests", "ttft_ms"},
+	} {
+		if !testColumnExists(t, ctx, store.DB(), column.table, column.column) {
+			t.Fatalf("expected column %s.%s to exist after migration", column.table, column.column)
+		}
+	}
+	narrator, err := store.GetNarrator(ctx, "narrator-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrator.Title != "Legacy" || narrator.PruneBoundaryMessageID != "" || narrator.PrunedPercent != 0 {
+		t.Fatalf("unexpected migrated narrator: %+v", narrator)
+	}
+}
+
+func TestForeignKeysEnabledAfterOpen(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var enabled int
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 {
+		t.Fatalf("expected foreign keys to be enabled, got %d", enabled)
+	}
+}
+
+func readUserVersion(t *testing.T, ctx context.Context, db *sql.DB) int {
+	t.Helper()
+	var version int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+func openRawDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func testTableExists(t *testing.T, ctx context.Context, db *sql.DB, table string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count > 0
+}
+
+func testColumnExists(t *testing.T, ctx context.Context, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+quoteIdentifier(table)+`)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
 }

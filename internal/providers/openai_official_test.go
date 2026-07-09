@@ -118,3 +118,122 @@ func TestOpenAIOfficialStreamsDoneTextWhenNoDelta(t *testing.T) {
 		t.Fatalf("expected done text fallback when no deltas arrived, got %q", text)
 	}
 }
+
+func TestOpenAIOfficialEmitsFunctionToolCall(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"Read","arguments":"{\"path\":\"README.md\"}"}}`,
+			``,
+			`event: response.completed`,
+			`data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-4.1-mini","status":"completed","error":null,"incomplete_details":null,"output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"Read","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":5,"output_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":7}}}`,
+			``,
+		}, "\n") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIOfficial(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "gpt-4.1-mini"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "read README"}},
+		Tools: []ToolSpec{{
+			Name:        "Read",
+			Description: "Read a file",
+			Schema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string"}},
+				"required":   []any{"path"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []ToolCall
+	var done bool
+	for event := range events {
+		switch event.Type {
+		case "error":
+			t.Fatalf("unexpected error event: %s", event.Text)
+		case "tool_call":
+			if event.ToolCall != nil {
+				calls = append(calls, *event.ToolCall)
+			}
+		case "done":
+			done = true
+		}
+	}
+	if !done {
+		t.Fatal("expected done event")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %+v", calls)
+	}
+	if calls[0].ID != "call_1" || calls[0].Name != "Read" || string(calls[0].Input) != `{"path":"README.md"}` {
+		t.Fatalf("unexpected tool call: %+v", calls[0])
+	}
+	tools, ok := requestBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected one tool in request, got %+v", requestBody["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "Read" || tool["description"] != "Read a file" {
+		t.Fatalf("unexpected tool payload: %+v", tool)
+	}
+	if _, ok := requestBody["input"].([]any); !ok {
+		t.Fatalf("expected structured input list when tools are present, got %+v", requestBody["input"])
+	}
+}
+
+func TestOpenAIOfficialSerializesToolHistory(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: response.completed`,
+			`data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-4.1-mini","status":"completed","error":null,"incomplete_details":null,"output":[],"usage":{"input_tokens":1,"output_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}`,
+			``,
+		}, "\n") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIOfficial(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "gpt-4.1-mini"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := provider.Generate(ctx, GenerateRequest{
+		Messages: []Message{
+			{Role: "assistant", Blocks: []ContentBlock{{Type: "tool_use", ToolUseID: "call_1", ToolName: "Read", Input: json.RawMessage(`{"path":"README.md"}`)}}},
+			{Role: "user", Blocks: []ContentBlock{{Type: "tool_result", ToolUseID: "call_1", ToolName: "Read", Output: "file contents"}}},
+		},
+		Tools: []ToolSpec{{Name: "Read", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error event: %s", event.Text)
+		}
+	}
+	input, ok := requestBody["input"].([]any)
+	if !ok || len(input) != 2 {
+		t.Fatalf("expected function call and output input items, got %+v", requestBody["input"])
+	}
+	functionCall, _ := input[0].(map[string]any)
+	if functionCall["type"] != "function_call" || functionCall["call_id"] != "call_1" || functionCall["name"] != "Read" || functionCall["arguments"] != `{"path":"README.md"}` {
+		t.Fatalf("unexpected function call history item: %+v", functionCall)
+	}
+	functionOutput, _ := input[1].(map[string]any)
+	if functionOutput["type"] != "function_call_output" || functionOutput["call_id"] != "call_1" || functionOutput["output"] != "file contents" {
+		t.Fatalf("unexpected function output history item: %+v", functionOutput)
+	}
+}

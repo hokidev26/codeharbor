@@ -137,6 +137,47 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, messages)
 }
 
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	runs, err := s.store.ListRuns(r.Context(), chi.URLParam(r, "id"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+func (s *Server) getRunSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := s.store.RunSummary(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "runId"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) listRunToolCalls(w http.ResponseWriter, r *http.Request) {
+	calls, err := s.store.ListToolCallsByRun(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "runId"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, calls)
+}
+
+func (s *Server) listPendingToolCalls(w http.ResponseWriter, r *http.Request) {
+	calls, err := s.store.ListPendingToolCalls(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, calls)
+}
+
 type postMessageRequest struct {
 	Text      string `json:"text"`
 	CreatedBy string `json:"createdBy"`

@@ -162,36 +162,12 @@ The roadmap target remains either incremental ES modules without a build step or
 
 ## Validation checklist
 
-Before submitting changes, run:
+Before submitting changes, run the unified local check:
 
 ```bash
-gofmt -w ./cmd ./internal
-go test ./...
-go vet ./...
-go build ./...
-node --check internal/server/static/app.js
-node --check internal/server/static/modules/app-main.mjs
-node --check internal/server/static/modules/backend-registry.mjs
-node --check internal/server/static/modules/chat-composer.mjs
-node --check internal/server/static/modules/chat-rendering.mjs
-node --check internal/server/static/modules/directory-browser.mjs
-node --check internal/server/static/modules/formatters.mjs
-node --check internal/server/static/modules/git-workflow.mjs
-node --check internal/server/static/modules/terminal.mjs
-node --check internal/server/static/modules/runtime.mjs
-node --check internal/server/static/modules/mcp-registry.mjs
-node --check internal/server/static/modules/mcp-registry-ui.mjs
-node --check internal/server/static/modules/model-provider-settings.mjs
-node --check internal/server/static/modules/local-preferences-settings.mjs
-node --check internal/server/static/modules/system-settings.mjs
-node --check internal/server/static/modules/workspace-settings.mjs
-node --check internal/server/static/modules/skills-workbench.mjs
-node --check internal/server/static/modules/ui-shell.mjs
-node --check internal/server/static/modules/settings-preferences.mjs
-node --check internal/server/static/modules/dom.mjs
-node --check internal/server/static/modules/settings-data.mjs
-node --check internal/server/static/modules/preferences-data.mjs
-node --test internal/server/static/modules/*.test.mjs
+make check
 ```
 
-CI additionally runs `golangci-lint`. The server package includes an end-to-end smoke for HTTP message submission, narrator WebSocket events, approval routing, Bash execution, provider feedback, and persistence. Release tags matching `v*` trigger GoReleaser to build macOS, Linux, and Windows archives.
+If `make` is unavailable, run `./scripts/check.sh` directly. The script verifies Go formatting without rewriting files, runs Go tests/vet/build, checks embedded JavaScript syntax, and runs embedded JavaScript tests. Use `make fmt` to apply Go formatting.
+
+CI runs the same check script and additionally runs `golangci-lint`. The server package includes an end-to-end smoke for HTTP message submission, narrator WebSocket events, approval routing, Bash execution, provider feedback, and persistence. Release tags matching `v*` trigger GoReleaser to build macOS, Linux, and Windows archives.

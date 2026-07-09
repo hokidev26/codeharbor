@@ -110,9 +110,26 @@ CREATE TABLE IF NOT EXISTS narrators (
 CREATE INDEX IF NOT EXISTS idx_narrators_chapter ON narrators(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_narrators_parent ON narrators(parent_narrator_id);
 
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  trigger_message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error_message TEXT,
+  base_head TEXT,
+  end_head TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runs_narrator_started ON runs(narrator_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+
 CREATE TABLE IF NOT EXISTS narrator_messages (
   id TEXT PRIMARY KEY,
   narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   sdk_message_uuid TEXT,
   parent_tool_use_id TEXT,
   role TEXT NOT NULL,
@@ -130,6 +147,7 @@ CREATE TABLE IF NOT EXISTS narrator_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_narrator_messages_narrator_time ON narrator_messages(narrator_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_run ON narrator_messages(run_id, created_at);
 
 CREATE TABLE IF NOT EXISTS narrator_message_attachments (
   id TEXT PRIMARY KEY,
@@ -149,6 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_message_attachments_narrator ON narrator_message_
 CREATE TABLE IF NOT EXISTS narrator_tool_calls (
   id TEXT PRIMARY KEY,
   narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
   tool_use_id TEXT NOT NULL,
   tool_name TEXT NOT NULL,
@@ -172,11 +191,13 @@ CREATE TABLE IF NOT EXISTS narrator_tool_calls (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_narrator ON narrator_tool_calls(narrator_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON narrator_tool_calls(run_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_tool_use ON narrator_tool_calls(narrator_id, tool_use_id);
 
 CREATE TABLE IF NOT EXISTS api_requests (
   id TEXT PRIMARY KEY,
   narrator_id TEXT REFERENCES narrators(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
   kind TEXT NOT NULL DEFAULT 'model',
   provider TEXT,
@@ -196,6 +217,7 @@ CREATE TABLE IF NOT EXISTS api_requests (
   raw_dump_json TEXT,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_api_requests_run ON api_requests(run_id, created_at);
 
 CREATE TABLE IF NOT EXISTS agent_backends (
   id TEXT PRIMARY KEY,
