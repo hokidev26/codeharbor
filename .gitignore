@@ -23,3 +23,5 @@ config.local.json
 tmp/
 .codeharbor-run-*.json
 .DS_Store
+.narrafork/
+.worktrees/
