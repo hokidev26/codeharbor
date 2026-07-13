@@ -48,6 +48,16 @@ type activeRun struct {
 	pendingTriggerMessageID string
 }
 
+var ErrAgentBusy = errors.New("agent is busy")
+
+type SourceSubmission struct {
+	AgentID           string
+	Prompt            string
+	Source            string
+	SourceID          string
+	PermissionModeCap string
+}
+
 type NotificationEvent struct {
 	Event     string
 	RunID     string
@@ -140,7 +150,7 @@ func (r *Runner) notify(event NotificationEvent) {
 	if notifier == nil {
 		return
 	}
-	go notifier.Notify(context.Background(), event)
+	notifier.Notify(context.Background(), event)
 }
 
 var serverSkillCommandPattern = regexp.MustCompile(`^(/[A-Za-z0-9][A-Za-z0-9_-]{0,62})(?:$|[ \t\r\n]+([\s\S]*))`)
@@ -154,7 +164,7 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 	if err != nil {
 		return db.Message{}, err
 	}
-	run, err := r.store.CreateRun(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending"})
+	run, err := r.store.CreateRun(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending", Source: "manual"})
 	if err != nil {
 		return db.Message{}, err
 	}
@@ -165,6 +175,113 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments)}, run.ID)})
 	go r.runWithRun(context.Background(), agentID, run.ID, msg.ID)
 	return msg, nil
+}
+
+func (r *Runner) SubmitSchedule(ctx context.Context, schedule db.Schedule) (db.Run, error) {
+	return r.SubmitSource(ctx, SourceSubmission{
+		AgentID:           schedule.AgentID,
+		Prompt:            schedule.Prompt,
+		Source:            "schedule",
+		SourceID:          schedule.ID,
+		PermissionModeCap: schedule.PermissionMode,
+	})
+}
+
+func (r *Runner) SubmitScheduleRun(ctx context.Context, schedule db.Schedule) (db.Run, error) {
+	return r.SubmitSchedule(ctx, schedule)
+}
+
+func (r *Runner) SubmitInternal(ctx context.Context, agentID, sourceID, prompt, permissionModeCap string) (db.Run, error) {
+	return r.SubmitSource(ctx, SourceSubmission{
+		AgentID:           agentID,
+		Prompt:            prompt,
+		Source:            "internal",
+		SourceID:          sourceID,
+		PermissionModeCap: permissionModeCap,
+	})
+}
+
+func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) (db.Run, error) {
+	if r == nil || r.store == nil {
+		return db.Run{}, errors.New("agent runner is not initialized")
+	}
+	submission.AgentID = strings.TrimSpace(submission.AgentID)
+	submission.Prompt = strings.TrimSpace(submission.Prompt)
+	submission.Source = strings.TrimSpace(submission.Source)
+	submission.SourceID = strings.TrimSpace(submission.SourceID)
+	submission.PermissionModeCap = strings.TrimSpace(submission.PermissionModeCap)
+	if submission.AgentID == "" || submission.Prompt == "" || submission.SourceID == "" {
+		return db.Run{}, errors.New("agent, prompt, and source id are required")
+	}
+	if submission.Source != "schedule" && submission.Source != "internal" {
+		return db.Run{}, errors.New("source must be schedule or internal")
+	}
+	if submission.PermissionModeCap != "readOnly" && submission.PermissionModeCap != "acceptEdits" {
+		return db.Run{}, errors.New("permission mode cap must be readOnly or acceptEdits")
+	}
+	if err := ctx.Err(); err != nil {
+		return db.Run{}, err
+	}
+	if _, err := r.store.GetAgent(ctx, submission.AgentID); err != nil {
+		return db.Run{}, err
+	}
+
+	r.runMu.Lock()
+	if r.running == nil {
+		r.running = make(map[string]*activeRun)
+	}
+	if r.running[submission.AgentID] != nil {
+		r.runMu.Unlock()
+		return db.Run{}, ErrAgentBusy
+	}
+	var durableBusy int
+	if err := r.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE agent_id = ? AND status IN ('pending','running')`, submission.AgentID).Scan(&durableBusy); err != nil {
+		r.runMu.Unlock()
+		return db.Run{}, err
+	}
+	if durableBusy > 0 {
+		r.runMu.Unlock()
+		return db.Run{}, ErrAgentBusy
+	}
+	msg, err := r.store.AddMessage(ctx, db.Message{AgentID: submission.AgentID, Role: "user", ContentText: submission.Prompt})
+	if err != nil {
+		r.runMu.Unlock()
+		return db.Run{}, err
+	}
+	run, err := r.store.CreateRun(ctx, db.Run{
+		AgentID:           submission.AgentID,
+		TriggerMessageID:  msg.ID,
+		Status:            "pending",
+		Source:            submission.Source,
+		SourceID:          submission.SourceID,
+		PermissionModeCap: submission.PermissionModeCap,
+	})
+	if err != nil {
+		r.runMu.Unlock()
+		return db.Run{}, err
+	}
+	if err := r.store.AssignMessageRun(ctx, submission.AgentID, msg.ID, run.ID); err != nil {
+		r.runMu.Unlock()
+		return db.Run{}, err
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	active := &activeRun{cancel: cancel, runID: run.ID, triggerMessageID: msg.ID}
+	r.running[submission.AgentID] = active
+	r.runMu.Unlock()
+
+	msg.RunID = run.ID
+	r.publish(Event{Type: "message.created", AgentID: submission.AgentID, MessageID: msg.ID, Text: submission.Prompt, Data: mergeEventData(map[string]any{"source": submission.Source, "sourceId": submission.SourceID}, run.ID)})
+	go r.executeRegisteredRun(runCtx, submission.AgentID, active)
+	return run, nil
+}
+
+func (r *Runner) ActiveRunCount() int {
+	if r == nil {
+		return 0
+	}
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	return len(r.running)
 }
 
 func (r *Runner) expandServerSkillCommand(ctx context.Context, values ...string) (contentText, commandText string, err error) {
@@ -267,6 +384,10 @@ func (r *Runner) runWithRun(ctx context.Context, agentID, runID, triggerMessageI
 		return
 	}
 
+	r.executeRegisteredRun(runCtx, agentID, active)
+}
+
+func (r *Runner) executeRegisteredRun(runCtx context.Context, agentID string, active *activeRun) {
 	err := r.run(runCtx, agentID, active.runID)
 	completion := r.unregisterRun(agentID, active)
 	if err != nil {
@@ -479,6 +600,13 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return err
+	}
+	if runID != "" {
+		run, err := r.store.GetRun(ctx, agentID, runID)
+		if err != nil {
+			return err
+		}
+		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
 	}
 	r.captureRunCheckpoint(ctx, agent, runID)
 	projectInstructions := loadProjectInstructions(agent.CWD)
@@ -1333,6 +1461,13 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 	if err != nil {
 		return tools.Result{}, err
 	}
+	if runID != "" {
+		run, runErr := r.store.GetRun(ctx, agentID, runID)
+		if runErr != nil {
+			return tools.Result{}, runErr
+		}
+		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
+	}
 	if r.tools == nil {
 		return tools.Result{}, errors.New("tool registry is not initialized")
 	}
@@ -2161,6 +2296,19 @@ func (r *Runner) publish(event Event) {
 	if r.hub != nil {
 		r.hub.Publish(event)
 	}
+}
+
+func permissionModeWithCap(mode, cap string) string {
+	mode = strings.TrimSpace(mode)
+	switch strings.TrimSpace(cap) {
+	case "readOnly":
+		return "readOnly"
+	case "acceptEdits":
+		if mode == "bypassPermissions" {
+			return "acceptEdits"
+		}
+	}
+	return mode
 }
 
 func allowed(mode, toolName string, risk tools.Risk) bool {

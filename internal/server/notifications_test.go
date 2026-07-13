@@ -83,7 +83,16 @@ func TestNotificationSettingsRejectsInvalidWebhookURL(t *testing.T) {
 	defer store.Close()
 	app := New(config.Config{}, store, nil, nil)
 	routes := app.Routes()
-	putJSON(t, routes, http.MethodPut, "/api/notifications/settings", notificationSettingsPayload{Enabled: true, WebhookURL: "file:///tmp/hook", NotifyOnApproval: true}, http.StatusBadRequest)
+	for _, webhookURL := range []string{
+		"file:///tmp/hook",
+		"https://user:password@example.test/hook",
+		"https://example.test/hook?token=secret",
+		"https://example.test/hook#fragment",
+		"http://169.254.169.254/latest/meta-data",
+		"http://metadata.google.internal/computeMetadata/v1/",
+	} {
+		putJSON(t, routes, http.MethodPut, "/api/notifications/settings", notificationSettingsPayload{Enabled: true, WebhookURL: webhookURL, NotifyOnApproval: true}, http.StatusBadRequest)
+	}
 }
 
 func TestWebhookNotifierSendsRunNotification(t *testing.T) {

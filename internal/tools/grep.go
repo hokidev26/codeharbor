@@ -52,8 +52,20 @@ func (GrepTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	}
 	var lines []string
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || len(lines) >= limit {
+		if err != nil {
 			return err
+		}
+		if len(lines) >= limit {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && (heavyToolDirectory(d.Name()) || sensitiveToolPath(root, path)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if sensitiveToolPath(root, path) {
+			return nil
 		}
 		file, err := os.Open(path)
 		if err != nil {

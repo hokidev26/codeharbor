@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"autoto/internal/workspacefs"
 )
 
 func resolveInCWD(cwd, inputPath string) (string, error) {
@@ -28,6 +30,9 @@ func resolveInCWD(cwd, inputPath string) (string, error) {
 	}
 	if !pathIsWithin(base, abs) {
 		return "", errors.New("path escapes working directory")
+	}
+	if sensitiveToolPath(base, abs) {
+		return "", errors.New("sensitive path is not accessible")
 	}
 
 	realBase, err := filepath.EvalSymlinks(base)
@@ -67,6 +72,32 @@ func pathIsWithin(base, target string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func sensitiveToolPath(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil || filepath.IsAbs(rel) {
+		return true
+	}
+	rel = filepath.ToSlash(rel)
+	if workspacefs.IsSensitivePath(rel) {
+		return true
+	}
+	for _, component := range strings.Split(strings.ToLower(rel), "/") {
+		if component == ".git" {
+			return true
+		}
+	}
+	return false
+}
+
+func heavyToolDirectory(name string) bool {
+	switch strings.ToLower(name) {
+	case ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "target", ".next", ".nuxt", "coverage", "out":
+		return true
+	default:
+		return false
+	}
 }
 
 func truncate(s string, max int) (string, bool) {

@@ -9,7 +9,7 @@ export const settingsSections = [
       { key: "skills", icon: "✦", label: "技能", subtitle: "管理技能、命令和 MCP 工具，增强你的 AI 工作流。" },
       { key: "notifications", icon: "♢", label: "通知", subtitle: "管理任务完成、错误与后台运行提醒。" },
       { key: "appearance", icon: "◉", label: "外观与界面", subtitle: "调整主题、布局密度和界面显示。" },
-      { key: "im-gateway", icon: "◌", label: "IM 网关", subtitle: "连接 IM、Webhook 与外部消息入口。" },
+      { key: "im-gateway", icon: "⌂", label: "渠道、排程与家电", subtitle: "管理 Telegram 配对、后台排程、通知投递与 Home Assistant 设备。" },
     ],
   },
   {

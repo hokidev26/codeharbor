@@ -140,6 +140,9 @@ type Run struct {
 	CheckpointState    string `json:"checkpointState"`
 	CheckpointError    string `json:"checkpointError,omitempty"`
 	RolledBackAt       string `json:"rolledBackAt,omitempty"`
+	Source             string `json:"source"`
+	SourceID           string `json:"sourceId,omitempty"`
+	PermissionModeCap  string `json:"permissionModeCap,omitempty"`
 	CreatedAt          string `json:"createdAt"`
 	UpdatedAt          string `json:"updatedAt"`
 }
@@ -1053,7 +1056,22 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if run.CheckpointState == "" {
 		run.CheckpointState = RunCheckpointNone
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.CreatedAt, run.UpdatedAt)
+	run.Source = strings.TrimSpace(run.Source)
+	if run.Source == "" {
+		run.Source = "manual"
+	}
+	run.SourceID = strings.TrimSpace(run.SourceID)
+	run.PermissionModeCap = strings.TrimSpace(run.PermissionModeCap)
+	if err := validateP2P3Text("run source", run.Source, 64, true, true); err != nil {
+		return Run{}, err
+	}
+	if err := validateP2P3Text("run source id", run.SourceID, 256, false, false); err != nil {
+		return Run{}, err
+	}
+	if run.PermissionModeCap != "" && run.PermissionModeCap != "readOnly" && run.PermissionModeCap != "acceptEdits" {
+		return Run{}, errors.New("invalid run permission mode cap")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id, permission_mode_cap, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.CreatedAt, run.UpdatedAt)
 	if err != nil {
 		return Run{}, err
 	}
@@ -1313,13 +1331,13 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 
 func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
 func (s *Store) GetRunByID(ctx context.Context, runID string) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
@@ -1327,7 +1345,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`, agentID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1335,7 +1353,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 	runs := make([]Run, 0)
 	for rows.Next() {
 		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1344,7 +1362,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 }
 
 func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY started_at ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY started_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1352,7 +1370,7 @@ func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
 	runs := make([]Run, 0)
 	for rows.Next() {
 		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1361,7 +1379,7 @@ func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
 }
 
 func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY started_at ASC, id ASC`, RunCheckpointRollingBack)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY started_at ASC, id ASC`, RunCheckpointRollingBack)
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1387,7 @@ func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
 	runs := make([]Run, 0)
 	for rows.Next() {
 		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)

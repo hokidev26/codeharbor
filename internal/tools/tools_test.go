@@ -92,6 +92,35 @@ func TestResolveInCWDAllowsOrdinaryNewFilePath(t *testing.T) {
 	}
 }
 
+func TestPathToolsRejectSensitiveWorkspaceFiles(t *testing.T) {
+	cwd := t.TempDir()
+	for _, name := range []string{".env", "credentials.json", filepath.Join(".git", "config")} {
+		path := filepath.Join(cwd, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("TOP_SECRET_VALUE"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveInCWD(cwd, name); err == nil || !strings.Contains(err.Error(), "sensitive path") {
+			t.Fatalf("expected sensitive path rejection for %q, got %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "safe.txt"), []byte("public value"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	grepInput, _ := json.Marshal(map[string]any{"pattern": "TOP_SECRET_VALUE", "path": cwd})
+	grepResult, err := (GrepTool{}).Execute(context.Background(), Call{ID: "grep-sensitive", Name: "Grep", Input: grepInput}, Env{CWD: cwd})
+	if err != nil || grepResult.IsError || grepResult.Output != "No matches found" {
+		t.Fatalf("grep exposed sensitive content: result=%+v err=%v", grepResult, err)
+	}
+	globInput, _ := json.Marshal(map[string]any{"pattern": ".*", "path": cwd})
+	globResult, err := (GlobTool{}).Execute(context.Background(), Call{ID: "glob-sensitive", Name: "Glob", Input: globInput}, Env{CWD: cwd})
+	if err != nil || globResult.IsError || strings.Contains(globResult.Output, ".env") || strings.Contains(globResult.Output, ".git") {
+		t.Fatalf("glob exposed sensitive paths: result=%+v err=%v", globResult, err)
+	}
+}
+
 func requireSymlink(t *testing.T, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const CurrentDBVersion = 18
+const CurrentDBVersion = 22
 
 type migration struct {
 	version int
@@ -34,6 +34,10 @@ var migrations = []migration{
 	{version: 16, name: "automation audit events", up: migrateV16AutomationAuditEvents},
 	{version: 17, name: "integration connections", up: migrateV17IntegrationConnections},
 	{version: 18, name: "memories", up: migrateV18Memories},
+	{version: 19, name: "schedules and run sources", up: migrateV19Schedules},
+	{version: 20, name: "notification deliveries", up: migrateV20NotificationDeliveries},
+	{version: 21, name: "channel pairings events and cursors", up: migrateV21ChannelPersistence},
+	{version: 22, name: "device action requests", up: migrateV22DeviceActionRequests},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -602,6 +606,52 @@ func migrateV18Memories(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
+func migrateV19Schedules(ctx context.Context, tx *sql.Tx) error {
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
+		{"source_id", "TEXT NOT NULL DEFAULT ''"},
+		{"permission_mode_cap", "TEXT NOT NULL DEFAULT '' CHECK (permission_mode_cap IN ('', 'readOnly', 'acceptEdits'))"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, "runs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, schedulesSchemaSQL); err != nil {
+		return err
+	}
+	return ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'")
+}
+
+func migrateV20NotificationDeliveries(ctx context.Context, tx *sql.Tx) error {
+	// Re-ensure timezone for development databases that reached v19 before the
+	// schedule timezone contract was finalized.
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, notificationDeliveriesSchemaSQL)
+	return err
+}
+
+func migrateV21ChannelPersistence(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, channelPersistenceSchemaSQL)
+	return err
+}
+
+func migrateV22DeviceActionRequests(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, deviceActionRequestsSchemaSQL)
+	return err
+}
+
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -635,6 +685,9 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 }
 
 func legacyNamingSchemaSQL() string {
+	// P2-P3 tables were introduced after the agent/workline naming migration and
+	// must be created by their own migrations with modern column names.
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",
@@ -649,7 +702,7 @@ func legacyNamingSchemaSQL() string {
 		"CREATE TABLE IF NOT EXISTS agents (", "CREATE TABLE IF NOT EXISTS narrators (",
 		" ON agents(", " ON narrators(",
 		"workline", "chapter",
-	).Replace(schemaSQL)
+	).Replace(legacySchema)
 }
 
 func execSchemaStatements(ctx context.Context, tx *sql.Tx, schema string, include func(string) bool) error {

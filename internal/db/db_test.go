@@ -2321,8 +2321,8 @@ func TestMemoryFreshSchemaAndV17MigrationMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fresh.Close()
-	if version := readUserVersion(t, ctx, fresh.DB()); version != 18 {
-		t.Fatalf("expected fresh database version 18, got %d", version)
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected fresh database version %d, got %d", CurrentDBVersion, version)
 	}
 	freshSchema := memorySchemaSnapshot(t, ctx, fresh.DB())
 	for _, name := range []string{"memories", "memory_injections", "idx_memories_pinned_updated", "idx_memories_archived", "idx_memory_injections_agent"} {
@@ -2347,8 +2347,8 @@ func TestMemoryFreshSchemaAndV17MigrationMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer migrated.Close()
-	if version := readUserVersion(t, ctx, migrated.DB()); version != 18 {
-		t.Fatalf("expected migrated database version 18, got %d", version)
+	if version := readUserVersion(t, ctx, migrated.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated database version %d, got %d", CurrentDBVersion, version)
 	}
 	migratedSchema := memorySchemaSnapshot(t, ctx, migrated.DB())
 	if migratedSchema != freshSchema {

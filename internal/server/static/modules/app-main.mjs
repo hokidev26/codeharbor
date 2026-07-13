@@ -1,4 +1,5 @@
 import { createAgentStreamController } from "./agent-stream.mjs";
+import { createAutomationControlController } from "./automation-control.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs";
 import { createChatRenderingController } from "./chat-rendering.mjs";
@@ -100,7 +101,6 @@ const state = {
   authSeq: 0,
   profile: null,
   searchPrefs: null,
-  imGatewayPrefs: null,
   skillsPrefs: null,
   serverSkills: [],
   serverSkillsStatus: "idle",
@@ -495,14 +495,10 @@ const {
   applyAppearancePreferences,
   applyProfilePreferences,
   currentAppearancePreferences,
-  currentIMGatewayPreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
   currentSearchPreferences,
-  imGatewayChannelLabel,
-  imGatewayPrefsExport,
   loadAppearancePreferences,
-  loadIMGatewayPreferences,
   loadNotificationPreferences,
   loadProfilePreferences,
   loadSearchPreferences,
@@ -516,13 +512,11 @@ const {
   notificationVariantEnabled,
   profileDisplayName,
   profileGitEnvExample,
-  resetIMGatewayPreferences,
   resetNotificationPreferences,
   resetProfilePreferences,
   resetSearchPreferences,
   resetSkillsPreferences,
   restoreLocalPreferencesBackup,
-  saveIMGatewayPreferences,
   saveNotificationPreferences,
   saveProfilePreferences,
   saveSearchPreferences,
@@ -539,23 +533,18 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   state,
   copyText,
   currentAppearancePreferences,
-  currentIMGatewayPreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
   currentSearchPreferences,
-  imGatewayChannelLabel,
-  imGatewayPrefsExport,
   notifyTerminal,
   profileDisplayName,
   profileGitEnvExample,
-  resetIMGatewayPreferences,
   resetNotificationPreferences,
   resetProfilePreferences,
   resetSearchPreferences,
   loadServerNotificationSettings,
   saveServerNotificationSettings,
   testServerNotification,
-  saveIMGatewayPreferences,
   saveProfilePreferences,
   saveSearchPreferences,
   searchPrefsExport,
@@ -568,12 +557,10 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
 
 const {
   bindAppearanceSettingsActions,
-  bindIMGatewaySettingsActions,
   bindNetworkSearchSettingsActions,
   bindNotificationSettingsActions,
   bindProfileSettingsActions,
   renderAppearanceSettingsContent,
-  renderIMGatewaySettingsContent,
   renderNetworkSearchSettingsContent,
   renderNotificationSettingsContent,
   renderProfileSettingsContent,
@@ -763,6 +750,15 @@ const memorySettings = createMemorySettingsController({
   showToast,
 });
 
+const automationControl = createAutomationControlController({
+  request: api,
+  onChange: () => {
+    if (state.activeSettingsPanel === "im-gateway") refreshActiveSettingsPanel();
+  },
+  showError,
+  showToast,
+});
+
 const settingsPanelRegistry = createSettingsPanelRegistry();
 [
   ["profile", { render: renderProfileSettingsContent, bind: bindProfileSettingsActions }],
@@ -772,7 +768,7 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["agents", { render: renderAgentSettingsContent, bind: bindAgentSettingsActions }],
   ["providers", { render: renderProviderSettingsContent, bind: bindProviderSettingsActions }],
   ["network-search", { render: renderNetworkSearchSettingsContent, bind: bindNetworkSearchSettingsActions }],
-  ["im-gateway", { render: renderIMGatewaySettingsContent, bind: bindIMGatewaySettingsActions }],
+  ["im-gateway", { render: automationControl.render, bind: automationControl.bind }],
   ["notifications", { render: renderNotificationSettingsContent, bind: bindNotificationSettingsActions }],
   ["appearance", { render: renderAppearanceSettingsContent, bind: bindAppearanceSettingsActions }],
   ["agent-admin", { render: renderAgentAdminSettingsContent, bind: bindAgentAdminSettingsActions }],
@@ -2325,7 +2321,6 @@ async function init() {
     state.profile = loadProfilePreferences();
     applyProfilePreferences();
     state.searchPrefs = loadSearchPreferences();
-    state.imGatewayPrefs = loadIMGatewayPreferences();
     state.skillsPrefs = loadSkillsPreferences();
     state.notifications = loadNotificationPreferences();
     state.appearance = loadAppearancePreferences();

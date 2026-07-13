@@ -2003,3 +2003,139 @@ func mustJSON(value any) json.RawMessage {
 	data, _ := json.Marshal(value)
 	return data
 }
+
+func TestScheduleSubmitDoesNotCancelActiveManualRun(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "manual work"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingProvider{started: make(chan struct{})}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 2})
+	done := make(chan struct{})
+	go func() {
+		runner.Run(ctx, agent.ID)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual provider did not start")
+	}
+
+	_, err := runner.SubmitSchedule(ctx, db.Schedule{ID: "schedule-1", AgentID: agent.ID, Prompt: "scheduled work", PermissionMode: "readOnly"})
+	if !errors.Is(err, ErrAgentBusy) {
+		t.Fatalf("expected ErrAgentBusy, got %v", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("schedule submission canceled the active manual run")
+	case <-time.After(100 * time.Millisecond):
+	}
+	messages, err := store.ListMessages(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ContentText != "manual work" {
+		t.Fatalf("busy schedule submission should not persist a prompt: %+v", messages)
+	}
+	interrupted, err := runner.Interrupt(ctx, agent.ID)
+	if err != nil || !interrupted {
+		t.Fatalf("interrupt manual run: interrupted=%v err=%v", interrupted, err)
+	}
+	waitDone(t, done)
+}
+
+func TestScheduleSubmitDoesNotReplaceDurablePendingManualRun(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	message, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "pending manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, TriggerMessageID: message.ID, Status: "pending", Source: "manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignMessageRun(ctx, agent.ID, message.ID, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner := newAgentTestRunner(store, &scriptedProvider{}, config.AgentConfig{})
+	if _, err := runner.SubmitSchedule(ctx, db.Schedule{ID: "schedule-pending", AgentID: agent.ID, Prompt: "must skip", PermissionMode: "readOnly"}); !errors.Is(err, ErrAgentBusy) {
+		t.Fatalf("expected pending manual run to make schedule busy, got %v", err)
+	}
+	stored, err := store.GetRun(ctx, agent.ID, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "pending" {
+		t.Fatalf("pending manual run was replaced: %+v", stored)
+	}
+	messages, err := store.ListMessages(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("busy schedule should not persist an additional message: %+v", messages)
+	}
+}
+
+func TestScheduleRunPermissionModeCapIsApplied(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "bypassPermissions")
+	defer store.Close()
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "capped-write", Name: "Write", Input: json.RawMessage(`{"file_path":"blocked.txt","content":"no"}`)}}, {Type: "done", Done: true, StopReason: "tool_use"}},
+		{{Type: "text", Text: "write was blocked"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 3})
+	run, err := runner.SubmitSchedule(ctx, db.Schedule{ID: "schedule-cap", AgentID: agent.ID, Prompt: "try to write", PermissionMode: "readOnly"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, getErr := store.GetRun(ctx, agent.ID, run.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if stored.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	call, err := store.GetToolCallByUseID(ctx, agent.ID, "capped-write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "denied" || !strings.Contains(call.PermissionDecisionReason, "readOnly") {
+		t.Fatalf("expected schedule readOnly cap to deny write, got %+v", call)
+	}
+	storedRun, err := store.GetRun(ctx, agent.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.Source != "schedule" || storedRun.SourceID != "schedule-cap" || storedRun.PermissionModeCap != "readOnly" {
+		t.Fatalf("unexpected persisted run source metadata: %+v", storedRun)
+	}
+}
+
+func TestPermissionModeWithCapNeverWidens(t *testing.T) {
+	cases := []struct {
+		mode string
+		cap  string
+		want string
+	}{
+		{mode: "bypassPermissions", cap: "acceptEdits", want: "acceptEdits"},
+		{mode: "readOnly", cap: "acceptEdits", want: "readOnly"},
+		{mode: "default", cap: "acceptEdits", want: "default"},
+		{mode: "bypassPermissions", cap: "readOnly", want: "readOnly"},
+	}
+	for _, test := range cases {
+		if got := permissionModeWithCap(test.mode, test.cap); got != test.want {
+			t.Fatalf("permissionModeWithCap(%q, %q)=%q, want %q", test.mode, test.cap, got, test.want)
+		}
+	}
+}

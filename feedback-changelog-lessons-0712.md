@@ -19,6 +19,11 @@
 - 這不是 durable event log：事件仍未持久化，服務重啟或跨進程後不能 replay；若 IM Gateway 將跨進程補發變成正確性要求，仍需另立持久事件設計。
 - Provider 已有 `Tools`、`Streaming`、`ImageInput` 最小 capability contract；未知或未宣告能力的 Provider 按不支援處理，業務層不需按名稱特判。
 - Skills 已完成 global/project/workspace scope、revision 歷史與 restore，以及 snapshot-stable cursor 分頁；原先「目前不做」的描述已失效。
+- P2–P3 已新增 V19 schedules/run source、V20 durable notification deliveries、V21 Telegram pairing/events/cursor、V22 device action requests，並由 runtime Supervisor 管理 channels / automation / HTTP 生命周期。
+- Telegram 現況是 long polling + 私聊 `/pair`、`/status`、`/approve`（固定一次性 `allow_once`）與 `/deny`；未配對/錯誤配對靜默。沒有 `/task`、自由聊天、Telegram webhook、Slack 或 Discord。
+- Home Assistant 僅允許本機/私網 endpoint；狀態摘要只讀，動作固定 allowlist 且要求本地雙確認/direct-loopback 批准；critical/未知動作硬阻斷，IM 不得控制設備。
+- 通知已具持久歷史、去重、退避、`dead` 與 retry；monitoring snapshot 只做本地聚合，不是雲監控。
+- `Read` / `Write` / `Edit` / `Glob` / `Grep` 已對敏感路徑硬阻斷或過濾；Bash/stdio MCP 仍不屬於此 filename boundary。
 - 四條工程規範與快取七問已正式寫入 `CONTRIBUTING.md`，架構摘要已寫入 `docs/ARCHITECTURE.md`。
 
 ## 1. 八項原則最新狀態
@@ -176,6 +181,6 @@ Skills 已完成：
 
 ## 7. 最終判斷
 
-這份報告的高收益程式碼建議已完成：Agent stream protocol 2、有界記憶體 replay、snapshot resync、Provider 最小能力契約，以及 scoped/revisioned Skills 與 snapshot cursor 都已落地。
+這份報告的高收益程式碼建議已完成：Agent stream protocol 2、有界記憶體 replay、snapshot resync、Provider 最小能力契約，以及 scoped/revisioned Skills 與 snapshot cursor 都已落地。其後的 P2–P3 也已完成受限 schedules、durable deliveries、Telegram pairing/status/一次性 approval/deny、Home Assistant 受限動作與本地監控聚合。
 
-後續產品主線回到 IM foundation。產品 Phase B 若要求服務重啟後仍能可靠補發，應新增 durable event log 與跨進程 replay，而不是誤把目前的進程內 ring replay 當成持久消息系統。Provider 契約則只按真實差異增量擴充。
+必須繼續區分不同的「durable」：notification deliveries 與 Telegram channel events/cursors 已持久化，但 Agent WebSocket event stream 仍是進程內 ring，服務重啟或跨進程不能 replay。產品邊界同樣不可外推：`/task`、自由聊天、Slack/Discord、通用 IoT、攝像頭動作、門鎖解鎖與雲監控仍未實現。Provider 契約只按真實差異增量擴充。

@@ -62,8 +62,14 @@ MVP 已逐步扩展出：
 - 终端 PTY、WebSearch/WebFetch、权限审批与内嵌 Web UI
 - 服务端 Skills 的 global/project/workspace CRUD、effective 解析、revision/restore 与 cursor 分页；设置页 scoped 面板已支持按作用域浏览、详情、分页和修订恢复，写操作 UI 仍限 global scope
 - Agent stream protocol 2 的有界内存 replay 与 snapshot resync
+- P2–P3 自动化持久层：V19 schedules/run source，V20 durable notification deliveries，V21 channel pairing/events/cursor，V22 device action requests
+- 仅 Telegram 的 long polling 控制面：私聊 `/pair`、`/status`、`/approve <toolCallId>`（固定一次性 `allow_once`）与 `/deny`；无 `/task`、无自由聊天、无 webhook 入站、无 Slack/Discord
+- Webhook/Telegram 通知历史、去重、lease、指数退避、`dead` 状态与显式 retry
+- 仅本机/私网 Home Assistant endpoint、只读状态摘要、固定动作 allowlist、本地双确认与 direct-loopback 批准；critical/未知动作硬阻断，IM 不得控制设备
+- 本地监控聚合与 runtime Supervisor 对 channels / automation / HTTP 生命周期的统一管理
+- `Read` / `Write` / `Edit` / `Glob` / `Grep` 对敏感路径的硬阻断或过滤
 
-后续长期能力包括入站 IM Gateway、review workline / AI conflict resolve、子代理、任务队列、排程与 runtime cleanup。
+后续长期能力仍包括 review workline / AI conflict resolve、子代理、显式任务队列与 runtime cleanup。Slack/Discord、IM `/task`、通用 IoT、摄像头动作、门锁解锁与云监控均未实现，不得写成现有能力。
 
 ---
 
@@ -83,6 +89,22 @@ Task / 用户消息
 ```
 
 Agent WebSocket protocol 2 推送运行事件并支持当前进程内的有界 replay；无法 replay 时由 live snapshot 恢复。手动 tool-call API 仍保留，但不再是唯一工具闭环。
+
+P2–P3 另增加两个受限闭环：
+
+```txt
+schedule 到点/手动触发
+  -> 仅 readOnly / acceptEdits permission cap
+  -> Agent busy 时记录 skipped，不取消人工 run
+  -> 结果进入 durable Webhook/Telegram delivery history
+
+Telegram private chat long polling
+  -> 一次性配对码绑定 connection/chat/user/Agent/token revision
+  -> /status 或 /approve（allow_once）/deny 已存在的 pending tool call
+  -> 未配对、错误配对与非私聊不回 Telegram
+```
+
+这不是通用远程助理：Telegram 不接收 `/task` 或自由聊天，也不能切换权限、打开终端或控制 Home Assistant 设备。
 
 ---
 
@@ -204,6 +226,15 @@ CLIPROXYAPI_CONFIG
 
 首次生成默认 `config.json` 时，运行时仍会读取环境变量中的 API key，但写入磁盘的默认配置会清空 provider/backend API key，避免把 shell 环境里的 secret 持久化。
 
+P2–P3 integration connection 的 bot/access token 不接受明文，只保存 `env:VARIABLE_NAME` 引用，例如：
+
+```txt
+Telegram botToken     -> env:AUTOTO_TELEGRAM_BOT_TOKEN
+Home Assistant token -> env:AUTOTO_HOME_ASSISTANT_TOKEN
+```
+
+公开 API 只返回对应 logical secret 是否已配置，不返回引用目标或解析后的值。Telegram bot token 轮换会改变 credential revision 并撤销旧配对；怀疑泄漏时还应从本地 UI/API 显式撤销配对并重新配对。Home Assistant 不使用 channel pairing，token 轮换后应重启/重测或禁用连接。
+
 ---
 
 ### 3.3 SQLite 数据库
@@ -228,6 +259,13 @@ agent_message_attachments
 agent_tool_calls
 api_requests
 agent_backends
+schedules
+notification_deliveries
+integration_connections
+channel_pairings
+channel_events
+channel_cursors
+device_action_requests
 ```
 
 这些表的命名与字段风格尽量贴近 AI 编程工作台数据模型，方便后续迁移或扩展。
@@ -257,6 +295,35 @@ GET  /api/licenses
 GET  /api/runtime/summary
 GET  /api/storage/summary
 GET  /api/usage/summary
+GET  /api/monitoring/snapshot
+
+GET  /api/notifications/settings
+PUT  /api/notifications/settings
+POST /api/notifications/test
+GET  /api/notifications/deliveries
+POST /api/notifications/deliveries/{id}/retry
+
+GET    /api/schedules
+POST   /api/schedules
+PATCH  /api/schedules/{id}
+DELETE /api/schedules/{id}
+POST   /api/schedules/{id}/run
+
+GET    /api/integrations/connections
+POST   /api/integrations/connections
+PATCH  /api/integrations/connections/{id}
+DELETE /api/integrations/connections/{id}
+POST   /api/integrations/connections/{id}/test
+
+POST /api/channels/pairing-codes
+GET  /api/channels/pairings
+POST /api/channels/pairings/{id}/revoke
+GET  /api/audit/events
+
+GET  /api/devices?connectionId=...
+POST /api/device-actions
+POST /api/device-actions/{id}/approve
+POST /api/device-actions/{id}/deny
 
 PUT  /api/providers/{name}/config
 
@@ -506,6 +573,8 @@ rmdir
 shred
 ```
 
+P2–P3 进一步把敏感路径阻断下沉到文件路径工具：`Read`、`Write`、`Edit` 直接拒绝，`Glob`、`Grep` 遍历时过滤 `.env*`、credentials/secret、常见私钥文件及 `.git`；同时继续拒绝 symlink 逃逸。此边界不覆盖 Bash/stdio MCP，二者仍是强本地执行能力，不能把敏感路径过滤描述成完整 sandbox。
+
 ---
 
 ### 3.9 文件系统 API
@@ -645,12 +714,14 @@ GET /ui/app.js
 
 - 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
 - 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略；Agent 工具层已提供 `WebSearch` 公网搜索结果工具和 `WebFetch` 公网 HTTP(S) 文档抓取工具
-- 设置 → IM 网关页当前只是浏览器本地策略草稿（渠道预设、未来入站确认/签名/脱敏/路由选项），不会启动服务或接收入站消息；服务端另有单向 Webhook run 通知，两者不得混称为入站 IM Gateway
+- 设置 → P2–P3 管理控制台已接入服务端 schedules、durable deliveries、integration connections、Telegram pairing/revoke、Home Assistant 只读实体/本地动作审批、monitoring snapshot 与 audit events。旧 `localStorage` IM 草稿只作为“已停用”的迁移提示，不会启动服务或计入运行状态
+- Telegram 当前只通过 long polling 接收私聊 `/pair`、`/status`、`/approve`（固定一次性 `allow_once`）与 `/deny`；无 `/task`、无自由聊天、无 Telegram webhook、无 Slack/Discord。未配对与错误配对保持静默
+- Home Assistant 只允许本机/私网 endpoint；状态列表只读，动作仅限固定 allowlist，创建和批准均要求本地 UI 双确认，最终执行批准还要求 direct loopback。critical/未知动作硬阻断，IM 不得控制设备
 - 设置 → 技能页已接入服务端 Skills：后端支持 global/project/workspace CRUD、effective Skills、revision 历史/restore 与 snapshot-stable cursor 分页；scoped 面板支持按作用域浏览、详情、分页、修订历史与恢复，但创建、SKILL.md 导入、启停、编辑、删除 UI 仍只操作 global scope。MCP registry 仍可创建/启停/删除 server、运行 tools/list，并通过 exec-risk 审批调用 stdio MCP tools
 - 设置 → 工作线与容器页内完成当前项目工作线、当前工作线 Agent、worktree/branch/容器隔离边界概览和快速切换
 - 设置 → AI 代理页内完成默认 Agent 策略概览、当前 agent 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
-- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好，并接入服务端 Webhook 任务通知配置/测试发送
+- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好；服务端 Webhook/Telegram 通知改为持久 delivery history，具去重、lease、指数退避、最大尝试次数、delivered/dead 状态和显式 retry
 - 设置 → 外观与界面页内完成浏览器本地主题、布局密度、终端默认展开和 Agent 事件日志显示偏好
 - 设置 → 关于页内完成浏览器本地偏好备份、下载、复制和导入恢复，便于跨浏览器或跨机器迁移工作台设置
 - 设置 → 模型/提供商页内完成模型刷新、Codex Token/JSON 凭证导入、账号列表刷新、中转站 API Key/Base URL/协议/默认模型保存、模型选择和首选模型保存
@@ -756,6 +827,16 @@ internal/server/interrupt_test.go
 internal/server/mcp_servers_test.go
 internal/server/security_test.go
 internal/tools/tools_test.go
+internal/runtime/supervisor_test.go
+internal/app/run_test.go
+internal/automation/manager_test.go
+internal/channels/telegram_test.go
+internal/devices/action_test.go
+internal/devices/client_test.go
+internal/schedules/expression_test.go
+internal/db/automation_p2p3_test.go
+internal/server/automation_api_test.go
+internal/server/static/modules/automation-control.test.mjs
 ```
 
 覆盖：
@@ -776,6 +857,13 @@ internal/tools/tools_test.go
 - Git commit API 的显式 paths 提交、安全路径拒绝、空仓库 diff 降级
 - 全链路 E2E：真实 httptest server、WebSocket agent stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
 - Workline workflow：fork API 创建 Git worktree/child workline/agent，fork agent Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
+- V19–V22 migration 与 schedules/deliveries/integration/channel/device action 持久状态、CAS/lease、统计和敏感 payload 拒绝
+- Schedule cron/`@every`/timezone、busy skip、不替换人工 run，以及 run permission cap 不放宽 Agent 权限
+- Webhook/Telegram delivery retry/backoff、`dead`、历史与 Agent-scoped Telegram 路由/脱敏
+- Telegram 私聊配对、失败锁定与静默、event/cursor 幂等、`/status`、一次性 `/approve`、`/deny`、danger 拒绝、审计 fail-closed 与限流
+- Home Assistant 私网 endpoint、只读属性过滤、固定动作 catalog、canonical seal、本地 direct-loopback 二次批准，以及 unlock/camera/script 等 critical/未知动作硬阻断
+- monitoring snapshot 聚合、runtime Supervisor 启停/回滚顺序、Settings P2–P3 控制台的有界 DOM 与 secret 不回显
+- 文件路径工具对 `.env*`、credentials/secrets、私钥与 `.git` 的硬阻断/过滤
 
 当前验证命令已收敛为统一入口：
 
@@ -805,7 +893,7 @@ make check
 
 ## 5. 工程工作流状态（历史 Phase 1–6）
 
-本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指尚未实现的 IM Gateway**，不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
+本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指 IM 控制面**；当前只完成受限 Telegram 配对/状态/一次性审批/拒绝，不包含 `/task`、自由聊天或其他渠道。不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
 
 ### Engineering Phase 1：当前 MVP 完善
 
@@ -897,8 +985,15 @@ make check
 - [x] MCP tool execution（`MCPCallTool` 通过 stdio initialize + tools/call，支持 `serverId`，exec-risk 审批）
 - [x] PTY terminal
 - [x] `/ws/terminal`
-- [x] Webhook run notifications（审批、完成、错误/中断事件异步 POST 到用户配置端点）
-- [ ] background tasks
+- [x] V19 schedules + run source/permission cap（仅 `readOnly` / `acceptEdits`，busy skip，不取消人工 run）
+- [x] V20 durable Webhook/Telegram deliveries（历史、去重、lease、指数退避、`dead`、retry）
+- [x] V21 Telegram pairing/events/cursor（long polling，`/pair` `/status` `/approve`-once `/deny`，未配对静默）
+- [x] V22 Home Assistant device action requests（本机/私网、只读状态、固定 allowlist、本地双确认、critical hard block、IM 禁止）
+- [x] monitoring snapshot 聚合与 runtime Supervisor 管理 channels / automation / HTTP
+- [ ] Slack/Discord channel adapter
+- [ ] IM `/task` 与自由聊天（当前明确不提供）
+- [ ] 通用 IoT、摄像头动作、门锁解锁、云监控
+- [ ] 显式通用 background task queue（schedule 已实现，但不等于通用任务队列）
 - [ ] process list
 - [ ] runtime cleanup
 
@@ -994,26 +1089,31 @@ license
 
 当前 MVP 仍有这些限制：
 
-- 当前 IM 能力只有浏览器本地策略草稿与服务端单向 Webhook 通知；不存在入站 IM Gateway，不能从 IM 派任务、查状态或审批工具。
-- Agent stream protocol 2 的 replay 仅位于当前进程的有界内存；没有 durable event log、持久 retention、服务重启后或跨进程 replay。
+- Telegram 是唯一入站渠道且只使用 long polling；命令仅 `/pair`、`/status`、`/approve <toolCallId>`（一次性）和 `/deny`。没有 `/task`、自由聊天、Telegram webhook、Slack 或 Discord。
+- Telegram durable event/cursor 与 notification delivery history 不等于 Agent durable event log。Agent stream protocol 2 的 replay 仍只位于当前进程的有界内存；没有持久 retention、服务重启后或跨进程 replay。
+- Home Assistant 是唯一设备适配器，且只允许本机/私网 endpoint。没有通用 IoT、摄像头动作、门锁解锁或云监控；本地 monitoring snapshot 只是聚合状态。
+- Home Assistant 状态读取只返回过滤后的实体/属性；动作仅限固定 allowlist，并要求本地双确认和 direct-loopback 最终批准。IM 永远不能控制设备。
+- Schedule 已实现，但不是通用任务队列：只允许 `readOnly` / `acceptEdits`，Agent busy 时跳过并记录，不排队，也不取消人工 run。
+- 文件路径工具已硬阻断敏感路径，但 Bash 与 stdio MCP 仍能执行强本地操作，不能视为 sandbox。
 - 前端 UI 已按 ES module 拆分，但仍有较多业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现。
 - `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制。
 - Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址。
 - Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；尚未实现 AI conflict resolve 与完整 review workline。
 - license API 只确认了部分依赖协议。
 - 已有 stdio MCP discovery/execution 与 registry；尚未实现 MCP 长连接会话池。
-- background schedules、任务队列、进程列表与 runtime cleanup 尚未实现。
+- 显式通用任务队列、进程列表与 runtime cleanup 尚未实现。
 
 ---
 
 ## 8. 下一步建议
 
-产品 Phase A 的 Provider capability 与 Agent stream 基础已经收口；Skills 的“收口”仅指后端 scope/effective/revision/pagination 语义和当前 scoped 浏览/恢复能力已稳定，未来仅修缺陷，不表示非 global scope 的创建、导入、启停、编辑、删除 UI 已齐全。下一轮主线回到 **IM foundation**：
+产品 Phase A 的 Provider capability、Agent stream 与 Skills 基础已经收口；P2–P3 已把 schedules、durable deliveries、Telegram pairing/status/一次性 approval/deny、Home Assistant 受限适配、监控聚合和 Supervisor 生命周期接通。下一轮应先稳定现有边界，而不是扩张渠道或设备矩阵：
 
-1. 明确 Channel Adapter、command router 与出站通知复用边界；
-2. 先完成配对、账号白名单、审计、限流、重放保护与权限天花板；
-3. 只选一个渠道实现 `/status`、`/approve`、`/deny`；
-4. 通知历史与重试队列必须可见且不阻塞 agent loop；
-5. 闭环稳定后才考虑默认关闭的 `/task` 入站派任务。
+1. 为真实 Telegram bot + Home Assistant 环境补一份可重复的本地 dogfood/重启恢复记录，尤其验证 token 轮换撤销配对、delivery 重试和 busy schedule skip；
+2. 保持 Telegram 命令面只含 `/pair`、`/status`、一次性 `/approve` 与 `/deny`，除非完成独立威胁模型与默认关闭设计，否则不加入 `/task`；
+3. 保持 IM 与设备控制隔离，不允许 Telegram 创建或批准 Home Assistant action；
+4. 补齐通知历史、channel events、device actions 的 retention/清理策略与更细监控，但不要称为云监控；
+5. Slack/Discord、通用 IoT、摄像头动作和门锁解锁继续保持未完成，只有真实需求与安全审查后再立项；
+6. 继续推进 review workline / AI conflict resolve、通用队列、process list 与 runtime cleanup。
 
-在上述能力落地前，所有文档与 UI 都必须继续明确：当前没有入站 IM Gateway。
+所有文档与 UI 必须持续明确：当前有受限 Telegram 入站控制，但没有 `/task` 或通用 IM 聊天；当前有受限 Home Assistant 动作，但没有通用 IoT、摄像头动作、门锁解锁或云监控。

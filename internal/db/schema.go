@@ -127,8 +127,12 @@ CREATE TABLE IF NOT EXISTS runs (
   checkpoint_state TEXT NOT NULL DEFAULT 'none',
   checkpoint_error TEXT,
   rolled_back_at TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  source_id TEXT NOT NULL DEFAULT '',
+  permission_mode_cap TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  CHECK (permission_mode_cap IN ('', 'readOnly', 'acceptEdits'))
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent_started ON runs(agent_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
@@ -401,7 +405,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -469,4 +473,164 @@ CREATE TABLE IF NOT EXISTS memory_injections (
   PRIMARY KEY (memory_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_injections_agent ON memory_injections(agent_id, injected_at DESC, memory_id);
+`
+
+const schedulesSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  expression TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  prompt TEXT NOT NULL,
+  permission_mode TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  next_run_at TEXT,
+  last_run_at TEXT,
+  last_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  last_outcome TEXT,
+  last_error TEXT,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (permission_mode IN ('readOnly', 'acceptEdits')),
+  CHECK (enabled IN (0, 1)),
+  CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 120),
+  CHECK (length(CAST(expression AS BLOB)) BETWEEN 1 AND 256),
+  CHECK (length(CAST(timezone AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (length(CAST(prompt AS BLOB)) BETWEEN 1 AND 131072),
+  CHECK (last_outcome IS NULL OR last_outcome IN ('success', 'failure', 'skipped', 'error'))
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at, lease_until, id);
+CREATE INDEX IF NOT EXISTS idx_schedules_agent ON schedules(agent_id, created_at DESC, id);
+`
+
+const notificationDeliveriesSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id TEXT PRIMARY KEY,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  sink_type TEXT NOT NULL,
+  sink_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  tool_use_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at TEXT NOT NULL,
+  lease_until TEXT,
+  last_http_status INTEGER,
+  last_error TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (sink_type IN ('webhook', 'telegram')),
+  CHECK (status IN ('queued', 'inflight', 'retry_wait', 'delivered', 'dead')),
+  CHECK (attempt_count >= 0),
+  CHECK (max_attempts BETWEEN 1 AND 100),
+  CHECK (last_http_status IS NULL OR last_http_status BETWEEN 100 AND 599),
+  CHECK (length(CAST(dedupe_key AS BLOB)) BETWEEN 1 AND 256),
+  CHECK (length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 32768)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_claim ON notification_deliveries(status, next_attempt_at, lease_until, id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_event ON notification_deliveries(event_type, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_agent ON notification_deliveries(agent_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_run ON notification_deliveries(run_id, created_at DESC, id);
+`
+
+const channelPersistenceSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS channel_pairings (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  code_hash TEXT,
+  expires_at TEXT,
+  chat_id TEXT,
+  user_id TEXT,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
+  credential_revision INTEGER NOT NULL DEFAULT 0,
+  paired_at TEXT,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (status IN ('pending', 'active', 'revoked')),
+  CHECK (failed_attempts >= 0),
+  CHECK (credential_revision >= 0),
+  CHECK (
+    (status = 'pending' AND length(COALESCE(code_hash, '')) BETWEEN 32 AND 256 AND expires_at IS NOT NULL AND paired_at IS NULL AND revoked_at IS NULL)
+    OR (status = 'active' AND code_hash IS NULL AND chat_id IS NOT NULL AND user_id IS NOT NULL AND paired_at IS NOT NULL AND revoked_at IS NULL)
+    OR (status = 'revoked' AND code_hash IS NULL AND revoked_at IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_channel_pairings_connection_status ON channel_pairings(connection_id, status, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_channel_pairings_agent_status ON channel_pairings(agent_id, status, updated_at DESC, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_pairings_active_identity ON channel_pairings(connection_id, chat_id, user_id) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS channel_events (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+  external_event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  tool_use_id TEXT,
+  chat_id TEXT,
+  user_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT,
+  processed_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(connection_id, external_event_id),
+  CHECK (length(CAST(external_event_id AS BLOB)) BETWEEN 1 AND 256),
+  CHECK (length(CAST(event_type AS BLOB)) BETWEEN 1 AND 96),
+  CHECK (length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 32768)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_events_connection_created ON channel_events(connection_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_events_agent_created ON channel_events(agent_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_events_unprocessed ON channel_events(connection_id, processed_at, created_at, id);
+
+CREATE TABLE IF NOT EXISTS channel_cursors (
+  connection_id TEXT PRIMARY KEY REFERENCES integration_connections(id) ON DELETE CASCADE,
+  offset INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  CHECK (offset >= 0)
+);
+`
+
+const deviceActionRequestsSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS device_action_requests (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+  entity_id TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  service TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  risk TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by TEXT NOT NULL,
+  approved_by TEXT,
+  expires_at TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  CHECK (risk IN ('low', 'medium', 'high', 'critical')),
+  CHECK (status IN ('pending', 'approved', 'denied', 'executing', 'succeeded', 'failed', 'expired')),
+  CHECK (length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 32768),
+  CHECK (
+    (status = 'pending' AND approved_by IS NULL AND completed_at IS NULL)
+    OR (status IN ('approved', 'executing') AND approved_by IS NOT NULL AND completed_at IS NULL)
+    OR (status IN ('denied', 'succeeded', 'failed', 'expired') AND completed_at IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_device_action_requests_status ON device_action_requests(status, expires_at, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_device_action_requests_connection ON device_action_requests(connection_id, created_at DESC, id DESC);
 `

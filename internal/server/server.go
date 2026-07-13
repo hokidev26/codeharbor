@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -12,33 +14,42 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	agentpkg "autoto/internal/agent"
+	"autoto/internal/audit"
+	"autoto/internal/automation"
 	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/devices"
+	"autoto/internal/integrations"
 	"autoto/internal/preview"
 	"autoto/internal/providers"
 	"autoto/internal/tools"
 )
 
 type Server struct {
-	cfg                 config.Config
-	cfgMu               sync.RWMutex
-	configPath          string
-	startedAt           time.Time
-	clock               func() time.Time
-	localToken          string
-	remoteAccessToken   string
-	remoteAccessFailure map[string]remoteAccessFailure
-	remoteAccessMu      sync.Mutex
-	legacyWarnings      *compat.Registry
-	store               *db.Store
-	runner              *agentpkg.Runner
-	hub                 *agentpkg.Hub
-	providers           *providers.Registry
-	toolRegistry        *tools.Registry
-	toolRegistryMu      sync.RWMutex
-	previewManager      *preview.Manager
-	notifier            *WebhookNotifier
+	cfg                  config.Config
+	cfgMu                sync.RWMutex
+	configPath           string
+	startedAt            time.Time
+	clock                func() time.Time
+	localToken           string
+	remoteAccessToken    string
+	remoteAccessFailure  map[string]remoteAccessFailure
+	remoteAccessMu       sync.Mutex
+	legacyWarnings       *compat.Registry
+	store                *db.Store
+	runner               *agentpkg.Runner
+	hub                  *agentpkg.Hub
+	providers            *providers.Registry
+	toolRegistry         *tools.Registry
+	toolRegistryMu       sync.RWMutex
+	previewManager       *preview.Manager
+	notifier             *WebhookNotifier
+	automation           *automation.Manager
+	connections          *integrations.ConnectionService
+	audit                audit.Recorder
+	integrationClient    *http.Client
+	deviceAdapterFactory func(context.Context, string) (devices.Adapter, error)
 }
 
 func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agentpkg.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -111,6 +122,26 @@ func (s *Server) SetConfigPath(path string) {
 
 func (s *Server) SetWebhookNotifier(notifier *WebhookNotifier) {
 	s.notifier = notifier
+}
+
+func (s *Server) SetAutomationManager(manager *automation.Manager) {
+	s.automation = manager
+}
+
+func (s *Server) SetConnectionService(service *integrations.ConnectionService) {
+	s.connections = service
+}
+
+func (s *Server) SetAuditRecorder(recorder audit.Recorder) {
+	s.audit = recorder
+}
+
+func (s *Server) SetIntegrationHTTPClient(client *http.Client) {
+	s.integrationClient = client
+}
+
+func (s *Server) SetDeviceAdapterFactory(factory func(context.Context, string) (devices.Adapter, error)) {
+	s.deviceAdapterFactory = factory
 }
 
 func (s *Server) SetPreviewManager(manager *preview.Manager) {
@@ -205,7 +236,32 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/settings", s.getNotificationSettings)
 		r.Put("/settings", s.updateNotificationSettings)
 		r.Post("/test", s.testNotification)
+		r.Get("/deliveries", s.listNotificationDeliveries)
+		r.Post("/deliveries/{id}/retry", s.retryNotificationDelivery)
 	})
+	r.Route("/api/schedules", func(r chi.Router) {
+		r.Get("/", s.listSchedules)
+		r.Post("/", s.createSchedule)
+		r.Patch("/{id}", s.updateSchedule)
+		r.Delete("/{id}", s.deleteSchedule)
+		r.Post("/{id}/run", s.runSchedule)
+	})
+	r.Route("/api/integrations/connections", func(r chi.Router) {
+		r.Get("/", s.listIntegrationConnections)
+		r.Post("/", s.createIntegrationConnection)
+		r.Patch("/{id}", s.updateIntegrationConnection)
+		r.Delete("/{id}", s.deleteIntegrationConnection)
+		r.Post("/{id}/test", s.testIntegrationConnection)
+	})
+	r.Post("/api/channels/pairing-codes", s.createChannelPairingCode)
+	r.Get("/api/channels/pairings", s.listChannelPairings)
+	r.Post("/api/channels/pairings/{id}/revoke", s.revokeChannelPairing)
+	r.Get("/api/audit/events", s.listAuditEvents)
+	r.Get("/api/devices", s.listDevices)
+	r.Post("/api/device-actions", s.createDeviceAction)
+	r.Post("/api/device-actions/{id}/approve", s.approveDeviceAction)
+	r.Post("/api/device-actions/{id}/deny", s.denyDeviceAction)
+	r.Get("/api/monitoring/snapshot", s.monitoringSnapshot)
 
 	r.Route("/api/workflow", func(r chi.Router) {
 		r.Get("/preferences", s.getWorkflowPreferences)
@@ -296,9 +352,19 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func decodeJSON(r *http.Request, dst any) error {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func statusFromError(err error) int {

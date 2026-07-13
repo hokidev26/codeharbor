@@ -12,18 +12,34 @@ import (
 	"time"
 
 	"autoto/internal/agent"
+	"autoto/internal/audit"
+	"autoto/internal/automation"
+	"autoto/internal/channels"
 	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/integrations"
 	"autoto/internal/preview"
 	"autoto/internal/providers"
 	"autoto/internal/runtime"
+	"autoto/internal/secrets"
 	"autoto/internal/server"
 	"autoto/internal/tools"
 )
 
 type Options struct {
 	LegacyCommand bool
+}
+
+type channelApprovalAdapter struct {
+	runner *agent.Runner
+}
+
+func (a channelApprovalAdapter) ApproveToolCall(ctx context.Context, agentID, toolUseID string, decision channels.ApprovalDecision) (bool, error) {
+	return a.runner.ApproveToolCall(ctx, agentID, toolUseID, agent.ToolApprovalDecision{
+		Decision: decision.Decision, Reason: decision.Reason, DecidedBy: decision.DecidedBy,
+		PermissionGeneration: decision.PermissionGeneration, PolicyGeneration: decision.PolicyGeneration,
+	})
 }
 
 func Run(options Options) int {
@@ -91,12 +107,27 @@ func Run(options Options) int {
 		logger.Error("recover interrupted runs", "error", err)
 		return 1
 	}
-	notifier := server.NewWebhookNotifier(store)
-	runner.SetNotifier(notifier)
+	connectionService := integrations.NewConnectionService(store, secrets.EnvResolver{})
+	auditRecorder := audit.NewRecorder(store)
+	automationManager, err := automation.NewManager(automation.Config{Store: store, Runner: runner, Audit: auditRecorder})
+	if err != nil {
+		logger.Error("create automation manager", "error", err)
+		return 1
+	}
+	channelManager, err := channels.New(store, connectionService, channelApprovalAdapter{runner: runner}, toolRegistry)
+	if err != nil {
+		logger.Error("create channel manager", "error", err)
+		return 1
+	}
+	automationManager.SetTelegramSender(channelManager)
+	runner.SetNotifier(automationManager)
+
 	previewManager := preview.NewManager()
 	application := server.New(cfg, store, runner, hub, providerRegistry)
 	application.SetToolRegistry(toolRegistry)
-	application.SetWebhookNotifier(notifier)
+	application.SetAutomationManager(automationManager)
+	application.SetConnectionService(connectionService)
+	application.SetAuditRecorder(auditRecorder)
 	application.SetPreviewManager(previewManager)
 	application.SetConfigPath(resolvedConfigPath)
 
@@ -110,14 +141,11 @@ func Run(options Options) int {
 	defer stop()
 
 	supervisor := runtime.NewSupervisor()
-	if err := supervisor.Register(previewManager); err != nil {
-		logger.Error("register preview service", "error", err)
-		return 1
-	}
-	if err := supervisor.Register(runtime.NewHTTPService(httpServer, func(err error) {
+	httpService := runtime.NewHTTPService(httpServer, func(err error) {
 		logger.Error("serve", "error", err)
 		stop()
-	})); err != nil {
+	})
+	if err := registerRuntimeServices(supervisor, previewManager, channelManager, automationManager, httpService); err != nil {
 		logger.Error("register service", "error", err)
 		return 1
 	}
@@ -136,6 +164,15 @@ func Run(options Options) int {
 		return 1
 	}
 	return 0
+}
+
+func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime.Service) error {
+	for _, service := range services {
+		if err := supervisor.Register(service); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func configuredBackends(backends []config.BackendConfig) []db.Backend {
