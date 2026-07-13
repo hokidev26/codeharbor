@@ -26,13 +26,13 @@ CREATE TABLE IF NOT EXISTS projects (
   default_branch TEXT,
   startup_script TEXT,
   copy_files TEXT,
-  chapter_settings TEXT,
+  workline_settings TEXT,
   proxy_domain TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS chapters (
+CREATE TABLE IF NOT EXISTS worklines (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
@@ -42,9 +42,9 @@ CREATE TABLE IF NOT EXISTS chapters (
   branch TEXT,
   worktree_path TEXT,
   base_branch TEXT,
-  parent_chapter_id TEXT REFERENCES chapters(id) ON DELETE SET NULL,
+  parent_workline_id TEXT REFERENCES worklines(id) ON DELETE SET NULL,
   fork_point TEXT,
-  merged_into_chapter_id TEXT REFERENCES chapters(id) ON DELETE SET NULL,
+  merged_into_workline_id TEXT REFERENCES worklines(id) ON DELETE SET NULL,
   merge_commit_sha TEXT,
   merge_strategy TEXT,
   pre_merge_target_sha TEXT,
@@ -62,29 +62,31 @@ CREATE TABLE IF NOT EXISTS chapters (
   panel_expanded INTEGER,
   panel_width REAL,
   panel_height REAL,
-  review_source_chapter_id TEXT,
+  review_source_workline_id TEXT,
   review_status TEXT,
   last_accessed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id);
+CREATE INDEX IF NOT EXISTS idx_worklines_project ON worklines(project_id);
 
-CREATE TABLE IF NOT EXISTS narrators (
+CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
-  chapter_id TEXT REFERENCES chapters(id) ON DELETE SET NULL,
+  workline_id TEXT REFERENCES worklines(id) ON DELETE SET NULL,
   api_conversation_id TEXT,
   fork_message_id TEXT,
   type TEXT NOT NULL DEFAULT 'primary',
   subagent_type TEXT,
   title TEXT NOT NULL,
   inherit_mode TEXT,
-  parent_narrator_id TEXT REFERENCES narrators(id) ON DELETE SET NULL,
+  parent_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   context_summary TEXT,
   model TEXT NOT NULL,
   system_prompt TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'acceptEdits',
   previous_permission_mode TEXT,
+  entity_generation INTEGER NOT NULL DEFAULT 1,
+  permission_generation INTEGER NOT NULL DEFAULT 1,
   reasoning_effort TEXT,
   fast_mode INTEGER NOT NULL DEFAULT 0,
   relaxed_plan INTEGER NOT NULL DEFAULT 0,
@@ -107,28 +109,46 @@ CREATE TABLE IF NOT EXISTS narrators (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_narrators_chapter ON narrators(chapter_id);
-CREATE INDEX IF NOT EXISTS idx_narrators_parent ON narrators(parent_narrator_id);
+CREATE INDEX IF NOT EXISTS idx_agents_workline ON agents(workline_id);
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id);
 
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
-  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
-  trigger_message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  trigger_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
   completed_at TEXT,
   error_message TEXT,
   base_head TEXT,
   end_head TEXT,
+  checkpoint_repo_root TEXT,
+  git_snapshot_at TEXT,
+  checkpoint_state TEXT NOT NULL DEFAULT 'none',
+  checkpoint_error TEXT,
+  rolled_back_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_runs_narrator_started ON runs(narrator_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_agent_started ON runs(agent_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
-CREATE TABLE IF NOT EXISTS narrator_messages (
+CREATE TABLE IF NOT EXISTS run_git_changes (
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  orig_path TEXT,
+  index_status TEXT NOT NULL,
+  worktree_status TEXT NOT NULL,
+  untracked INTEGER NOT NULL DEFAULT 0,
+  index_fingerprint TEXT,
+  worktree_fingerprint TEXT NOT NULL,
+  PRIMARY KEY (run_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_run_git_changes_run ON run_git_changes(run_id, path);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
   id TEXT PRIMARY KEY,
-  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   sdk_message_uuid TEXT,
   parent_tool_use_id TEXT,
@@ -146,13 +166,13 @@ CREATE TABLE IF NOT EXISTS narrator_messages (
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_narrator_messages_narrator_time ON narrator_messages(narrator_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_run ON narrator_messages(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_time ON agent_messages(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_run ON agent_messages(run_id, created_at);
 
-CREATE TABLE IF NOT EXISTS narrator_message_attachments (
+CREATE TABLE IF NOT EXISTS agent_message_attachments (
   id TEXT PRIMARY KEY,
-  message_id TEXT NOT NULL REFERENCES narrator_messages(id) ON DELETE CASCADE,
-  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES agent_messages(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   filename TEXT NOT NULL,
   mime_type TEXT,
   kind TEXT NOT NULL,
@@ -161,14 +181,14 @@ CREATE TABLE IF NOT EXISTS narrator_message_attachments (
   extracted_text TEXT,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON narrator_message_attachments(message_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_message_attachments_narrator ON narrator_message_attachments(narrator_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON agent_message_attachments(message_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_agent ON agent_message_attachments(agent_id, created_at);
 
-CREATE TABLE IF NOT EXISTS narrator_tool_calls (
+CREATE TABLE IF NOT EXISTS agent_tool_calls (
   id TEXT PRIMARY KEY,
-  narrator_id TEXT NOT NULL REFERENCES narrators(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
+  message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
   tool_use_id TEXT NOT NULL,
   tool_name TEXT NOT NULL,
   input_json TEXT,
@@ -181,6 +201,8 @@ CREATE TABLE IF NOT EXISTS narrator_tool_calls (
   permission_deny_message TEXT,
   permission_decision_reason TEXT,
   permission_suggestions TEXT,
+  permission_generation INTEGER NOT NULL DEFAULT 1,
+  policy_generation INTEGER NOT NULL DEFAULT 1,
   is_background INTEGER NOT NULL DEFAULT 0,
   input_tokens INTEGER,
   output_tokens INTEGER,
@@ -190,15 +212,15 @@ CREATE TABLE IF NOT EXISTS narrator_tool_calls (
   result_message_id TEXT,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_tool_calls_narrator ON narrator_tool_calls(narrator_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON narrator_tool_calls(run_id, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_tool_use ON narrator_tool_calls(narrator_id, tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON agent_tool_calls(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON agent_tool_calls(run_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_tool_use ON agent_tool_calls(agent_id, tool_use_id);
 
 CREATE TABLE IF NOT EXISTS api_requests (
   id TEXT PRIMARY KEY,
-  narrator_id TEXT REFERENCES narrators(id) ON DELETE SET NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  message_id TEXT REFERENCES narrator_messages(id) ON DELETE SET NULL,
+  message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
   kind TEXT NOT NULL DEFAULT 'model',
   provider TEXT,
   credential_id TEXT,
@@ -245,6 +267,106 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
 
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  command TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  source TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'global',
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  workline_id TEXT REFERENCES worklines(id) ON DELETE CASCADE,
+  deleted_at TEXT,
+  revision_no INTEGER NOT NULL DEFAULT 1,
+  content_hash TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  scan_verdict TEXT NOT NULL,
+  scan_findings_json TEXT NOT NULL DEFAULT '[]',
+  scanner_version INTEGER NOT NULL DEFAULT 0,
+  risk_acknowledged_at TEXT,
+  risk_acknowledged_by TEXT,
+  risk_acknowledged_hash TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (source IN ('manual', 'local_migration', 'skill_md')),
+  CHECK (scope IN ('global', 'project', 'workspace')),
+  CHECK ((scope = 'global' AND project_id IS NULL AND workline_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL AND workline_id IS NULL) OR (scope = 'workspace' AND project_id IS NOT NULL AND workline_id IS NOT NULL)),
+  CHECK (revision_no >= 1),
+  CHECK (scan_verdict IN ('safe', 'review', 'blocked')),
+  CHECK (enabled IN (0, 1)),
+  CHECK (NOT (scan_verdict = 'blocked' AND enabled = 1)),
+  CHECK (NOT (scan_verdict = 'review' AND enabled = 1 AND (TRIM(COALESCE(risk_acknowledged_at, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = '' OR TRIM(COALESCE(risk_acknowledged_by, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = '' OR COALESCE(risk_acknowledged_hash, '') <> content_hash)))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_global_command ON skills(command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'global';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_project_command ON skills(project_id, command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'project';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_workspace_command ON skills(workline_id, command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'workspace';
+CREATE INDEX IF NOT EXISTS idx_skills_scope_command ON skills(scope, project_id, workline_id, command COLLATE NOCASE, id) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER IF NOT EXISTS skills_workspace_scope_insert
+BEFORE INSERT ON skills
+WHEN NEW.scope = 'workspace' AND NOT EXISTS (SELECT 1 FROM worklines WHERE id = NEW.workline_id AND project_id = NEW.project_id)
+BEGIN
+  SELECT RAISE(ABORT, 'workspace skill must reference a workline in the selected project');
+END;
+CREATE TRIGGER IF NOT EXISTS skills_workspace_scope_update
+BEFORE UPDATE OF scope, project_id, workline_id ON skills
+WHEN NEW.scope = 'workspace' AND NOT EXISTS (SELECT 1 FROM worklines WHERE id = NEW.workline_id AND project_id = NEW.project_id)
+BEGIN
+  SELECT RAISE(ABORT, 'workspace skill must reference a workline in the selected project');
+END;
+
+CREATE TABLE IF NOT EXISTS skill_revisions (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  revision_no INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  restored_from_revision_no INTEGER,
+  name TEXT NOT NULL,
+  command TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  source TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  workline_id TEXT,
+  deleted_at TEXT,
+  content_hash TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  scan_verdict TEXT NOT NULL,
+  scan_findings_json TEXT NOT NULL,
+  scanner_version INTEGER NOT NULL,
+  risk_acknowledged_at TEXT,
+  risk_acknowledged_by TEXT,
+  risk_acknowledged_hash TEXT,
+  head_created_at TEXT NOT NULL,
+  head_updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(skill_id, revision_no),
+  CHECK (operation IN ('baseline', 'create', 'update', 'delete', 'restore', 'revalidate')),
+  CHECK (scope IN ('global', 'project', 'workspace')),
+  CHECK (enabled IN (0, 1)),
+  CHECK (scan_verdict IN ('safe', 'review', 'blocked'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_revisions_skill_revision ON skill_revisions(skill_id, revision_no DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_revisions_snapshot ON skill_revisions(sequence, skill_id);
+
+CREATE TABLE IF NOT EXISTS skill_audit_events (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  scan_verdict TEXT NOT NULL,
+  finding_codes_json TEXT NOT NULL DEFAULT '[]',
+  risk_acknowledged_at TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (action IN ('create', 'update', 'enable', 'disable', 'delete', 'restore'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_audit_events_skill_created ON skill_audit_events(skill_id, created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS notification_settings (
   id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
@@ -255,4 +377,28 @@ CREATE TABLE IF NOT EXISTS notification_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_preferences (
+  id TEXT PRIMARY KEY,
+  require_confirmation_for_exec INTEGER NOT NULL DEFAULT 1,
+  require_confirmation_for_writes INTEGER NOT NULL DEFAULT 0,
+  allow_read_only_by_default INTEGER NOT NULL DEFAULT 1,
+  policy_generation INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tool_permission_rules (
+  id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT '*',
+  tool_name TEXT NOT NULL DEFAULT '*',
+  risk TEXT NOT NULL DEFAULT '*',
+  decision TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
 `

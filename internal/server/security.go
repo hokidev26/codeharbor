@@ -12,12 +12,15 @@ import (
 	"time"
 )
 
-const localTokenHeader = "X-CodeHarbor-Token"
-const localTokenCookieName = "codeharbor_local_token"
+const localTokenHeader = "X-Autoto-Token"
+const legacyLocalTokenHeader = "X-CodeHarbor-Token"
+const localTokenCookieName = "autoto_local_token"
 const localTokenQuery = "token"
 
-const remoteAccessCookieName = "codeharbor_remote_access"
-const remoteAccessHeader = "X-CodeHarbor-Access"
+const remoteAccessCookieName = "autoto_remote_access"
+const legacyRemoteAccessCookieName = "codeharbor_remote_access"
+const remoteAccessHeader = "X-Autoto-Access"
+const legacyRemoteAccessHeader = "X-CodeHarbor-Access"
 
 const remoteAccessPath = "/auth/remote-access"
 const remoteAccessLogoutPath = "/auth/remote-access/logout"
@@ -82,14 +85,21 @@ func (s *Server) validateWebSocketRequest(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) validHeaderToken(r *http.Request) bool {
-	return constantTimeEqualToken(r.Header.Get(localTokenHeader), s.localToken)
+	return validTokenFromHeaders(r, s.localToken, localTokenHeader, legacyLocalTokenHeader)
 }
 
 func (s *Server) validWebSocketToken(r *http.Request) bool {
 	if constantTimeEqualToken(r.URL.Query().Get(localTokenQuery), s.localToken) {
 		return true
 	}
-	return constantTimeEqualToken(r.Header.Get(localTokenHeader), s.localToken)
+	return validTokenFromHeaders(r, s.localToken, localTokenHeader, legacyLocalTokenHeader)
+}
+
+func validTokenFromHeaders(r *http.Request, want string, canonicalName, legacyName string) bool {
+	if canonicalValue := strings.TrimSpace(r.Header.Get(canonicalName)); canonicalValue != "" {
+		return constantTimeEqualToken(canonicalValue, want)
+	}
+	return constantTimeEqualToken(r.Header.Get(legacyName), want)
 }
 
 func constantTimeEqualToken(got, want string) bool {
@@ -184,7 +194,7 @@ func (s *Server) handleRemoteAccessGate(w http.ResponseWriter, r *http.Request) 
 		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "")
 		return true
 	}
-	message := "remote access requires CODEHARBOR_ACCESS_PASSWORD"
+	message := "remote access requires AUTOTO_ACCESS_PASSWORD"
 	if strings.TrimSpace(s.configSnapshot().Security.AccessPassword) != "" {
 		message = "remote access authentication required"
 	}
@@ -227,7 +237,7 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 	}
 	password := strings.TrimSpace(s.configSnapshot().Security.AccessPassword)
 	if password == "" {
-		s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "请先在启动环境中配置 CODEHARBOR_ACCESS_PASSWORD。")
+		s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "请先在启动环境中配置 AUTOTO_ACCESS_PASSWORD。")
 		return
 	}
 	if locked, until := s.remoteAccessLocked(r); locked {
@@ -461,10 +471,12 @@ func (s *Server) validRemoteAccess(r *http.Request) bool {
 	if password == "" {
 		return false
 	}
-	if cookie, err := r.Cookie(remoteAccessCookieName); err == nil && constantTimeEqualToken(cookie.Value, s.remoteAccessToken) {
-		return true
+	for _, name := range []string{remoteAccessCookieName, legacyRemoteAccessCookieName} {
+		if cookie, err := r.Cookie(name); err == nil && constantTimeEqualToken(cookie.Value, s.remoteAccessToken) {
+			return true
+		}
 	}
-	if constantTimeEqualToken(r.Header.Get(remoteAccessHeader), password) {
+	if validTokenFromHeaders(r, password, remoteAccessHeader, legacyRemoteAccessHeader) {
 		return true
 	}
 	bearer := strings.TrimSpace(r.Header.Get("Authorization"))
@@ -487,15 +499,17 @@ func (s *Server) setRemoteAccessCookie(w http.ResponseWriter, r *http.Request, t
 }
 
 func (s *Server) clearRemoteAccessCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     remoteAccessCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   requestIsHTTPS(r) || s.remoteAccessGateRequired(r),
-		SameSite: http.SameSiteLaxMode,
-	})
+	for _, name := range []string{remoteAccessCookieName, legacyRemoteAccessCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   requestIsHTTPS(r) || s.remoteAccessGateRequired(r),
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 }
 
 func requestIsHTTPS(r *http.Request) bool {
@@ -508,9 +522,9 @@ func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, m
 	if message != "" {
 		messageHTML = fmt.Sprintf(`<div class="alert">%s</div>`, html.EscapeString(message))
 	} else if !passwordConfigured {
-		messageHTML = `<div class="alert">远程访问已触发保护，但还没有配置 <code>CODEHARBOR_ACCESS_PASSWORD</code>。请先停止裸露隧道，设置密码或使用 Cloudflare Access 后再重试。</div>`
+		messageHTML = `<div class="alert">远程访问已触发保护，但还没有配置 <code>AUTOTO_ACCESS_PASSWORD</code>。请先停止裸露隧道，设置密码或使用 Cloudflare Access 后再重试。</div>`
 	}
-	formHTML := `<button class="submit" type="submit">解锁 NarraFork</button>`
+	formHTML := `<button class="submit" type="submit">解锁 Autoto</button>`
 	if !passwordConfigured {
 		formHTML = `<button class="submit" type="submit" disabled>等待配置访问密码</button>`
 	}
@@ -522,7 +536,7 @@ func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, m
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>NarraFork 远程访问保护</title>
+  <title>Autoto 远程访问保护</title>
   <style>
     :root { color-scheme: dark; --bg:#202020; --panel:#28282a; --line:#3d3d42; --text:#f0f0f1; --muted:#a6a7ad; --accent:#7f91ff; --danger:#ff8b8b; }
     * { box-sizing: border-box; }
@@ -545,7 +559,7 @@ func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, m
   <main>
     <span class="pill">🔒 远程访问保护</span>
     <h1>先解锁，再控制本机 agent</h1>
-    <p>当前请求不是可信 localhost，NarraFork 已拦截 UI/API，避免隧道链接被拿到后直接驱动你的电脑。</p>
+    <p>当前请求不是可信 localhost，Autoto 已拦截 UI/API，避免隧道链接被拿到后直接驱动你的电脑。</p>
     %s
     <form method="post" action="/auth/remote-access" autocomplete="off">
       <label>访问密码
@@ -727,17 +741,17 @@ func (s *Server) permissionModeAllowedForRequest(r *http.Request, mode string) (
 	return mode, true, ""
 }
 
-func (s *Server) enforceRemotePermissionCap(r *http.Request, narratorID string) error {
+func (s *Server) enforceRemotePermissionCap(r *http.Request, agentID string) error {
 	if !s.remoteHardeningActive(r) || s.store == nil {
 		return nil
 	}
-	narrator, err := s.store.GetNarrator(r.Context(), narratorID)
+	agent, err := s.store.GetAgent(r.Context(), agentID)
 	if err != nil {
 		return err
 	}
-	if narrator.PermissionMode != "bypassPermissions" {
+	if agent.PermissionMode != "bypassPermissions" {
 		return nil
 	}
-	_, err = s.store.UpdateNarratorPermissionMode(r.Context(), narratorID, "acceptEdits")
+	_, err = s.store.UpdateAgentPermissionMode(r.Context(), agentID, "acceptEdits")
 	return err
 }

@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
 )
 
 type attachmentTestProvider struct{}
@@ -37,14 +38,14 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	_, _, narrator, err := store.CreateProject(context.Background(), "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(context.Background(), "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
 	registry := providers.NewRegistry()
 	registry.Register(attachmentTestProvider{})
-	hub := agent.NewHub()
-	runner := agent.NewRunner(store, registry, nil, hub, config.AgentConfig{})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, nil, hub, config.AgentConfig{})
 	app := New(config.Config{}, store, runner, hub, registry)
 
 	var body bytes.Buffer
@@ -64,7 +65,7 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/messages", &body)
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusAccepted {
@@ -83,7 +84,7 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	if posted.Attachments[0].Kind != "text" || posted.Attachments[0].ExtractedText != "" {
 		t.Fatalf("unexpected attachment metadata: %+v", posted.Attachments[0])
 	}
-	messagesWithData, err := store.ListMessagesWithAttachmentData(context.Background(), narrator.ID)
+	messagesWithData, err := store.ListMessagesWithAttachmentData(context.Background(), agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	path := "/api/narrators/" + narrator.ID + "/messages/" + posted.ID + "/attachments/" + posted.Attachments[0].ID
+	path := "/api/agents/" + agent.ID + "/messages/" + posted.ID + "/attachments/" + posted.Attachments[0].ID
 	request = httptest.NewRequest(http.MethodGet, path, nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -101,21 +102,57 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	if recorder.Body.String() != "hello attachment" {
 		t.Fatalf("unexpected attachment body: %q", recorder.Body.String())
 	}
-	waitForNarratorIdle(t, store, narrator.ID)
+	waitForAgentIdle(t, store, agent.ID)
 }
 
-func waitForNarratorIdle(t *testing.T, store *db.Store, narratorID string) {
+func TestPostMessageMapsUnavailableServerSkillToConflict(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSkill(ctx, db.Skill{Name: "Disabled", Command: "/disabled", Description: "disabled", Prompt: "Trusted prompt.", Source: "manual", Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(attachmentTestProvider{})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, nil, hub, config.AgentConfig{})
+	app := New(config.Config{}, store, runner, hub, registry)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"/disabled client prompt"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	messages, err := store.ListMessages(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("rejected skill invocation must not persist a message: %+v", messages)
+	}
+}
+
+func waitForAgentIdle(t *testing.T, store *db.Store, agentID string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		narrator, err := store.GetNarrator(context.Background(), narratorID)
+		agent, err := store.GetAgent(context.Background(), agentID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if narrator.Status == "idle" || narrator.Status == "error" {
+		if agent.Status == "idle" || agent.Status == "error" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("timed out waiting for narrator to finish")
+	t.Fatal("timed out waiting for agent to finish")
 }

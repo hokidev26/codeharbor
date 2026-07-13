@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 type runtimeSummaryResponse struct {
@@ -175,7 +175,7 @@ func buildRuntimeSummary(cfg config.Config, configPath string, startedAt time.Ti
 			GCCycles:        mem.NumGC,
 		},
 		Paths: []runtimePathSummary{
-			{Key: "home", Label: "CodeHarbor home", Path: cfg.Paths.HomeDir},
+			{Key: "home", Label: "Autoto home", Path: cfg.Paths.HomeDir},
 			{Key: "database", Label: "SQLite database", Path: cfg.Paths.DatabasePath},
 			{Key: "config", Label: "Config file", Path: configPath},
 			{Key: "projects", Label: "Default project directory", Path: cfg.Paths.DefaultProjectDir},
@@ -251,7 +251,7 @@ func (s *Server) runtimeSecuritySummaryForRequest(r *http.Request) runtimeSecuri
 		summary.Mode = "remote-hardened"
 		summary.Message = "远程收紧已启用：需要访问密码，且禁用 bypassPermissions。"
 		if !accessPasswordConfigured {
-			summary.Message = "远程收紧已启用：请配置 CODEHARBOR_ACCESS_PASSWORD 或仅通过已认证边缘访问。"
+			summary.Message = "远程收紧已启用：请配置 AUTOTO_ACCESS_PASSWORD 或仅通过已认证边缘访问。"
 		}
 	}
 	return summary

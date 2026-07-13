@@ -45,14 +45,14 @@ func loadProjectInstructions(cwd string) projectInstructionBundle {
 		files = append(files, projectInstructionFile{Name: name, Path: path, Truncated: truncated})
 		truncationNote := ""
 		if truncated {
-			truncationNote = "\n\n[CodeHarbor note: this instruction file was truncated to fit the safety limit.]"
+			truncationNote = "\n\n[Autoto note: this instruction file was truncated to fit the safety limit.]"
 		}
 		sections = append(sections, fmt.Sprintf("### %s\n\n%s%s", name, strings.TrimSpace(content), truncationNote))
 	}
 	if len(sections) == 0 {
 		return projectInstructionBundle{}
 	}
-	return projectInstructionBundle{Text: "## Project instructions loaded by CodeHarbor\n\n" + strings.Join(sections, "\n\n"), Files: files}
+	return projectInstructionBundle{Text: "## Project instructions loaded by Autoto\n\n" + strings.Join(sections, "\n\n"), Files: files}
 }
 
 func projectInstructionPath(cwd, name string) (string, bool) {

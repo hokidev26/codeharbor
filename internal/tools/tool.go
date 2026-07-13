@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
 type Risk string
@@ -35,10 +35,10 @@ type OutputChunk struct {
 }
 
 type Env struct {
-	NarratorID string
-	CWD        string
-	Store      *db.Store
-	Output     func(OutputChunk)
+	AgentID string
+	CWD     string
+	Store   *db.Store
+	Output  func(OutputChunk)
 }
 
 type Tool interface {

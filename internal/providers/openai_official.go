@@ -11,7 +11,7 @@ import (
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 type OpenAIOfficial struct {
@@ -37,6 +37,10 @@ func NewOpenAIOfficial(cfg config.ProviderConfig) *OpenAIOfficial {
 }
 
 func (p *OpenAIOfficial) Name() string { return p.cfg.Name }
+
+func (p *OpenAIOfficial) Capabilities() Capabilities {
+	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
+}
 
 func (p *OpenAIOfficial) ListModels(ctx context.Context) ([]string, error) {
 	if p.cfg.APIKey == "" {

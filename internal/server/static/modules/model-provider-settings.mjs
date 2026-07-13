@@ -42,11 +42,18 @@ export function createModelProviderSettingsController({
   }
 
   async function loadProviderAuthFiles({ silent = false } = {}) {
+    const provider = providerAuthProvider();
+    if (!provider) {
+      state.providerAuthFiles = null;
+      state.providerAuthError = "当前没有支持凭证文件管理的 Provider。";
+      if (!silent) throw new Error(state.providerAuthError);
+      return;
+    }
     const seq = ++state.providerAuthSeq;
     const button = silent ? null : $("codexRefreshAuthBtn");
     setButtonBusy(button, true, "刷新中");
     try {
-      const files = await api("/api/providers/cliproxyapi/auth-files");
+      const files = await api(`/api/providers/${encodeURIComponent(provider.name)}/auth-files`);
       if (seq !== state.providerAuthSeq) return;
       state.providerAuthFiles = files;
       state.providerAuthError = "";
@@ -62,6 +69,8 @@ export function createModelProviderSettingsController({
   }
 
   async function importCodexAuthFile() {
+    const provider = providerAuthProvider();
+    if (!provider) throw new Error("当前没有支持凭证文件管理的 Provider。");
     const button = $("codexImportAuthBtn");
     if (button?.disabled) return;
     const textarea = $("codexAuthImportText");
@@ -70,9 +79,9 @@ export function createModelProviderSettingsController({
     setButtonBusy(button, true, "导入中");
     if (textarea) textarea.disabled = true;
     try {
-      await api("/api/providers/cliproxyapi/auth-files/import", {
+      await api(`/api/providers/${encodeURIComponent(provider.name)}/auth-files/import`, {
         method: "POST",
-        body: JSON.stringify({ filename: "codeharbor-codex-auth.json", content }),
+        body: JSON.stringify({ filename: "autoto-codex-auth.json", content }),
       });
       if (textarea) textarea.value = "";
       notifyTerminal?.("[info] 已导入 Codex 凭据，正在刷新账号和模型。\n");
@@ -100,7 +109,8 @@ export function createModelProviderSettingsController({
       apiKey,
       model,
       maxTokens: spec.providerType === "anthropic" ? 4096 : 0,
-      apiKeyOptional: spec.providerName === "cliproxyapi",
+      profile: spec.providerProfile || existing?.profile || "",
+      apiKeyOptional: Boolean(existing?.apiKeyOptional),
     };
     setButtonBusy(button, true, "保存中");
     try {
@@ -136,7 +146,7 @@ export function createModelProviderSettingsController({
   function relayProtocolSpecs() {
     return [
       { key: "anthropic", label: "Anthropic兼容", providerName: "anthropic", providerType: "anthropic", help: "连接第三方 Anthropic Messages API 兼容网关。" },
-      { key: "codex", label: "Codex中转", providerName: "cliproxyapi", providerType: "openai-compatible", help: "连接本机 CLIProxyAPI；Codex 账号统一使用下方凭据导入。" },
+      { key: "codex", label: "Codex中转", providerName: "cliproxyapi", providerType: "openai-compatible", providerProfile: "cliproxyapi", help: "连接本机 CLIProxyAPI；Codex 账号统一使用下方凭据导入。" },
       { key: "responses", label: "Responses兼容", providerName: "openai", providerType: "openai", help: "连接 OpenAI Responses API 兼容端点。" },
       { key: "claude-code", label: "ClaudeCode中转", providerName: "anthropic", providerType: "anthropic", help: "按 Anthropic Messages API 兼容方式接入 Claude Code 中转。" },
       { key: "completions", label: "Completions老旧兼容", providerName: "openai-compatible", providerType: "openai-compatible", help: "连接 OpenAI Chat Completions 兼容中转站。" },
@@ -257,7 +267,7 @@ export function createModelProviderSettingsController({
         <div>
           <div class="settings-hero-kicker">AI 供应商</div>
           <div class="settings-hero-title">Codex 凭证 + 中转站</div>
-          <p>Codex 统一走凭证导入；中转站在 CodeHarbor 内填写 API Key、Base URL、协议和默认模型，保存后立即刷新模型列表。</p>
+          <p>Codex 统一走凭证导入；中转站在 Autoto 内填写 API Key、Base URL、协议和默认模型，保存后立即刷新模型列表。</p>
         </div>
         <div class="settings-action-row">
           <button id="codexFocusImportBtn" class="settings-action-btn primary" type="button">导入 Codex 凭证</button>
@@ -342,7 +352,7 @@ export function createModelProviderSettingsController({
             <label class="relay-field wide">
               <span>供应商名称</span>
               <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
-              <small>当前保存到 CodeHarbor provider：${escapeHtml(spec.providerName)}</small>
+              <small>当前保存到 Autoto provider：${escapeHtml(spec.providerName)}</small>
             </label>
             <label class="relay-field wide">
               <span>供应商前缀</span>
@@ -443,7 +453,7 @@ export function createModelProviderSettingsController({
           <div class="settings-provider-actions">
             <button class="settings-action-btn primary" type="submit" data-provider-save>保存自定义 Provider</button>
           </div>
-          <div class="settings-provider-note">例如 Groq：Provider 填 groq、协议选 OpenAI-compatible、Base URL 填 https://api.groq.com/openai/v1、默认模型填 openai/gpt-oss-20b。保存后模型前缀会是 groq:。</div>
+          <div class="settings-provider-note">例如 Groq：Provider 填 groq、协议选 OpenAI-compatible、Base URL 填 https://api.groq.com/openai/v1、API Key 填 Groq 控制台生成的免费额度 Key、默认模型填 openai/gpt-oss-20b。保存后模型前缀会是 groq:。</div>
         </form>
       ` : ""}
     </section>
@@ -512,7 +522,7 @@ export function createModelProviderSettingsController({
     const model = provider.defaultModel || setting.model || "";
     const maxTokens = provider.maxTokens || setting.maxTokens || 0;
     const models = providerModelList(provider);
-    const apiKeyOptional = Boolean(provider.apiKeyOptional || setting.apiKeyOptional || provider.name === "cliproxyapi");
+    const apiKeyOptional = Boolean(provider.apiKeyOptional || setting.apiKeyOptional);
     const envExample = providerEnvExample({ ...provider, type, baseUrl, defaultModel: model });
     const expanded = providerConfigExpanded(`provider:${provider.name}`);
     return `
@@ -520,7 +530,7 @@ export function createModelProviderSettingsController({
       <div class="settings-provider-card-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
-          <div class="settings-provider-meta">${escapeHtml(type)} · ${escapeHtml(models.length + " 个模型")}</div>
+          <div class="settings-provider-meta">${escapeHtml(type)} · ${escapeHtml(providerCapabilitiesLabel(provider))} · ${escapeHtml(models.length + " 个模型")}</div>
         </div>
         <div class="settings-action-row compact-actions">
           <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
@@ -542,7 +552,7 @@ export function createModelProviderSettingsController({
               <input class="settings-field" name="model" value="${escapeAttr(model)}" placeholder="例如 gpt-4.1-mini" />
             </label>
             <label class="settings-form-span-2">Base URL
-              <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.name))}" />
+              <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.profile))}" />
             </label>
             <label class="settings-form-span-2">API Key
               <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${provider.configured ? "留空保留当前运行时密钥" : "粘贴 API Key（不会写入磁盘）"}" />
@@ -574,8 +584,8 @@ export function createModelProviderSettingsController({
     ].map((item) => `<option value="${escapeAttr(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
   }
 
-  function providerBaseURLPlaceholder(type, name) {
-    if (name === "cliproxyapi") return "http://127.0.0.1:8317/v1";
+  function providerBaseURLPlaceholder(type, profile) {
+    if (profile === "cliproxyapi") return "http://127.0.0.1:8317/v1";
     if (type === "openai-compatible") return "https://api.example.com/v1";
     if (type === "anthropic") return "留空使用 Anthropic 官方端点";
     return "留空使用 OpenAI 官方端点";
@@ -583,14 +593,15 @@ export function createModelProviderSettingsController({
 
   function providerEnvExample(provider) {
     const model = provider.defaultModel || provider.model || "your-model";
-    const baseURL = provider.baseUrl || providerBaseURLPlaceholder(provider.type, provider.name);
+    const baseURL = provider.baseUrl || providerBaseURLPlaceholder(provider.type, provider.profile);
     const rowsByProvider = {
       openai: [`export OPENAI_API_KEY="sk-..."`, `export OPENAI_MODEL="${model}"`],
       anthropic: [`export ANTHROPIC_API_KEY="sk-ant-..."`, `export ANTHROPIC_MODEL="${model}"`],
+      groq: [`export GROQ_API_KEY="gsk_..."`, `export GROQ_MODEL="${model}"`],
       cliproxyapi: [`export CLIPROXYAPI_BASE_URL="${baseURL}"`, `export CLIPROXYAPI_MODEL="${model}"`, `# 如果 CLIProxyAPI 启用了客户端 api-keys，再设置：`, `export CLIPROXYAPI_API_KEY="..."`],
       "openai-compatible": [`export OPENAI_COMPATIBLE_BASE_URL="${baseURL}"`, `export OPENAI_COMPATIBLE_API_KEY="sk-..."`, `export OPENAI_COMPATIBLE_MODEL="${model}"`],
     };
-    return (rowsByProvider[provider.name] || rowsByProvider[provider.type] || rowsByProvider["openai-compatible"]).join("\n");
+    return (rowsByProvider[provider.profile] || rowsByProvider[provider.name] || rowsByProvider[provider.type] || rowsByProvider["openai-compatible"]).join("\n");
   }
 
   function fillGroqProviderExample() {
@@ -688,8 +699,8 @@ export function createModelProviderSettingsController({
   }
 
   function providerLabel(provider) {
-    if (provider.name === "cliproxyapi") return "CLIProxyAPI";
-    if (provider.name === "openai-compatible") return "中转站";
+    if (provider.profile === "cliproxyapi") return "CLIProxyAPI";
+    if (provider.type === "openai-compatible" && provider.profile === "") return "中转站";
     return provider.name;
   }
 
@@ -699,11 +710,20 @@ export function createModelProviderSettingsController({
     return "未配置";
   }
 
+  function providerCapabilitiesLabel(provider) {
+    const capabilities = provider.capabilities || {};
+    const labels = [];
+    if (capabilities.streaming) labels.push("流式");
+    if (capabilities.tools) labels.push("工具");
+    if (capabilities.imageInput) labels.push("图像");
+    return labels.length ? labels.join(" / ") : "基础";
+  }
+
   async function applyPreferredModel(model) {
     if (state.modelApplying) return;
     const seq = ++state.modelApplySeq;
     const value = String(model || "").trim();
-    let narratorId = "";
+    let agentId = "";
     state.modelApplying = true;
     setModelApplyButtonsBusy(true);
     try {
@@ -712,17 +732,17 @@ export function createModelProviderSettingsController({
         if (value) $("modelSelect").value = value;
         renderModelOptions();
       }
-      narratorId = state.narrator?.id || "";
-      if (narratorId && value && value !== state.narrator.model) {
-        const updated = await api(`/api/narrators/${narratorId}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
-        if (seq !== state.modelApplySeq || state.narrator?.id !== narratorId) return;
-        state.narrator = updated;
+      agentId = state.agent?.id || "";
+      if (agentId && value && value !== state.agent.model) {
+        const updated = await api(`/api/agents/${agentId}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
+        if (seq !== state.modelApplySeq || state.agent?.id !== agentId) return;
+        state.agent = updated;
       }
       if (seq !== state.modelApplySeq) return;
       refreshActiveSettingsPanel?.();
       notifyTerminal?.(value ? `[info] 已使用模型：${value}\n` : "[info] 已清除首选模型。\n");
     } catch (err) {
-      if (!narratorId || state.narrator?.id === narratorId) throw err;
+      if (!agentId || state.agent?.id === agentId) throw err;
     } finally {
       if (seq === state.modelApplySeq) state.modelApplying = false;
       setModelApplyButtonsBusy(false);
@@ -807,11 +827,11 @@ export function createModelProviderSettingsController({
   }
 
   function selectedModelValue() {
-    return $("modelSelect")?.value || state.narrator?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+    return $("modelSelect")?.value || state.agent?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
   }
 
   function currentModelValue() {
-    return state.narrator?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+    return state.agent?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
   }
 
   function renderModelOptions() {
@@ -854,6 +874,7 @@ export function createModelProviderSettingsController({
         return normalizeModelProvider({
           name: setting.name,
           type: setting.type,
+          profile: setting.profile,
           baseUrl: setting.baseUrl,
           defaultModel: setting.model,
           maxTokens: setting.maxTokens,
@@ -866,6 +887,7 @@ export function createModelProviderSettingsController({
     return (state.settings?.providers || []).map((provider) => normalizeModelProvider({
       name: provider.name,
       type: provider.type,
+      profile: provider.profile,
       baseUrl: provider.baseUrl,
       defaultModel: provider.model,
       maxTokens: provider.maxTokens,
@@ -885,16 +907,28 @@ export function createModelProviderSettingsController({
   }
 
   function normalizeModelProvider(provider) {
+    const capabilities = provider.capabilities && typeof provider.capabilities === "object" ? provider.capabilities : {};
+    const management = provider.management && typeof provider.management === "object" ? provider.management : {};
     return {
       name: provider.name || provider.type || "provider",
       type: provider.type || provider.name || "provider",
+      profile: provider.profile || "",
       baseUrl: provider.baseUrl || "",
       defaultModel: provider.defaultModel || provider.model || "",
       maxTokens: Number(provider.maxTokens || 0),
       models: Array.isArray(provider.models) ? provider.models.filter(Boolean) : [],
       configured: Boolean(provider.configured),
       apiKeyOptional: Boolean(provider.apiKeyOptional),
-      managementUrl: provider.managementUrl || "",
+      capabilities: {
+        tools: Boolean(capabilities.tools),
+        streaming: Boolean(capabilities.streaming),
+        imageInput: Boolean(capabilities.imageInput),
+      },
+      management: {
+        url: management.url || provider.managementUrl || "",
+        authFiles: Boolean(management.authFiles),
+      },
+      managementUrl: provider.managementUrl || management.url || "",
       error: provider.error || "",
     };
   }
@@ -911,7 +945,7 @@ export function createModelProviderSettingsController({
       || null;
   }
 
-  function isCurrentModelConfigured(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
+  function isCurrentModelConfigured(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
     return Boolean(currentProviderConfig(modelValue)?.configured);
   }
 
@@ -924,7 +958,7 @@ export function createModelProviderSettingsController({
     select.title = provider?.error || (configured ? "模型已配置，可以对话" : modelSetupMessage(select.value));
   }
 
-  function modelSetupMessage(modelValue = $("modelSelect")?.value || state.narrator?.model || "") {
+  function modelSetupMessage(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
     const provider = currentProviderConfig(modelValue);
     const providerName = provider?.name || String(modelValue || "openai").split(":")[0] || "openai";
     if (provider?.error) {
@@ -933,16 +967,21 @@ export function createModelProviderSettingsController({
     const envByProvider = {
       openai: "OPENAI_API_KEY",
       anthropic: "ANTHROPIC_API_KEY",
+      groq: "GROQ_API_KEY",
       cliproxyapi: "CLIPROXYAPI_API_KEY（仅当 CLIProxyAPI 配置了 api-keys 时需要）",
       "openai-compatible": "OPENAI_COMPATIBLE_API_KEY 或 OPENAI_API_KEY",
     };
     const envName = envByProvider[providerName] || "对应 provider 的 API key 环境变量";
-    return `当前模型 ${modelValue || "未选择"} 尚未配置 API Key。可在“设置 → 提供商”粘贴 API Key 立即生效，或在启动 CodeHarbor 前设置 ${envName} 后重启服务。`;
+    return `已选择模型 ${modelValue || "未选择"}，但它所属的 provider（${providerName}）尚未配置 API Key。请在“设置 → 提供商”粘贴该 provider 的 API Key 立即生效；或在启动 Autoto 前设置 ${envName} 后重启。注意：为避免把密钥写进磁盘，页面里粘贴的 API Key 只保存在当前运行时，服务重启后需要重新提供。`;
+  }
+
+  function providerAuthProvider() {
+    return modelProvidersForUI().find((provider) => provider.management?.authFiles)
+      || null;
   }
 
   function cliProxyProvider() {
-    return modelProvidersForUI().find((provider) => provider.name === "cliproxyapi")
-      || (state.settings?.providers || []).find((provider) => provider.name === "cliproxyapi")
+    return modelProvidersForUI().find((provider) => provider.profile === "cliproxyapi")
       || null;
   }
 

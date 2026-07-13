@@ -16,11 +16,11 @@ import (
 
 	"nhooyr.io/websocket"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
-	"codeharbor/internal/tools"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
+	"autoto/internal/tools"
 )
 
 type e2eProvider struct {
@@ -29,6 +29,10 @@ type e2eProvider struct {
 }
 
 func (p *e2eProvider) Name() string { return "fake" }
+
+func (p *e2eProvider) Capabilities() providers.Capabilities {
+	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true}
+}
 
 func (p *e2eProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
@@ -66,10 +70,10 @@ func (p *e2eProvider) request(index int) providers.GenerateRequest {
 }
 
 type captureNotifier struct {
-	events chan agent.NotificationEvent
+	events chan agentpkg.NotificationEvent
 }
 
-func (n captureNotifier) Notify(_ context.Context, event agent.NotificationEvent) {
+func (n captureNotifier) Notify(_ context.Context, event agentpkg.NotificationEvent) {
 	n.events <- event
 }
 
@@ -84,7 +88,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	defer store.Close()
 
 	projectDir := t.TempDir()
-	_, _, narrator, err := store.CreateProject(ctx, "E2E", "", projectDir, "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "E2E", "", projectDir, "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,20 +98,20 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	providerRegistry.Register(provider)
 	toolRegistry := tools.NewRegistry()
 	tools.RegisterCore(toolRegistry)
-	hub := agent.NewHub()
-	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, config.AgentConfig{MaxTurns: 4})
-	notifications := make(chan agent.NotificationEvent, 4)
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, providerRegistry, toolRegistry, hub, config.AgentConfig{MaxTurns: 4})
+	notifications := make(chan agentpkg.NotificationEvent, 4)
 	runner.SetNotifier(captureNotifier{events: notifications})
 	app := New(config.Config{}, store, runner, hub, providerRegistry)
 
 	httpServer := httptest.NewServer(app.Routes())
 	defer httpServer.Close()
 
-	conn := dialNarratorWebSocket(t, ctx, httpServer.URL, app.localToken, narrator.ID)
+	conn := dialAgentWebSocket(t, ctx, httpServer.URL, app.localToken, agent.ID)
 	defer conn.CloseNow()
 	readConnectedWebSocketEvent(t, ctx, conn)
 
-	postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/narrators/"+narrator.ID+"/messages", app.localToken, httpServer.URL, map[string]string{"text": "run the approved command"})
+	postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/agents/"+agent.ID+"/messages", app.localToken, httpServer.URL, map[string]string{"text": "run the approved command"})
 
 	approved := false
 	sawToolOutput := false
@@ -121,7 +125,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 				t.Fatalf("unexpected approval event: %+v", event)
 			}
 			if !approved {
-				postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/narrators/"+narrator.ID+"/tool-calls/e2e-bash/approval", app.localToken, httpServer.URL, map[string]string{"decision": "allow_once", "reason": "e2e approval"})
+				postJSON(t, ctx, httpServer.Client(), httpServer.URL+"/api/agents/"+agent.ID+"/tool-calls/e2e-bash/approval", app.localToken, httpServer.URL, map[string]string{"decision": "allow_once", "reason": "e2e approval"})
 				approved = true
 			}
 		case "tool.output":
@@ -141,7 +145,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 		}
 	}
 
-	waitForNarratorIdle(t, store, narrator.ID)
+	waitForAgentIdle(t, store, agent.ID)
 	assertE2ENotifications(t, notifications)
 	if got := provider.requestCount(); got != 2 {
 		t.Fatalf("expected provider to be called twice, got %d", got)
@@ -150,7 +154,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 		t.Fatalf("second provider request did not include approved tool result: %+v", provider.request(1).Messages)
 	}
 
-	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "e2e-bash")
+	call, err := store.GetToolCallByUseID(ctx, agent.ID, "e2e-bash")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +162,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 		t.Fatalf("unexpected persisted tool call: %+v output=%s", call, string(call.OutputJSON))
 	}
 
-	messages, err := store.ListMessages(ctx, narrator.ID)
+	messages, err := store.ListMessages(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +172,7 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 
 	var apiRequests int
 	var outputTokens int64
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(output_tokens), 0) FROM api_requests WHERE narrator_id = ?`, narrator.ID).Scan(&apiRequests, &outputTokens); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(output_tokens), 0) FROM api_requests WHERE agent_id = ?`, agent.ID).Scan(&apiRequests, &outputTokens); err != nil {
 		t.Fatal(err)
 	}
 	if apiRequests != 2 || outputTokens != 20 {
@@ -176,13 +180,13 @@ func TestEndToEndMessageWebSocketApprovalToolExecutionAndPersistence(t *testing.
 	}
 }
 
-type wsAgentEvent struct {
+type agentWSEvent struct {
 	Type string         `json:"type"`
 	Text string         `json:"text"`
 	Data map[string]any `json:"data"`
 }
 
-func assertE2ENotifications(t *testing.T, notifications <-chan agent.NotificationEvent) {
+func assertE2ENotifications(t *testing.T, notifications <-chan agentpkg.NotificationEvent) {
 	t.Helper()
 	sawApproval := false
 	sawCompleted := false
@@ -202,9 +206,9 @@ func assertE2ENotifications(t *testing.T, notifications <-chan agent.Notificatio
 	}
 }
 
-func dialNarratorWebSocket(t *testing.T, ctx context.Context, baseURL, token, narratorID string) *websocket.Conn {
+func dialAgentWebSocket(t *testing.T, ctx context.Context, baseURL, token, agentID string) *websocket.Conn {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/narrator?id=" + url.QueryEscape(narratorID) + "&token=" + url.QueryEscape(token)
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/agent?id=" + url.QueryEscape(agentID) + "&token=" + url.QueryEscape(token)
 	header := http.Header{}
 	header.Set("Origin", baseURL)
 	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
@@ -223,18 +227,22 @@ func readConnectedWebSocketEvent(t *testing.T, ctx context.Context, conn *websoc
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"type":"connected"}` {
-		t.Fatalf("expected connected event, got %s", string(data))
+	var event struct {
+		Type           string `json:"type"`
+		LatestSequence int64  `json:"latestSequence"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil || event.Type != "connected" {
+		t.Fatalf("expected connected event, got %s (err=%v)", string(data), err)
 	}
 }
 
-func readAgentWebSocketEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) wsAgentEvent {
+func readAgentWebSocketEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) agentWSEvent {
 	t.Helper()
 	_, data, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var event wsAgentEvent
+	var event agentWSEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		t.Fatalf("decode websocket event %s: %v", string(data), err)
 	}

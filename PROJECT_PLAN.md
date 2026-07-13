@@ -1,14 +1,14 @@
-# CodeHarbor Go MVP 项目规划
+# Autoto Go MVP 项目规划
 
 ## 1. 项目目标
 
-本项目目标是用 Go 实现 CodeHarbor：一个本地 AI 编程 Agent 后端。
+本项目目标是用 Go 实现 Autoto：一个本地 AI 编程 Agent 后端。Go module 为 `autoto`，`cmd/autoto` 与 `autoto` 二进制是当前规范入口；`cmd/codeharbor` 仅保留为 legacy 兼容 shim。
 
 核心目标不是一次性堆满所有功能，而是先做出一个可运行、可扩展、可逐步替换/增强的 MVP：
 
 - 本地 HTTP 服务
 - SQLite 持久化
-- Project / Chapter / Narrator 数据模型
+- Project / Workline / Agent 数据模型
 - Agent 会话与消息记录
 - Provider 抽象
 - Tool 抽象与基础工具执行
@@ -38,7 +38,7 @@
 
 ```txt
 用户输入
-  -> narrator message 入库
+  -> agent_messages 入库
   -> agent loop
   -> provider 生成回复
   -> assistant message 入库
@@ -48,10 +48,10 @@
 并补充手动工具执行闭环：
 
 ```txt
-POST /api/narrators/{id}/tool-calls
+POST /api/agents/{id}/tool-calls
   -> permission 判断
   -> 执行工具
-  -> narrator_tool_calls 入库
+  -> agent_tool_calls 入库
   -> 返回工具结果
 ```
 
@@ -64,11 +64,12 @@ POST /api/narrators/{id}/tool-calls
 目录：
 
 ```txt
-codeharbor/
-  go.mod
+autoto/
+  go.mod                         # module autoto
   go.sum
   .gitignore
-  cmd/codeharbor/main.go
+  cmd/autoto/main.go              # canonical application entrypoint
+  cmd/codeharbor/main.go          # legacy compatibility shim
   internal/config
   internal/db
   internal/server
@@ -80,8 +81,10 @@ codeharbor/
 启动方式：
 
 ```bash
-go run ./cmd/codeharbor
+go run ./cmd/autoto
 ```
+
+构建后的规范 CLI 名称为 `autoto`，例如 `go build -o autoto ./cmd/autoto && ./autoto`。
 
 默认监听：
 
@@ -92,14 +95,16 @@ http://localhost:7788
 默认配置路径：
 
 ```txt
-~/.codeharbor/config.json
+~/.autoto/config.json
 ```
 
 默认数据库路径：
 
 ```txt
-~/.codeharbor/codeharbor.db
+~/.autoto/autoto.db
 ```
+
+当规范配置文件不存在而旧 `~/.codeharbor/config.json` 存在时，启动会自动将该 legacy 配置复制到 `~/.autoto/config.json` 后继续加载；旧目录仅用于迁移兼容。
 
 默认项目目录：
 
@@ -137,12 +142,18 @@ agent.defaultPermissionMode = acceptEdits
 agent.defaultModel = openai:gpt-4.1-mini
 ```
 
-Agent 模型支持环境变量：
+Agent 与核心运行时支持的规范环境变量：
 
 ```txt
-CODEHARBOR_DEFAULT_MODEL
-CODEHARBOR_SUMMARY_MODEL
+AUTOTO_DEFAULT_MODEL
+AUTOTO_SUMMARY_MODEL
+AUTOTO_CONTEXT_TOKEN_LIMIT
+AUTOTO_EXPOSED
+AUTOTO_ACCESS_PASSWORD
+AUTOTO_REMOTE_TERMINAL
 ```
+
+同名 legacy `CODEHARBOR_*` 环境变量仍作为回退兼容；当两者同时存在时，`AUTOTO_*` 优先。
 
 Provider 支持环境变量：
 
@@ -175,15 +186,17 @@ internal/db/schema.go
 internal/db/db.go
 ```
 
-当前已建表：
+当前核心表（节选）：
 
 ```txt
 users
 projects
-chapters
-narrators
-narrator_messages
-narrator_tool_calls
+worklines
+agents
+runs
+agent_messages
+agent_message_attachments
+agent_tool_calls
 api_requests
 agent_backends
 ```
@@ -194,10 +207,10 @@ agent_backends
 
 ```txt
 projects
-  -> chapters
-      -> narrators
-          -> narrator_messages
-          -> narrator_tool_calls
+  -> worklines
+      -> agents
+          -> agent_messages
+          -> agent_tool_calls
 ```
 
 ---
@@ -232,32 +245,39 @@ GET    /api/backends/{id}/health
 GET  /api/projects
 POST /api/projects
 GET  /api/projects/{id}
+GET  /api/projects/{id}/worklines
 
-GET  /api/chapters/{id}
+GET  /api/worklines/{id}
+POST /api/worklines/{id}/fork
+GET  /api/worklines/{id}/merge-check?targetWorklineId=...
+POST /api/worklines/{id}/merge
+GET  /api/worklines/{id}/agents
 
-GET   /api/narrators/{id}
-PATCH /api/narrators/{id}/cwd
-PATCH /api/narrators/{id}/model
-PATCH /api/narrators/{id}/permission-mode
-POST  /api/narrators/{id}/interrupt
-GET   /api/narrators/{id}/messages
-POST  /api/narrators/{id}/messages
-GET   /api/narrators/{id}/tools
-POST  /api/narrators/{id}/tool-calls
-GET   /api/narrators/{id}/tool-calls/{toolUseId}
-GET   /api/narrators/{id}/git/status
-GET   /api/narrators/{id}/git/diff
-GET   /api/narrators/{id}/git/log
-POST  /api/narrators/{id}/git/commit
+GET   /api/agents/{id}
+PATCH /api/agents/{id}/cwd
+PATCH /api/agents/{id}/model
+PATCH /api/agents/{id}/permission-mode
+POST  /api/agents/{id}/interrupt
+GET   /api/agents/{id}/messages
+POST  /api/agents/{id}/messages
+GET   /api/agents/{id}/tools
+POST  /api/agents/{id}/tool-calls
+GET   /api/agents/{id}/tool-calls/{toolUseId}
+GET   /api/agents/{id}/git/status
+GET   /api/agents/{id}/git/diff
+GET   /api/agents/{id}/git/log
+POST  /api/agents/{id}/git/commit
 
 GET  /api/fs/browse?path=...
 GET  /api/fs/directories?path=...
 GET  /api/fs/preview?path=...
 POST /api/fs/mkdir
 
-GET  /ws/narrator?id={narratorId}
-GET  /ws/terminal?narratorId={narratorId}
+GET  /ws/agent?id={agentId}
+GET  /ws/terminal?agentId={agentId}
 ```
+
+规范领域实体与路由为 Agent / Workline、`/api/agents`、`/api/worklines` 和 `/ws/agent`。Legacy 客户端仍可使用 `/api/projects/{id}/chapters`、`/api/chapters/...`、`/api/narrators/...` 与 `/ws/narrator`；这些兼容别名复用同一组 Agent/Workline handler。
 
 ---
 
@@ -289,8 +309,8 @@ GET  /ws/terminal?narratorId={narratorId}
 并自动创建：
 
 - project
-- root chapter
-- primary narrator
+- root workline
+- primary agent
 
 ---
 
@@ -306,11 +326,11 @@ internal/agent/hub.go
 当前能力：
 
 - 接收用户消息
-- 写入 `narrator_messages`
+- 写入 `agent_messages`
 - 启动 goroutine 执行 agent loop
 - 调用默认 provider
 - 写入 assistant message
-- 更新 narrator status
+- 更新 agent status
 - 经 WebSocket 推送事件
 
 当前 WebSocket 事件包括：
@@ -479,7 +499,7 @@ POST /api/fs/mkdir
 
 后续计划：
 
-- 支持 narrator cwd 边界
+- 支持 agent cwd 边界
 - 支持项目维度 path scope
 - 支持二进制文件识别
 - 支持图片/Notebook/PDF 预览
@@ -504,12 +524,15 @@ internal/db/schema.go
 - 健康检查 `/alive`、`/health`、`/ready`、`/server_info`
 - UI 中可以添加、检测、切换、删除后端
 - 可通过环境变量 seed 初始后端：
-  - `CODEHARBOR_AGENT_BACKEND_URL`
+  - `AUTOTO_AGENT_BACKEND_URL`
+  - `AUTOTO_AGENT_BACKEND_NAME`
+  - `AUTOTO_AGENT_BACKEND_KIND`
+  - `AUTOTO_AGENT_BACKEND_API_KEY`
   - `OPENHANDS_AGENT_SERVER_URL`
   - `AGENT_SERVER_URL`
-  - `CODEHARBOR_AGENT_BACKEND_API_KEY`
   - `OPENHANDS_SESSION_API_KEY`
   - `AGENT_SERVER_API_KEY`
+- `AUTOTO_AGENT_BACKEND_*` 优先于同名 legacy `CODEHARBOR_AGENT_BACKEND_*`；后者仅保留为回退兼容。
 
 注意：API 返回时只暴露 `apiKeyConfigured`，不会回显后端 API key。
 
@@ -538,7 +561,7 @@ internal/server/static/modules/mcp-registry-ui.mjs # backend MCP registry UI/act
 internal/server/static/modules/model-provider-settings.mjs # Settings Models/Providers UI and model helpers
 internal/server/static/modules/local-preferences-settings.mjs # Settings local preference panels UI/actions controller
 internal/server/static/modules/system-settings.mjs # Settings system/storage/usage/users/about panels controller
-internal/server/static/modules/workspace-settings.mjs # Settings AI Agents/Chapters workspace panels controller
+internal/server/static/modules/workspace-settings.mjs # Settings AI Agents/Worklines workspace panels controller
 internal/server/static/modules/skills-workbench.mjs # Settings Skills workbench UI/actions controller
 internal/server/static/modules/ui-shell.mjs     # global shortcuts/sidebar/mobile shell/project search
 internal/server/static/modules/settings-preferences.mjs # browser-local settings preferences/backup/import
@@ -547,7 +570,7 @@ internal/server/static/modules/settings-data.mjs # settings/skills static naviga
 internal/server/static/modules/preferences-data.mjs # localStorage keys/default preference data
 ```
 
-当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。前端已开始无构建 ES module 拆分：`app.js` 只负责 bootstrap，业务主模块在 `modules/app-main.mjs`，Agent Server backend registry/弹窗/Agent Admin controller 在 `modules/backend-registry.mjs`，Chat 发送/草稿/历史/附件/slash command controller 在 `modules/chat-composer.mjs`，Chat 消息渲染/审批/Markdown controller 在 `modules/chat-rendering.mjs`，目录选择/浏览/最近目录/路径格式化 controller 在 `modules/directory-browser.mjs`，通用格式化函数在 `modules/formatters.mjs`，Git status/diff/log/commit modal controller 在 `modules/git-workflow.mjs`，终端偏好/设置页/WebSocket controller 在 `modules/terminal.mjs`，API/token/WebSocket helper 在 `modules/runtime.mjs`，后端 MCP registry UI/action controller 在 `modules/mcp-registry-ui.mjs`，Settings Models/Providers UI 与模型选择 helper 在 `modules/model-provider-settings.mjs`，Settings 本地偏好面板（Profile/Network Search/IM Gateway/Notifications/Appearance）UI/action controller 在 `modules/local-preferences-settings.mjs`，Settings 系统/存储/使用/用户/About 面板 controller 在 `modules/system-settings.mjs`，Settings AI Agents/Chapters 工作区面板 controller 在 `modules/workspace-settings.mjs`，Settings Skills 工作台 UI/action controller 在 `modules/skills-workbench.mjs`，全局快捷键/侧栏/移动端 shell/项目搜索 controller 在 `modules/ui-shell.mjs`，浏览器本地 Settings 偏好/备份/导入 controller 在 `modules/settings-preferences.mjs`。
+当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。前端已开始无构建 ES module 拆分：`app.js` 只负责 bootstrap，业务主模块在 `modules/app-main.mjs`，Agent Server backend registry/弹窗/Agent Admin controller 在 `modules/backend-registry.mjs`，Chat 发送/草稿/历史/附件/slash command controller 在 `modules/chat-composer.mjs`，Chat 消息渲染/审批/Markdown controller 在 `modules/chat-rendering.mjs`，目录选择/浏览/最近目录/路径格式化 controller 在 `modules/directory-browser.mjs`，通用格式化函数在 `modules/formatters.mjs`，Git status/diff/log/commit modal controller 在 `modules/git-workflow.mjs`，终端偏好/设置页/WebSocket controller 在 `modules/terminal.mjs`，API/token/WebSocket helper 在 `modules/runtime.mjs`，后端 MCP registry UI/action controller 在 `modules/mcp-registry-ui.mjs`，Settings Models/Providers UI 与模型选择 helper 在 `modules/model-provider-settings.mjs`，Settings 本地偏好面板（Profile/Network Search/IM Gateway/Notifications/Appearance）UI/action controller 在 `modules/local-preferences-settings.mjs`，Settings 系统/存储/使用/用户/About 面板 controller 在 `modules/system-settings.mjs`，Settings AI Agents/Worklines 工作区面板 controller 在 `modules/workspace-settings.mjs`，Settings Skills 工作台 UI/action controller 在 `modules/skills-workbench.mjs`，全局快捷键/侧栏/移动端 shell/项目搜索 controller 在 `modules/ui-shell.mjs`，浏览器本地 Settings 偏好/备份/导入 controller 在 `modules/settings-preferences.mjs`。
 
 当前路由：
 
@@ -562,18 +585,18 @@ GET /ui/app.js
 - 查看健康状态
 - 查看项目列表
 - 创建项目
-- 自动选择 root chapter / primary narrator
-- 查看 narrator messages
+- 自动选择 root workline / primary agent
+- 查看 agent messages
 - 复制任意用户/助手消息原文，或一键复制当前对话 Markdown，便于整理 issue、PR 描述或外部笔记
 - 发送消息
-- 按当前 narrator 浏览器本地自动保存/恢复聊天输入草稿，切换项目或刷新页面不丢失未发送内容
+- 按当前 agent 浏览器本地自动保存/恢复聊天输入草稿，切换项目或刷新页面不丢失未发送内容
 - 在聊天输入框中通过浏览器本地提示词历史保存最近提示，并在空输入时用 ↑/↓ 快速召回
 - 在聊天输入框输入 `/` 调出已启用的本地技能命令模板，并通过键盘或点击插入提示词
-- 连接 `/ws/narrator`
+- 连接 `/ws/agent`
 - 查看 WebSocket event log
 - 连接 `/ws/terminal` 交互式 PTY
 - 通过设置 → 终端管理查看 PTY 状态、重连/清空/复制/聚焦终端，并管理输出保留和连接后聚焦偏好
-- 更新 narrator cwd / model / permission mode
+- 更新 agent cwd / model / permission mode
 - 浏览 `/api/fs/browse`
 - 预览 `/api/fs/preview`
 - 在设置弹窗内搜索/过滤个人设置、实例管理和各产品化设置面板，并支持快捷键聚焦搜索
@@ -590,8 +613,8 @@ GET /ui/app.js
 - 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略；Agent 工具层已提供 `WebSearch` 公网搜索结果工具和 `WebFetch` 公网 HTTP(S) 文档抓取工具
 - 设置 → IM 网关页内完成浏览器本地 Webhook/Discord/Slack/Telegram/Lark/企业微信预设、入站确认、签名、脱敏和事件路由策略
 - 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出；已接入后端 MCP registry，可创建/启停/删除 server 并运行 tools/list discovery；后端已提供 stdio MCP discovery/execution core tools（exec-risk 审批）
-- 设置 → 章节与容器页内完成当前项目章节/workline、当前章节 narrator、worktree/branch/容器隔离边界概览和快速切换
-- 设置 → AI 代理页内完成默认 Agent 策略概览、当前 narrator 状态、模型/权限/workdir 快速调整和 ID 复制
+- 设置 → 工作线与容器页内完成当前项目工作线、当前工作线 Agent、worktree/branch/容器隔离边界概览和快速切换
+- 设置 → AI 代理页内完成默认 Agent 策略概览、当前 agent 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
 - 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好，并接入服务端 Webhook 任务通知配置/测试发送
 - 设置 → 外观与界面页内完成浏览器本地主题、布局密度、终端默认展开和 Agent 事件日志显示偏好
@@ -692,7 +715,7 @@ internal/providers/anthropic_provider_test.go
 internal/providers/openai_compatible_test.go
 internal/providers/openai_official_test.go
 internal/server/backends_test.go
-internal/server/chapter_workflow_test.go
+internal/server/workline_workflow_test.go
 internal/server/e2e_test.go
 internal/server/git_test.go
 internal/server/interrupt_test.go
@@ -704,7 +727,7 @@ internal/tools/tools_test.go
 覆盖：
 
 - 默认配置与后端环境变量 seed
-- 创建 project/chapter/narrator
+- 创建 project/workline/agent
 - agent backend registry 单 active 约束
 - OpenHands Agent Server 健康检查
 - 工具路径越界检查
@@ -717,8 +740,8 @@ internal/tools/tools_test.go
 - 官方 Anthropic/OpenAI SDK provider 流式事件、usage 与 fallback 行为
 - usage cost 估算：OpenAI、Anthropic Sonnet/Opus 与未知模型分支
 - Git commit API 的显式 paths 提交、安全路径拒绝、空仓库 diff 降级
-- 全链路 E2E：真实 httptest server、WebSocket narrator stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
-- Chapter workflow：fork API 创建 Git worktree/child chapter/narrator，fork narrator Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
+- 全链路 E2E：真实 httptest server、WebSocket agent stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
+- Workline workflow：fork API 创建 Git worktree/child workline/agent，fork agent Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
 
 当前验证命令已收敛为统一入口：
 
@@ -737,12 +760,12 @@ make check
 - `/api/mcp/servers`
 - `/api/mcp/servers/{id}/tools`
 - `POST /api/projects`
-- `POST /api/narrators/{id}/tool-calls`
-- `GET /api/narrators/{id}/git/status`
-- `GET /api/narrators/{id}/git/diff`
-- `POST /api/narrators/{id}/git/commit`
+- `POST /api/agents/{id}/tool-calls`
+- `GET /api/agents/{id}/git/status`
+- `GET /api/agents/{id}/git/diff`
+- `POST /api/agents/{id}/git/commit`
 
-本地 dogfood 证据：2026-07-07 UTC / 2026-07-08 +08:00 使用临时 CodeHarbor 服务与临时 Git 仓库，通过 API 创建项目，执行 `Write` / `Read` / `Grep`，让已跟踪文件 `demo/notes.md` 变为 `worktree=M`，通过 Git diff API 看到 `added=2 deleted=0` 和补丁行 `+- Updated through CodeHarbor Write tool for tracked diff review.`，再用显式 `paths: ["demo/notes.md"]` 调用 Git commit API 创建提交 `96cd79e Dogfood tracked diff workflow`，提交后仓库 `clean=true`。较早的未跟踪文件 smoke 也创建并提交了 `2484ab7 Dogfood CodeHarbor API workflow`。
+历史 dogfood 证据（Autoto 更名前，以下服务名称、补丁文本和提交信息保留为 legacy 原始记录）：2026-07-07 UTC / 2026-07-08 +08:00 使用临时 CodeHarbor 服务与临时 Git 仓库，通过 API 创建项目，执行 `Write` / `Read` / `Grep`，让已跟踪文件 `demo/notes.md` 变为 `worktree=M`，通过 Git diff API 看到 `added=2 deleted=0` 和补丁行 `+- Updated through CodeHarbor Write tool for tracked diff review.`，再用显式 `paths: ["demo/notes.md"]` 调用 Git commit API 创建提交 `96cd79e Dogfood tracked diff workflow`，提交后仓库 `clean=true`。较早的未跟踪文件 smoke 也创建并提交了 `2484ab7 Dogfood CodeHarbor API workflow`。
 
 ---
 
@@ -754,16 +777,16 @@ make check
 
 待做：
 
-- [x] `GET /api/projects/{id}/chapters`
-- [x] `GET /api/chapters/{id}/narrators`
-- [x] `PATCH /api/narrators/{id}/cwd`
-- [x] `PATCH /api/narrators/{id}/model`
-- [x] `PATCH /api/narrators/{id}/permission-mode`
-- [x] `POST /api/narrators/{id}/interrupt`
+- [x] `GET /api/projects/{id}/worklines`
+- [x] `GET /api/worklines/{id}/agents`
+- [x] `PATCH /api/agents/{id}/cwd`
+- [x] `PATCH /api/agents/{id}/model`
+- [x] `PATCH /api/agents/{id}/permission-mode`
+- [x] `POST /api/agents/{id}/interrupt`
 - [x] 工具调用 WebSocket 事件
 - [x] provider request/response 记录到 `api_requests`
 - [x] 最简 context 管理（粗略 token 估算、旧消息摘要、旧工具输出降级）
-- [x] narrator status 更细化：`idle/running/error/interrupted`
+- [x] agent status 更细化：`idle/running/error/interrupted`
 
 ---
 
@@ -806,7 +829,7 @@ make check
 
 ---
 
-### Phase 4：Git / Chapter 工作流
+### Phase 4：Git / Workline 工作流
 
 目标：实现多分支、多工作线能力。
 
@@ -816,12 +839,12 @@ make check
 - [x] UI diff 查看器（只读 Git 变更面板）
 - [x] Git commit API
 - [x] project git path 检查（repo root 必须位于项目路径或 default project dir 内）
-- [x] chapter fork（后端 API 创建 child chapter + primary narrator）
-- [x] git worktree 创建（`POST /api/chapters/{id}/fork` 使用 sibling `.codeharbor-worktrees`，避免嵌套进主 repo）
-- [x] chapter merge-check（`GET /api/chapters/{id}/merge-check` 使用临时 worktree 做非破坏性冲突预检）
-- [x] merge（`POST /api/chapters/{id}/merge` 要求 source/target clean，冲突时 abort 并返回 409，成功后记录 merge metadata）
+- [x] workline fork（后端 API 创建 child workline + primary agent）
+- [x] git worktree 创建（`POST /api/worklines/{id}/fork` 使用 sibling `.autoto-worktrees`，避免嵌套进主 repo）
+- [x] workline merge-check（`GET /api/worklines/{id}/merge-check` 使用临时 worktree 做非破坏性冲突预检）
+- [x] merge（`POST /api/worklines/{id}/merge` 要求 source/target clean，冲突时 abort 并返回 409，成功后记录 merge metadata）
 - [ ] AI resolve conflict
-- [ ] review chapter
+- [ ] review workline
 
 ---
 
@@ -852,9 +875,9 @@ make check
 初版 UI 页面：
 
 - [x] Project list
-- [ ] Chapter detail
-- [x] Narrator chat
-- [x] Run summary 回顾卡片（接入 `/api/narrators/{id}/runs/{runId}`，支持复制摘要与打开 Git 变更）
+- [ ] Workline detail
+- [x] Agent chat
+- [x] Run summary 回顾卡片（接入 `/api/agents/{id}/runs/{runId}`，支持复制摘要与打开 Git 变更）
 - [ ] Tool calls panel
 - [x] File browser
 - [x] Settings
@@ -888,7 +911,7 @@ runtime/debug BuildInfo
 后续可以增加命令：
 
 ```txt
-codeharbor licenses export
+autoto licenses export
 ```
 
 生成：
@@ -940,9 +963,9 @@ license
 - Agent loop 暂未支持所有 provider 的完整模型 tool calling（Anthropic 路径已具备自动工具循环基础）
 - OpenAI-compatible provider 暂未流式输出；官方 OpenAI/Anthropic provider 已支持 SDK streaming
 - Bash 工具默认在 `acceptEdits` 下不可执行
-- `/api/fs` 当前以 default project dir 为边界，尚未按 narrator cwd 动态限制
+- `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制
 - Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址
-- Git API 与 chapter merge API 已限制 repo root 位于项目路径、default project dir 或 CodeHarbor 创建的 chapter worktree 内；后续 AI conflict resolve 需要延续同一边界
+- Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；后续 AI conflict resolve 需要延续同一边界
 - license API 只确认了部分依赖协议
 - 已有后端 Git worktree/fork/merge-check/merge；尚未实现 AI resolve conflict 和前端完整操作面板
 - 已有 stdio MCP discovery/execution core tools、后端 MCP server registry，以及 Settings 创建/启停/删除/发现工具接入；尚未实现 MCP 长连接复用和完整编辑/update UI

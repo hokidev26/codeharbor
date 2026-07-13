@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestMCPServersCRUDAndToolDiscovery(t *testing.T) {
@@ -28,7 +28,7 @@ func TestMCPServersCRUDAndToolDiscovery(t *testing.T) {
 	payload := map[string]any{
 		"name": "Fake MCP", "transport": "stdio", "command": os.Args[0],
 		"args": []string{"-test.run=TestMCPServerFakeProcess"},
-		"env":  map[string]string{"CODEHARBOR_MCP_SERVER_FAKE": "1", "TOKEN": "secret"},
+		"env":  map[string]string{"AUTOTO_MCP_SERVER_FAKE": "1", "TOKEN": "secret"},
 	}
 	body, _ := json.Marshal(payload)
 	recorder := httptest.NewRecorder()
@@ -43,7 +43,7 @@ func TestMCPServersCRUDAndToolDiscovery(t *testing.T) {
 	if created.ID == "" || !created.Enabled || strings.Contains(recorder.Body.String(), "secret") {
 		t.Fatalf("unexpected create response: %+v body=%s", created, recorder.Body.String())
 	}
-	if len(created.EnvKeys) != 2 || created.EnvKeys[0] != "CODEHARBOR_MCP_SERVER_FAKE" || created.EnvKeys[1] != "TOKEN" {
+	if len(created.EnvKeys) != 2 || created.EnvKeys[0] != "AUTOTO_MCP_SERVER_FAKE" || created.EnvKeys[1] != "TOKEN" {
 		t.Fatalf("expected sorted env keys, got %+v", created.EnvKeys)
 	}
 
@@ -88,7 +88,7 @@ func TestMCPServersCRUDAndToolDiscovery(t *testing.T) {
 }
 
 func TestMCPServerFakeProcess(t *testing.T) {
-	if os.Getenv("CODEHARBOR_MCP_SERVER_FAKE") != "1" {
+	if os.Getenv("AUTOTO_MCP_SERVER_FAKE") != "1" {
 		return
 	}
 	decoder := json.NewDecoder(os.Stdin)

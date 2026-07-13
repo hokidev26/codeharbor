@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,16 +17,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
+	"autoto/internal/gitlock"
+	"autoto/internal/gitsnapshot"
 )
 
 const (
-	gitStatusMaxBytes        = 1 << 20
-	gitDiffMaxBytes          = 2 << 20
-	gitLogMaxBytes           = 512 << 10
-	gitCommitOutputMaxBytes  = 512 << 10
-	gitCommitMessageMaxBytes = 10 << 10
-	gitCommitMaxPaths        = 200
+	gitStatusMaxBytes          = 1 << 20
+	gitDiffMaxBytes            = 2 << 20
+	gitLogMaxBytes             = 512 << 10
+	gitCommitOutputMaxBytes    = 512 << 10
+	gitCommitMessageMaxBytes   = 10 << 10
+	gitCommitMaxPaths          = 200
+	gitRollbackPreviewMaxPaths = 20
 )
 
 type gitStatusResponse struct {
@@ -87,11 +92,34 @@ type gitRollbackRequest struct {
 }
 
 type gitRollbackResponse struct {
-	GeneratedAt string            `json:"generatedAt"`
-	RepoRoot    string            `json:"repoRoot"`
-	RunID       string            `json:"runId"`
-	BaseHead    string            `json:"baseHead"`
-	Status      gitStatusResponse `json:"status"`
+	GeneratedAt string             `json:"generatedAt"`
+	RepoRoot    string             `json:"repoRoot"`
+	RunID       string             `json:"runId"`
+	BaseHead    string             `json:"baseHead"`
+	Status      *gitStatusResponse `json:"status,omitempty"`
+	Warning     string             `json:"warning,omitempty"`
+}
+
+type gitRollbackPreviewResponse struct {
+	GeneratedAt  string   `json:"generatedAt"`
+	RepoRoot     string   `json:"repoRoot"`
+	RunID        string   `json:"runId"`
+	Available    bool     `json:"available"`
+	Reason       string   `json:"reason,omitempty"`
+	RestorePaths []string `json:"restorePaths"`
+	DeletePaths  []string `json:"deletePaths"`
+	RestoreCount int      `json:"restoreCount"`
+	DeleteCount  int      `json:"deleteCount"`
+	Truncated    bool     `json:"truncated,omitempty"`
+}
+
+type gitRollbackPlan struct {
+	available    bool
+	reason       string
+	baseHead     string
+	changes      []db.RunGitChange
+	restorePaths []string
+	deletePaths  []string
 }
 
 type gitCommitResponse struct {
@@ -120,7 +148,7 @@ type gitCommandError struct {
 func (e gitCommandError) Error() string { return e.Msg }
 
 func (s *Server) gitStatus(w http.ResponseWriter, r *http.Request) {
-	cwd, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), chi.URLParam(r, "id"))
+	cwd, repoRoot, err := s.resolveAgentGitRepo(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -153,7 +181,7 @@ func (s *Server) gitStatusForRepo(ctx context.Context, repoRoot, cwd string) (gi
 }
 
 func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
-	_, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), chi.URLParam(r, "id"))
+	_, repoRoot, err := s.resolveAgentGitRepo(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -196,7 +224,7 @@ func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gitLog(w http.ResponseWriter, r *http.Request) {
-	_, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), chi.URLParam(r, "id"))
+	_, repoRoot, err := s.resolveAgentGitRepo(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -211,10 +239,30 @@ func (s *Server) gitLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gitLogResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), RepoRoot: repoRoot, Commits: parseGitLog(out), Truncated: truncated})
 }
 
-func (s *Server) rollbackRun(w http.ResponseWriter, r *http.Request) {
-	narratorID := chi.URLParam(r, "id")
+func (s *Server) rollbackRunPreview(w http.ResponseWriter, r *http.Request) {
+	agentID := chi.URLParam(r, "id")
 	runID := chi.URLParam(r, "runId")
-	cwd, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), narratorID)
+	_, repoRoot, err := s.resolveAgentGitRepo(r.Context(), agentID)
+	if err != nil {
+		writeGitError(w, err)
+		return
+	}
+	run, err := s.store.GetRun(r.Context(), agentID, runID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	plan, err := s.buildRollbackPlan(r.Context(), repoRoot, run, db.RunCheckpointReady)
+	if err != nil {
+		plan = gitRollbackPlan{reason: err.Error()}
+	}
+	writeJSON(w, http.StatusOK, gitRollbackPreview(repoRoot, runID, plan))
+}
+
+func (s *Server) rollbackRun(w http.ResponseWriter, r *http.Request) {
+	agentID := chi.URLParam(r, "id")
+	runID := chi.URLParam(r, "runId")
+	cwd, repoRoot, err := s.resolveAgentGitRepo(r.Context(), agentID)
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -228,48 +276,289 @@ func (s *Server) rollbackRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "confirm must be true")
 		return
 	}
-	run, err := s.store.GetRun(r.Context(), narratorID, runID)
+
+	unlockGitMutation := gitlock.Default.Lock(repoRoot)
+	defer unlockGitMutation()
+	run, err := s.store.GetRun(r.Context(), agentID, runID)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	baseHead := strings.TrimSpace(run.BaseHead)
-	if baseHead == "" {
-		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "run has no clean-start checkpoint"})
-		return
-	}
-	endHead := strings.TrimSpace(run.EndHead)
-	if endHead != "" && endHead != baseHead {
-		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "run changed HEAD; refusing rollback across commits"})
-		return
-	}
-	currentHead, _, err := runGitCommand(r.Context(), repoRoot, 256, 3*time.Second, nil, "rev-parse", "HEAD")
+	plan, err := s.buildRollbackPlan(r.Context(), repoRoot, run, db.RunCheckpointReady)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
-	if strings.TrimSpace(currentHead) != baseHead {
-		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "current HEAD differs from run checkpoint"})
+	if !plan.available {
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: plan.reason})
 		return
 	}
-	if _, _, err := runGitCommand(r.Context(), repoRoot, gitCommitOutputMaxBytes, 10*time.Second, nil, "restore", "--source", baseHead, "--staged", "--worktree", "--", "."); err != nil {
-		writeGitError(w, err)
+	if err := s.store.ClaimRunGitRollback(r.Context(), runID); err != nil {
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "run rollback is no longer available: " + err.Error()})
 		return
 	}
-	if _, _, err := runGitCommand(r.Context(), repoRoot, gitCommitOutputMaxBytes, 10*time.Second, nil, "clean", "-fd", "--", "."); err != nil {
-		writeGitError(w, err)
+
+	run, err = s.store.GetRun(r.Context(), agentID, runID)
+	if err != nil {
+		writeGitError(w, s.failRollbackAfterClaim(r.Context(), runID, "reload run after rollback claim failed: "+err.Error(), http.StatusInternalServerError))
 		return
 	}
+	plan, err = s.buildRollbackPlan(r.Context(), repoRoot, run, db.RunCheckpointRollingBack)
+	if err != nil || !plan.available {
+		reason := "rollback verification failed after claim"
+		if err != nil {
+			reason += ": " + err.Error()
+		} else if plan.reason != "" {
+			reason += ": " + plan.reason
+		}
+		writeGitError(w, s.failRollbackAfterClaim(r.Context(), runID, reason, http.StatusConflict))
+		return
+	}
+	if err := restoreRunGitChanges(r.Context(), repoRoot, plan.baseHead, plan.changes); err != nil {
+		writeGitError(w, s.failRollbackAfterClaim(r.Context(), runID, "rollback file operations failed: "+err.Error(), http.StatusInternalServerError))
+		return
+	}
+	if err := s.store.MarkRunGitCheckpointRolledBack(r.Context(), runID); err != nil {
+		writeGitError(w, s.failRollbackAfterClaim(r.Context(), runID, "rollback file operations completed, but checkpoint state could not be marked rolled back: "+err.Error(), http.StatusInternalServerError))
+		return
+	}
+	response := gitRollbackResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), RepoRoot: repoRoot, RunID: runID, BaseHead: plan.baseHead}
 	status, err := s.gitStatusForRepo(r.Context(), repoRoot, cwd)
 	if err != nil {
-		writeGitError(w, err)
-		return
+		response.Warning = "rollback completed, but git status refresh failed: " + err.Error()
+		slog.Warn("refresh git status after rollback failed", "runId", runID, "repoRoot", repoRoot, "error", err)
+	} else {
+		response.Status = &status
 	}
-	writeJSON(w, http.StatusOK, gitRollbackResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), RepoRoot: repoRoot, RunID: runID, BaseHead: baseHead, Status: status})
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) failRollbackAfterClaim(ctx context.Context, runID, reason string, status int) error {
+	if err := s.store.FailRunGitRollback(ctx, runID, reason); err != nil {
+		return gitCommandError{Status: http.StatusInternalServerError, Msg: reason + "; checkpoint remains rolling_back because failure state could not be persisted: " + err.Error()}
+	}
+	return gitCommandError{Status: status, Msg: reason}
+}
+
+func (s *Server) buildRollbackPlan(ctx context.Context, repoRoot string, run db.Run, expectedState string) (gitRollbackPlan, error) {
+	plan := gitRollbackPlan{}
+	if run.CheckpointState != expectedState {
+		plan.reason = rollbackCheckpointStateReason(run)
+		return plan, nil
+	}
+	plan.baseHead = strings.TrimSpace(run.BaseHead)
+	if plan.baseHead == "" {
+		plan.reason = "run has no clean-start checkpoint"
+		return plan, nil
+	}
+	if strings.TrimSpace(run.CheckpointRepoRoot) == "" || strings.TrimSpace(run.GitSnapshotAt) == "" {
+		plan.reason = "run has no completed scoped file checkpoint"
+		return plan, nil
+	}
+	if canonicalPath(run.CheckpointRepoRoot) != canonicalPath(repoRoot) {
+		plan.reason = "run checkpoint belongs to a different git repository"
+		return plan, nil
+	}
+	if endHead := strings.TrimSpace(run.EndHead); endHead != "" && endHead != plan.baseHead {
+		plan.reason = "run changed HEAD; refusing rollback across commits"
+		return plan, nil
+	}
+	currentHead, truncated, err := runGitCommand(ctx, repoRoot, 256, 3*time.Second, nil, "rev-parse", "HEAD")
+	if err != nil {
+		return plan, err
+	}
+	if truncated || strings.TrimSpace(currentHead) != plan.baseHead {
+		plan.reason = "current HEAD differs from run checkpoint"
+		return plan, nil
+	}
+	changes, err := s.store.ListRunGitChanges(ctx, run.ID)
+	if err != nil {
+		return plan, err
+	}
+	if len(changes) == 0 {
+		plan.reason = "run checkpoint has no owned git changes to roll back"
+		return plan, nil
+	}
+	if err := verifyRunGitChanges(ctx, repoRoot, changes); err != nil {
+		return plan, err
+	}
+	plan.changes = append([]db.RunGitChange{}, changes...)
+	for _, change := range changes {
+		path, err := cleanGitPath(repoRoot, change.Path)
+		if err != nil || path == "" || change.OrigPath != "" {
+			return plan, gitCommandError{Status: http.StatusConflict, Msg: "run checkpoint contains an invalid or legacy rename path"}
+		}
+		if change.Untracked {
+			plan.deletePaths = append(plan.deletePaths, path)
+		} else {
+			plan.restorePaths = append(plan.restorePaths, path)
+		}
+	}
+	sort.Strings(plan.restorePaths)
+	sort.Strings(plan.deletePaths)
+	plan.available = true
+	plan.reason = "verified run-owned changes are ready to roll back"
+	return plan, nil
+}
+
+func rollbackCheckpointStateReason(run db.Run) string {
+	switch run.CheckpointState {
+	case db.RunCheckpointRolledBack:
+		return "run checkpoint was already rolled back"
+	case db.RunCheckpointRollingBack:
+		return "run rollback is already in progress"
+	case db.RunCheckpointInvalid:
+		return "run checkpoint is invalid: " + strings.TrimSpace(run.CheckpointError)
+	case db.RunCheckpointCapturing:
+		return "run checkpoint is still capturing tool changes"
+	case db.RunCheckpointTracking:
+		return "run checkpoint is still tracking and is not ready for rollback"
+	case db.RunCheckpointNone:
+		return "run has no completed scoped file checkpoint"
+	default:
+		return "run checkpoint is in an unknown state and cannot be rolled back"
+	}
+}
+
+func gitRollbackPreview(repoRoot, runID string, plan gitRollbackPlan) gitRollbackPreviewResponse {
+	restorePaths, restoreTruncated := truncateRollbackPaths(plan.restorePaths)
+	deletePaths, deleteTruncated := truncateRollbackPaths(plan.deletePaths)
+	return gitRollbackPreviewResponse{
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		RepoRoot:     repoRoot,
+		RunID:        runID,
+		Available:    plan.available,
+		Reason:       plan.reason,
+		RestorePaths: restorePaths,
+		DeletePaths:  deletePaths,
+		RestoreCount: len(plan.restorePaths),
+		DeleteCount:  len(plan.deletePaths),
+		Truncated:    restoreTruncated || deleteTruncated,
+	}
+}
+
+func truncateRollbackPaths(paths []string) ([]string, bool) {
+	if len(paths) <= gitRollbackPreviewMaxPaths {
+		return append([]string{}, paths...), false
+	}
+	return append([]string{}, paths[:gitRollbackPreviewMaxPaths]...), true
+}
+
+func verifyRunGitChanges(ctx context.Context, repoRoot string, changes []db.RunGitChange) error {
+	statusOut, truncated, err := runGitCommand(ctx, repoRoot, gitStatusMaxBytes, 3*time.Second, nil, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	if truncated {
+		return gitCommandError{Status: http.StatusConflict, Msg: "git status output exceeded rollback verification limit"}
+	}
+	entries, err := gitsnapshot.ParsePorcelainV1NoRenames(statusOut)
+	if err != nil {
+		return gitCommandError{Status: http.StatusConflict, Msg: "could not parse current git status for rollback"}
+	}
+	current := make(map[string]gitsnapshot.StatusEntry, len(entries))
+	for _, entry := range entries {
+		current[entry.Path] = entry
+	}
+	for _, change := range changes {
+		path, err := cleanGitPath(repoRoot, change.Path)
+		if err != nil || path == "" || change.OrigPath != "" {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run checkpoint contains an invalid or legacy rename path"}
+		}
+		entry, ok := current[path]
+		if !ok || !runGitChangeMatchesStatus(change, entry) {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run rollback refused because path changed after the run completed: " + path}
+		}
+		indexFingerprint, err := gitRunIndexFingerprint(ctx, repoRoot, path)
+		if err != nil {
+			return err
+		}
+		if indexFingerprint != change.IndexFingerprint {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run rollback refused because the staged state changed after the run completed: " + path}
+		}
+		worktreeFingerprint, err := gitsnapshot.WorktreeFingerprint(repoRoot, path)
+		if err != nil {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run rollback could not fingerprint checkpoint path: " + path}
+		}
+		if worktreeFingerprint != change.WorktreeFingerprint {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run rollback refused because file contents or mode changed after the run completed: " + path}
+		}
+	}
+	return nil
+}
+
+func runGitChangeMatchesStatus(change db.RunGitChange, entry gitsnapshot.StatusEntry) bool {
+	return change.Path == entry.Path && change.IndexStatus == entry.IndexStatus && change.WorktreeStatus == entry.WorktreeStatus && change.Untracked == entry.Untracked
+}
+
+func gitRunIndexFingerprint(ctx context.Context, repoRoot, path string) (string, error) {
+	out, truncated, err := runGitCommand(ctx, repoRoot, 16<<10, 3*time.Second, nil, "ls-files", "-s", "-z", "--", path)
+	if err != nil {
+		return "", err
+	}
+	if truncated {
+		return "", gitCommandError{Status: http.StatusConflict, Msg: "git index output exceeded rollback verification limit"}
+	}
+	return gitsnapshot.IndexFingerprint(out), nil
+}
+
+func restoreRunGitChanges(ctx context.Context, repoRoot, baseHead string, changes []db.RunGitChange) error {
+	trackedPaths := make([]string, 0, len(changes))
+	untrackedPaths := make([]string, 0, len(changes))
+	for _, change := range changes {
+		path, err := cleanGitPath(repoRoot, change.Path)
+		if err != nil || path == "" || change.OrigPath != "" {
+			return gitCommandError{Status: http.StatusConflict, Msg: "run checkpoint contains an invalid or legacy rename path"}
+		}
+		if change.Untracked {
+			untrackedPaths = append(untrackedPaths, path)
+			continue
+		}
+		trackedPaths = append(trackedPaths, path)
+	}
+	sort.Strings(trackedPaths)
+	sort.Strings(untrackedPaths)
+	if len(trackedPaths) > 0 {
+		args := append([]string{"restore", "--source", baseHead, "--staged", "--worktree", "--"}, trackedPaths...)
+		if _, _, err := runGitCommand(ctx, repoRoot, gitCommitOutputMaxBytes, 10*time.Second, nil, args...); err != nil {
+			return err
+		}
+	}
+	for _, path := range untrackedPaths {
+		if err := removeScopedRunFile(repoRoot, path); err != nil {
+			return gitCommandError{Status: http.StatusInternalServerError, Msg: "tracked changes were restored, but a verified run-created untracked file could not be removed; no further files were removed: " + path + ": " + err.Error()}
+		}
+	}
+	return nil
+}
+
+func removeScopedRunFile(repoRoot, path string) error {
+	path, err := cleanGitPath(repoRoot, path)
+	if err != nil || path == "" {
+		return gitCommandError{Status: http.StatusConflict, Msg: "run checkpoint contains an invalid path"}
+	}
+	absolute, err := gitsnapshot.Path(repoRoot, path)
+	if err != nil {
+		return gitCommandError{Status: http.StatusConflict, Msg: "run checkpoint contains an invalid path"}
+	}
+	info, err := os.Lstat(absolute)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+		return gitCommandError{Status: http.StatusConflict, Msg: "refusing to delete non-file run checkpoint path: " + path}
+	}
+	if err := os.Remove(absolute); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {
-	_, repoRoot, err := s.resolveNarratorGitRepo(r.Context(), chi.URLParam(r, "id"))
+	_, repoRoot, err := s.resolveAgentGitRepo(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -299,6 +588,8 @@ func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	unlockGitMutation := gitlock.Default.Lock(repoRoot)
+	defer unlockGitMutation()
 	statusOut, _, err := runGitCommand(r.Context(), repoRoot, gitStatusMaxBytes, 3*time.Second, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		writeGitError(w, err)
@@ -359,51 +650,51 @@ func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) resolveNarratorGitRepo(ctx context.Context, narratorID string) (string, string, error) {
-	narrator, err := s.store.GetNarrator(ctx, narratorID)
+func (s *Server) resolveAgentGitRepo(ctx context.Context, agentID string) (string, string, error) {
+	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return "", "", err
 	}
-	cwd := strings.TrimSpace(narrator.CWD)
-	if cwd == "" && narrator.ChapterID != "" {
-		chapter, err := s.store.GetChapter(ctx, narrator.ChapterID)
+	cwd := strings.TrimSpace(agent.CWD)
+	if cwd == "" && agent.WorklineID != "" {
+		workline, err := s.store.GetWorkline(ctx, agent.WorklineID)
 		if err == nil {
-			cwd = strings.TrimSpace(chapter.WorktreePath)
+			cwd = strings.TrimSpace(workline.WorktreePath)
 		}
 	}
 	if cwd == "" {
-		return "", "", gitCommandError{Status: http.StatusBadRequest, Msg: "narrator cwd is not configured"}
+		return "", "", gitCommandError{Status: http.StatusBadRequest, Msg: "agent cwd is not configured"}
 	}
 	info, err := os.Stat(cwd)
 	if err != nil {
 		return "", "", err
 	}
 	if !info.IsDir() {
-		return "", "", gitCommandError{Status: http.StatusBadRequest, Msg: "narrator cwd must be a directory"}
+		return "", "", gitCommandError{Status: http.StatusBadRequest, Msg: "agent cwd must be a directory"}
 	}
 	repoRoot, _, err := runGitCommand(ctx, cwd, 4096, 3*time.Second, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", "", err
 	}
 	repoRoot = strings.TrimSpace(repoRoot)
-	if err := s.validateNarratorGitRepoBoundary(ctx, narrator, repoRoot); err != nil {
+	if err := s.validateAgentGitRepoBoundary(ctx, agent, repoRoot); err != nil {
 		return "", "", err
 	}
 	return cwd, repoRoot, nil
 }
 
-func (s *Server) validateNarratorGitRepoBoundary(ctx context.Context, narrator db.Narrator, repoRoot string) error {
+func (s *Server) validateAgentGitRepoBoundary(ctx context.Context, agent db.Agent, repoRoot string) error {
 	repoRoot = strings.TrimSpace(repoRoot)
 	if repoRoot == "" {
 		return gitCommandError{Status: http.StatusConflict, Msg: "git repository root is not configured"}
 	}
 	allowedRoots := make([]string, 0, 2)
-	if narrator.ChapterID != "" {
-		if chapter, err := s.store.GetChapter(ctx, narrator.ChapterID); err == nil {
-			if strings.TrimSpace(chapter.WorktreePath) != "" {
-				allowedRoots = append(allowedRoots, chapter.WorktreePath)
+	if agent.WorklineID != "" {
+		if workline, err := s.store.GetWorkline(ctx, agent.WorklineID); err == nil {
+			if strings.TrimSpace(workline.WorktreePath) != "" {
+				allowedRoots = append(allowedRoots, workline.WorktreePath)
 			}
-			if project, err := s.store.GetProject(ctx, chapter.ProjectID); err == nil && strings.TrimSpace(project.GitPath) != "" {
+			if project, err := s.store.GetProject(ctx, workline.ProjectID); err == nil && strings.TrimSpace(project.GitPath) != "" {
 				allowedRoots = append(allowedRoots, project.GitPath)
 			}
 		}

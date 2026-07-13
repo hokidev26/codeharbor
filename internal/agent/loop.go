@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
-	"codeharbor/internal/tools"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
+	"autoto/internal/skills"
+	"autoto/internal/tools"
 )
 
 type Runner struct {
@@ -30,7 +32,7 @@ type Runner struct {
 
 	approvalMu    sync.Mutex
 	approvals     map[string]*pendingApproval
-	sessionGrants map[string]map[string]struct{}
+	sessionGrants map[string]map[string]sessionGrant
 
 	notifierMu sync.RWMutex
 	notifier   Notifier
@@ -47,13 +49,13 @@ type activeRun struct {
 }
 
 type NotificationEvent struct {
-	Event      string
-	RunID      string
-	NarratorID string
-	Status     string
-	Error      string
-	ToolUseID  string
-	ToolName   string
+	Event     string
+	RunID     string
+	AgentID   string
+	Status    string
+	Error     string
+	ToolUseID string
+	ToolName  string
 }
 
 type Notifier interface {
@@ -68,25 +70,48 @@ type runCompletion struct {
 }
 
 type pendingApproval struct {
-	NarratorID string
-	ToolUseID  string
-	ToolName   string
-	Input      json.RawMessage
-	Risk       tools.Risk
-	CWD        string
-	Command    string
-	Reason     string
-	Warning    string
-	GrantKey   string
-	ExpiresAt  time.Time
-	Decision   chan ToolApprovalDecision
+	AgentID              string
+	RunID                string
+	ToolUseID            string
+	ToolName             string
+	Input                json.RawMessage
+	Risk                 tools.Risk
+	CWD                  string
+	Command              string
+	Reason               string
+	Warning              string
+	GrantKey             string
+	PermissionGeneration int64
+	PolicyGeneration     int64
+	ExpiresAt            time.Time
+	Decision             chan ToolApprovalDecision
 }
 
 type ToolApprovalDecision struct {
-	Decision  string
-	Reason    string
-	DecidedBy string
+	Decision             string
+	Reason               string
+	DecidedBy            string
+	PermissionGeneration int64
+	PolicyGeneration     int64
+	GrantKey             string
 }
+
+type sessionGrant struct {
+	PermissionGeneration int64
+	PolicyGeneration     int64
+}
+
+type toolPermissionResolution struct {
+	Decision string
+	Reason   string
+	Warning  string
+}
+
+const (
+	toolPermissionAllow = "allow"
+	toolPermissionAsk   = "ask"
+	toolPermissionDeny  = "deny"
+)
 
 const (
 	toolApprovalTimeout       = 10 * time.Minute
@@ -97,7 +122,7 @@ const (
 )
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]struct{})}
+	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
 }
 
 func (r *Runner) SetNotifier(notifier Notifier) {
@@ -116,96 +141,177 @@ func (r *Runner) notify(event NotificationEvent) {
 	go notifier.Notify(context.Background(), event)
 }
 
-func (r *Runner) SubmitUserMessage(ctx context.Context, narratorID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
-	msg, err := r.store.AddMessageWithAttachments(ctx, db.Message{NarratorID: narratorID, Role: "user", ContentText: text, CreatedBy: createdBy}, attachments)
+var serverSkillCommandPattern = regexp.MustCompile(`^(/[A-Za-z0-9][A-Za-z0-9_-]{0,62})(?:$|[ \t\r\n]+([\s\S]*))`)
+
+func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
+	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
 	if err != nil {
 		return db.Message{}, err
 	}
-	run, err := r.store.CreateRun(ctx, db.Run{NarratorID: narratorID, TriggerMessageID: msg.ID, Status: "pending"})
+	msg, err := r.store.AddMessageWithAttachments(ctx, db.Message{AgentID: agentID, Role: "user", ContentText: contentText, CommandText: commandText, CreatedBy: createdBy}, attachments)
 	if err != nil {
 		return db.Message{}, err
 	}
-	if err := r.store.AssignMessageRun(ctx, narratorID, msg.ID, run.ID); err != nil {
+	run, err := r.store.CreateRun(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending"})
+	if err != nil {
+		return db.Message{}, err
+	}
+	if err := r.store.AssignMessageRun(ctx, agentID, msg.ID, run.ID); err != nil {
 		return db.Message{}, err
 	}
 	msg.RunID = run.ID
-	r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments)}, run.ID)})
-	go r.runWithRun(context.Background(), narratorID, run.ID, msg.ID)
+	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments)}, run.ID)})
+	go r.runWithRun(context.Background(), agentID, run.ID, msg.ID)
 	return msg, nil
 }
 
-func (r *Runner) RunWithTrigger(ctx context.Context, narratorID, triggerMessageID string) {
-	r.runWithRun(ctx, narratorID, "", triggerMessageID)
+func (r *Runner) expandServerSkillCommand(ctx context.Context, values ...string) (contentText, commandText string, err error) {
+	if len(values) == 0 || len(values) > 2 {
+		return "", "", errors.New("skill command expansion requires text")
+	}
+	agentID, text := "", values[0]
+	if len(values) == 2 {
+		agentID, text = values[0], values[1]
+	}
+	match := serverSkillCommandPattern.FindStringSubmatch(text)
+	if match == nil {
+		return text, "", nil
+	}
+	var skill db.Skill
+	if agentID == "" {
+		skill, err = r.store.GetSkillByCommand(ctx, match[1])
+	} else {
+		skill, err = r.store.ResolveSkillByAgentAndCommand(ctx, agentID, match[1])
+	}
+	if db.IsNotFound(err) {
+		return text, "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateServerSkillInvocation(skill); err != nil {
+		return "", "", err
+	}
+	contentText = skill.Prompt
+	if args := strings.TrimSpace(match[2]); args != "" {
+		contentText += "\n\n用户参数：\n" + args
+	}
+	return contentText, text, nil
 }
 
-func (r *Runner) Run(ctx context.Context, narratorID string) {
-	r.runWithRun(ctx, narratorID, "", "")
+func validateServerSkillInvocation(skill db.Skill) error {
+	unavailable := func(reason string) error {
+		return fmt.Errorf("%w: server skill %s %s", db.ErrConflict, skill.Command, reason)
+	}
+	if !skill.Enabled {
+		return unavailable("is disabled")
+	}
+	if skill.ScannerVersion != skills.ScannerVersion {
+		return unavailable("requires scanner revalidation")
+	}
+	normalized, err := skills.Normalize(skills.Skill{Name: skill.Name, Command: skill.Command, Description: skill.Description, Prompt: skill.Prompt})
+	if err != nil || normalized.Name != skill.Name || normalized.Command != skill.Command || normalized.Description != skill.Description || normalized.Prompt != skill.Prompt {
+		return unavailable("has invalid stored content")
+	}
+	result := skills.Scan(normalized)
+	if result.Hash != skill.ContentHash {
+		return unavailable("has stale content metadata")
+	}
+	if result.Verdict != skill.ScanVerdict {
+		return unavailable("has stale scan metadata")
+	}
+	switch skill.ScanVerdict {
+	case skills.VerdictSafe:
+		return nil
+	case skills.VerdictReview:
+		acknowledgedAt := strings.TrimSpace(skill.RiskAcknowledgedAt)
+		acknowledgedBy := strings.TrimSpace(skill.RiskAcknowledgedBy)
+		if acknowledgedAt == "" || acknowledgedBy == "" || len(acknowledgedBy) > 200 || strings.TrimSpace(skill.RiskAcknowledgedHash) != skill.ContentHash {
+			return unavailable("requires acknowledgement for the current content")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, acknowledgedAt); err != nil {
+			return unavailable("has an invalid risk acknowledgement")
+		}
+		return nil
+	case skills.VerdictBlocked:
+		return unavailable("is blocked")
+	default:
+		return unavailable("has an invalid scan verdict")
+	}
 }
 
-func (r *Runner) runWithRun(ctx context.Context, narratorID, runID, triggerMessageID string) {
-	runCtx, active, started, registerErr := r.registerRun(ctx, narratorID, runID, triggerMessageID)
+func (r *Runner) RunWithTrigger(ctx context.Context, agentID, triggerMessageID string) {
+	r.runWithRun(ctx, agentID, "", triggerMessageID)
+}
+
+func (r *Runner) Run(ctx context.Context, agentID string) {
+	r.runWithRun(ctx, agentID, "", "")
+}
+
+func (r *Runner) runWithRun(ctx context.Context, agentID, runID, triggerMessageID string) {
+	runCtx, active, started, registerErr := r.registerRun(ctx, agentID, runID, triggerMessageID)
 	if registerErr != nil {
-		slog.Error("register agent run failed", "narratorId", narratorID, "runId", runID, "error", registerErr)
-		_ = r.store.SetNarratorStatus(context.Background(), narratorID, "error", registerErr.Error())
+		slog.Error("register agent run failed", "agentId", agentID, "runId", runID, "error", registerErr)
+		_ = r.store.SetAgentStatus(context.Background(), agentID, "error", registerErr.Error())
 		if runID != "" {
 			r.captureRunEndHead(runID)
 			_ = r.store.CompleteRun(context.Background(), runID, "error", registerErr.Error())
 		}
-		r.publish(Event{Type: "agent.error", NarratorID: narratorID, Text: registerErr.Error(), Data: runEventData(runID)})
-		r.notify(NotificationEvent{Event: "error", RunID: runID, NarratorID: narratorID, Status: "error", Error: registerErr.Error()})
+		r.publish(Event{Type: "agent.error", AgentID: agentID, Text: registerErr.Error(), Data: runEventData(runID)})
+		r.notify(NotificationEvent{Event: "error", RunID: runID, AgentID: agentID, Status: "error", Error: registerErr.Error()})
 		return
 	}
 	if !started {
 		return
 	}
 
-	err := r.run(runCtx, narratorID, active.runID)
-	completion := r.unregisterRun(narratorID, active)
+	err := r.run(runCtx, agentID, active.runID)
+	completion := r.unregisterRun(agentID, active)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			if completion.interrupted || !completion.pending {
-				slog.Info("agent loop interrupted", "narratorId", narratorID, "runId", activeRunID(active))
-				_ = r.store.SetNarratorStatus(context.Background(), narratorID, "interrupted", "")
+				slog.Info("agent loop interrupted", "agentId", agentID, "runId", activeRunID(active))
+				_ = r.store.SetAgentStatus(context.Background(), agentID, "interrupted", "")
 				if active != nil && active.runID != "" {
 					r.captureRunEndHead(active.runID)
 					_ = r.store.CompleteRun(context.Background(), active.runID, "interrupted", "")
 				}
-				r.publish(Event{Type: "agent.interrupted", NarratorID: narratorID, Data: runEventData(activeRunID(active))})
-				r.notify(NotificationEvent{Event: "interrupted", RunID: activeRunID(active), NarratorID: narratorID, Status: "interrupted"})
+				r.publish(Event{Type: "agent.interrupted", AgentID: agentID, Data: runEventData(activeRunID(active))})
+				r.notify(NotificationEvent{Event: "interrupted", RunID: activeRunID(active), AgentID: agentID, Status: "interrupted"})
 				return
 			}
 			if active != nil && active.runID != "" {
 				r.captureRunEndHead(active.runID)
 				_ = r.store.CompleteRun(context.Background(), active.runID, "superseded", "")
-				r.notify(NotificationEvent{Event: "superseded", RunID: active.runID, NarratorID: narratorID, Status: "superseded"})
+				r.notify(NotificationEvent{Event: "superseded", RunID: active.runID, AgentID: agentID, Status: "superseded"})
 			}
-			go r.runWithRun(context.Background(), narratorID, completion.runID, completion.triggerMessageID)
+			go r.runWithRun(context.Background(), agentID, completion.runID, completion.triggerMessageID)
 			return
 		}
-		slog.Error("agent loop failed", "narratorId", narratorID, "runId", activeRunID(active), "error", err)
-		_ = r.store.SetNarratorStatus(context.Background(), narratorID, "error", err.Error())
+		slog.Error("agent loop failed", "agentId", agentID, "runId", activeRunID(active), "error", err)
+		_ = r.store.SetAgentStatus(context.Background(), agentID, "error", err.Error())
 		if active != nil && active.runID != "" {
 			r.captureRunEndHead(active.runID)
 			_ = r.store.CompleteRun(context.Background(), active.runID, "error", err.Error())
 		}
-		r.publish(Event{Type: "agent.error", NarratorID: narratorID, Text: err.Error(), Data: runEventData(activeRunID(active))})
-		r.notify(NotificationEvent{Event: "error", RunID: activeRunID(active), NarratorID: narratorID, Status: "error", Error: err.Error()})
+		r.publish(Event{Type: "agent.error", AgentID: agentID, Text: err.Error(), Data: runEventData(activeRunID(active))})
+		r.notify(NotificationEvent{Event: "error", RunID: activeRunID(active), AgentID: agentID, Status: "error", Error: err.Error()})
 		if completion.pending {
-			go r.runWithRun(context.Background(), narratorID, completion.runID, completion.triggerMessageID)
+			go r.runWithRun(context.Background(), agentID, completion.runID, completion.triggerMessageID)
 		}
 		return
 	}
 	if completion.pending {
-		go r.runWithRun(context.Background(), narratorID, completion.runID, completion.triggerMessageID)
+		go r.runWithRun(context.Background(), agentID, completion.runID, completion.triggerMessageID)
 	}
 }
 
-func (r *Runner) Interrupt(ctx context.Context, narratorID string) (bool, error) {
-	if _, err := r.store.GetNarrator(ctx, narratorID); err != nil {
+func (r *Runner) Interrupt(ctx context.Context, agentID string) (bool, error) {
+	if _, err := r.store.GetAgent(ctx, agentID); err != nil {
 		return false, err
 	}
 	r.runMu.Lock()
-	active := r.running[narratorID]
+	active := r.running[agentID]
 	var cancel context.CancelFunc
 	pendingRunID := ""
 	if active != nil {
@@ -228,25 +334,39 @@ func (r *Runner) Interrupt(ctx context.Context, narratorID string) (bool, error)
 	return true, nil
 }
 
-func (r *Runner) ApproveToolCall(ctx context.Context, narratorID, toolUseID string, decision ToolApprovalDecision) (bool, error) {
-	if _, err := r.store.GetNarrator(ctx, narratorID); err != nil {
+func (r *Runner) ApproveToolCall(ctx context.Context, agentID, toolUseID string, decision ToolApprovalDecision) (bool, error) {
+	generations, err := r.store.GetPermissionGenerations(ctx, agentID)
+	if err != nil {
 		return false, err
 	}
 	decision.Decision = strings.TrimSpace(decision.Decision)
 	if decision.Decision != "allow_once" && decision.Decision != "allow_session" && decision.Decision != "deny" {
 		return false, fmt.Errorf("invalid approval decision: %s", decision.Decision)
 	}
-	key := approvalKey(narratorID, toolUseID)
+	key := approvalKey(agentID, toolUseID)
 	r.approvalMu.Lock()
 	approval := r.approvals[key]
+	r.approvalMu.Unlock()
 	if approval == nil {
-		r.approvalMu.Unlock()
 		return false, nil
 	}
-	if decision.Decision == "allow_session" {
-		r.addSessionGrantLocked(narratorID, approval.GrantKey)
+	if decision.PermissionGeneration != 0 && decision.PermissionGeneration != approval.PermissionGeneration {
+		return false, fmt.Errorf("%w: pending approval permission generation changed", db.ErrConflict)
 	}
-	r.approvalMu.Unlock()
+	if decision.PolicyGeneration != 0 && decision.PolicyGeneration != approval.PolicyGeneration {
+		return false, fmt.Errorf("%w: pending approval policy generation changed", db.ErrConflict)
+	}
+	if generations.Permission != approval.PermissionGeneration || generations.Policy != approval.PolicyGeneration {
+		invalidated := ToolApprovalDecision{Decision: "deny", Reason: "tool approval invalidated by permission or policy change", DecidedBy: "system", PermissionGeneration: approval.PermissionGeneration, PolicyGeneration: approval.PolicyGeneration, GrantKey: approval.GrantKey}
+		select {
+		case approval.Decision <- invalidated:
+		default:
+		}
+		return false, fmt.Errorf("%w: pending approval was invalidated by permission or policy change", db.ErrConflict)
+	}
+	decision.PermissionGeneration = approval.PermissionGeneration
+	decision.PolicyGeneration = approval.PolicyGeneration
+	decision.GrantKey = approval.GrantKey
 	select {
 	case approval.Decision <- decision:
 		return true, nil
@@ -257,12 +377,19 @@ func (r *Runner) ApproveToolCall(ctx context.Context, narratorID, toolUseID stri
 	}
 }
 
-func (r *Runner) registerRun(ctx context.Context, narratorID, runID, triggerMessageID string) (context.Context, *activeRun, bool, error) {
+func (r *Runner) registerRun(ctx context.Context, agentID, runID, triggerMessageID string) (context.Context, *activeRun, bool, error) {
 	r.runMu.Lock()
 	if r.running == nil {
 		r.running = make(map[string]*activeRun)
 	}
-	if active := r.running[narratorID]; active != nil {
+	if active := r.running[agentID]; active != nil {
+		// Keep only the newest queued request. Persistently supersede the prior
+		// pending run before it can be forgotten by this in-memory slot.
+		previousPending, previousRunID, previousTriggerID := active.pending, active.pendingRunID, active.pendingTriggerMessageID
+		replacedPendingRunID := ""
+		if runID != "" && active.pendingRunID != "" && active.pendingRunID != runID {
+			replacedPendingRunID = active.pendingRunID
+		}
 		active.pending = true
 		if runID != "" {
 			active.pendingRunID = runID
@@ -272,6 +399,23 @@ func (r *Runner) registerRun(ctx context.Context, narratorID, runID, triggerMess
 		}
 		cancel := active.cancel
 		r.runMu.Unlock()
+		if replacedPendingRunID != "" {
+			r.captureRunEndHead(replacedPendingRunID)
+			if err := r.store.CompleteRun(context.Background(), replacedPendingRunID, "superseded", ""); err != nil && !db.IsConflict(err) && !db.IsNotFound(err) {
+				// Do not leave the old durable run stranded if its terminal write
+				// failed. Restore it as the queued successor, then let the new run
+				// follow its normal registration-error path.
+				r.runMu.Lock()
+				if r.running[agentID] == active && active.pendingRunID == runID {
+					active.pending, active.pendingRunID, active.pendingTriggerMessageID = previousPending, previousRunID, previousTriggerID
+				}
+				r.runMu.Unlock()
+				if cancel != nil {
+					cancel()
+				}
+				return nil, nil, false, err
+			}
+		}
 		if cancel != nil {
 			cancel()
 		}
@@ -280,7 +424,7 @@ func (r *Runner) registerRun(ctx context.Context, narratorID, runID, triggerMess
 	runCtx, cancel := context.WithCancel(ctx)
 	active := &activeRun{cancel: cancel, runID: runID, triggerMessageID: triggerMessageID}
 	if active.runID == "" {
-		runningRun, err := r.store.CreateRun(context.Background(), db.Run{NarratorID: narratorID, TriggerMessageID: triggerMessageID, Status: "running"})
+		runningRun, err := r.store.CreateRun(context.Background(), db.Run{AgentID: agentID, TriggerMessageID: triggerMessageID, Status: "running"})
 		if err != nil {
 			r.runMu.Unlock()
 			cancel()
@@ -288,7 +432,7 @@ func (r *Runner) registerRun(ctx context.Context, narratorID, runID, triggerMess
 		}
 		active.runID = runningRun.ID
 		if triggerMessageID != "" {
-			if err := r.store.AssignMessageRun(context.Background(), narratorID, triggerMessageID, active.runID); err != nil {
+			if err := r.store.AssignMessageRun(context.Background(), agentID, triggerMessageID, active.runID); err != nil {
 				r.runMu.Unlock()
 				cancel()
 				return nil, nil, false, err
@@ -299,20 +443,20 @@ func (r *Runner) registerRun(ctx context.Context, narratorID, runID, triggerMess
 		cancel()
 		return nil, nil, false, err
 	}
-	r.running[narratorID] = active
+	r.running[agentID] = active
 	r.runMu.Unlock()
 	return runCtx, active, true, nil
 }
 
-func (r *Runner) unregisterRun(narratorID string, active *activeRun) runCompletion {
+func (r *Runner) unregisterRun(agentID string, active *activeRun) runCompletion {
 	completion := runCompletion{}
 	r.runMu.Lock()
-	if r.running[narratorID] == active {
+	if r.running[agentID] == active {
 		completion.pending = active.pending
 		completion.interrupted = active.interrupted
 		completion.runID = active.pendingRunID
 		completion.triggerMessageID = active.pendingTriggerMessageID
-		delete(r.running, narratorID)
+		delete(r.running, agentID)
 	}
 	r.runMu.Unlock()
 	if active != nil && active.cancel != nil {
@@ -321,30 +465,30 @@ func (r *Runner) unregisterRun(narratorID string, active *activeRun) runCompleti
 	return completion
 }
 
-func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
+func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := r.store.SetNarratorStatus(ctx, narratorID, "running", ""); err != nil {
+	if err := r.store.SetAgentStatus(ctx, agentID, "running", ""); err != nil {
 		return err
 	}
-	r.publish(Event{Type: "agent.started", NarratorID: narratorID, Data: runEventData(runID)})
+	r.publish(Event{Type: "agent.started", AgentID: agentID, Data: runEventData(runID)})
 
-	narrator, err := r.store.GetNarrator(ctx, narratorID)
+	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return err
 	}
-	r.captureRunCheckpoint(ctx, narrator, runID)
-	projectInstructions := loadProjectInstructions(narrator.CWD)
+	r.captureRunCheckpoint(ctx, agent, runID)
+	projectInstructions := loadProjectInstructions(agent.CWD)
 	if strings.TrimSpace(projectInstructions.Text) != "" {
-		narrator.SystemPrompt = mergeProjectInstructions(narrator.SystemPrompt, projectInstructions)
-		r.publish(Event{Type: "project.instructions_loaded", NarratorID: narratorID, Data: mergeEventData(projectInstructions.eventData(), runID)})
+		agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
+		r.publish(Event{Type: "project.instructions_loaded", AgentID: agentID, Data: mergeEventData(projectInstructions.eventData(), runID)})
 	}
-	messages, err := r.store.ListMessagesWithAttachmentData(ctx, narratorID)
+	messages, err := r.store.ListMessagesWithAttachmentData(ctx, agentID)
 	if err != nil {
 		return err
 	}
-	provider, model, err := r.providers.Resolve(narrator.Model)
+	provider, model, err := r.providers.Resolve(agent.Model)
 	if err != nil {
 		return err
 	}
@@ -354,16 +498,19 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 		maxTurns = 20
 	}
 	toolSpecs := r.toolSpecs()
+	if !providers.CapabilitiesFor(provider).Tools {
+		toolSpecs = nil
+	}
 	for turn := 0; turn < maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		providerMessages, updatedNarrator, err := r.managedContextForTurn(ctx, narrator, messages, toolSpecs)
+		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs)
 		if err != nil {
 			return err
 		}
-		narrator = updatedNarrator
-		result, err := r.runModelTurn(ctx, narratorID, runID, provider, model, narrator.SystemPrompt, providerMessages, toolSpecs)
+		agent = updatedAgent
+		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs)
 		if err != nil {
 			return err
 		}
@@ -375,18 +522,18 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 			if assistantText == "" {
 				assistantText = "Done."
 			}
-			assistantMsg, err := r.store.AddMessage(ctx, db.Message{NarratorID: narratorID, RunID: runID, Role: "assistant", ContentText: assistantText})
+			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText})
 			if err != nil {
 				return err
 			}
-			r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
+			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
 			r.captureRunEndHead(runID)
 			if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
 				return err
 			}
-			r.publish(Event{Type: "agent.done", NarratorID: narratorID, Data: mergeEventData(map[string]any{"stopReason": result.StopReason}, runID)})
-			r.notify(NotificationEvent{Event: "completed", RunID: runID, NarratorID: narratorID, Status: "completed"})
-			if err := r.store.SetNarratorStatus(ctx, narratorID, "idle", ""); err != nil {
+			r.publish(Event{Type: "agent.done", AgentID: agentID, Data: mergeEventData(map[string]any{"stopReason": result.StopReason}, runID)})
+			r.notify(NotificationEvent{Event: "completed", RunID: runID, AgentID: agentID, Status: "completed"})
+			if err := r.store.SetAgentStatus(ctx, agentID, "idle", ""); err != nil {
 				return err
 			}
 			return nil
@@ -395,11 +542,11 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 		assistantBlocks := assistantToolUseBlocks(result.Text, result.ToolCalls)
 		assistantJSON, _ := json.Marshal(assistantBlocks)
 		assistantText := assistantToolUseText(result.Text, result.ToolCalls)
-		assistantMsg, err := r.store.AddMessage(ctx, db.Message{NarratorID: narratorID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON})
+		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON})
 		if err != nil {
 			return err
 		}
-		r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: assistantMsg.ID, Text: assistantText, Data: mergeEventData(map[string]any{"toolCalls": len(result.ToolCalls)}, runID)})
+		r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: mergeEventData(map[string]any{"toolCalls": len(result.ToolCalls)}, runID)})
 		messages = append(messages, assistantMsg)
 
 		for _, call := range result.ToolCalls {
@@ -407,51 +554,51 @@ func (r *Runner) run(ctx context.Context, narratorID, runID string) error {
 				return err
 			}
 			toolCall := normalizeProviderToolCall(call)
-			toolResult, err := r.executeToolForLoop(ctx, narratorID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID)
+			toolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID)
 			if err != nil {
 				toolResult = tools.Result{Output: err.Error(), IsError: true}
 			}
 			toolResultBlock := providers.ContentBlock{Type: "tool_result", ToolUseID: toolCall.ID, ToolName: toolCall.Name, Output: toolResult.Output, IsError: toolResult.IsError}
 			toolResultJSON, _ := json.Marshal([]providers.ContentBlock{toolResultBlock})
 			toolResultText := toolResultMessageText(toolCall, toolResult)
-			toolMsg, err := r.store.AddMessage(ctx, db.Message{NarratorID: narratorID, RunID: runID, Role: "user", ParentToolID: toolCall.ID, ContentText: toolResultText, ContentJSON: toolResultJSON})
+			toolMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "user", ParentToolID: toolCall.ID, ContentText: toolResultText, ContentJSON: toolResultJSON})
 			if err != nil {
 				return err
 			}
-			r.publish(Event{Type: "message.created", NarratorID: narratorID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": toolResult.IsError}, runID)})
+			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": toolResult.IsError}, runID)})
 			messages = append(messages, toolMsg)
 		}
 	}
 	return fmt.Errorf("agent reached max turns (%d) while model kept requesting tools", maxTurns)
 }
 
-func (r *Runner) managedContextForTurn(ctx context.Context, narrator db.Narrator, messages []db.Message, toolSpecs []providers.ToolSpec) ([]providers.Message, db.Narrator, error) {
-	providerMessages := providerMessagesForContext(narrator, messages)
+func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, messages []db.Message, toolSpecs []providers.ToolSpec) ([]providers.Message, db.Agent, error) {
+	providerMessages := providerMessagesForContext(agent, messages)
 	limit := r.contextTokenLimit()
-	if estimateRequestTokens(narrator.SystemPrompt, providerMessages, toolSpecs) <= limit {
-		return providerMessages, narrator, nil
+	if estimateRequestTokens(agent.SystemPrompt, providerMessages, toolSpecs) <= limit {
+		return providerMessages, agent, nil
 	}
 
-	candidates := selectSummaryCandidates(messages, narrator.PruneBoundaryMessageID, contextKeepRecentMessages)
+	candidates := selectSummaryCandidates(messages, agent.PruneBoundaryMessageID, contextKeepRecentMessages)
 	if len(candidates) == 0 {
-		return providerMessages, narrator, nil
+		return providerMessages, agent, nil
 	}
-	summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, narrator, candidates))
+	summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
 	if summary == "" {
-		return providerMessages, narrator, nil
+		return providerMessages, agent, nil
 	}
 	boundaryID := candidates[len(candidates)-1].ID
 	prunedPercent := 0
 	if len(messages) > 0 {
 		prunedPercent = int(float64(len(candidates)) / float64(len(messages)) * 100)
 	}
-	if err := r.store.UpdateNarratorContextSummary(ctx, narrator.ID, summary, boundaryID, prunedPercent); err != nil {
-		return nil, narrator, err
+	if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
+		return nil, agent, err
 	}
-	narrator.ContextSummary = summary
-	narrator.PruneBoundaryMessageID = boundaryID
-	narrator.PrunedPercent = prunedPercent
-	return providerMessagesForContext(narrator, messages), narrator, nil
+	agent.ContextSummary = summary
+	agent.PruneBoundaryMessageID = boundaryID
+	agent.PrunedPercent = prunedPercent
+	return providerMessagesForContext(agent, messages), agent, nil
 }
 
 func (r *Runner) contextTokenLimit() int {
@@ -461,10 +608,10 @@ func (r *Runner) contextTokenLimit() int {
 	return defaultContextTokenLimit
 }
 
-func providerMessagesForContext(narrator db.Narrator, messages []db.Message) []providers.Message {
-	start := messagesStartAfterBoundary(messages, narrator.PruneBoundaryMessageID)
+func providerMessagesForContext(agent db.Agent, messages []db.Message) []providers.Message {
+	start := messagesStartAfterBoundary(messages, agent.PruneBoundaryMessageID)
 	out := make([]providers.Message, 0, len(messages)-start+1)
-	if summary := strings.TrimSpace(narrator.ContextSummary); summary != "" {
+	if summary := strings.TrimSpace(agent.ContextSummary); summary != "" {
 		out = append(out, summaryProviderMessage(summary))
 	}
 	compactBefore := len(messages) - contextKeepRecentMessages
@@ -474,6 +621,54 @@ func providerMessagesForContext(narrator db.Narrator, messages []db.Message) []p
 			continue
 		}
 		out = append(out, message)
+	}
+	return out
+}
+
+func prepareProviderMessagesForCapabilities(messages []providers.Message, capabilities providers.Capabilities) []providers.Message {
+	if capabilities.Tools && capabilities.ImageInput {
+		return messages
+	}
+	out := make([]providers.Message, len(messages))
+	for i, message := range messages {
+		out[i] = message
+		if len(message.Blocks) == 0 {
+			continue
+		}
+		blocks := make([]providers.ContentBlock, 0, len(message.Blocks))
+		for _, block := range message.Blocks {
+			switch block.Type {
+			case "image":
+				if capabilities.ImageInput {
+					blocks = append(blocks, block)
+					continue
+				}
+				name := strings.TrimSpace(block.Filename)
+				if name == "" {
+					name = "image"
+				}
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("[图片附件 %s 未发送：当前 Provider 不支持原生图片输入。]", name)})
+			case "tool_use":
+				if capabilities.Tools {
+					blocks = append(blocks, block)
+					continue
+				}
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("[历史工具调用 %s 未作为结构化工具消息发送。]", strings.TrimSpace(block.ToolName))})
+			case "tool_result":
+				if capabilities.Tools {
+					blocks = append(blocks, block)
+					continue
+				}
+				blocks = append(blocks, providers.ContentBlock{Type: "text", Text: fmt.Sprintf("[历史工具结果 %s]\n%s", strings.TrimSpace(block.ToolName), block.Output)})
+			default:
+				block.Data = nil
+				blocks = append(blocks, block)
+			}
+		}
+		out[i].Blocks = blocks
+		if content := strings.TrimSpace(contextMessageContent(blocks)); content != "" {
+			out[i].Content = content
+		}
 	}
 	return out
 }
@@ -612,13 +807,13 @@ func estimateTextTokens(text string) int {
 	return (count + 3) / 4
 }
 
-func (r *Runner) summarizeOldestMessages(ctx context.Context, narrator db.Narrator, candidates []db.Message) string {
-	if summary, err := r.summarizeWithModel(ctx, narrator.ContextSummary, candidates); err == nil && strings.TrimSpace(summary) != "" {
+func (r *Runner) summarizeOldestMessages(ctx context.Context, agent db.Agent, candidates []db.Message) string {
+	if summary, err := r.summarizeWithModel(ctx, agent.ContextSummary, candidates); err == nil && strings.TrimSpace(summary) != "" {
 		return strings.TrimSpace(summary)
 	} else if err != nil {
-		slog.Warn("summary model unavailable, using local context summary", "narratorId", narrator.ID, "error", err)
+		slog.Warn("summary model unavailable, using local context summary", "agentId", agent.ID, "error", err)
 	}
-	return deterministicSummary(narrator.ContextSummary, candidates)
+	return deterministicSummary(agent.ContextSummary, candidates)
 }
 
 func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string, candidates []db.Message) (string, error) {
@@ -630,7 +825,7 @@ func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string,
 		return "", err
 	}
 	prompt := "请把下面较早的对话历史压缩成一段供后续 Agent 继续工作的中文摘要。保留用户目标、关键决策、文件路径、工具执行结果状态和未完成事项；省略大段工具输出。不要编造。\n\n" + renderMessagesForSummary(existingSummary, candidates)
-	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 CodeHarbor 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 Autoto 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}}
 	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	events, err := provider.Generate(summaryCtx, request)
@@ -771,14 +966,14 @@ type modelTurnResult struct {
 	StopReason string
 }
 
-func (r *Runner) runModelTurn(ctx context.Context, narratorID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error) {
+func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error) {
 	maxRetries := r.cfg.MaxTransientRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		result, err, retryable := r.runModelTurnAttempt(ctx, narratorID, runID, provider, model, systemPrompt, messages, toolSpecs)
+		result, err, retryable := r.runModelTurnAttempt(ctx, agentID, runID, provider, model, systemPrompt, messages, toolSpecs)
 		if err == nil {
 			return result, nil
 		}
@@ -787,7 +982,7 @@ func (r *Runner) runModelTurn(ctx context.Context, narratorID, runID string, pro
 			return modelTurnResult{}, err
 		}
 		backoff := modelRetryBackoff(attempt)
-		slog.Warn("retrying transient provider error", "narratorId", narratorID, "provider", provider.Name(), "model", model, "attempt", attempt+1, "maxRetries", maxRetries, "backoff", backoff.String(), "error", err)
+		slog.Warn("retrying transient provider error", "agentId", agentID, "provider", provider.Name(), "model", model, "attempt", attempt+1, "maxRetries", maxRetries, "backoff", backoff.String(), "error", err)
 		select {
 		case <-ctx.Done():
 			return modelTurnResult{}, ctx.Err()
@@ -797,14 +992,18 @@ func (r *Runner) runModelTurn(ctx context.Context, narratorID, runID string, pro
 	return modelTurnResult{}, lastErr
 }
 
-func (r *Runner) runModelTurnAttempt(ctx context.Context, narratorID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error, bool) {
+func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error, bool) {
 	started := time.Now()
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: messages, Tools: toolSpecs}
+	capabilities := providers.CapabilitiesFor(provider)
+	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs}
+	if !capabilities.Tools {
+		request.Tools = nil
+	}
 	events, err := provider.Generate(attemptCtx, request)
 	if err != nil {
-		r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), providers.Usage{}, err.Error())
+		r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), providers.Usage{}, err.Error())
 		return modelTurnResult{}, err, isTransientProviderError(err)
 	}
 
@@ -818,12 +1017,12 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, narratorID, runID stri
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+			r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
 			return modelTurnResult{}, err, false
 		case <-firstEventTimer:
 			err := &ProviderError{Message: fmt.Sprintf("provider first token timeout after %dms", r.cfg.FirstTokenTimeoutMs)}
 			cancel()
-			r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+			r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
 			return modelTurnResult{}, err, true
 		case event, ok := <-events:
 			if !firstEventReceived {
@@ -832,15 +1031,20 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, narratorID, runID stri
 			}
 			if !ok {
 				result.Text = builder.String()
-				r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
+				r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
 				return result, nil, false
 			}
 			switch event.Type {
 			case "text":
 				modelOutputStarted = true
 				builder.WriteString(event.Text)
-				r.publish(Event{Type: "agent.text", NarratorID: narratorID, Text: event.Text})
+				r.publish(Event{Type: "agent.text", AgentID: agentID, Text: event.Text})
 			case "tool_call":
+				if !capabilities.Tools {
+					err := &ProviderError{Message: "provider emitted a tool call without declaring tool capability"}
+					r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+					return modelTurnResult{}, err, false
+				}
 				if event.ToolCall != nil {
 					modelOutputStarted = true
 					result.ToolCalls = append(result.ToolCalls, normalizeProviderToolCall(*event.ToolCall))
@@ -851,13 +1055,13 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, narratorID, runID stri
 				}
 			case "error":
 				err := &ProviderError{Message: event.Text}
-				r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), result.Usage, event.Text)
+				r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, event.Text)
 				return modelTurnResult{}, err, !modelOutputStarted && isTransientProviderError(err)
 			case "done":
 				result.Text = builder.String()
 				result.StopReason = event.StopReason
 				if shouldRecordAPIRequest(result.StopReason) {
-					r.recordAPIRequest(narratorID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
+					r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
 				}
 				return result, nil, false
 			}
@@ -925,12 +1129,12 @@ func shouldRecordAPIRequest(stopReason string) bool {
 	return stopReason != "not_configured"
 }
 
-func (r *Runner) recordAPIRequest(narratorID, runID, providerName, model string, duration time.Duration, usage providers.Usage, errorMessage string) {
+func (r *Runner) recordAPIRequest(agentID, runID, providerName, model string, duration time.Duration, usage providers.Usage, errorMessage string) {
 	if r.store == nil {
 		return
 	}
 	_, err := r.store.AddAPIRequest(context.Background(), db.APIRequest{
-		NarratorID:        narratorID,
+		AgentID:           agentID,
 		RunID:             runID,
 		Kind:              "model",
 		Provider:          providerName,
@@ -944,7 +1148,7 @@ func (r *Runner) recordAPIRequest(narratorID, runID, providerName, model string,
 		ErrorMessage:      errorMessage,
 	})
 	if err != nil {
-		slog.Warn("record api request failed", "narratorId", narratorID, "error", err)
+		slog.Warn("record api request failed", "agentId", agentID, "error", err)
 	}
 }
 
@@ -1025,13 +1229,13 @@ func (r *Runner) ListTools() []ToolInfo {
 	return out
 }
 
-func (r *Runner) ExecuteTool(ctx context.Context, narratorID string, call tools.Call) (tools.Result, error) {
-	return r.executeTool(ctx, narratorID, call, "")
+func (r *Runner) ExecuteTool(ctx context.Context, agentID string, call tools.Call) (tools.Result, error) {
+	return r.executeTool(ctx, agentID, call, "")
 }
 
-func (r *Runner) executeToolForLoop(ctx context.Context, narratorID, runID string, call tools.Call, messageID string) (tools.Result, error) {
+func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, call tools.Call, messageID string) (tools.Result, error) {
 	call = normalizeToolCall(call)
-	narrator, err := r.store.GetNarrator(ctx, narratorID)
+	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -1046,22 +1250,27 @@ func (r *Runner) executeToolForLoop(ctx context.Context, narratorID, runID strin
 	if risk == tools.RiskDanger {
 		warning := toolRiskWarning(call.Name, call.Input)
 		result := tools.Result{Output: dangerBlockedMessage(warning), IsError: true}
-		r.recordImmediateToolResult(ctx, narratorID, runID, messageID, call, risk, result, "denied", warning)
-		r.publish(Event{Type: "tool.approval_required", NarratorID: narratorID, Data: mergeEventData(approvalEventData(narrator, call, risk, warning, "danger", time.Time{}), runID)})
-		r.notify(NotificationEvent{Event: "approval_required", RunID: runID, NarratorID: narratorID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
-		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "warning": warning}, runID)})
+		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", warning)
+		r.publish(Event{Type: "tool.approval_required", AgentID: agentID, Data: mergeEventData(approvalEventData(agent, call, risk, warning, "danger", time.Time{}), runID)})
+		r.notify(NotificationEvent{Event: "approval_required", RunID: runID, AgentID: agentID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "warning": warning}, runID)})
 		return result, nil
 	}
-	if r.canAutoExecuteTool(narrator.ID, narrator.PermissionMode, call.Name, risk, call.Input) {
-		return r.executeApprovedTool(ctx, narrator, runID, call, tool, risk, messageID, false)
+	permission := r.resolveToolPermission(ctx, agent.ID, agent.PermissionMode, call.Name, risk, call.Input)
+	if permission.Decision == toolPermissionAllow {
+		return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, false, permission.Reason)
 	}
-	if !approvalRequired(narrator.PermissionMode, call.Name, risk) {
-		result := tools.Result{Output: "tool call denied by permission mode", IsError: true}
-		r.recordImmediateToolResult(ctx, narratorID, runID, messageID, call, risk, result, "denied", result.Output)
-		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+	if permission.Decision == toolPermissionDeny {
+		message := strings.TrimSpace(permission.Reason)
+		if message == "" {
+			message = "tool call denied by permission policy"
+		}
+		result := tools.Result{Output: message, IsError: true}
+		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", message)
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
 		return result, nil
 	}
-	decision, err := r.waitForToolApproval(ctx, narrator, runID, call, risk, messageID)
+	decision, err := r.waitForToolApproval(ctx, agent, runID, call, risk, messageID, permission.Reason, permission.Warning)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -1071,24 +1280,39 @@ func (r *Runner) executeToolForLoop(ctx context.Context, narratorID, runID strin
 			message = "tool call denied by user"
 		}
 		result := tools.Result{Output: message, IsError: true}
-		r.updatePendingToolResult(ctx, narratorID, call.ID, result, "denied", 0)
-		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+		r.updatePendingToolResult(ctx, agentID, call.ID, result, "denied", 0)
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
 		return result, nil
 	}
-	if err := r.store.UpdateToolCallApproval(ctx, narratorID, call.ID, "approved", decision.DecidedBy, "", decision.Reason, ""); err != nil {
-		slog.Warn("record tool approval failed", "narratorId", narratorID, "toolUseId", call.ID, "error", err)
+	current, err := r.approvalGenerationsCurrent(ctx, agentID, decision.PermissionGeneration, decision.PolicyGeneration)
+	if err != nil {
+		return tools.Result{}, err
 	}
-	return r.executeApprovedTool(ctx, narrator, runID, call, tool, risk, messageID, true)
+	if !current {
+		message := "tool approval invalidated by permission or policy change"
+		result := tools.Result{Output: message, IsError: true}
+		r.updatePendingToolResult(ctx, agentID, call.ID, result, "denied", 0)
+		r.publish(Event{Type: "tool.approval_invalidated", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "reason": message}, runID)})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+		return result, nil
+	}
+	if decision.Decision == "allow_session" {
+		r.addSessionGrant(agentID, decision.GrantKey, decision.PermissionGeneration, decision.PolicyGeneration)
+	}
+	if err := r.store.UpdateToolCallApproval(ctx, agentID, call.ID, "approved", decision.DecidedBy, "", decision.Reason, ""); err != nil {
+		slog.Warn("record tool approval failed", "agentId", agentID, "toolUseId", call.ID, "error", err)
+	}
+	return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, true, decision.Reason)
 }
 
-func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.Call, messageID string) (tools.Result, error) {
+func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Call, messageID string) (tools.Result, error) {
 	if call.ID == "" {
 		call.ID = db.NewID()
 	}
 	if len(call.Input) == 0 {
 		call.Input = json.RawMessage(`{}`)
 	}
-	narrator, err := r.store.GetNarrator(ctx, narratorID)
+	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -1100,18 +1324,28 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 		return tools.Result{}, err
 	}
 	risk := tool.Risk(call.Input)
-	r.publish(Event{Type: "tool.started", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}})
-	if !allowed(narrator.PermissionMode, call.Name, risk) {
-		result := tools.Result{Output: "tool call denied by permission mode", IsError: true}
-		output, _ := json.Marshal(result)
-		if _, err := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narratorID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: "denied", ErrorMessage: result.Output}); err != nil {
-			slog.Warn("record denied tool call failed", "narratorId", narratorID, "toolUseId", call.ID, "error", err)
+	r.publish(Event{Type: "tool.started", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}})
+	permission := r.resolveToolPermission(ctx, agent.ID, agent.PermissionMode, call.Name, risk, call.Input)
+	if permission.Decision != toolPermissionAllow {
+		message := strings.TrimSpace(permission.Reason)
+		if permission.Decision == toolPermissionAsk {
+			message = "tool call requires approval in an agent loop"
 		}
-		r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}})
+		if message == "" {
+			message = "tool call denied by permission policy"
+		}
+		result := tools.Result{Output: message, IsError: true}
+		output, _ := json.Marshal(result)
+		if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: "denied", ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: permission.Reason, PermissionSuggestions: permission.Warning}); err != nil {
+			slog.Warn("record denied tool call failed", "agentId", agentID, "toolUseId", call.ID, "error", err)
+		}
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}})
 		return result, nil
 	}
+	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
+	defer unlockGitMutation()
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narratorID, CWD: narrator.CWD, Store: r.store, Output: r.toolOutputPublisher(narratorID, "", call)})
+	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agentID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agentID, "", call)})
 	duration := time.Since(started).Milliseconds()
 	output, _ := json.Marshal(result)
 	status := "completed"
@@ -1124,14 +1358,14 @@ func (r *Runner) executeTool(ctx context.Context, narratorID string, call tools.
 		status = "error"
 		errMsg = err.Error()
 	}
-	if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narratorID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg}); recordErr != nil {
-		slog.Warn("record tool call failed", "narratorId", narratorID, "toolUseId", call.ID, "error", recordErr)
+	if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); recordErr != nil {
+		slog.Warn("record tool call failed", "agentId", agentID, "toolUseId", call.ID, "error", recordErr)
 	}
-	r.publish(Event{Type: "tool.finished", NarratorID: narratorID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
+	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
 	return result, err
 }
 
-func (r *Runner) toolOutputPublisher(narratorID, runID string, call tools.Call) func(tools.OutputChunk) {
+func (r *Runner) toolOutputPublisher(agentID, runID string, call tools.Call) func(tools.OutputChunk) {
 	return func(chunk tools.OutputChunk) {
 		if chunk.Text == "" {
 			return
@@ -1144,14 +1378,18 @@ func (r *Runner) toolOutputPublisher(narratorID, runID string, call tools.Call) 
 		if chunk.Truncated {
 			data["truncated"] = true
 		}
-		r.publish(Event{Type: "tool.output", NarratorID: narratorID, Text: chunk.Text, Data: mergeEventData(data, runID)})
+		r.publish(Event{Type: "tool.output", AgentID: agentID, Text: chunk.Text, Data: mergeEventData(data, runID)})
 	}
 }
 
-func (r *Runner) executeApprovedTool(ctx context.Context, narrator db.Narrator, runID string, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool) (tools.Result, error) {
-	r.publish(Event{Type: "tool.started", NarratorID: narrator.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}, runID)})
+func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID string, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool, permissionReason string) (tools.Result, error) {
+	r.publish(Event{Type: "tool.started", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}, runID)})
+	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
+	defer unlockGitMutation()
+	gitBefore := r.captureRunToolGitBefore(ctx, agent, runID, risk)
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{NarratorID: narrator.ID, CWD: narrator.CWD, Store: r.store, Output: r.toolOutputPublisher(narrator.ID, runID, call)})
+	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agent.ID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agent.ID, runID, call)})
+	r.captureRunToolGitAfter(context.Background(), runID, gitBefore)
 	duration := time.Since(started).Milliseconds()
 	status := "completed"
 	errMsg := ""
@@ -1165,39 +1403,55 @@ func (r *Runner) executeApprovedTool(ctx context.Context, narrator db.Narrator, 
 	}
 	output, _ := json.Marshal(result)
 	if updateExisting {
-		if recordErr := r.store.UpdateToolCallResult(ctx, narrator.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
-			slog.Warn("update approved tool call failed", "narratorId", narrator.ID, "toolUseId", call.ID, "error", recordErr)
+		if recordErr := r.store.UpdateToolCallResult(ctx, agent.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
+			slog.Warn("update approved tool call failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
 		}
-	} else if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narrator.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReason(call.Name, call.Input)}); recordErr != nil {
-		slog.Warn("record tool call failed", "narratorId", narrator.ID, "toolUseId", call.ID, "error", recordErr)
+	} else if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permissionReason)}); recordErr != nil {
+		slog.Warn("record tool call failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
 	}
-	r.publish(Event{Type: "tool.finished", NarratorID: narrator.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}, runID)})
+	r.publish(Event{Type: "tool.finished", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}, runID)})
 	return result, err
 }
 
-func (r *Runner) waitForToolApproval(ctx context.Context, narrator db.Narrator, runID string, call tools.Call, risk tools.Risk, messageID string) (ToolApprovalDecision, error) {
+func (r *Runner) waitForToolApproval(ctx context.Context, agent db.Agent, runID string, call tools.Call, risk tools.Risk, messageID, reason, warning string) (ToolApprovalDecision, error) {
 	command := toolCommand(call.Name, call.Input)
-	approval := &pendingApproval{
-		NarratorID: narrator.ID,
-		ToolUseID:  call.ID,
-		ToolName:   call.Name,
-		Input:      call.Input,
-		Risk:       risk,
-		CWD:        narrator.CWD,
-		Command:    command,
-		Reason:     "exec risk requires approval",
-		Warning:    "Bash 命令将访问本地 shell，请确认命令安全后再允许。",
-		GrantKey:   sessionGrantKey(call.Name, call.Input),
-		ExpiresAt:  time.Now().Add(toolApprovalTimeout),
-		Decision:   make(chan ToolApprovalDecision, 1),
+	if strings.TrimSpace(reason) == "" {
+		reason = defaultApprovalReason(risk)
 	}
-	if _, err := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narrator.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "pending_approval", PermissionDecisionReason: approval.Reason, PermissionSuggestions: approval.Warning}); err != nil {
+	if strings.TrimSpace(warning) == "" {
+		warning = defaultApprovalWarning(call.Name, risk, call.Input)
+	}
+	generations, err := r.store.GetPermissionGenerations(ctx, agent.ID)
+	if err != nil {
+		return ToolApprovalDecision{}, err
+	}
+	approval := &pendingApproval{
+		AgentID:              agent.ID,
+		RunID:                runID,
+		ToolUseID:            call.ID,
+		ToolName:             call.Name,
+		Input:                call.Input,
+		Risk:                 risk,
+		CWD:                  agent.CWD,
+		Command:              command,
+		Reason:               reason,
+		Warning:              warning,
+		GrantKey:             sessionGrantKey(call.Name, call.Input),
+		PermissionGeneration: generations.Permission,
+		PolicyGeneration:     generations.Policy,
+		ExpiresAt:            time.Now().Add(toolApprovalTimeout),
+		Decision:             make(chan ToolApprovalDecision, 1),
+	}
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "pending_approval", PermissionDecisionReason: approval.Reason, PermissionSuggestions: approval.Warning, PermissionGeneration: approval.PermissionGeneration, PolicyGeneration: approval.PolicyGeneration}); err != nil {
 		return ToolApprovalDecision{}, err
 	}
 	r.addPendingApproval(approval)
-	defer r.removePendingApproval(narrator.ID, call.ID)
-	r.publish(Event{Type: "tool.approval_required", NarratorID: narrator.ID, Data: mergeEventData(approvalEventData(narrator, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt), runID)})
-	r.notify(NotificationEvent{Event: "approval_required", RunID: runID, NarratorID: narrator.ID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
+	defer r.removePendingApproval(agent.ID, call.ID)
+	approvalData := approvalEventData(agent, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt)
+	approvalData["permissionGeneration"] = approval.PermissionGeneration
+	approvalData["policyGeneration"] = approval.PolicyGeneration
+	r.publish(Event{Type: "tool.approval_required", AgentID: agent.ID, Data: mergeEventData(approvalData, runID)})
+	r.notify(NotificationEvent{Event: "approval_required", RunID: runID, AgentID: agent.ID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
 
 	timer := time.NewTimer(toolApprovalTimeout)
 	defer timer.Stop()
@@ -1206,16 +1460,19 @@ func (r *Runner) waitForToolApproval(ctx context.Context, narrator db.Narrator, 
 		if decision.DecidedBy == "" {
 			decision.DecidedBy = "user"
 		}
+		decision.PermissionGeneration = approval.PermissionGeneration
+		decision.PolicyGeneration = approval.PolicyGeneration
+		decision.GrantKey = approval.GrantKey
 		if decision.Decision == "deny" {
-			_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
+			_ = r.store.UpdateToolCallApproval(context.Background(), agent.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
 		}
 		return decision, nil
 	case <-timer.C:
 		decision := ToolApprovalDecision{Decision: "deny", Reason: "tool approval timed out", DecidedBy: "system"}
-		_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
+		_ = r.store.UpdateToolCallApproval(context.Background(), agent.ID, call.ID, "denied", decision.DecidedBy, decision.Reason, decision.Reason, approval.Warning)
 		return decision, nil
 	case <-ctx.Done():
-		_ = r.store.UpdateToolCallApproval(context.Background(), narrator.ID, call.ID, "denied", "system", "tool approval canceled", "tool approval canceled", approval.Warning)
+		_ = r.store.UpdateToolCallApproval(context.Background(), agent.ID, call.ID, "denied", "system", "tool approval canceled", "tool approval canceled", approval.Warning)
 		return ToolApprovalDecision{}, ctx.Err()
 	}
 }
@@ -1225,41 +1482,260 @@ func (r *Runner) addPendingApproval(approval *pendingApproval) {
 	if r.approvals == nil {
 		r.approvals = make(map[string]*pendingApproval)
 	}
-	r.approvals[approvalKey(approval.NarratorID, approval.ToolUseID)] = approval
+	r.approvals[approvalKey(approval.AgentID, approval.ToolUseID)] = approval
 	r.approvalMu.Unlock()
 }
 
-func (r *Runner) removePendingApproval(narratorID, toolUseID string) {
+func (r *Runner) removePendingApproval(agentID, toolUseID string) {
 	r.approvalMu.Lock()
-	delete(r.approvals, approvalKey(narratorID, toolUseID))
+	delete(r.approvals, approvalKey(agentID, toolUseID))
 	r.approvalMu.Unlock()
 }
 
-func (r *Runner) addSessionGrantLocked(narratorID, grantKey string) {
-	if grantKey == "" {
+func (r *Runner) addSessionGrant(agentID, grantKey string, permissionGeneration, policyGeneration int64) {
+	if grantKey == "" || permissionGeneration < 1 || policyGeneration < 1 {
+		return
+	}
+	r.approvalMu.Lock()
+	defer r.approvalMu.Unlock()
+	r.addSessionGrantLocked(agentID, grantKey, permissionGeneration, policyGeneration)
+}
+
+func (r *Runner) addSessionGrantLocked(agentID, grantKey string, generations ...int64) {
+	permissionGeneration := int64(1)
+	policyGeneration := int64(1)
+	if len(generations) >= 2 {
+		permissionGeneration = generations[0]
+		policyGeneration = generations[1]
+	}
+	if grantKey == "" || permissionGeneration < 1 || policyGeneration < 1 {
 		return
 	}
 	if r.sessionGrants == nil {
-		r.sessionGrants = make(map[string]map[string]struct{})
+		r.sessionGrants = make(map[string]map[string]sessionGrant)
 	}
-	if r.sessionGrants[narratorID] == nil {
-		r.sessionGrants[narratorID] = make(map[string]struct{})
+	if r.sessionGrants[agentID] == nil {
+		r.sessionGrants[agentID] = make(map[string]sessionGrant)
 	}
-	r.sessionGrants[narratorID][grantKey] = struct{}{}
+	r.sessionGrants[agentID][grantKey] = sessionGrant{PermissionGeneration: permissionGeneration, PolicyGeneration: policyGeneration}
 }
 
-func (r *Runner) hasSessionGrant(narratorID, grantKey string) bool {
+func (r *Runner) approvalGenerationsCurrent(ctx context.Context, agentID string, permissionGeneration, policyGeneration int64) (bool, error) {
+	generations, err := r.store.GetPermissionGenerations(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+	return generations.Permission == permissionGeneration && generations.Policy == policyGeneration, nil
+}
+
+func (r *Runner) hasSessionGrant(ctx context.Context, agentID, grantKey string) bool {
+	if grantKey == "" {
+		return false
+	}
 	r.approvalMu.Lock()
-	defer r.approvalMu.Unlock()
-	_, ok := r.sessionGrants[narratorID][grantKey]
-	return ok
+	grant, ok := r.sessionGrants[agentID][grantKey]
+	r.approvalMu.Unlock()
+	if !ok {
+		return false
+	}
+	current, err := r.approvalGenerationsCurrent(ctx, agentID, grant.PermissionGeneration, grant.PolicyGeneration)
+	if err != nil || !current {
+		r.approvalMu.Lock()
+		delete(r.sessionGrants[agentID], grantKey)
+		if len(r.sessionGrants[agentID]) == 0 {
+			delete(r.sessionGrants, agentID)
+		}
+		r.approvalMu.Unlock()
+		return false
+	}
+	return true
 }
 
-func approvalKey(narratorID, toolUseID string) string {
-	return narratorID + ":" + toolUseID
+func (r *Runner) InvalidateAgentApprovals(agentID, reason string) int {
+	return r.invalidateApprovals(agentID, reason)
 }
 
-func (r *Runner) canAutoExecuteTool(narratorID, mode, toolName string, risk tools.Risk, input json.RawMessage) bool {
+func (r *Runner) InvalidatePolicyApprovals(reason string) int {
+	return r.invalidateApprovals("", reason)
+}
+
+func (r *Runner) invalidateApprovals(agentID, reason string) int {
+	if strings.TrimSpace(reason) == "" {
+		reason = "tool approval invalidated by permission or policy change"
+	}
+	r.approvalMu.Lock()
+	if agentID == "" {
+		r.sessionGrants = make(map[string]map[string]sessionGrant)
+	} else {
+		delete(r.sessionGrants, agentID)
+	}
+	approvals := make([]*pendingApproval, 0)
+	for _, approval := range r.approvals {
+		if agentID == "" || approval.AgentID == agentID {
+			approvals = append(approvals, approval)
+		}
+	}
+	r.approvalMu.Unlock()
+	for _, approval := range approvals {
+		decision := ToolApprovalDecision{Decision: "deny", Reason: reason, DecidedBy: "system", PermissionGeneration: approval.PermissionGeneration, PolicyGeneration: approval.PolicyGeneration, GrantKey: approval.GrantKey}
+		select {
+		case approval.Decision <- decision:
+		default:
+		}
+		r.publish(Event{Type: "tool.approval_invalidated", AgentID: approval.AgentID, Data: mergeEventData(map[string]any{"toolUseId": approval.ToolUseID, "toolName": approval.ToolName, "status": "denied", "reason": reason}, approval.RunID)})
+	}
+	return len(approvals)
+}
+
+func approvalKey(agentID, toolUseID string) string {
+	return agentID + ":" + toolUseID
+}
+
+func (r *Runner) resolveToolPermission(ctx context.Context, agentID, mode, toolName string, risk tools.Risk, input json.RawMessage) toolPermissionResolution {
+	if risk == tools.RiskDanger {
+		warning := toolRiskWarning(toolName, input)
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", "hard_danger_block")
+		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: warning, Warning: warning}
+	}
+	if mode == "readOnly" && risk != tools.RiskRead {
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", "read_only_cap")
+		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: string(risk) + " risk denied by readOnly permission mode", Warning: defaultApprovalWarning(toolName, risk, input)}
+	}
+	if r != nil && r.store != nil {
+		rules, err := r.store.ListToolPermissionRules(ctx)
+		if err != nil {
+			slog.Warn("load tool permission rules failed; requiring approval", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "error", err)
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "tool permission policy unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+		// The store returns the deterministic policy order: priority, match
+		// specificity, deny/ask/allow safety precedence, then stable age/ID.
+		// The first matching rule therefore defines the persisted policy result.
+		for _, rule := range rules {
+			if !toolPermissionRuleMatches(rule, mode, toolName, risk) {
+				continue
+			}
+			decision := normalizedRuleDecision(rule.Decision)
+			reason := toolPermissionRuleReason(rule)
+			slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", decision, "source", "rule", "ruleId", rule.ID, "rulePriority", rule.Priority, "ruleEnabled", rule.Enabled)
+			return toolPermissionResolution{Decision: decision, Reason: reason, Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+	}
+	if r.hasSessionGrant(ctx, agentID, sessionGrantKey(toolName, input)) {
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionAllow, "source", "session_approval")
+		return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by session approval"}
+	}
+	prefs := db.DefaultWorkflowPreferences()
+	if r != nil && r.store != nil {
+		loaded, err := r.store.GetWorkflowPreferences(ctx)
+		if err != nil {
+			slog.Warn("load workflow preferences failed; requiring approval", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "error", err)
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "workflow preferences unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+		prefs = loaded
+	}
+	resolution := r.defaultToolPermission(ctx, agentID, mode, toolName, risk, input, prefs)
+	slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", resolution.Decision, "source", "default_policy")
+	return resolution
+}
+
+func (r *Runner) defaultToolPermission(ctx context.Context, agentID, mode, toolName string, risk tools.Risk, input json.RawMessage, prefs db.WorkflowPreferences) toolPermissionResolution {
+	switch risk {
+	case tools.RiskRead:
+		if !prefs.AllowReadOnlyByDefault {
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "read risk requires approval by workflow preferences", Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+		if allowed(mode, toolName, risk) {
+			return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by permission mode"}
+		}
+	case tools.RiskWrite:
+		if mode == "readOnly" {
+			return toolPermissionResolution{Decision: toolPermissionDeny, Reason: "write risk denied by readOnly permission mode"}
+		}
+		if prefs.RequireConfirmationForWrites {
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "write risk requires approval by workflow preferences", Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+		if allowed(mode, toolName, risk) {
+			return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by permission mode"}
+		}
+	case tools.RiskExec:
+		if mode == "bypassPermissions" {
+			return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by bypassPermissions mode"}
+		}
+		if !prefs.RequireConfirmationForExec && execPermittedByMode(mode) {
+			return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "exec risk allowed by workflow preferences"}
+		}
+		if r.canAutoExecuteTool(ctx, agentID, mode, toolName, risk, input) {
+			return toolPermissionResolution{Decision: toolPermissionAllow, Reason: autoApprovalReason(toolName, input)}
+		}
+		if approvalRequired(mode, toolName, risk) {
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: defaultApprovalReason(risk), Warning: defaultApprovalWarning(toolName, risk, input)}
+		}
+	}
+	return toolPermissionResolution{Decision: toolPermissionDeny, Reason: "tool call denied by permission mode"}
+}
+
+func toolPermissionRuleMatches(rule db.ToolPermissionRule, mode, toolName string, risk tools.Risk) bool {
+	if !rule.Enabled {
+		return false
+	}
+	return wildcardMatch(rule.Mode, mode) && wildcardMatch(rule.ToolName, toolName) && wildcardMatch(rule.Risk, string(risk))
+}
+
+func normalizedRuleDecision(decision string) string {
+	switch strings.TrimSpace(decision) {
+	case toolPermissionAllow, toolPermissionAsk, toolPermissionDeny:
+		return strings.TrimSpace(decision)
+	default:
+		return toolPermissionAsk
+	}
+}
+
+func wildcardMatch(pattern, value string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+	return pattern == value
+}
+
+func toolPermissionRuleReason(rule db.ToolPermissionRule) string {
+	prefix := fmt.Sprintf("tool permission rule matched (id=%s, priority=%d, decision=%s)", rule.ID, rule.Priority, normalizedRuleDecision(rule.Decision))
+	if strings.TrimSpace(rule.Description) != "" {
+		return prefix + ": " + strings.TrimSpace(rule.Description)
+	}
+	return prefix
+}
+
+func defaultApprovalReason(risk tools.Risk) string {
+	switch risk {
+	case tools.RiskRead:
+		return "read risk requires approval"
+	case tools.RiskWrite:
+		return "write risk requires approval"
+	case tools.RiskExec:
+		return "exec risk requires approval"
+	default:
+		return "tool risk requires approval"
+	}
+}
+
+func defaultApprovalWarning(toolName string, risk tools.Risk, input json.RawMessage) string {
+	if risk == tools.RiskExec {
+		if toolName == "Bash" {
+			return "Bash 命令将访问本地 shell，请确认命令安全后再允许。"
+		}
+		return "该工具会启动本地进程或外部工具，请确认安全后再允许。"
+	}
+	if risk == tools.RiskWrite {
+		return "该工具会修改本地工作区文件，请确认变更范围后再允许。"
+	}
+	if risk == tools.RiskRead {
+		return "该只读工具被当前工作流策略要求人工批准。"
+	}
+	return toolRiskWarning(toolName, input)
+}
+
+func (r *Runner) canAutoExecuteTool(ctx context.Context, agentID, mode, toolName string, risk tools.Risk, input json.RawMessage) bool {
 	if allowed(mode, toolName, risk) {
 		return true
 	}
@@ -1272,7 +1748,16 @@ func (r *Runner) canAutoExecuteTool(narratorID, mode, toolName string, risk tool
 	if toolName == "Bash" && isWhitelistedExecCommand(tools.BashCommand(input)) {
 		return true
 	}
-	return r.hasSessionGrant(narratorID, sessionGrantKey(toolName, input))
+	return r.hasSessionGrant(ctx, agentID, sessionGrantKey(toolName, input))
+}
+
+func execPermittedByMode(mode string) bool {
+	switch mode {
+	case "bypassPermissions", "acceptEdits", "default", "dontAsk":
+		return true
+	default:
+		return false
+	}
 }
 
 func approvalRequired(mode, toolName string, risk tools.Risk) bool {
@@ -1287,21 +1772,21 @@ func approvalRequired(mode, toolName string, risk tools.Risk) bool {
 	}
 }
 
-func (r *Runner) recordImmediateToolResult(ctx context.Context, narratorID, runID, messageID string, call tools.Call, risk tools.Risk, result tools.Result, status, reason string) {
+func (r *Runner) recordImmediateToolResult(ctx context.Context, agentID, runID, messageID string, call tools.Call, risk tools.Risk, result tools.Result, status, reason string) {
 	output, _ := json.Marshal(result)
-	if _, err := r.store.AddToolCall(ctx, db.ToolCall{NarratorID: narratorID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: reason, PermissionSuggestions: reason}); err != nil {
-		slog.Warn("record immediate tool result failed", "narratorId", narratorID, "toolUseId", call.ID, "error", err)
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: reason, PermissionSuggestions: reason}); err != nil {
+		slog.Warn("record immediate tool result failed", "agentId", agentID, "toolUseId", call.ID, "error", err)
 	}
 }
 
-func (r *Runner) updatePendingToolResult(ctx context.Context, narratorID, toolUseID string, result tools.Result, status string, durationMS int64) {
+func (r *Runner) updatePendingToolResult(ctx context.Context, agentID, toolUseID string, result tools.Result, status string, durationMS int64) {
 	output, _ := json.Marshal(result)
 	errMsg := ""
 	if result.IsError {
 		errMsg = result.Output
 	}
-	if err := r.store.UpdateToolCallResult(ctx, narratorID, toolUseID, output, status, durationMS, errMsg); err != nil {
-		slog.Warn("update pending tool result failed", "narratorId", narratorID, "toolUseId", toolUseID, "error", err)
+	if err := r.store.UpdateToolCallResult(ctx, agentID, toolUseID, output, status, durationMS, errMsg); err != nil {
+		slog.Warn("update pending tool result failed", "agentId", agentID, "toolUseId", toolUseID, "error", err)
 	}
 }
 
@@ -1330,8 +1815,8 @@ func mergeEventData(data map[string]any, runID string) map[string]any {
 	return data
 }
 
-func approvalEventData(narrator db.Narrator, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
-	data := map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk, "input": json.RawMessage(call.Input), "command": toolCommand(call.Name, call.Input), "cwd": narrator.CWD, "warning": warning, "reason": reason}
+func approvalEventData(agent db.Agent, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
+	data := map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk, "input": json.RawMessage(call.Input), "command": toolCommand(call.Name, call.Input), "cwd": agent.CWD, "warning": warning, "reason": reason}
 	if !expiresAt.IsZero() {
 		data["expiresAt"] = expiresAt.Format(time.RFC3339Nano)
 	}
@@ -1385,6 +1870,13 @@ func autoApprovalReason(toolName string, input json.RawMessage) string {
 		return "auto-approved by built-in exec whitelist"
 	}
 	return "allowed by permission mode"
+}
+
+func autoApprovalReasonWithPolicy(toolName string, input json.RawMessage, reason string) string {
+	if strings.TrimSpace(reason) != "" {
+		return strings.TrimSpace(reason)
+	}
+	return autoApprovalReason(toolName, input)
 }
 
 func isWhitelistedExecCommand(command string) bool {

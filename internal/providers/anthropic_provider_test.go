@@ -11,7 +11,7 @@ import (
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 func TestAnthropicMessagesPreserveToolBlocks(t *testing.T) {

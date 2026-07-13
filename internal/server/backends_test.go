@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestBackendsRouteWithoutTrailingSlash(t *testing.T) {

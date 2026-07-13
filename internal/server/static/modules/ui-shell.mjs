@@ -56,7 +56,7 @@ export function createUIShellController({
     event.preventDefault();
     event.stopPropagation();
     const path = trigger.dataset.openDirectoryShortcut === "current"
-      ? (state.narrator?.cwd || state.project?.gitPath || "")
+      ? (state.agent?.cwd || state.project?.gitPath || "")
       : "";
     const mobileViewport = window.matchMedia?.("(max-width: 760px)")?.matches;
     if (document.body.classList.contains("mobile-sidebar-open")) closeMobileSidebar();

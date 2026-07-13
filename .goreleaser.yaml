@@ -1,13 +1,25 @@
 version: 2
 
-project_name: codeharbor
+project_name: autoto
 
 before:
   hooks:
     - go mod download
 
 builds:
-  - id: codeharbor
+  - id: autoto
+    main: ./cmd/autoto
+    binary: autoto
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+  - id: codeharbor-compat
     main: ./cmd/codeharbor
     binary: codeharbor
     env:
@@ -21,7 +33,10 @@ builds:
       - arm64
 
 archives:
-  - id: codeharbor
+  - id: autoto
+    ids:
+      - autoto
+      - codeharbor-compat
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"codeharbor/internal/mcp"
+	"autoto/internal/mcp"
 )
 
 type MCPListToolsTool struct{}

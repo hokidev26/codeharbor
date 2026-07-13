@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -63,9 +64,12 @@ type ProvidersConfig struct {
 	OpenAICompatible *OpenAICompatibleConfig `json:"openaiCompatible,omitempty"`
 }
 
+const ProviderProfileCLIProxyAPI = "cliproxyapi"
+
 type ProviderConfig struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
+	Profile        string `json:"profile,omitempty"`
 	BaseURL        string `json:"baseUrl,omitempty"`
 	APIKey         string `json:"apiKey,omitempty"`
 	Model          string `json:"model"`
@@ -91,6 +95,7 @@ type BackendConfig struct {
 type ProviderSummary struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
+	Profile        string `json:"profile,omitempty"`
 	BaseURL        string `json:"baseUrl,omitempty"`
 	Model          string `json:"model"`
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
@@ -103,30 +108,38 @@ func Default() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	appHome := filepath.Join(home, ".codeharbor")
+	appHome := filepath.Join(home, ".autoto")
+	defaultModel := firstEnv("AUTOTO_DEFAULT_MODEL", "CODEHARBOR_DEFAULT_MODEL")
+	if defaultModel == "" {
+		defaultModel = "openai:gpt-4.1-mini"
+	}
+	summaryModel := firstEnv("AUTOTO_SUMMARY_MODEL", "CODEHARBOR_SUMMARY_MODEL")
+	if summaryModel == "" {
+		summaryModel = defaultModel
+	}
 	return Config{
 		SchemaVersion: CurrentConfigVersion,
 		Server:        ServerConfig{Host: "localhost", Port: 7788},
 		Paths: PathsConfig{
 			HomeDir:           appHome,
-			DatabasePath:      filepath.Join(appHome, "codeharbor.db"),
+			DatabasePath:      filepath.Join(appHome, "autoto.db"),
 			DefaultProjectDir: filepath.Join(home, "projects"),
 		},
 		Agent: AgentConfig{
-			DefaultModel:           getenv("CODEHARBOR_DEFAULT_MODEL", "openai:gpt-4.1-mini"),
-			SummaryModel:           getenv("CODEHARBOR_SUMMARY_MODEL", getenv("CODEHARBOR_DEFAULT_MODEL", "openai:gpt-4.1-mini")),
+			DefaultModel:           defaultModel,
+			SummaryModel:           summaryModel,
 			DefaultPermissionMode:  "acceptEdits",
 			DefaultStartInPlanMode: false,
 			MaxTurns:               200,
-			ContextTokenLimit:      getenvInt("CODEHARBOR_CONTEXT_TOKEN_LIMIT", 120000),
+			ContextTokenLimit:      getenvIntFallback([]string{"AUTOTO_CONTEXT_TOKEN_LIMIT", "CODEHARBOR_CONTEXT_TOKEN_LIMIT"}, 120000),
 			FirstTokenTimeoutMs:    60000,
 			MaxTransientRetries:    10,
 		},
 		Auth: AuthConfig{RegistrationOpen: true},
 		Security: SecurityConfig{
-			Exposed:             getenvBool("CODEHARBOR_EXPOSED", false),
-			AccessPassword:      os.Getenv("CODEHARBOR_ACCESS_PASSWORD"),
-			AllowRemoteTerminal: getenvBool("CODEHARBOR_REMOTE_TERMINAL", false),
+			Exposed:             getenvBoolFallback([]string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
+			AccessPassword:      firstEnv("AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
+			AllowRemoteTerminal: getenvBoolFallback([]string{"AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"}, false),
 		},
 		Providers: ProvidersConfig{Instances: []ProviderConfig{
 			{
@@ -181,6 +194,21 @@ func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if isCanonicalConfigPath(path, cfg) {
+				legacyPath, legacyErr := legacyConfigPath()
+				if legacyErr != nil {
+					return Config{}, legacyErr
+				}
+				if copied, copyErr := copyLegacyConfig(legacyPath, path); copyErr != nil {
+					return Config{}, copyErr
+				} else if copied {
+					data, err = os.ReadFile(path)
+					if err != nil {
+						return Config{}, err
+					}
+					goto decode
+				}
+			}
 			if writeErr := writeDefaultConfig(path, cfg); writeErr != nil {
 				return Config{}, writeErr
 			}
@@ -188,6 +216,8 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, err
 	}
+
+decode:
 	if len(data) == 0 {
 		return cfg, nil
 	}
@@ -196,6 +226,72 @@ func Load(path string) (Config, error) {
 	}
 	cfg = normalizeConfig(cfg)
 	return cfg, nil
+}
+
+func isCanonicalConfigPath(path string, cfg Config) bool {
+	canonical := filepath.Join(cfg.Paths.HomeDir, "config.json")
+	return filepath.Clean(path) == filepath.Clean(canonical)
+}
+
+func legacyConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codeharbor", "config.json"), nil
+}
+
+func copyLegacyConfig(sourcePath, destinationPath string) (bool, error) {
+	linkInfo, err := os.Lstat(sourcePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !linkInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("legacy config %s is not a regular file", sourcePath)
+	}
+
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	defer source.Close()
+
+	info, err := source.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) {
+		return false, fmt.Errorf("legacy config %s changed while opening", sourcePath)
+	}
+
+	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	complete := false
+	defer func() {
+		_ = destination.Close()
+		if !complete {
+			_ = os.Remove(destinationPath)
+		}
+	}()
+	if _, err := io.Copy(destination, source); err != nil {
+		return false, err
+	}
+	if err := destination.Sync(); err != nil {
+		return false, err
+	}
+	if err := destination.Close(); err != nil {
+		return false, err
+	}
+	complete = true
+	return true, nil
 }
 
 func normalizeConfig(cfg Config) Config {
@@ -214,13 +310,13 @@ func migrateConfig(cfg Config) Config {
 }
 
 func applySecurityEnvOverrides(security *SecurityConfig) {
-	if value, ok := lookupBoolEnv("CODEHARBOR_EXPOSED"); ok {
+	if value, ok := lookupBoolEnvFallback("AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"); ok {
 		security.Exposed = value
 	}
-	if value := os.Getenv("CODEHARBOR_ACCESS_PASSWORD"); value != "" {
+	if value := firstEnv("AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
 		security.AccessPassword = value
 	}
-	if value, ok := lookupBoolEnv("CODEHARBOR_REMOTE_TERMINAL"); ok {
+	if value, ok := lookupBoolEnvFallback("AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"); ok {
 		security.AllowRemoteTerminal = value
 	}
 }
@@ -237,6 +333,7 @@ func (p ProviderConfig) Summary() ProviderSummary {
 	return ProviderSummary{
 		Name:           p.Name,
 		Type:           p.Type,
+		Profile:        p.Profile,
 		BaseURL:        p.BaseURL,
 		Model:          p.Model,
 		MaxTokens:      p.MaxTokens,
@@ -267,20 +364,44 @@ func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 		p.OpenAICompatible = nil
 	}
 	for i := range p.Instances {
-		if p.Instances[i].Type == "" {
-			p.Instances[i].Type = p.Instances[i].Name
+		provider := &p.Instances[i]
+		provider.Name = strings.TrimSpace(provider.Name)
+		provider.Type = strings.TrimSpace(provider.Type)
+		provider.Profile = strings.TrimSpace(provider.Profile)
+		if provider.Type == "" {
+			provider.Type = provider.Name
 		}
-		if p.Instances[i].Name == "" {
-			p.Instances[i].Name = p.Instances[i].Type
+		if provider.Name == "" {
+			provider.Name = provider.Type
 		}
-		applyProviderEnvDefaults(&p.Instances[i])
+		if provider.Profile == "" {
+			provider.Profile = legacyProviderProfile(provider.Name)
+		}
+		applyProviderEnvDefaults(provider)
 	}
 	return p
 }
 
+// legacyProviderProfile is the single compatibility boundary for historic provider names.
+func legacyProviderProfile(name string) string {
+	if strings.EqualFold(strings.TrimSpace(name), ProviderProfileCLIProxyAPI) {
+		return ProviderProfileCLIProxyAPI
+	}
+	return ""
+}
+
+// NormalizeProviderConfig applies the same compatibility defaults used when loading config.
+func NormalizeProviderConfig(provider ProviderConfig) ProviderConfig {
+	return normalizeProviders(ProvidersConfig{Instances: []ProviderConfig{provider}}).Instances[0]
+}
+
 func applyProviderEnvDefaults(provider *ProviderConfig) {
-	if provider.Name == "cliproxyapi" || provider.Type == "cliproxyapi" {
+	if provider.Profile == ProviderProfileCLIProxyAPI {
 		applyCLIProxyAPIEnvDefaults(provider)
+		return
+	}
+	if provider.Name == "groq" {
+		applyGroqEnvDefaults(provider)
 		return
 	}
 	switch provider.Type {
@@ -315,12 +436,27 @@ func applyProviderEnvDefaults(provider *ProviderConfig) {
 }
 
 func defaultCLIProxyAPIProvider() ProviderConfig {
-	provider := ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", APIKeyOptional: true}
+	provider := ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", Profile: ProviderProfileCLIProxyAPI, APIKeyOptional: true}
 	applyCLIProxyAPIEnvDefaults(&provider)
 	return provider
 }
 
+func applyGroqEnvDefaults(provider *ProviderConfig) {
+	provider.Name = "groq"
+	provider.Type = "openai-compatible"
+	if provider.BaseURL == "" {
+		provider.BaseURL = "https://api.groq.com/openai/v1"
+	}
+	if provider.APIKey == "" {
+		provider.APIKey = os.Getenv("GROQ_API_KEY")
+	}
+	if provider.Model == "" {
+		provider.Model = getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+	}
+}
+
 func applyCLIProxyAPIEnvDefaults(provider *ProviderConfig) {
+	provider.Profile = ProviderProfileCLIProxyAPI
 	if provider.Name == "" {
 		provider.Name = "cliproxyapi"
 	}
@@ -397,16 +533,24 @@ func sanitizeConfigForDisk(cfg Config) Config {
 }
 
 func defaultBackendsFromEnv() []BackendConfig {
-	baseURL := firstEnv("CODEHARBOR_AGENT_BACKEND_URL", "OPENHANDS_AGENT_SERVER_URL", "AGENT_SERVER_URL")
+	baseURL := firstEnv("AUTOTO_AGENT_BACKEND_URL", "CODEHARBOR_AGENT_BACKEND_URL", "OPENHANDS_AGENT_SERVER_URL", "AGENT_SERVER_URL")
 	if baseURL == "" {
 		return nil
 	}
+	name := firstEnv("AUTOTO_AGENT_BACKEND_NAME", "CODEHARBOR_AGENT_BACKEND_NAME")
+	if name == "" {
+		name = "Local Agent Server"
+	}
+	kind := firstEnv("AUTOTO_AGENT_BACKEND_KIND", "CODEHARBOR_AGENT_BACKEND_KIND")
+	if kind == "" {
+		kind = "local"
+	}
 	return []BackendConfig{
 		{
-			Name:    getenv("CODEHARBOR_AGENT_BACKEND_NAME", "Local Agent Server"),
-			Kind:    getenv("CODEHARBOR_AGENT_BACKEND_KIND", "local"),
+			Name:    name,
+			Kind:    kind,
 			BaseURL: normalizeURL(baseURL),
-			APIKey:  firstEnv("CODEHARBOR_AGENT_BACKEND_API_KEY", "OPENHANDS_SESSION_API_KEY", "AGENT_SERVER_API_KEY"),
+			APIKey:  firstEnv("AUTOTO_AGENT_BACKEND_API_KEY", "CODEHARBOR_AGENT_BACKEND_API_KEY", "OPENHANDS_SESSION_API_KEY", "AGENT_SERVER_API_KEY"),
 			Active:  true,
 		},
 	}
@@ -460,23 +604,44 @@ func getenv(key, fallback string) string {
 }
 
 func getenvInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
+	return getenvIntFallback([]string{key}, fallback)
+}
+
+func getenvIntFallback(keys []string, fallback int) int {
+	for _, key := range keys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return fallback
+		}
+		return parsed
 	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
+	return fallback
 }
 
 func getenvBool(key string, fallback bool) bool {
-	value, ok := lookupBoolEnv(key)
+	return getenvBoolFallback([]string{key}, fallback)
+}
+
+func getenvBoolFallback(keys []string, fallback bool) bool {
+	value, ok := lookupBoolEnvFallback(keys...)
 	if !ok {
 		return fallback
 	}
 	return value
+}
+
+func lookupBoolEnvFallback(keys ...string) (bool, bool) {
+	for _, key := range keys {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			continue
+		}
+		return lookupBoolEnv(key)
+	}
+	return false, false
 }
 
 func lookupBoolEnv(key string) (bool, bool) {

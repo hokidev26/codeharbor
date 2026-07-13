@@ -2,21 +2,66 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"nhooyr.io/websocket"
+
+	agentpkg "autoto/internal/agent"
 )
 
-func (s *Server) narratorWS(w http.ResponseWriter, r *http.Request) {
-	narratorID := r.URL.Query().Get("id")
-	if narratorID == "" {
+type wsControlFrame struct {
+	Type           string  `json:"type"`
+	Protocol       int     `json:"protocol,omitempty"`
+	StreamSession  string  `json:"streamSession,omitempty"`
+	OldestSequence *uint64 `json:"oldestSequence,omitempty"`
+	LatestSequence *uint64 `json:"latestSequence,omitempty"`
+	Resume         string  `json:"resume,omitempty"`
+	Reason         string  `json:"reason,omitempty"`
+}
+
+func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("id")
+	if agentID == "" {
 		writeError(w, http.StatusBadRequest, "id query parameter is required")
 		return
 	}
 	if !s.validateWebSocketRequest(w, r) {
 		return
 	}
+
+	protocol, protocol2, err := websocketProtocol(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent store is not initialized")
+		return
+	}
+	if _, err := s.store.GetAgent(r.Context(), agentID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent event hub is not initialized")
+		return
+	}
+
+	after, hasAfter, err := websocketAfter(r, protocol2)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -25,23 +70,131 @@ func (s *Server) narratorWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	sub := s.hub.Subscribe(ctx, narratorID)
-	_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"connected"}`))
+	subscription := s.hub.SubscribeProtocol(ctx, agentpkg.SubscribeOptions{
+		AgentID:       agentID,
+		StreamSession: r.URL.Query().Get("streamSession"),
+		After:         after,
+		HasAfter:      hasAfter,
+	})
+	if subscription.Reason != "" {
+		writeWSControl(ctx, conn, wsControlFrame{
+			Type:           "resync_required",
+			Protocol:       protocol,
+			StreamSession:  subscription.StreamSession,
+			OldestSequence: &subscription.OldestSequence,
+			LatestSequence: &subscription.LatestSequence,
+			Resume:         "snapshot_required",
+			Reason:         string(subscription.Reason),
+		})
+		return
+	}
+
+	if protocol2 {
+		resume := "live"
+		if len(subscription.Replay) > 0 {
+			resume = "replayed"
+		}
+		if !writeWSControl(ctx, conn, wsControlFrame{
+			Type:           "connected",
+			Protocol:       agentpkg.ProtocolVersion,
+			StreamSession:  subscription.StreamSession,
+			OldestSequence: &subscription.OldestSequence,
+			LatestSequence: &subscription.LatestSequence,
+			Resume:         resume,
+		}) {
+			return
+		}
+	} else if !writeWSControl(ctx, conn, wsControlFrame{Type: "connected"}) {
+		return
+	}
+	for _, event := range subscription.Replay {
+		if !writeWSEvent(ctx, conn, event) {
+			return
+		}
+	}
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-sub:
+		case reason, ok := <-subscription.Resync:
 			if !ok {
 				return
 			}
-			writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := conn.Write(writeCtx, websocket.MessageText, event.JSON()); err != nil {
-				writeCancel()
+			writeWSControl(ctx, conn, wsControlFrame{
+				Type:           "resync_required",
+				Protocol:       agentpkg.ProtocolVersion,
+				StreamSession:  subscription.StreamSession,
+				OldestSequence: &subscription.OldestSequence,
+				LatestSequence: &subscription.LatestSequence,
+				Resume:         "snapshot_required",
+				Reason:         string(reason),
+			})
+			return
+		case <-ctx.Done():
+			return
+		case event, ok := <-subscription.Events:
+			if !ok {
+				select {
+				case reason, ok := <-subscription.Resync:
+					if ok {
+						writeWSControl(ctx, conn, wsControlFrame{
+							Type:           "resync_required",
+							Protocol:       agentpkg.ProtocolVersion,
+							StreamSession:  subscription.StreamSession,
+							LatestSequence: &subscription.LatestSequence,
+							Reason:         string(reason),
+						})
+					}
+				default:
+				}
 				return
 			}
-			writeCancel()
+			if !writeWSEvent(ctx, conn, event) {
+				return
+			}
 		}
 	}
+}
+
+func websocketProtocol(r *http.Request) (int, bool, error) {
+	value := r.URL.Query().Get("protocol")
+	if value == "" {
+		return 0, false, nil
+	}
+	protocol, err := strconv.Atoi(value)
+	if err != nil || protocol != agentpkg.ProtocolVersion {
+		return 0, false, errors.New("protocol must be 2")
+	}
+	return protocol, true, nil
+}
+
+func websocketAfter(r *http.Request, protocol2 bool) (uint64, bool, error) {
+	if !protocol2 {
+		return 0, false, nil
+	}
+	value, present := r.URL.Query()["after"]
+	if !present || len(value) == 0 || value[0] == "" {
+		return 0, false, nil
+	}
+	after, err := strconv.ParseUint(value[0], 10, 64)
+	if err != nil {
+		return 0, false, errors.New("after must be an unsigned integer")
+	}
+	return after, true, nil
+}
+
+func writeWSEvent(ctx context.Context, conn *websocket.Conn, event agentpkg.Event) bool {
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return conn.Write(writeCtx, websocket.MessageText, event.JSON()) == nil
+}
+
+func writeWSControl(ctx context.Context, conn *websocket.Conn, frame wsControlFrame) bool {
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return conn.Write(writeCtx, websocket.MessageText, marshalWSControl(frame)) == nil
+}
+
+func marshalWSControl(frame wsControlFrame) []byte {
+	data, _ := json.Marshal(frame)
+	return data
 }

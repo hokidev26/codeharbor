@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/db"
-	"codeharbor/internal/mcp"
+	"autoto/internal/db"
+	"autoto/internal/mcp"
 )
 
 const mcpDiscoveryTimeout = 20 * time.Second

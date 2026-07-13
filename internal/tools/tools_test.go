@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
 func TestResolveInCWDRejectsEscape(t *testing.T) {
@@ -159,7 +159,7 @@ func TestWebSearchParsesDuckDuckGoHTMLResults(t *testing.T) {
 }
 
 func TestMCPToolsUseStdioServer(t *testing.T) {
-	server := map[string]any{"command": os.Args[0], "args": []string{"-test.run=TestMCPFakeServerProcess"}, "env": map[string]string{"CODEHARBOR_MCP_FAKE_SERVER": "1"}, "timeout": 5000}
+	server := map[string]any{"command": os.Args[0], "args": []string{"-test.run=TestMCPFakeServerProcess"}, "env": map[string]string{"AUTOTO_MCP_FAKE_SERVER": "1"}, "timeout": 5000}
 	listInput, _ := json.Marshal(server)
 	listResult, err := (MCPListToolsTool{}).Execute(context.Background(), Call{ID: "mcp-list", Name: "MCPListTools", Input: listInput}, Env{})
 	if err != nil || listResult.IsError {
@@ -169,7 +169,7 @@ func TestMCPToolsUseStdioServer(t *testing.T) {
 		t.Fatalf("expected listed echo tool, got %q", listResult.Output)
 	}
 
-	callPayload := map[string]any{"command": os.Args[0], "args": []string{"-test.run=TestMCPFakeServerProcess"}, "env": map[string]string{"CODEHARBOR_MCP_FAKE_SERVER": "1"}, "timeout": 5000, "toolName": "echo", "arguments": map[string]any{"name": "Ada"}}
+	callPayload := map[string]any{"command": os.Args[0], "args": []string{"-test.run=TestMCPFakeServerProcess"}, "env": map[string]string{"AUTOTO_MCP_FAKE_SERVER": "1"}, "timeout": 5000, "toolName": "echo", "arguments": map[string]any{"name": "Ada"}}
 	callInput, _ := json.Marshal(callPayload)
 	callResult, err := (MCPCallToolTool{}).Execute(context.Background(), Call{ID: "mcp-call", Name: "MCPCallTool", Input: callInput}, Env{})
 	if err != nil || callResult.IsError {
@@ -190,7 +190,7 @@ func TestMCPToolsUseRegisteredServer(t *testing.T) {
 	server, err := store.CreateMCPServer(ctx, db.MCPServer{
 		Name: "Fake MCP", Transport: "stdio", Command: os.Args[0],
 		Args: []string{"-test.run=TestMCPFakeServerProcess"},
-		Env:  map[string]string{"CODEHARBOR_MCP_FAKE_SERVER": "1"}, Enabled: true,
+		Env:  map[string]string{"AUTOTO_MCP_FAKE_SERVER": "1"}, Enabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestMCPToolsUseRegisteredServer(t *testing.T) {
 }
 
 func TestMCPFakeServerProcess(t *testing.T) {
-	if os.Getenv("CODEHARBOR_MCP_FAKE_SERVER") != "1" {
+	if os.Getenv("AUTOTO_MCP_FAKE_SERVER") != "1" {
 		return
 	}
 	decoder := json.NewDecoder(os.Stdin)
@@ -233,6 +233,16 @@ func TestMCPFakeServerProcess(t *testing.T) {
 		response := map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(request.ID)}
 		switch request.Method {
 		case "initialize":
+			var params struct {
+				ClientInfo struct {
+					Name string `json:"name"`
+				} `json:"clientInfo"`
+			}
+			_ = json.Unmarshal(request.Params, &params)
+			if params.ClientInfo.Name != "Autoto" {
+				response["error"] = map[string]any{"code": -32602, "message": "unexpected MCP client"}
+				break
+			}
 			response["result"] = map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}}}
 		case "tools/list":
 			response["result"] = map[string]any{"tools": []map[string]any{{"name": "echo", "description": "Echo a greeting", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}}}}}

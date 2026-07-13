@@ -1,13 +1,20 @@
-# Changelog
+# Autoto Changelog
 
-All notable changes to CodeHarbor are tracked here. The project is still an experimental local-first MVP, so entries focus on user-visible behavior, security boundaries, and contributor-facing workflow changes.
+All notable changes to Autoto are tracked here. The project is still an experimental local-first MVP, so entries focus on user-visible behavior, security boundaries, and contributor-facing workflow changes.
 
 ## Unreleased
+
+### Branding and compatibility
+
+- Renamed the current product to **Autoto**. The canonical Go module and CLI are `autoto` and `cmd/autoto` / `autoto`; `cmd/codeharbor` remains a legacy compatibility shim.
+- Moved default runtime state to `~/.autoto/config.json` and `~/.autoto/autoto.db`. When the canonical config is absent, a legacy `~/.codeharbor/config.json` is copied forward for compatibility.
+- Made `AUTOTO_*` environment variables and `X-Autoto-*` headers canonical. Corresponding `CODEHARBOR_*`, `X-CodeHarbor-*`, and legacy remote-access cookie names remain accepted only for migration compatibility.
+- Historical entries below intentionally retain pre-rename CodeHarbor terminology, endpoint names, commit messages, and other recorded facts; they are legacy history rather than current naming guidance.
 
 ### Added
 
 - Added a frontend Run Summary card that loads completed/error/interrupted run summaries, shows tool/message/token/cost metrics, and links the review flow to the existing Git changes modal.
-- Added streaming Bash tool output over narrator WebSocket events, with a live output card in the chat UI while commands run.
+- Added streaming Bash tool output over Agent WebSocket events, with a live output card in the chat UI while commands run.
 - Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block.
 
 ### Changed

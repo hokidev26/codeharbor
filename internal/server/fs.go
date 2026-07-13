@@ -116,10 +116,10 @@ func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	script := `set chosenFolder to choose folder with prompt "选择 CodeHarbor 工作资料夹"`
+	script := `set chosenFolder to choose folder with prompt "选择 Autoto 工作资料夹"`
 	if defaultPath != "" {
 		script = `set defaultFolder to POSIX file ` + appleScriptString(defaultPath) + ` as alias
-set chosenFolder to choose folder with prompt "选择 CodeHarbor 工作资料夹" default location defaultFolder`
+set chosenFolder to choose folder with prompt "选择 Autoto 工作资料夹" default location defaultFolder`
 	}
 	script += "\nPOSIX path of chosenFolder"
 

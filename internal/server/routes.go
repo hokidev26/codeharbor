@@ -10,7 +10,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
+	"autoto/internal/providers"
 )
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -26,13 +27,36 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"hasUsers": hasUsers, "registrationOpen": s.configSnapshot().Auth.RegistrationOpen})
 }
 
+type settingsProviderResponse struct {
+	Name           string                      `json:"name"`
+	Type           string                      `json:"type"`
+	Profile        string                      `json:"profile,omitempty"`
+	BaseURL        string                      `json:"baseUrl,omitempty"`
+	Model          string                      `json:"model"`
+	MaxTokens      int64                       `json:"maxTokens,omitempty"`
+	Configured     bool                        `json:"configured"`
+	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
+	Capabilities   providers.Capabilities      `json:"capabilities"`
+	Management     *providerManagementResponse `json:"management,omitempty"`
+}
+
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configSnapshot()
+	summaries := cfg.Providers.Summaries()
+	providerResponses := make([]settingsProviderResponse, 0, len(summaries))
+	for _, summary := range summaries {
+		metadata := s.providerSettingsMetadata(summary)
+		providerResponses = append(providerResponses, settingsProviderResponse{
+			Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
+			MaxTokens: summary.MaxTokens, Configured: summary.Configured, APIKeyOptional: summary.APIKeyOptional,
+			Capabilities: metadata.Capabilities, Management: metadata.Management,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server":    cfg.Server,
 		"paths":     cfg.Paths,
 		"agent":     cfg.Agent,
-		"providers": cfg.Providers.Summaries(),
+		"providers": providerResponses,
 		"version":   config.Version,
 	})
 }
@@ -79,12 +103,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		model = cfg.Agent.DefaultModel
 	}
 	permissionMode := s.safeDefaultPermissionModeForRequest(r, cfg.Agent.DefaultPermissionMode)
-	project, chapter, narrator, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, permissionMode)
+	project, workline, agent, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, permissionMode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "chapter": chapter, "narrator": narrator})
+	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "workline": workline, "agent": agent})
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
@@ -119,33 +143,33 @@ func slugify(name string) string {
 	return slug
 }
 
-func (s *Server) listProjectChapters(w http.ResponseWriter, r *http.Request) {
-	chapters, err := s.store.ListChaptersByProject(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) listProjectWorklines(w http.ResponseWriter, r *http.Request) {
+	worklines, err := s.store.ListWorklinesByProject(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, chapters)
+	writeJSON(w, http.StatusOK, worklines)
 }
 
-func (s *Server) getChapter(w http.ResponseWriter, r *http.Request) {
-	chapter, err := s.store.GetChapter(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) getWorkline(w http.ResponseWriter, r *http.Request) {
+	workline, err := s.store.GetWorkline(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		if err == sql.ErrNoRows {
-			writeError(w, http.StatusNotFound, "chapter not found")
+			writeError(w, http.StatusNotFound, "workline not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, chapter)
+	writeJSON(w, http.StatusOK, workline)
 }
 
-func (s *Server) listChapterNarrators(w http.ResponseWriter, r *http.Request) {
-	narrators, err := s.store.ListNarratorsByChapter(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) listWorklineAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := s.store.ListAgentsByWorkline(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, narrators)
+	writeJSON(w, http.StatusOK, agents)
 }

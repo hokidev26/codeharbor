@@ -10,7 +10,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 type AnthropicProvider struct {
@@ -39,6 +39,10 @@ func NewAnthropicProvider(cfg config.ProviderConfig) *AnthropicProvider {
 }
 
 func (p *AnthropicProvider) Name() string { return p.cfg.Name }
+
+func (p *AnthropicProvider) Capabilities() Capabilities {
+	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
+}
 
 func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	if p.cfg.APIKey == "" {

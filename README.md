@@ -1,17 +1,31 @@
-# CodeHarbor
+# Autoto
 
-![CodeHarbor local agent workflow demo](docs/demo.gif)
+![Autoto local agent workflow demo](docs/demo.svg)
 
-CodeHarbor is a local-first Go MVP for an AI coding agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, Agent Server and MCP server registries, and a simple embedded web UI.
+Autoto is a local-first Go MVP for an AI coding-agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, Agent Server and MCP server registries, and a simple embedded web UI.
 
 The project is currently an experimental MVP. It is intended for local development and iteration, not for untrusted multi-user or production deployments.
 
-> **Real local dogfood:** the current code has been run end-to-end against temporary local projects. The latest tracked-file smoke created a project through the HTTP API, edited a tracked file with the `Write` tool, reviewed the resulting Git diff, and committed only the selected path. See [Dogfood demo](#dogfood-demo).
+> **Real local dogfood:** the current code has been run end-to-end against temporary local projects. The latest tracked-file smoke created a project through the HTTP API, edited a tracked file with the `Write` tool, reviewed the resulting Git diff, and committed only the selected path. See [Dogfood demo](#dogfood-demo-historical-evidence).
+
+## Naming and migration
+
+Use these canonical names for new documentation, automation, and integrations:
+
+- **Product:** Autoto
+- **CLI, binary, release assets, and module namespace:** `autoto`
+- **Default home:** `~/.autoto`; default config: `~/.autoto/config.json`; default database: `~/.autoto/autoto.db`
+- **Environment variables:** `AUTOTO_*`
+- **Browser request headers:** `X-Autoto-*`
+- **Browser-local preference keys:** `autoto.*`
+- **Domain entities and canonical routes:** `Agent` / `Workline`, `/api/agents`, `/api/worklines`, and `/ws/agent`
+
+Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-CodeHarbor-*` headers, and `codeharbor.*` browser-local preference keys are read for migration compatibility. New scripts and clients must write the Autoto names above. The legacy Narrator/Chapter routes are also compatibility aliases; they invoke the canonical Agent/Workline handlers and return the canonical payload shape.
 
 ## Features
 
-- Local HTTP server with embedded HTML/CSS/JS UI, using a no-build ES module seam for frontend bootstrap/runtime helpers and extracted Settings local preference panels
-- SQLite persistence for projects, chapters, narrators, messages, tool calls, backend registry entries, and stdio MCP server registry entries
+- Local HTTP server with embedded HTML/CSS/JS UI, using a no-build ES module seam for frontend bootstrap/runtime helpers and extracted Settings local-preference panels
+- SQLite persistence for projects, worklines, agents, messages, tool calls, backend registry entries, and stdio MCP server registry entries
 - Provider abstraction for:
   - OpenAI official Responses API with SDK streaming text deltas and usage capture
   - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, usage capture, and automatic 5m prompt-cache breakpoints for sufficiently large requests
@@ -29,28 +43,28 @@ The project is currently an experimental MVP. It is intended for local developme
   - MCPListTools
   - MCPCallTool
 - Git workspace APIs and UI for status, diff, log, and explicit-path commits without automatic push, amend, reset, clean, force, or `git add -A`
-- WebSocket agent event stream: `/ws/narrator` with Settings → AI Agents current narrator controls for model, permission mode, and working directory
-- Settings → Chapters & Containers project workline view backed by project chapter/narrator APIs, with backend chapter fork support that creates Git worktrees, merge-check preflight, and clean-worktree merge APIs
-- Interactive PTY terminal WebSocket: `/ws/terminal` with Settings → Terminal management controls and browser-local retention/focus preferences
+- WebSocket Agent event stream: `/ws/agent`, with current-Agent controls for model, permission mode, and working directory
+- Workline and container settings backed by project Workline/Agent APIs, with backend workline-fork support that creates Git worktrees, merge-check preflight, and clean-worktree merge APIs
+- Interactive PTY terminal WebSocket: `/ws/terminal`, with terminal-management controls and browser-local retention/focus preferences
 - Filesystem browse/preview/mkdir APIs
-- Agent Server backend registry with sidebar and Settings → Agent Admin management UI for compatible OpenHands Agent Server endpoints
+- Agent Server backend registry with sidebar and Agent Admin management UI for compatible OpenHands Agent Server endpoints
 - Settings modal search/filter with keyboard focus shortcut for quickly locating growing product configuration panels
 - Chat message copy actions for exporting individual messages and the current conversation as Markdown
-- Browser-local chat draft autosave/restore per narrator, including migration through local preference backups
+- Browser-local chat draft autosave/restore per Agent, including migration through local preference backups
 - Browser-local prompt history for the chat composer, with empty-input ↑/↓ recall and migration through local preference backups
-- Chat composer slash command palette backed by enabled local Skills command templates
+- Chat-composer slash command palette backed by enabled local Skills command templates
 - Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
 - Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules, plus `WebSearch` and `WebFetch` core tools for public web/documentation lookup
 - Browser-local Settings → IM Gateway integration policy preferences for webhook/bot presets, confirmation, signatures, redaction, and event routing
 - Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export; it can create/enable/delete persisted stdio MCP registry entries, run `tools/list` discovery, and let core tools list/call registered MCP servers with explicit exec-risk approval
 - Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices
-- Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and agent event log display
-- Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and agent limits
+- Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and Agent event-log display
+- Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and Agent limits
 - Settings → Users read-only auth status panel backed by `/api/auth/status`
-- Local storage summary endpoint and Settings → Storage panel for config, database, home, and project directory footprint
+- Local storage summary endpoint and Settings → Storage panel for config, database, home, and project-directory footprint
 - Local usage summary endpoint and Settings → Usage panel for projects, messages, tool calls, model requests, estimated token cost, and backends
-- Settings → About dependency license panel backed by the development-time `/api/licenses` endpoint
-- Settings → About browser-local preferences backup/import for migrating profile, skills, chat drafts, prompt history, search, IM, notification, appearance, terminal, recent directory, model, and relay protocol settings
+- Settings → About dependency-license panel backed by the development-time `/api/licenses` endpoint
+- Settings → About browser-local preferences backup/import for migrating profile, skills, chat drafts, prompt history, search, IM, notification, appearance, terminal, recent directory, model, and relay-protocol settings
 
 ## Requirements
 
@@ -60,12 +74,12 @@ The project is currently an experimental MVP. It is intended for local developme
 
 ## Install
 
-For tagged releases, the GoReleaser workflow builds macOS, Linux, and Windows archives named like `codeharbor_<version>_<os>_<arch>`. Download the matching archive from GitHub Releases, unpack it, then run the `codeharbor` binary.
+Tagged releases publish Autoto release assets for macOS, Linux, and Windows, named like `autoto_<version>_<os>_<arch>`. Download the matching asset from GitHub Releases, unpack it, then run the `autoto` binary.
 
 From source:
 
 ```bash
-go run ./cmd/codeharbor
+go run ./cmd/autoto
 ```
 
 Then open:
@@ -77,22 +91,20 @@ http://localhost:7788
 Default paths:
 
 ```text
-Config:   ~/.codeharbor/config.json
-Database: ~/.codeharbor/codeharbor.db
+Config:   ~/.autoto/config.json
+Database: ~/.autoto/autoto.db
 Projects: ~/projects
 ```
 
 You can pass a custom config path:
 
 ```bash
-go run ./cmd/codeharbor --config /path/to/config.json
+go run ./cmd/autoto --config /path/to/config.json
 ```
 
-## Dogfood demo
+## Dogfood demo (historical evidence)
 
-Local API-only dogfood smokes were run against temporary CodeHarbor servers and temporary Git repositories. The workflow creates a project through `POST /api/projects`, executes tools through `POST /api/narrators/{id}/tool-calls`, reviews Git state through `GET /api/narrators/{id}/git/status` and `GET /api/narrators/{id}/git/diff`, then commits only selected files through `POST /api/narrators/{id}/git/commit` with an explicit `paths` list.
-
-Latest tracked-file run on 2026-07-07 UTC / 2026-07-08 +08:00:
+The following tracked-file smoke was run before the rename, against temporary **CodeHarbor** servers and temporary Git repositories. It is retained as a historical record; the same current workflow uses the canonical Agent APIs shown below.
 
 ```text
 Write: Wrote 197 bytes to demo/notes.md inside the temporary project worktree
@@ -110,23 +122,24 @@ After commit: clean=true, remainingFiles=[]
 
 An earlier untracked-file smoke also created and committed `demo/notes.md` with commit `2484ab7 Dogfood CodeHarbor API workflow`.
 
-The README hero currently uses a lightweight tracked `docs/demo.gif` workflow preview. To replace it with a real product recording, capture a 15-20 second browser flow (create/open project → send task → approve tool call → review diff → commit selected path), compress it to a small GIF, and overwrite `docs/demo.gif`.
+`docs/demo.svg` is a lightweight tracked workflow preview. To replace it with a real product recording, capture a 15–20 second browser flow (create/open project → send task → approve tool call → review diff → commit selected path), compress it to a small asset, and update the README reference.
 
-To reproduce manually, start CodeHarbor with a temporary config, create or open a local Git repository as the project worktree, use the UI or tool-call API to write a small file, verify Git status, inspect the diff in the Git panel, select the file checkbox, enter a commit message, and submit the commit. The commit API stages only the selected paths and does not push, amend, reset, clean, force, or auto-stage the full worktree.
+To reproduce manually, start Autoto with a temporary config, create or open a local Git repository as the project worktree, use the UI or tool-call API to write a small file, verify Git status, inspect the diff in the Git panel, select the file checkbox, enter a commit message, and submit the commit. The commit API stages only the selected paths and does not push, amend, reset, clean, force, or auto-stage the full worktree.
 
 ## Usage cost estimates
 
-CodeHarbor records provider usage in `api_requests` and shows aggregate estimated cost in Settings → Usage. Cost is calculated from a small built-in USD-per-million-token table in `internal/agent/loop.go`. The table was last reviewed on 2026-07-07 against public pricing pages: [OpenAI API pricing](https://developers.openai.com/api/docs/pricing), [OpenAI GPT-4.1 pricing announcement](https://openai.com/index/gpt-4-1/), and [Anthropic Claude pricing](https://docs.anthropic.com/en/docs/about-claude/pricing). Unknown models intentionally estimate to `0`, and OpenAI-compatible relay or local models may bill differently from their public model-name match.
+Autoto records provider usage in `api_requests` and shows aggregate estimated cost in Settings → Usage. Cost is calculated from a small built-in USD-per-million-token table in `internal/agent/loop.go`. The table was last reviewed on 2026-07-07 against public pricing pages: [OpenAI API pricing](https://developers.openai.com/api/docs/pricing), [OpenAI GPT-4.1 pricing announcement](https://openai.com/index/gpt-4-1/), and [Anthropic Claude pricing](https://docs.anthropic.com/en/docs/about-claude/pricing). Unknown models intentionally estimate to `0`, and OpenAI-compatible relay or local models may bill differently from their public model-name match.
 
 ## Configuration
 
-On first run, CodeHarbor creates a local config file if it does not exist. Runtime secrets can be supplied through environment variables. `config.json` includes a schema `version` field; legacy configs without it are loaded as version `1` and normalized in memory.
+On first run, Autoto creates a local config file if it does not exist. Runtime secrets can be supplied through environment variables. `config.json` includes a schema `version` field; legacy configs without it are loaded as version `1` and normalized in memory.
 
-Agent model environment variables:
+Agent-model environment variables:
 
 ```text
-CODEHARBOR_DEFAULT_MODEL
-CODEHARBOR_SUMMARY_MODEL
+AUTOTO_DEFAULT_MODEL
+AUTOTO_SUMMARY_MODEL
+AUTOTO_CONTEXT_TOKEN_LIMIT
 ```
 
 Provider environment variables:
@@ -150,7 +163,7 @@ CLIPROXYAPI_CONFIG
 
 ### CLIProxyAPI preset
 
-CodeHarbor includes a built-in `cliproxyapi` provider profile for local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instances:
+Autoto includes a built-in `cliproxyapi` provider profile for local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instances:
 
 ```text
 Provider: cliproxyapi
@@ -159,22 +172,33 @@ Base URL: http://127.0.0.1:8317/v1
 Model:    gpt-5.5
 ```
 
-Start CLIProxyAPI, then use **Settings → Providers → Codex 凭证 + 中转站** inside CodeHarbor. Codex now uses credential import only: paste a Codex auth JSON, refresh token list, or token/account rows and import them directly into CLIProxyAPI; CodeHarbor refreshes CLIProxyAPI auth files and `/v1/models` afterwards. The same page also includes an embedded relay/provider form for API Key, Base URL, protocol selection, and default model. Saving the form updates CodeHarbor's runtime provider registry immediately and persists non-secret provider settings to `config.json`; API keys are intentionally not written to disk. You can pick a preferred model before creating a project, and CodeHarbor will use it for the new narrator. To make new projects use the preset by default, start CodeHarbor with `CODEHARBOR_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting CodeHarbor. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`. CodeHarbor uses `CLIPROXYAPI_MANAGEMENT_KEY` for local management API calls; local previews default to `codeharbor-local`.
+Start CLIProxyAPI, then use **Settings → Providers → Codex 凭证 + 中转站** inside Autoto. Codex uses credential import: paste a Codex auth JSON, refresh token list, or token/account rows and import them directly into CLIProxyAPI; Autoto refreshes CLIProxyAPI auth files and `/v1/models` afterwards. The same page also includes an embedded relay/provider form for API Key, Base URL, protocol selection, and default model. Saving the form updates Autoto's runtime provider registry immediately and persists non-secret provider settings to `config.json`; API keys are intentionally not written to disk. You can pick a preferred model before creating a project, and Autoto will use it for the new Agent. To make new projects use the preset by default, start Autoto with `AUTOTO_DEFAULT_MODEL=cliproxyapi:gpt-5.5`. If your CLIProxyAPI config enables client `api-keys`, export `CLIPROXYAPI_API_KEY` before starting Autoto. You can override the local endpoint or fallback model with `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_MODEL`. Autoto uses `CLIPROXYAPI_MANAGEMENT_KEY` for local management API calls.
 
 Agent Server backend seed variables:
 
 ```text
-CODEHARBOR_AGENT_BACKEND_URL
-CODEHARBOR_AGENT_BACKEND_NAME
-CODEHARBOR_AGENT_BACKEND_KIND
-CODEHARBOR_AGENT_BACKEND_API_KEY
+AUTOTO_AGENT_BACKEND_URL
+AUTOTO_AGENT_BACKEND_NAME
+AUTOTO_AGENT_BACKEND_KIND
+AUTOTO_AGENT_BACKEND_API_KEY
 OPENHANDS_AGENT_SERVER_URL
 OPENHANDS_SESSION_API_KEY
 AGENT_SERVER_URL
 AGENT_SERVER_API_KEY
 ```
 
-If a backend URL is configured, CodeHarbor seeds the backend registry on first startup. Local backends use `X-Session-API-Key`; cloud backends use `Authorization: Bearer ...`.
+If a backend URL is configured, Autoto seeds the backend registry on first startup. Local backends use `X-Session-API-Key`; cloud backends use `Authorization: Bearer ...`.
+
+### Migration compatibility
+
+For a non-disruptive upgrade, Autoto continues to read the following legacy inputs:
+
+- `~/.codeharbor/config.json` configuration, which is migrated into the canonical Autoto home when applicable
+- `CODEHARBOR_*` environment variables as fallbacks for their `AUTOTO_*` counterparts
+- `X-CodeHarbor-Token` and `X-CodeHarbor-Access` request headers alongside `X-Autoto-Token` and `X-Autoto-Access`
+- `codeharbor.*` browser `localStorage` preference keys alongside canonical `autoto.*` keys
+
+Do not introduce new dependencies on the legacy names. They exist solely to preserve existing local installations during the rename.
 
 ## API overview
 
@@ -213,36 +237,38 @@ GET    /api/mcp/servers/{id}/tools
 GET  /api/projects
 POST /api/projects
 GET  /api/projects/{id}
-GET  /api/projects/{id}/chapters
+GET  /api/projects/{id}/worklines
 
-GET  /api/chapters/{id}
-POST /api/chapters/{id}/fork
-GET  /api/chapters/{id}/merge-check?targetChapterId=...
-POST /api/chapters/{id}/merge
-GET  /api/chapters/{id}/narrators
+GET  /api/worklines/{id}
+POST /api/worklines/{id}/fork
+GET  /api/worklines/{id}/merge-check?targetWorklineId=...
+POST /api/worklines/{id}/merge
+GET  /api/worklines/{id}/agents
 
-GET   /api/narrators/{id}
-PATCH /api/narrators/{id}/cwd
-PATCH /api/narrators/{id}/model
-PATCH /api/narrators/{id}/permission-mode
-GET   /api/narrators/{id}/messages
-POST  /api/narrators/{id}/messages
-GET   /api/narrators/{id}/tools
-POST  /api/narrators/{id}/tool-calls
-GET   /api/narrators/{id}/tool-calls/{toolUseId}
-GET   /api/narrators/{id}/git/status
-GET   /api/narrators/{id}/git/diff
-GET   /api/narrators/{id}/git/log
-POST  /api/narrators/{id}/git/commit
+GET   /api/agents/{id}
+PATCH /api/agents/{id}/cwd
+PATCH /api/agents/{id}/model
+PATCH /api/agents/{id}/permission-mode
+GET   /api/agents/{id}/messages
+POST  /api/agents/{id}/messages
+GET   /api/agents/{id}/tools
+POST  /api/agents/{id}/tool-calls
+GET   /api/agents/{id}/tool-calls/{toolUseId}
+GET   /api/agents/{id}/git/status
+GET   /api/agents/{id}/git/diff
+GET   /api/agents/{id}/git/log
+POST  /api/agents/{id}/git/commit
 
 GET  /api/fs/browse?path=...
 GET  /api/fs/directories?path=...
 GET  /api/fs/preview?path=...
 POST /api/fs/mkdir
 
-GET  /ws/narrator?id={narratorId}
-GET  /ws/terminal?narratorId={narratorId}
+GET  /ws/agent?id={agentId}
+GET  /ws/terminal?agentId={agentId}
 ```
+
+Legacy clients can continue using `/api/projects/{id}/chapters`, `/api/chapters/...`, `/api/narrators/...`, and `/ws/narrator`; these compatibility aliases invoke the same canonical Agent/Workline handlers and return the canonical payload shape.
 
 ## Validation
 
@@ -254,17 +280,17 @@ make check
 
 If `make` is unavailable, run `./scripts/check.sh` directly. The check script verifies Go formatting without rewriting files, runs Go tests/vet/build, checks embedded JavaScript syntax, and runs embedded JavaScript tests. Use `make fmt` to apply Go formatting.
 
-CI runs the same check script and additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the narrator WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing archives, not for local validation.
+CI runs the same check script and additionally runs `golangci-lint` through `.github/workflows/ci.yml`. The server test suite includes an end-to-end smoke that starts a real `httptest` server, connects the Agent WebSocket, posts a message over HTTP, approves a model-requested Bash tool call, verifies tool-result feedback, and checks persisted messages/tool calls/API requests. Release tags matching `v*` run GoReleaser through `.github/workflows/release.yml`; use this only for publishing Autoto release assets, not for local validation.
 
 ## Security notes
 
-CodeHarbor is a local development MVP.
+Autoto is a local development MVP.
 
 - Do not commit `.env`, local config files, SQLite databases, or API keys.
 - The embedded UI and APIs are intended for trusted local use.
 - Browser-originated API calls require a per-process local token injected into the UI, and WebSocket upgrades are restricted by Origin/Sec-Fetch-Site plus the same token.
-- Public tunnel usage must add authentication. Non-loopback hosts, forwarded tunnel headers, or explicit `CODEHARBOR_EXPOSED=true`, enter remote hardening mode: the UI/API require `CODEHARBOR_ACCESS_PASSWORD`, `bypassPermissions` is disabled, and the interactive terminal is off unless `CODEHARBOR_REMOTE_TERMINAL=true` is set.
-- Git status/diff/log/commit APIs resolve the narrator repository and reject repositories outside the project path, configured default project directory, or the narrator chapter worktree path created by CodeHarbor.
+- Public tunnel usage must add authentication. Non-loopback hosts, forwarded tunnel headers, or explicit `AUTOTO_EXPOSED=true`, enter remote-hardening mode: the UI/API require `AUTOTO_ACCESS_PASSWORD`, `bypassPermissions` is disabled, and the interactive terminal is off unless `AUTOTO_REMOTE_TERMINAL=true` is set.
+- Git status/diff/log/commit APIs resolve the Agent repository and reject repositories outside the project path, configured default project directory, or the Agent Workline worktree path created by Autoto.
 - Tools can read and write local files within their configured working directories.
 - Bash and stdio MCP execution are intentionally restricted by permission mode, but both should still be treated as powerful local code execution.
 - MCP server registry responses list environment variable names only; stored values are used for local process launch and are not returned by the public API.
@@ -279,8 +305,8 @@ See `THIRD_PARTY_NOTICES.md` for the initial direct dependency notice. It is a d
 
 ## Contributor docs
 
-- `docs/ARCHITECTURE.md` explains how requests flow through server, agent, provider, tools, WebSocket events, and persistence.
-- `CHANGELOG.md` tracks user-visible changes, security boundaries, and known release gaps.
+- `docs/ARCHITECTURE.md` explains how requests flow through server, Agent, provider, tools, WebSocket events, and persistence.
+- `CHANGELOG.md` tracks user-visible changes, migration compatibility, security boundaries, and known release gaps.
 
 ## Roadmap
 
@@ -288,4 +314,4 @@ See `PROJECT_PLAN.md` for the current implementation plan, known limitations, an
 
 ## License
 
-CodeHarbor is licensed under the MIT License. See `LICENSE`.
+Autoto is licensed under the MIT License. See `LICENSE`.

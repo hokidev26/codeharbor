@@ -52,7 +52,7 @@ func (WebFetchTool) Execute(ctx context.Context, call Call, env Env) (Result, er
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	req.Header.Set("User-Agent", "CodeHarbor-WebFetch/0.1")
+	req.Header.Set("User-Agent", "Autoto-WebFetch/0.1")
 	req.Header.Set("Accept", "text/html,text/plain,application/xhtml+xml,application/json;q=0.8,*/*;q=0.1")
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)

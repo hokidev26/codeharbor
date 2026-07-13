@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/db"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/db"
 )
 
 const webhookNotifyTimeout = 5 * time.Second
@@ -32,16 +32,16 @@ type notificationSettingsPayload struct {
 }
 
 type webhookPayload struct {
-	Kind       string                 `json:"kind"`
-	Event      string                 `json:"event"`
-	RunID      string                 `json:"runId,omitempty"`
-	NarratorID string                 `json:"narratorId,omitempty"`
-	Status     string                 `json:"status,omitempty"`
-	Error      string                 `json:"errorMessage,omitempty"`
-	Summary    *webhookRunSummary     `json:"summary,omitempty"`
-	Tool       *webhookToolSummary    `json:"tool,omitempty"`
-	CreatedAt  string                 `json:"createdAt"`
-	Meta       map[string]interface{} `json:"meta,omitempty"`
+	Kind      string                 `json:"kind"`
+	Event     string                 `json:"event"`
+	RunID     string                 `json:"runId,omitempty"`
+	AgentID   string                 `json:"agentId,omitempty"`
+	Status    string                 `json:"status,omitempty"`
+	Error     string                 `json:"errorMessage,omitempty"`
+	Summary   *webhookRunSummary     `json:"summary,omitempty"`
+	Tool      *webhookToolSummary    `json:"tool,omitempty"`
+	CreatedAt string                 `json:"createdAt"`
+	Meta      map[string]interface{} `json:"meta,omitempty"`
 }
 
 type webhookRunSummary struct {
@@ -65,7 +65,7 @@ func NewWebhookNotifier(store *db.Store) *WebhookNotifier {
 	return &WebhookNotifier{store: store, client: &http.Client{Timeout: webhookNotifyTimeout}}
 }
 
-func (n *WebhookNotifier) Notify(ctx context.Context, event agent.NotificationEvent) {
+func (n *WebhookNotifier) Notify(ctx context.Context, event agentpkg.NotificationEvent) {
 	if n == nil || n.store == nil {
 		return
 	}
@@ -90,25 +90,25 @@ func (n *WebhookNotifier) SendTest(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	payload := webhookPayload{Kind: "notification.test", Event: "test", Status: "test", CreatedAt: db.Now(), Meta: map[string]interface{}{"source": "CodeHarbor"}}
+	payload := webhookPayload{Kind: "notification.test", Event: "test", Status: "test", CreatedAt: db.Now(), Meta: map[string]interface{}{"source": "Autoto"}}
 	return n.send(ctx, settings.WebhookURL, payload)
 }
 
-func (n *WebhookNotifier) payload(ctx context.Context, event agent.NotificationEvent) webhookPayload {
+func (n *WebhookNotifier) payload(ctx context.Context, event agentpkg.NotificationEvent) webhookPayload {
 	payload := webhookPayload{
-		Kind:       "run." + notificationEventKind(event.Event),
-		Event:      event.Event,
-		RunID:      event.RunID,
-		NarratorID: event.NarratorID,
-		Status:     event.Status,
-		Error:      event.Error,
-		CreatedAt:  db.Now(),
+		Kind:      "run." + notificationEventKind(event.Event),
+		Event:     event.Event,
+		RunID:     event.RunID,
+		AgentID:   event.AgentID,
+		Status:    event.Status,
+		Error:     event.Error,
+		CreatedAt: db.Now(),
 	}
 	if event.ToolUseID != "" || event.ToolName != "" {
 		payload.Tool = &webhookToolSummary{ToolUseID: event.ToolUseID, ToolName: event.ToolName}
 	}
-	if event.RunID != "" && event.NarratorID != "" {
-		if summary, err := n.store.RunSummary(ctx, event.NarratorID, event.RunID); err == nil {
+	if event.RunID != "" && event.AgentID != "" {
+		if summary, err := n.store.RunSummary(ctx, event.AgentID, event.RunID); err == nil {
 			payload.Summary = &webhookRunSummary{
 				MessageCount: summary.MessageCount, ToolCallCount: summary.ToolCallCount,
 				PendingApprovals: summary.PendingApprovals, DeniedToolCalls: summary.DeniedToolCalls, ErrorToolCalls: summary.ErrorToolCalls,
@@ -135,7 +135,7 @@ func (n *WebhookNotifier) send(ctx context.Context, webhookURL string, payload w
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "CodeHarbor-Webhook/1.0")
+	request.Header.Set("User-Agent", "Autoto-Webhook/1.0")
 	response, err := n.client.Do(request)
 	if err != nil {
 		return err

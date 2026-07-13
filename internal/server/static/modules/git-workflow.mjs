@@ -24,7 +24,7 @@ export function createGitWorkflowController({
   function renderGitButtonState() {
     const button = $("gitWorkflowBtn");
     if (!button) return;
-    const enabled = Boolean(state.narrator?.id);
+    const enabled = Boolean(state.agent?.id);
     button.disabled = !enabled;
     const dirty = Boolean(state.gitStatus && state.gitStatus.clean === false);
     button.classList.toggle("active", dirty || state.gitOpen);
@@ -33,13 +33,13 @@ export function createGitWorkflowController({
   }
 
   async function loadGitStatus(options = {}) {
-    const narratorId = state.narrator?.id;
+    const agentId = state.agent?.id;
     renderGitButtonState();
-    if (!narratorId) return null;
+    if (!agentId) return null;
     const seq = ++state.gitSeq;
     try {
-      const status = await api(`/api/narrators/${narratorId}/git/status`);
-      if (seq !== state.gitSeq || state.narrator?.id !== narratorId) return null;
+      const status = await api(`/api/agents/${agentId}/git/status`);
+      if (seq !== state.gitSeq || state.agent?.id !== agentId) return null;
       state.gitStatus = status;
       state.gitError = "";
       const files = Array.isArray(status.files) ? status.files : [];
@@ -51,7 +51,7 @@ export function createGitWorkflowController({
       if (state.gitOpen) renderGitModal();
       return status;
     } catch (err) {
-      if (seq !== state.gitSeq || state.narrator?.id !== narratorId) return null;
+      if (seq !== state.gitSeq || state.agent?.id !== agentId) return null;
       state.gitStatus = null;
       state.gitError = err.message || String(err);
       renderGitButtonState();
@@ -62,14 +62,14 @@ export function createGitWorkflowController({
   }
 
   async function loadGitDiff(options = {}) {
-    const narratorId = state.narrator?.id;
-    if (!narratorId) return null;
+    const agentId = state.agent?.id;
+    if (!agentId) return null;
     const scope = options.scope || state.gitScope || "all";
     const path = options.path !== undefined ? options.path : state.gitSelectedPath || "";
     const params = new URLSearchParams({ scope });
     if (path) params.set("path", path);
-    const diff = await api(`/api/narrators/${narratorId}/git/diff?${params.toString()}`);
-    if (state.narrator?.id !== narratorId) return null;
+    const diff = await api(`/api/agents/${agentId}/git/diff?${params.toString()}`);
+    if (state.agent?.id !== agentId) return null;
     state.gitDiff = diff;
     state.gitError = "";
     if (state.gitOpen) renderGitModal();
@@ -77,10 +77,10 @@ export function createGitWorkflowController({
   }
 
   async function loadGitLog() {
-    const narratorId = state.narrator?.id;
-    if (!narratorId) return null;
-    const log = await api(`/api/narrators/${narratorId}/git/log?limit=30`);
-    if (state.narrator?.id !== narratorId) return null;
+    const agentId = state.agent?.id;
+    if (!agentId) return null;
+    const log = await api(`/api/agents/${agentId}/git/log?limit=30`);
+    if (state.agent?.id !== agentId) return null;
     state.gitLog = log;
     state.gitError = "";
     if (state.gitOpen) renderGitModal();
@@ -135,8 +135,8 @@ export function createGitWorkflowController({
   async function commitGitSelection(event) {
     event?.preventDefault();
     if (state.gitCommitBusy) return;
-    const narratorId = state.narrator?.id;
-    if (!narratorId) return;
+    const agentId = state.agent?.id;
+    if (!agentId) return;
     const input = $("gitCommitMessageInput");
     if (input) state.gitCommitMessage = input.value;
     const message = String(state.gitCommitMessage || "").trim();
@@ -153,22 +153,22 @@ export function createGitWorkflowController({
     state.gitError = "";
     renderGitModal();
     try {
-      const result = await api(`/api/narrators/${narratorId}/git/commit`, {
+      const result = await api(`/api/agents/${agentId}/git/commit`, {
         method: "POST",
         body: JSON.stringify({ message, paths }),
       });
-      if (state.narrator?.id !== narratorId) return;
+      if (state.agent?.id !== agentId) return;
       state.gitCommitMessage = "";
       state.gitCommitSelected = {};
       const shortHash = result?.commit?.shortHash ? ` ${result.commit.shortHash}` : "";
       showToast(`已创建提交${shortHash}。`, "success", { force: true });
       await refreshGitWorkflow({ silent: true });
     } catch (err) {
-      if (state.narrator?.id !== narratorId) return;
+      if (state.agent?.id !== agentId) return;
       state.gitError = err.message || String(err);
       showError(err);
     } finally {
-      if (state.narrator?.id === narratorId) {
+      if (state.agent?.id === agentId) {
         state.gitCommitBusy = false;
         renderGitModal();
       }
@@ -176,7 +176,7 @@ export function createGitWorkflowController({
   }
 
   function openGitModal() {
-    if (!state.narrator?.id) return;
+    if (!state.agent?.id) return;
     state.gitOpen = true;
     $("gitModal")?.classList.remove("hidden");
     renderGitButtonState();
@@ -203,7 +203,7 @@ export function createGitWorkflowController({
     const selectedPath = state.gitSelectedPath || "";
     const selectedCommitPaths = selectedGitCommitPaths(files);
     if ($("gitModalPath")) {
-      $("gitModalPath").textContent = status?.repoRoot || state.narrator?.cwd || state.project?.gitPath || "查看并提交当前 CodeHarbor 工作目录的 Git 变更。";
+      $("gitModalPath").textContent = status?.repoRoot || state.agent?.cwd || state.project?.gitPath || "查看并提交当前 Agent 工作目录的 Git 变更。";
     }
     body.innerHTML = `
       <div class="git-toolbar">

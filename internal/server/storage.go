@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 const storageScanLimit = 5000
@@ -53,7 +53,7 @@ func buildStorageSummary(ctx context.Context, cfg config.Config, configPath stri
 	}
 	configPath = effectiveConfigPath(cfg, configPath)
 	entries := []storageEntry{
-		scanStoragePath(ctx, "home", "CodeHarbor home", cfg.Paths.HomeDir, scanLimit),
+		scanStoragePath(ctx, "home", "Autoto home", cfg.Paths.HomeDir, scanLimit),
 		scanDatabaseFiles("database", "SQLite database", cfg.Paths.DatabasePath),
 		scanStoragePath(ctx, "config", "Config file", configPath, scanLimit),
 		scanStoragePath(ctx, "projects", "Default project directory", cfg.Paths.DefaultProjectDir, scanLimit),

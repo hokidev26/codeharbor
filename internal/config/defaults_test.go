@@ -19,8 +19,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Server.Port != 7788 {
 		t.Fatalf("expected default port 7788, got %d", cfg.Server.Port)
 	}
-	if cfg.Paths.HomeDir == "" || cfg.Paths.DatabasePath == "" {
-		t.Fatal("expected default paths")
+	if filepath.Base(cfg.Paths.HomeDir) != ".autoto" || filepath.Base(cfg.Paths.DatabasePath) != "autoto.db" {
+		t.Fatalf("expected Autoto default paths, got %+v", cfg.Paths)
 	}
 	if cfg.Agent.DefaultPermissionMode == "" {
 		t.Fatal("expected default permission mode")
@@ -40,6 +40,19 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestCodeHarborEnvFallbacksRemainSupported(t *testing.T) {
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy:default")
+	t.Setenv("CODEHARBOR_SUMMARY_MODEL", "legacy:summary")
+	t.Setenv("CODEHARBOR_CONTEXT_TOKEN_LIMIT", "23456")
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "legacy:default" || cfg.Agent.SummaryModel != "legacy:summary" || cfg.Agent.ContextTokenLimit != 23456 {
+		t.Fatalf("expected legacy agent env fallbacks, got %+v", cfg.Agent)
+	}
+}
+
 func TestContextTokenLimitFromEnv(t *testing.T) {
 	t.Setenv("CODEHARBOR_CONTEXT_TOKEN_LIMIT", "12345")
 	cfg, err := Default()
@@ -48,6 +61,47 @@ func TestContextTokenLimitFromEnv(t *testing.T) {
 	}
 	if cfg.Agent.ContextTokenLimit != 12345 {
 		t.Fatalf("expected env context token limit, got %d", cfg.Agent.ContextTokenLimit)
+	}
+}
+
+func TestAutotoEnvTakesPriorityOverCodeHarborEnv(t *testing.T) {
+	t.Setenv("AUTOTO_DEFAULT_MODEL", "autoto:default")
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy:default")
+	t.Setenv("AUTOTO_SUMMARY_MODEL", "autoto:summary")
+	t.Setenv("CODEHARBOR_SUMMARY_MODEL", "legacy:summary")
+	t.Setenv("AUTOTO_CONTEXT_TOKEN_LIMIT", "54321")
+	t.Setenv("CODEHARBOR_CONTEXT_TOKEN_LIMIT", "12345")
+	t.Setenv("AUTOTO_EXPOSED", "false")
+	t.Setenv("CODEHARBOR_EXPOSED", "true")
+	t.Setenv("AUTOTO_ACCESS_PASSWORD", "autoto-secret")
+	t.Setenv("CODEHARBOR_ACCESS_PASSWORD", "legacy-secret")
+	t.Setenv("AUTOTO_REMOTE_TERMINAL", "true")
+	t.Setenv("CODEHARBOR_REMOTE_TERMINAL", "false")
+	t.Setenv("AUTOTO_AGENT_BACKEND_URL", "http://127.0.0.1:9000/")
+	t.Setenv("CODEHARBOR_AGENT_BACKEND_URL", "http://127.0.0.1:8000/")
+	t.Setenv("AUTOTO_AGENT_BACKEND_NAME", "Autoto Backend")
+	t.Setenv("CODEHARBOR_AGENT_BACKEND_NAME", "Legacy Backend")
+	t.Setenv("AUTOTO_AGENT_BACKEND_KIND", "cloud")
+	t.Setenv("CODEHARBOR_AGENT_BACKEND_KIND", "local")
+	t.Setenv("AUTOTO_AGENT_BACKEND_API_KEY", "autoto-key")
+	t.Setenv("CODEHARBOR_AGENT_BACKEND_API_KEY", "legacy-key")
+
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "autoto:default" || cfg.Agent.SummaryModel != "autoto:summary" || cfg.Agent.ContextTokenLimit != 54321 {
+		t.Fatalf("expected canonical agent env values, got %+v", cfg.Agent)
+	}
+	if cfg.Security.Exposed || cfg.Security.AccessPassword != "autoto-secret" || !cfg.Security.AllowRemoteTerminal {
+		t.Fatalf("expected canonical security env values, got %+v", cfg.Security)
+	}
+	if len(cfg.Backends.Instances) != 1 {
+		t.Fatalf("expected one canonical backend, got %+v", cfg.Backends.Instances)
+	}
+	backend := cfg.Backends.Instances[0]
+	if backend.BaseURL != "http://127.0.0.1:9000" || backend.Name != "Autoto Backend" || backend.Kind != "cloud" || backend.APIKey != "autoto-key" {
+		t.Fatalf("expected canonical backend env values, got %+v", backend)
 	}
 }
 
@@ -92,6 +146,74 @@ func TestLoadBackfillsLegacyConfigVersion(t *testing.T) {
 	}
 	if cfg.Server.Port != 9000 {
 		t.Fatalf("expected loaded legacy server port, got %d", cfg.Server.Port)
+	}
+}
+
+func TestLoadMigratesLegacyConfigToCanonicalPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDir := filepath.Join(home, ".codeharbor")
+	legacyPath := filepath.Join(legacyDir, "config.json")
+	legacyDatabasePath := filepath.Join(legacyDir, "codeharbor.db")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyData := []byte(`{
+  "version": 1,
+  "server": {"host": "127.0.0.1", "port": 9091},
+  "paths": {"homeDir": "` + legacyDir + `", "databasePath": "` + legacyDatabasePath + `", "defaultProjectDir": "` + filepath.Join(home, "projects") + `"},
+  "agent": {"defaultModel": "openai:legacy", "summaryModel": "openai:legacy", "defaultPermissionMode": "acceptEdits", "maxTurns": 3, "contextTokenLimit": 1000}
+}`)
+	if err := os.WriteFile(legacyPath, legacyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalPath, err := ResolvePath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 9091 || cfg.Paths.DatabasePath != legacyDatabasePath {
+		t.Fatalf("expected migrated legacy values and database path, got %+v", cfg)
+	}
+	canonicalData, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(canonicalData) != string(legacyData) {
+		t.Fatalf("expected byte-for-byte config copy, got %q", canonicalData)
+	}
+	if _, err := os.Stat(legacyDatabasePath); !os.IsNotExist(err) {
+		t.Fatalf("migration must not create or move the legacy database, stat err=%v", err)
+	}
+	if legacyAfter, err := os.ReadFile(legacyPath); err != nil || string(legacyAfter) != string(legacyData) {
+		t.Fatalf("expected legacy config to remain unchanged, err=%v", err)
+	}
+}
+
+func TestLoadExplicitPathDoesNotMigrateLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDir := filepath.Join(home, ".codeharbor")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{"server":{"port":9091}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	explicitPath := filepath.Join(home, "custom", "config.json")
+	cfg, err := Load(explicitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 7788 {
+		t.Fatalf("expected explicit path to use new defaults, got port %d", cfg.Server.Port)
+	}
+	if _, err := os.Stat(explicitPath); err != nil {
+		t.Fatalf("expected explicit config to be created: %v", err)
 	}
 }
 
@@ -184,6 +306,27 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	}
 	if persisted.Security.AccessPassword != "" {
 		t.Fatal("expected persisted remote access password to be empty")
+	}
+}
+
+func TestNormalizeProvidersDerivesLegacyCLIProxyProfile(t *testing.T) {
+	providers := normalizeProviders(ProvidersConfig{Instances: []ProviderConfig{{
+		Name: "cliproxyapi",
+		Type: "openai-compatible",
+	}}})
+	if len(providers.Instances) != 1 || providers.Instances[0].Profile != ProviderProfileCLIProxyAPI {
+		t.Fatalf("expected legacy profile derivation, got %+v", providers.Instances)
+	}
+}
+
+func TestNormalizeProvidersPreservesExplicitProfile(t *testing.T) {
+	providers := normalizeProviders(ProvidersConfig{Instances: []ProviderConfig{{
+		Name:    "local-codex",
+		Type:    "openai-compatible",
+		Profile: ProviderProfileCLIProxyAPI,
+	}}})
+	if len(providers.Instances) != 1 || providers.Instances[0].Profile != ProviderProfileCLIProxyAPI {
+		t.Fatalf("expected explicit profile to remain intact, got %+v", providers.Instances)
 	}
 }
 

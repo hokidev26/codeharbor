@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
 type usageSummaryResponse struct {
@@ -19,8 +19,8 @@ type usageSummaryResponse struct {
 
 type usageCounts struct {
 	Projects    int64 `json:"projects"`
-	Chapters    int64 `json:"chapters"`
-	Narrators   int64 `json:"narrators"`
+	Worklines   int64 `json:"worklines"`
+	Agents      int64 `json:"agents"`
 	Messages    int64 `json:"messages"`
 	ToolCalls   int64 `json:"toolCalls"`
 	APIRequests int64 `json:"apiRequests"`
@@ -88,10 +88,10 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 		dst   *int64
 	}{
 		{`SELECT COUNT(*) FROM projects`, &summary.Counts.Projects},
-		{`SELECT COUNT(*) FROM chapters`, &summary.Counts.Chapters},
-		{`SELECT COUNT(*) FROM narrators`, &summary.Counts.Narrators},
-		{`SELECT COUNT(*) FROM narrator_messages`, &summary.Counts.Messages},
-		{`SELECT COUNT(*) FROM narrator_tool_calls`, &summary.Counts.ToolCalls},
+		{`SELECT COUNT(*) FROM worklines`, &summary.Counts.Worklines},
+		{`SELECT COUNT(*) FROM agents`, &summary.Counts.Agents},
+		{`SELECT COUNT(*) FROM agent_messages`, &summary.Counts.Messages},
+		{`SELECT COUNT(*) FROM agent_tool_calls`, &summary.Counts.ToolCalls},
 		{`SELECT COUNT(*) FROM api_requests`, &summary.Counts.APIRequests},
 		{`SELECT COUNT(*) FROM agent_backends`, &summary.Counts.Backends},
 		{`SELECT COUNT(*) FROM agent_backends WHERE active != 0`, &summary.Backends.Active},
@@ -105,10 +105,10 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 	}
 
 	var err error
-	if summary.Messages.ByRole, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(role, ''), 'unknown'), COUNT(*) FROM narrator_messages GROUP BY COALESCE(NULLIF(role, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
+	if summary.Messages.ByRole, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(role, ''), 'unknown'), COUNT(*) FROM agent_messages GROUP BY COALESCE(NULLIF(role, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
 		return usageSummaryResponse{}, err
 	}
-	if summary.ToolCalls.ByStatus, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(status, ''), 'unknown'), COUNT(*) FROM narrator_tool_calls GROUP BY COALESCE(NULLIF(status, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
+	if summary.ToolCalls.ByStatus, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(status, ''), 'unknown'), COUNT(*) FROM agent_tool_calls GROUP BY COALESCE(NULLIF(status, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
 		return usageSummaryResponse{}, err
 	}
 	if summary.APIRequests.ByProvider, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(provider, ''), 'unknown'), COUNT(*) FROM api_requests GROUP BY COALESCE(NULLIF(provider, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
@@ -117,21 +117,21 @@ func buildUsageSummary(ctx context.Context, database *sql.DB) (usageSummaryRespo
 	if summary.APIRequests.ByKind, err = queryCountMap(ctx, database, `SELECT COALESCE(NULLIF(kind, ''), 'unknown'), COUNT(*) FROM api_requests GROUP BY COALESCE(NULLIF(kind, ''), 'unknown') ORDER BY 2 DESC`); err != nil {
 		return usageSummaryResponse{}, err
 	}
-	if summary.ToolCalls.TopTools, err = queryNamedCounts(ctx, database, `SELECT COALESCE(NULLIF(tool_name, ''), 'unknown'), COUNT(*) FROM narrator_tool_calls GROUP BY COALESCE(NULLIF(tool_name, ''), 'unknown') ORDER BY 2 DESC, 1 ASC LIMIT 8`); err != nil {
+	if summary.ToolCalls.TopTools, err = queryNamedCounts(ctx, database, `SELECT COALESCE(NULLIF(tool_name, ''), 'unknown'), COUNT(*) FROM agent_tool_calls GROUP BY COALESCE(NULLIF(tool_name, ''), 'unknown') ORDER BY 2 DESC, 1 ASC LIMIT 8`); err != nil {
 		return usageSummaryResponse{}, err
 	}
 
-	if err := database.QueryRowContext(ctx, `SELECT COALESCE(AVG(duration_ms), 0) FROM narrator_tool_calls WHERE duration_ms IS NOT NULL`).Scan(&summary.ToolCalls.AverageDurationMS); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT COALESCE(AVG(duration_ms), 0) FROM agent_tool_calls WHERE duration_ms IS NOT NULL`).Scan(&summary.ToolCalls.AverageDurationMS); err != nil {
 		return usageSummaryResponse{}, err
 	}
 	if err := database.QueryRowContext(ctx, `SELECT COALESCE(AVG(duration_ms), 0), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(cost_usd), 0) FROM api_requests`).Scan(&summary.APIRequests.AverageDurationMS, &summary.APIRequests.InputTokens, &summary.APIRequests.OutputTokens, &summary.APIRequests.ReasoningTokens, &summary.APIRequests.CachedInputTokens, &summary.APIRequests.TotalCostUSD); err != nil {
 		return usageSummaryResponse{}, err
 	}
 
-	if summary.Messages.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM narrator_messages`); err != nil {
+	if summary.Messages.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM agent_messages`); err != nil {
 		return usageSummaryResponse{}, err
 	}
-	if summary.ToolCalls.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM narrator_tool_calls`); err != nil {
+	if summary.ToolCalls.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM agent_tool_calls`); err != nil {
 		return usageSummaryResponse{}, err
 	}
 	if summary.APIRequests.LatestAt, err = latestTimestamp(ctx, database, `SELECT COALESCE(MAX(created_at), '') FROM api_requests`); err != nil {

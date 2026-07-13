@@ -89,7 +89,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 	params := map[string]any{
 		"protocolVersion": DefaultProtocolVersion,
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "CodeHarbor", "version": "0.1"},
+		"clientInfo":      map[string]any{"name": "Autoto", "version": "0.1"},
 	}
 	if _, err := c.Call(ctx, "initialize", params); err != nil {
 		return err

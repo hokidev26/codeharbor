@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 func TestOpenAICompatibleListModelsAllowsOptionalAPIKey(t *testing.T) {

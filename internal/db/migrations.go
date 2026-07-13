@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const CurrentDBVersion = 3
+const CurrentDBVersion = 15
 
 type migration struct {
 	version int
@@ -19,6 +19,18 @@ var migrations = []migration{
 	{version: 1, name: "baseline schema", up: migrateV1Baseline},
 	{version: 2, name: "run tracking", up: migrateV2RunTracking},
 	{version: 3, name: "notification settings", up: migrateV3NotificationSettings},
+	{version: 4, name: "workflow permissions", up: migrateV4WorkflowPermissions},
+	{version: 5, name: "run scoped git checkpoints", up: migrateV5RunScopedGitCheckpoints},
+	{version: 6, name: "durable run git checkpoints", up: migrateV6DurableRunGitCheckpoints},
+	{version: 7, name: "rollback checkpoint recovery", up: migrateV7RollbackCheckpointRecovery},
+	{version: 8, name: "server skills", up: migrateV8ServerSkills},
+	{version: 9, name: "skill risk acknowledgement hardening", up: migrateV9SkillRiskAcknowledgementHardening},
+	{version: 10, name: "skill acknowledgement content binding", up: migrateV10SkillAcknowledgementContentBinding},
+	{version: 11, name: "skill scanner versions", up: migrateV11SkillScannerVersions},
+	{version: 12, name: "skill audit events", up: migrateV12SkillAuditEvents},
+	{version: 13, name: "agent and workline naming", up: migrateV13AgentWorklineNaming},
+	{version: 14, name: "agent stream and permission generations", up: migrateV14AgentStreamGenerations},
+	{version: 15, name: "scoped skill revisions", up: migrateV15ScopedSkillRevisions},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -39,12 +51,13 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		if !empty {
-			if err := migrateLegacyZeroVersion(ctx, db); err != nil {
-				return err
-			}
-			version = 1
+		if empty {
+			return runMigration(ctx, db, migration{version: CurrentDBVersion, name: "current schema", up: migrateV1Baseline})
 		}
+		if err := migrateLegacyZeroVersion(ctx, db); err != nil {
+			return err
+		}
+		version = 1
 	}
 
 	for _, m := range migrations {
@@ -84,6 +97,11 @@ func migrateV1Baseline(ctx context.Context, tx *sql.Tx) error {
 }
 
 func migrateV2RunTracking(ctx context.Context, tx *sql.Tx) error {
+	if exists, err := columnExists(ctx, tx, "runs", "agent_id"); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -136,6 +154,436 @@ CREATE TABLE IF NOT EXISTS notification_settings (
 	return err
 }
 
+func migrateV4WorkflowPermissions(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS workflow_preferences (
+  id TEXT PRIMARY KEY,
+  require_confirmation_for_exec INTEGER NOT NULL DEFAULT 1,
+  require_confirmation_for_writes INTEGER NOT NULL DEFAULT 0,
+  allow_read_only_by_default INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tool_permission_rules (
+  id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT '*',
+  tool_name TEXT NOT NULL DEFAULT '*',
+  risk TEXT NOT NULL DEFAULT '*',
+  decision TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
+`)
+	return err
+}
+
+func migrateV5RunScopedGitCheckpoints(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "runs", "checkpoint_repo_root", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "runs", "git_snapshot_at", "TEXT"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS run_git_changes (
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  orig_path TEXT,
+  index_status TEXT NOT NULL,
+  worktree_status TEXT NOT NULL,
+  untracked INTEGER NOT NULL DEFAULT 0,
+  index_fingerprint TEXT,
+  worktree_fingerprint TEXT NOT NULL,
+  PRIMARY KEY (run_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_run_git_changes_run ON run_git_changes(run_id, path);
+`)
+	return err
+}
+
+func migrateV6DurableRunGitCheckpoints(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "runs", "checkpoint_state", "TEXT NOT NULL DEFAULT 'none'"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "runs", "checkpoint_error", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "runs", "rolled_back_at", "TEXT"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE runs
+SET checkpoint_state = CASE
+	WHEN COALESCE(git_snapshot_at, '') <> '' THEN 'ready'
+	ELSE 'none'
+END,
+checkpoint_error = NULL,
+rolled_back_at = NULL
+WHERE COALESCE(checkpoint_state, '') IN ('', 'none')
+`)
+	return err
+}
+
+func migrateV7RollbackCheckpointRecovery(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE runs
+SET checkpoint_state = 'invalid',
+checkpoint_error = COALESCE(NULLIF(checkpoint_error, ''), 'process restarted while rollback was in progress'),
+rolled_back_at = NULL
+WHERE checkpoint_state = 'rolling_back'
+`)
+	return err
+}
+
+func migrateV8ServerSkills(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  command TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  source TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  scan_verdict TEXT NOT NULL,
+  scan_findings_json TEXT NOT NULL DEFAULT '[]',
+  risk_acknowledged_at TEXT,
+  risk_acknowledged_by TEXT,
+  risk_acknowledged_hash TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (source IN ('manual', 'local_migration', 'skill_md')),
+  CHECK (scan_verdict IN ('safe', 'review', 'blocked')),
+  CHECK (enabled IN (0, 1)),
+  CHECK (NOT (scan_verdict = 'blocked' AND enabled = 1)),
+  CHECK (NOT (scan_verdict = 'review' AND enabled = 1 AND (TRIM(COALESCE(risk_acknowledged_at, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = '' OR TRIM(COALESCE(risk_acknowledged_by, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = '' OR COALESCE(risk_acknowledged_hash, '') <> content_hash)))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_command_nocase ON skills(command COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_skills_enabled_command ON skills(enabled, command COLLATE NOCASE);
+`)
+	return err
+}
+
+func migrateV9SkillRiskAcknowledgementHardening(ctx context.Context, tx *sql.Tx) error {
+	// V8 allowed whitespace-only acknowledgement values. Those records never had
+	// a meaningful confirmation, so fail closed rather than preserving enabled.
+	if _, err := tx.ExecContext(ctx, `
+UPDATE skills
+SET enabled = 0,
+    risk_acknowledged_at = NULL,
+    risk_acknowledged_by = NULL
+WHERE scan_verdict = 'review'
+  AND enabled = 1
+  AND (TRIM(COALESCE(risk_acknowledged_at, '')) = '' OR TRIM(COALESCE(risk_acknowledged_by, '')) = '')
+`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+CREATE TRIGGER IF NOT EXISTS skills_review_acknowledgement_insert
+BEFORE INSERT ON skills
+WHEN NEW.scan_verdict = 'review' AND NEW.enabled = 1
+ AND (TRIM(COALESCE(NEW.risk_acknowledged_at, '')) = '' OR TRIM(COALESCE(NEW.risk_acknowledged_by, '')) = '')
+BEGIN
+  SELECT RAISE(ABORT, 'review skills require non-blank risk acknowledgement before enabling');
+END;
+CREATE TRIGGER IF NOT EXISTS skills_review_acknowledgement_update
+BEFORE UPDATE OF scan_verdict, enabled, risk_acknowledged_at, risk_acknowledged_by ON skills
+WHEN NEW.scan_verdict = 'review' AND NEW.enabled = 1
+ AND (TRIM(COALESCE(NEW.risk_acknowledged_at, '')) = '' OR TRIM(COALESCE(NEW.risk_acknowledged_by, '')) = '')
+BEGIN
+  SELECT RAISE(ABORT, 'review skills require non-blank risk acknowledgement before enabling');
+END;
+`)
+	return err
+}
+
+func migrateV10SkillAcknowledgementContentBinding(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "skills", "risk_acknowledged_hash", "TEXT"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE skills
+SET enabled = 0,
+    risk_acknowledged_at = NULL,
+    risk_acknowledged_by = NULL,
+    risk_acknowledged_hash = NULL
+WHERE scan_verdict = 'review'
+  AND enabled = 1
+  AND (
+    TRIM(COALESCE(risk_acknowledged_at, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+    OR TRIM(COALESCE(risk_acknowledged_by, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+  );
+UPDATE skills
+SET risk_acknowledged_hash = content_hash
+WHERE scan_verdict = 'review' AND enabled = 1;
+UPDATE skills
+SET risk_acknowledged_at = NULL,
+    risk_acknowledged_by = NULL,
+    risk_acknowledged_hash = NULL
+WHERE enabled = 0 OR scan_verdict <> 'review';
+DROP TRIGGER IF EXISTS skills_review_acknowledgement_insert;
+DROP TRIGGER IF EXISTS skills_review_acknowledgement_update;
+CREATE TRIGGER skills_review_acknowledgement_insert
+BEFORE INSERT ON skills
+WHEN NEW.scan_verdict = 'review' AND NEW.enabled = 1
+ AND (
+   TRIM(COALESCE(NEW.risk_acknowledged_at, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+   OR TRIM(COALESCE(NEW.risk_acknowledged_by, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+   OR COALESCE(NEW.risk_acknowledged_hash, '') <> NEW.content_hash
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'review skills require risk acknowledgement for the current content before enabling');
+END;
+CREATE TRIGGER skills_review_acknowledgement_update
+BEFORE UPDATE ON skills
+WHEN NEW.scan_verdict = 'review' AND NEW.enabled = 1
+ AND (
+   TRIM(COALESCE(NEW.risk_acknowledged_at, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+   OR TRIM(COALESCE(NEW.risk_acknowledged_by, ''), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) = ''
+   OR COALESCE(NEW.risk_acknowledged_hash, '') <> NEW.content_hash
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'review skills require risk acknowledgement for the current content before enabling');
+END;
+`)
+	return err
+}
+
+func migrateV11SkillScannerVersions(ctx context.Context, tx *sql.Tx) error {
+	// DEFAULT 0 deliberately marks all pre-versioned rows for one fail-closed
+	// revalidation pass. ensureColumn keeps partially-created temporary v11
+	// databases compatible.
+	return ensureColumn(ctx, tx, "skills", "scanner_version", "INTEGER NOT NULL DEFAULT 0")
+}
+
+func migrateV12SkillAuditEvents(ctx context.Context, tx *sql.Tx) error {
+	// Some development snapshots already advertised v11 before the migration was
+	// finalized. Re-ensure its column here before adding the independent audit table.
+	if err := ensureColumn(ctx, tx, "skills", "scanner_version", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS skill_audit_events (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  scan_verdict TEXT NOT NULL,
+  finding_codes_json TEXT NOT NULL DEFAULT '[]',
+  risk_acknowledged_at TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (action IN ('create', 'update', 'enable', 'disable', 'delete'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_audit_events_skill_created ON skill_audit_events(skill_id, created_at DESC, id DESC);
+`)
+	return err
+}
+
+func migrateV13AgentWorklineNaming(ctx context.Context, tx *sql.Tx) error {
+	tables := [][2]string{{"chapters", "worklines"}, {"narrators", "agents"}, {"narrator_messages", "agent_messages"}, {"narrator_message_attachments", "agent_message_attachments"}, {"narrator_tool_calls", "agent_tool_calls"}}
+	for _, table := range tables {
+		if err := renameTable(ctx, tx, table[0], table[1]); err != nil {
+			return err
+		}
+	}
+	columns := [][3]string{{"projects", "chapter_settings", "workline_settings"}, {"worklines", "parent_chapter_id", "parent_workline_id"}, {"worklines", "merged_into_chapter_id", "merged_into_workline_id"}, {"worklines", "review_source_chapter_id", "review_source_workline_id"}, {"agents", "chapter_id", "workline_id"}, {"agents", "parent_narrator_id", "parent_agent_id"}, {"runs", "narrator_id", "agent_id"}, {"agent_messages", "narrator_id", "agent_id"}, {"agent_message_attachments", "narrator_id", "agent_id"}, {"agent_tool_calls", "narrator_id", "agent_id"}, {"api_requests", "narrator_id", "agent_id"}}
+	for _, column := range columns {
+		if err := renameColumn(ctx, tx, column[0], column[1], column[2]); err != nil {
+			return err
+		}
+	}
+	for _, index := range []string{"idx_chapters_project", "idx_narrators_chapter", "idx_narrators_parent", "idx_runs_narrator_started", "idx_narrator_messages_narrator_time", "idx_messages_run", "idx_message_attachments_message", "idx_message_attachments_narrator", "idx_tool_calls_narrator", "idx_tool_calls_run", "idx_tool_calls_tool_use"} {
+		if _, err := tx.ExecContext(ctx, "DROP INDEX IF EXISTS "+quoteIdentifier(index)); err != nil {
+			return fmt.Errorf("drop legacy index %s: %w", index, err)
+		}
+	}
+	_, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_worklines_project ON worklines(project_id);
+CREATE INDEX IF NOT EXISTS idx_agents_workline ON agents(workline_id);
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id);
+CREATE INDEX IF NOT EXISTS idx_runs_agent_started ON runs(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_time ON agent_messages(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_run ON agent_messages(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_message_attachments_message ON agent_message_attachments(message_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_message_attachments_agent ON agent_message_attachments(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_agent ON agent_tool_calls(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_run ON agent_tool_calls(run_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tool_calls_tool_use ON agent_tool_calls(agent_id, tool_use_id);
+`)
+	return err
+}
+
+func migrateV14AgentStreamGenerations(ctx context.Context, tx *sql.Tx) error {
+	columns := []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{"agents", "entity_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"agents", "permission_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"workflow_preferences", "policy_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"agent_tool_calls", "permission_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"agent_tool_calls", "policy_generation", "INTEGER NOT NULL DEFAULT 1"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, column.table, column.column, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE agents SET entity_generation = 1 WHERE entity_generation IS NULL OR entity_generation < 1;
+UPDATE agents SET permission_generation = 1 WHERE permission_generation IS NULL OR permission_generation < 1;
+UPDATE workflow_preferences SET policy_generation = 1 WHERE policy_generation IS NULL OR policy_generation < 1;
+UPDATE agent_tool_calls SET permission_generation = 1 WHERE permission_generation IS NULL OR permission_generation < 1;
+UPDATE agent_tool_calls SET policy_generation = 1 WHERE policy_generation IS NULL OR policy_generation < 1;
+`)
+	return err
+}
+
+func migrateV15ScopedSkillRevisions(ctx context.Context, tx *sql.Tx) error {
+	for _, rename := range [][3]string{{"skills", "chapter_id", "workline_id"}, {"skill_revisions", "chapter_id", "workline_id"}} {
+		if err := renameColumn(ctx, tx, rename[0], rename[1], rename[2]); err != nil {
+			return err
+		}
+	}
+	columns := []struct {
+		column     string
+		definition string
+	}{
+		{"scope", "TEXT NOT NULL DEFAULT 'global'"},
+		{"project_id", "TEXT REFERENCES projects(id) ON DELETE CASCADE"},
+		{"workline_id", "TEXT REFERENCES worklines(id) ON DELETE CASCADE"},
+		{"deleted_at", "TEXT"},
+		{"revision_no", "INTEGER NOT NULL DEFAULT 1"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, "skills", column.column, column.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE skills
+SET scope = 'global', project_id = NULL, workline_id = NULL, revision_no = CASE WHEN revision_no < 1 THEN 1 ELSE revision_no END
+WHERE scope IS NULL OR scope NOT IN ('global', 'project', 'workspace') OR revision_no IS NULL OR revision_no < 1;
+DROP INDEX IF EXISTS idx_skills_command_nocase;
+DROP INDEX IF EXISTS idx_skills_enabled_command;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_global_command ON skills(command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'global';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_project_command ON skills(project_id, command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'project';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_workspace_command ON skills(workline_id, command COLLATE NOCASE) WHERE deleted_at IS NULL AND scope = 'workspace';
+CREATE INDEX IF NOT EXISTS idx_skills_scope_command ON skills(scope, project_id, workline_id, command COLLATE NOCASE, id) WHERE deleted_at IS NULL;
+DROP TRIGGER IF EXISTS skills_scope_shape_insert;
+DROP TRIGGER IF EXISTS skills_scope_shape_update;
+DROP TRIGGER IF EXISTS skills_workspace_scope_insert;
+DROP TRIGGER IF EXISTS skills_workspace_scope_update;
+DROP TRIGGER IF EXISTS skills_chapter_scope_insert;
+DROP TRIGGER IF EXISTS skills_chapter_scope_update;
+CREATE TRIGGER skills_scope_shape_insert
+BEFORE INSERT ON skills
+WHEN NOT (
+  (NEW.scope = 'global' AND NEW.project_id IS NULL AND NEW.workline_id IS NULL)
+  OR (NEW.scope = 'project' AND NEW.project_id IS NOT NULL AND NEW.workline_id IS NULL)
+  OR (NEW.scope = 'workspace' AND NEW.project_id IS NOT NULL AND NEW.workline_id IS NOT NULL AND EXISTS (SELECT 1 FROM worklines WHERE id = NEW.workline_id AND project_id = NEW.project_id))
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid skill scope target');
+END;
+CREATE TRIGGER skills_scope_shape_update
+BEFORE UPDATE OF scope, project_id, workline_id ON skills
+WHEN NOT (
+  (NEW.scope = 'global' AND NEW.project_id IS NULL AND NEW.workline_id IS NULL)
+  OR (NEW.scope = 'project' AND NEW.project_id IS NOT NULL AND NEW.workline_id IS NULL)
+  OR (NEW.scope = 'workspace' AND NEW.project_id IS NOT NULL AND NEW.workline_id IS NOT NULL AND EXISTS (SELECT 1 FROM worklines WHERE id = NEW.workline_id AND project_id = NEW.project_id))
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid skill scope target');
+END;
+CREATE TABLE IF NOT EXISTS skill_revisions (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  revision_no INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  restored_from_revision_no INTEGER,
+  name TEXT NOT NULL,
+  command TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  source TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  workline_id TEXT,
+  deleted_at TEXT,
+  content_hash TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  scan_verdict TEXT NOT NULL,
+  scan_findings_json TEXT NOT NULL,
+  scanner_version INTEGER NOT NULL,
+  risk_acknowledged_at TEXT,
+  risk_acknowledged_by TEXT,
+  risk_acknowledged_hash TEXT,
+  head_created_at TEXT NOT NULL,
+  head_updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(skill_id, revision_no),
+  CHECK (operation IN ('baseline', 'create', 'update', 'delete', 'restore', 'revalidate')),
+  CHECK (scope IN ('global', 'project', 'workspace')),
+  CHECK (enabled IN (0, 1)),
+  CHECK (scan_verdict IN ('safe', 'review', 'blocked'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_revisions_skill_revision ON skill_revisions(skill_id, revision_no DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_revisions_snapshot ON skill_revisions(sequence, skill_id);
+INSERT INTO skill_revisions (
+  id, skill_id, revision_no, operation, actor, name, command, description, prompt, source, scope, project_id, workline_id, deleted_at,
+  content_hash, enabled, scan_verdict, scan_findings_json, scanner_version, risk_acknowledged_at, risk_acknowledged_by, risk_acknowledged_hash,
+  head_created_at, head_updated_at, created_at
+)
+SELECT lower(hex(randomblob(16))), s.id, s.revision_no, 'baseline', 'migration', s.name, s.command, s.description, s.prompt, s.source,
+       s.scope, s.project_id, s.workline_id, s.deleted_at, s.content_hash, s.enabled, s.scan_verdict, s.scan_findings_json,
+       COALESCE(s.scanner_version, 0), s.risk_acknowledged_at, s.risk_acknowledged_by, s.risk_acknowledged_hash, s.created_at, s.updated_at, s.updated_at
+FROM skills s
+WHERE NOT EXISTS (SELECT 1 FROM skill_revisions r WHERE r.skill_id = s.id);
+`); err != nil {
+		return err
+	}
+
+	auditExists, err := tableExists(ctx, tx, "skill_audit_events")
+	if err != nil {
+		return err
+	}
+	if auditExists {
+		if _, err := tx.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_skill_audit_events_skill_created;
+CREATE TABLE skill_audit_events_v15 (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  scan_verdict TEXT NOT NULL,
+  finding_codes_json TEXT NOT NULL DEFAULT '[]',
+  risk_acknowledged_at TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (action IN ('create', 'update', 'enable', 'disable', 'delete', 'restore'))
+);
+INSERT INTO skill_audit_events_v15 (id, action, actor, skill_id, content_hash, scan_verdict, finding_codes_json, risk_acknowledged_at, created_at)
+SELECT id, action, actor, skill_id, content_hash, scan_verdict, finding_codes_json, risk_acknowledged_at, created_at FROM skill_audit_events;
+DROP TABLE skill_audit_events;
+ALTER TABLE skill_audit_events_v15 RENAME TO skill_audit_events;
+CREATE INDEX idx_skill_audit_events_skill_created ON skill_audit_events(skill_id, created_at DESC, id DESC);
+`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -143,7 +591,8 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
-	if err := execSchemaStatements(ctx, tx, func(stmt string) bool {
+	legacySchema := legacyNamingSchemaSQL()
+	if err := execSchemaStatements(ctx, tx, legacySchema, func(stmt string) bool {
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
 		return strings.HasPrefix(upper, "PRAGMA ") || strings.HasPrefix(upper, "CREATE TABLE ")
 	}); err != nil {
@@ -152,7 +601,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	if err := ensureLegacyColumns(ctx, tx); err != nil {
 		return fmt.Errorf("ensure legacy columns: %w", err)
 	}
-	if err := execSchemaStatements(ctx, tx, func(stmt string) bool {
+	if err := execSchemaStatements(ctx, tx, legacySchema, func(stmt string) bool {
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
 		return strings.HasPrefix(upper, "CREATE INDEX ") || strings.HasPrefix(upper, "CREATE UNIQUE INDEX ")
 	}); err != nil {
@@ -167,8 +616,26 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func execSchemaStatements(ctx context.Context, tx *sql.Tx, include func(string) bool) error {
-	for _, raw := range strings.Split(schemaSQL, ";") {
+func legacyNamingSchemaSQL() string {
+	return strings.NewReplacer(
+		"agent_message_attachments", "narrator_message_attachments",
+		"agent_messages", "narrator_messages",
+		"agent_tool_calls", "narrator_tool_calls",
+		"idx_runs_agent_started", "idx_runs_narrator_started",
+		"idx_message_attachments_agent", "idx_message_attachments_narrator",
+		"idx_tool_calls_agent", "idx_tool_calls_narrator",
+		"idx_agents_", "idx_narrators_",
+		"parent_agent_id", "parent_narrator_id",
+		"agent_id", "narrator_id",
+		"REFERENCES agents(", "REFERENCES narrators(",
+		"CREATE TABLE IF NOT EXISTS agents (", "CREATE TABLE IF NOT EXISTS narrators (",
+		" ON agents(", " ON narrators(",
+		"workline", "chapter",
+	).Replace(schemaSQL)
+}
+
+func execSchemaStatements(ctx context.Context, tx *sql.Tx, schema string, include func(string) bool) error {
+	for _, raw := range strings.Split(schema, ";") {
 		stmt := strings.TrimSpace(raw)
 		if stmt == "" || !include(stmt) {
 			continue
@@ -220,6 +687,55 @@ func tableExists(ctx context.Context, q rowQuerier, table string) (bool, error) 
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func renameTable(ctx context.Context, tx *sql.Tx, oldName, newName string) error {
+	oldExists, err := tableExists(ctx, tx, oldName)
+	if err != nil {
+		return fmt.Errorf("inspect legacy table %s: %w", oldName, err)
+	}
+	newExists, err := tableExists(ctx, tx, newName)
+	if err != nil {
+		return fmt.Errorf("inspect renamed table %s: %w", newName, err)
+	}
+	if !oldExists {
+		return nil
+	}
+	if newExists {
+		return fmt.Errorf("cannot rename table %s: %s already exists", oldName, newName)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", quoteIdentifier(oldName), quoteIdentifier(newName))); err != nil {
+		return fmt.Errorf("rename table %s to %s: %w", oldName, newName, err)
+	}
+	return nil
+}
+
+func renameColumn(ctx context.Context, tx *sql.Tx, table, oldName, newName string) error {
+	tablePresent, err := tableExists(ctx, tx, table)
+	if err != nil {
+		return fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	if !tablePresent {
+		return nil
+	}
+	oldExists, err := columnExists(ctx, tx, table, oldName)
+	if err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, oldName, err)
+	}
+	if !oldExists {
+		return nil
+	}
+	newExists, err := columnExists(ctx, tx, table, newName)
+	if err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, newName, err)
+	}
+	if newExists {
+		return fmt.Errorf("cannot rename column %s.%s: %s already exists", table, oldName, newName)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", quoteIdentifier(table), quoteIdentifier(oldName), quoteIdentifier(newName))); err != nil {
+		return fmt.Errorf("rename column %s.%s to %s: %w", table, oldName, newName, err)
+	}
+	return nil
 }
 
 func columnExists(ctx context.Context, q rowsQuerier, table, column string) (bool, error) {

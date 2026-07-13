@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestNotificationSettingsAPIAndTestWebhook(t *testing.T) {
@@ -27,6 +27,9 @@ func TestNotificationSettingsAPIAndTestWebhook(t *testing.T) {
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if got := r.Header.Get("User-Agent"); got != "Autoto-Webhook/1.0" {
+			t.Fatalf("unexpected webhook user agent %q", got)
 		}
 		var payload webhookPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -63,7 +66,7 @@ func TestNotificationSettingsAPIAndTestWebhook(t *testing.T) {
 	}
 	select {
 	case payload := <-received:
-		if payload.Kind != "notification.test" || payload.Event != "test" {
+		if payload.Kind != "notification.test" || payload.Event != "test" || payload.Meta["source"] != "Autoto" {
 			t.Fatalf("unexpected webhook payload: %+v", payload)
 		}
 	case <-time.After(2 * time.Second):
@@ -102,15 +105,15 @@ func TestWebhookNotifierSendsRunNotification(t *testing.T) {
 	}))
 	defer webhook.Close()
 
-	_, _, narrator, err := store.CreateProject(ctx, "Notify", "", t.TempDir(), "openai:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Notify", "", t.TempDir(), "openai:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "completed"})
+	run, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, Status: "completed"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, RunID: run.ID, Role: "assistant", ContentText: "done"}); err != nil {
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, RunID: run.ID, Role: "assistant", ContentText: "done"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.UpdateNotificationSettings(ctx, db.NotificationSettings{Enabled: true, WebhookURL: webhook.URL, NotifyOnApproval: true, NotifyOnDone: true, NotifyOnError: true}); err != nil {
@@ -118,7 +121,7 @@ func TestWebhookNotifierSendsRunNotification(t *testing.T) {
 	}
 
 	notifier := NewWebhookNotifier(store)
-	notifier.Notify(ctx, agent.NotificationEvent{Event: "completed", RunID: run.ID, NarratorID: narrator.ID, Status: "completed"})
+	notifier.Notify(ctx, agentpkg.NotificationEvent{Event: "completed", RunID: run.ID, AgentID: agent.ID, Status: "completed"})
 	select {
 	case payload := <-received:
 		if payload.Kind != "run.completed" || payload.RunID != run.ID || payload.Summary == nil || payload.Summary.MessageCount != 1 {

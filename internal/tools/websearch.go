@@ -77,7 +77,7 @@ func (WebSearchTool) Execute(ctx context.Context, call Call, _ Env) (Result, err
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	req.Header.Set("User-Agent", "CodeHarbor-WebSearch/0.1")
+	req.Header.Set("User-Agent", "Autoto-WebSearch/0.1")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.1")
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)

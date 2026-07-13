@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
@@ -25,7 +26,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: 9090},
 		Paths: config.PathsConfig{
 			HomeDir:           filepath.Join(t.TempDir(), "home"),
-			DatabasePath:      filepath.Join(t.TempDir(), "codeharbor.db"),
+			DatabasePath:      filepath.Join(t.TempDir(), "autoto.db"),
 			DefaultProjectDir: filepath.Join(t.TempDir(), "projects"),
 		},
 		Agent: config.AgentConfig{
@@ -100,6 +101,16 @@ func TestBuildRuntimeSummaryUsesSafeDefaults(t *testing.T) {
 	}
 	if summary.Version != config.Version || summary.GeneratedAt == "" {
 		t.Fatalf("unexpected metadata: %+v", summary)
+	}
+}
+
+func TestRuntimeSecuritySummaryUsesCanonicalPasswordEnvName(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{Exposed: true}}, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime/summary", nil)
+	request.Host = "demo.trycloudflare.com"
+	summary := app.runtimeSecuritySummaryForRequest(request)
+	if !strings.Contains(summary.Message, "AUTOTO_ACCESS_PASSWORD") || strings.Contains(summary.Message, "CODEHARBOR_ACCESS_PASSWORD") {
+		t.Fatalf("expected canonical password env guidance, got %q", summary.Message)
 	}
 }
 

@@ -28,12 +28,12 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "remote terminal is disabled while remote access hardening is active")
 		return
 	}
-	narratorID := r.URL.Query().Get("narratorId")
-	if narratorID == "" {
-		writeError(w, http.StatusBadRequest, "narratorId query parameter is required")
+	agentID := r.URL.Query().Get("agentId")
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "agentId query parameter is required")
 		return
 	}
-	narrator, err := s.store.GetNarrator(r.Context(), narratorID)
+	agent, err := s.store.GetAgent(r.Context(), agentID)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -48,8 +48,8 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
 	cmd := exec.CommandContext(r.Context(), terminalShell())
-	if narrator.CWD != "" {
-		cmd.Dir = narrator.CWD
+	if agent.CWD != "" {
+		cmd.Dir = agent.CWD
 	}
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	ptyFile, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 28})

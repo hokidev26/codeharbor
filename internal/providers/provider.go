@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"autoto/internal/config"
 )
 
 type Message struct {
@@ -72,9 +74,43 @@ type Provider interface {
 	Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error)
 }
 
+// Capabilities are optional provider features. Providers that do not implement
+// CapabilityProvider are treated as supporting no optional features.
+type Capabilities struct {
+	Tools      bool `json:"tools"`
+	Streaming  bool `json:"streaming"`
+	ImageInput bool `json:"imageInput"`
+}
+
+type CapabilityProvider interface {
+	Capabilities() Capabilities
+}
+
+func CapabilitiesFor(provider Provider) Capabilities {
+	if provider, ok := provider.(CapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	return Capabilities{}
+}
+
+// NewProvider constructs a provider adapter from a normalized provider config.
+func NewProvider(cfg config.ProviderConfig) (Provider, error) {
+	switch strings.TrimSpace(cfg.Type) {
+	case "openai":
+		return NewOpenAIOfficial(cfg), nil
+	case "anthropic":
+		return NewAnthropicProvider(cfg), nil
+	case "openai-compatible":
+		return NewOpenAICompatible(cfg), nil
+	default:
+		return nil, fmt.Errorf("unsupported provider type %q", cfg.Type)
+	}
+}
+
 type Registry struct {
-	mu        sync.RWMutex
-	providers map[string]Provider
+	mu          sync.RWMutex
+	providers   map[string]Provider
+	defaultName string
 }
 
 func NewRegistry() *Registry {
@@ -121,18 +157,56 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// SetDefault explicitly selects the provider used for unprefixed model names.
+func (r *Registry) SetDefault(name string) error {
+	name = strings.TrimSpace(name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.providers[name]; !ok {
+		return fmt.Errorf("provider %q is not registered", name)
+	}
+	r.defaultName = name
+	return nil
+}
+
+// SetDefaultFromConfig selects a default deterministically: first the provider
+// named by the default model prefix, then the first registered provider in
+// configuration order. It returns false when no configured provider is registered.
+func (r *Registry) SetDefaultFromConfig(defaultModel string, configs []config.ProviderConfig) bool {
+	preferred, _ := SplitModel(defaultModel)
+	candidates := make([]string, 0, len(configs)+1)
+	if preferred != "" {
+		candidates = append(candidates, preferred)
+	}
+	for _, cfg := range configs {
+		if name := strings.TrimSpace(cfg.Name); name != "" && name != preferred {
+			candidates = append(candidates, name)
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range candidates {
+		if _, ok := r.providers[name]; ok {
+			r.defaultName = name
+			return true
+		}
+	}
+	r.defaultName = ""
+	return false
+}
+
 func (r *Registry) Default() (Provider, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, name := range []string{"openai", "anthropic", "openai-compatible"} {
-		if provider, ok := r.providers[name]; ok {
-			return provider, nil
-		}
+	if r.defaultName == "" {
+		return nil, errors.New("no default provider configured")
 	}
-	for _, provider := range r.providers {
-		return provider, nil
+	provider, ok := r.providers[r.defaultName]
+	if !ok {
+		return nil, fmt.Errorf("default provider %q is not registered", r.defaultName)
 	}
-	return nil, errors.New("no providers registered")
+	return provider, nil
 }
 
 func SplitModel(model string) (providerName string, modelName string) {

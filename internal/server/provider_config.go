@@ -8,13 +8,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/providers"
+	"autoto/internal/config"
+	"autoto/internal/providers"
 )
 
 type providerConfigUpdateRequest struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
+	Profile        string `json:"profile"`
 	BaseURL        string `json:"baseUrl"`
 	APIKey         string `json:"apiKey"`
 	Model          string `json:"model"`
@@ -73,6 +74,9 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.providers != nil {
+		s.providers.SetDefaultFromConfig(cfg.Agent.DefaultModel, cfg.Providers.Instances)
+	}
 	s.cfgMu.Lock()
 	s.cfg = cfg
 	s.cfgMu.Unlock()
@@ -90,7 +94,7 @@ func (s *Server) providerConfig(name string) config.ProviderConfig {
 	defer s.cfgMu.RUnlock()
 	for _, provider := range s.cfg.Providers.Instances {
 		if provider.Name == name {
-			return provider
+			return config.NormalizeProviderConfig(provider)
 		}
 	}
 	return config.ProviderConfig{}
@@ -146,16 +150,21 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 	if apiKey == "" && existing.Name == name {
 		apiKey = existing.APIKey
 	}
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" && existing.Name == name {
+		profile = existing.Profile
+	}
+	if err := validateProviderProfile(profile); err != nil {
+		return config.ProviderConfig{}, err
+	}
 	apiKeyOptional := req.APIKeyOptional
 	if existing.Name == name && existing.APIKeyOptional {
-		apiKeyOptional = true
-	}
-	if name == "cliproxyapi" {
 		apiKeyOptional = true
 	}
 	return config.ProviderConfig{
 		Name:           name,
 		Type:           providerType,
+		Profile:        profile,
 		BaseURL:        baseURL,
 		APIKey:         apiKey,
 		Model:          model,
@@ -182,6 +191,15 @@ func validateProviderName(name string) error {
 	return nil
 }
 
+func validateProviderProfile(profile string) error {
+	switch strings.TrimSpace(profile) {
+	case "", config.ProviderProfileCLIProxyAPI:
+		return nil
+	default:
+		return fmt.Errorf("unsupported provider profile %q", profile)
+	}
+}
+
 func isProviderNameAlphaNumeric(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
@@ -191,29 +209,19 @@ func isProviderNameChar(r rune) bool {
 }
 
 func validateProviderRegistration(provider config.ProviderConfig) error {
-	switch provider.Type {
-	case "openai", "anthropic", "openai-compatible":
-		return nil
-	default:
-		return fmt.Errorf("unsupported provider type %q", provider.Type)
-	}
+	_, err := providers.NewProvider(provider)
+	return err
 }
 
 func (s *Server) registerProvider(provider config.ProviderConfig) error {
-	if err := validateProviderRegistration(provider); err != nil {
+	adapter, err := providers.NewProvider(provider)
+	if err != nil {
 		return err
 	}
 	if s.providers == nil {
 		s.providers = providers.NewRegistry()
 	}
-	switch provider.Type {
-	case "openai":
-		s.providers.Register(providers.NewOpenAIOfficial(provider))
-	case "anthropic":
-		s.providers.Register(providers.NewAnthropicProvider(provider))
-	case "openai-compatible":
-		s.providers.Register(providers.NewOpenAICompatible(provider))
-	}
+	s.providers.Register(adapter)
 	return nil
 }
 

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
-	"codeharbor/internal/tools"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
+	"autoto/internal/tools"
 )
 
 type interruptBlockingProvider struct {
@@ -29,6 +29,9 @@ type approvalRouteProvider struct {
 }
 
 func (p *approvalRouteProvider) Name() string { return "fake" }
+func (p *approvalRouteProvider) Capabilities() providers.Capabilities {
+	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true}
+}
 func (p *approvalRouteProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
 }
@@ -65,11 +68,11 @@ func TestApproveToolCallRouteReleasesPendingApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "run"}); err != nil {
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "run"}); err != nil {
 		t.Fatal(err)
 	}
 	provider := &approvalRouteProvider{}
@@ -77,19 +80,19 @@ func TestApproveToolCallRouteReleasesPendingApproval(t *testing.T) {
 	registry.Register(provider)
 	toolRegistry := tools.NewRegistry()
 	tools.RegisterCore(toolRegistry)
-	hub := agent.NewHub()
-	runner := agent.NewRunner(store, registry, toolRegistry, hub, config.AgentConfig{MaxTurns: 3})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, toolRegistry, hub, config.AgentConfig{MaxTurns: 3})
 	app := New(config.Config{}, store, runner, hub, registry)
 	done := make(chan struct{})
 	go func() {
-		runner.Run(ctx, narrator.ID)
+		runner.Run(ctx, agent.ID)
 		close(done)
 	}()
-	waitForToolCallStatus(t, store, narrator.ID, "bash-route", "pending_approval")
+	waitForToolCallStatus(t, store, agent.ID, "bash-route", "pending_approval")
 
 	payload := []byte(`{"decision":"allow_once","reason":"route ok"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/tool-calls/bash-route/approval", bytes.NewReader(payload))
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/tool-calls/bash-route/approval", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -100,7 +103,7 @@ func TestApproveToolCallRouteReleasesPendingApproval(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner did not finish after approval")
 	}
-	call, err := store.GetToolCallByUseID(ctx, narrator.ID, "bash-route")
+	call, err := store.GetToolCallByUseID(ctx, agent.ID, "bash-route")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,11 +112,11 @@ func TestApproveToolCallRouteReleasesPendingApproval(t *testing.T) {
 	}
 }
 
-func waitForToolCallStatus(t *testing.T, store *db.Store, narratorID, toolUseID, status string) {
+func waitForToolCallStatus(t *testing.T, store *db.Store, agentID, toolUseID, status string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		call, err := store.GetToolCallByUseID(context.Background(), narratorID, toolUseID)
+		call, err := store.GetToolCallByUseID(context.Background(), agentID, toolUseID)
 		if err == nil && call.Status == status {
 			return
 		}
@@ -122,18 +125,18 @@ func waitForToolCallStatus(t *testing.T, store *db.Store, narratorID, toolUseID,
 	t.Fatalf("timed out waiting for tool call %s status %s", toolUseID, status)
 }
 
-func TestInterruptNarratorRouteCancelsActiveRun(t *testing.T) {
+func TestInterruptAgentRouteCancelsActiveRun(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, Role: "user", ContentText: "wait"}); err != nil {
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "wait"}); err != nil {
 		t.Fatal(err)
 	}
 	provider := &interruptBlockingProvider{started: make(chan struct{})}
@@ -141,13 +144,13 @@ func TestInterruptNarratorRouteCancelsActiveRun(t *testing.T) {
 	registry.Register(provider)
 	toolRegistry := tools.NewRegistry()
 	tools.RegisterCore(toolRegistry)
-	hub := agent.NewHub()
-	runner := agent.NewRunner(store, registry, toolRegistry, hub, config.AgentConfig{MaxTurns: 2})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, toolRegistry, hub, config.AgentConfig{MaxTurns: 2})
 	app := New(config.Config{}, store, runner, hub, registry)
 
 	done := make(chan struct{})
 	go func() {
-		runner.Run(ctx, narrator.ID)
+		runner.Run(ctx, agent.ID)
 		close(done)
 	}()
 	select {
@@ -157,7 +160,7 @@ func TestInterruptNarratorRouteCancelsActiveRun(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/narrators/"+narrator.ID+"/interrupt", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/interrupt", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -176,7 +179,7 @@ func TestInterruptNarratorRouteCancelsActiveRun(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner did not stop after interrupt route")
 	}
-	updated, err := store.GetNarrator(ctx, narrator.ID)
+	updated, err := store.GetAgent(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

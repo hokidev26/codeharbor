@@ -1,4 +1,5 @@
 # Go build artifacts
+/autoto
 /codeharbor
 /bin/
 /dist/
@@ -21,6 +22,7 @@ config.local.json
 # Logs and temporary files
 *.log
 tmp/
+.autoto-run-*.json
 .codeharbor-run-*.json
 .DS_Store
 .narrafork/

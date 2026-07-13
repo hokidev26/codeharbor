@@ -1,4 +1,4 @@
-module codeharbor
+module autoto
 
 go 1.26
 

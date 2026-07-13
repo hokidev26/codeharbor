@@ -59,8 +59,8 @@ export function createSystemSettingsController({
       ${renderUsageMetricCard("监听地址", server.address || "未配置", "当前 Web UI 与 API 服务地址")}
       ${renderUsageMetricCard("访问模式", security.remoteAccessRequired ? "隧道收紧" : "本地", security.message || "当前请求的安全状态")}
       ${renderUsageMetricCard("自动执行", security.bypassPermissionsAllowed ? "允许" : "禁用", `权限上限：${security.maxPermissionMode || "bypassPermissions"}`)}
-      ${renderUsageMetricCard("远程终端", security.remoteTerminalAllowed ? "允许" : "禁用", "CODEHARBOR_REMOTE_TERMINAL")}
-      ${renderUsageMetricCard("访问密码", security.accessPasswordConfigured ? "已配置" : "未配置", "CODEHARBOR_ACCESS_PASSWORD")}
+      ${renderUsageMetricCard("远程终端", security.remoteTerminalAllowed ? "允许" : "禁用", "AUTOTO_REMOTE_TERMINAL")}
+      ${renderUsageMetricCard("访问密码", security.accessPasswordConfigured ? "已配置" : "未配置", "AUTOTO_ACCESS_PASSWORD")}
       ${renderUsageMetricCard("运行时长", formatUptime(process.uptimeSeconds || 0), `启动：${formatTimestamp(process.startedAt)}`)}
       ${renderUsageMetricCard("CPU", go.cpus || 0, `${go.os || "unknown"}/${go.arch || "unknown"}`)}
       ${renderUsageMetricCard("Provider", providers.total || 0, `${formatNumber(providers.configured || 0)} 个已配置`)}
@@ -186,9 +186,9 @@ export function createSystemSettingsController({
     <div class="settings-live-page about-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">关于 CodeHarbor</div>
+          <div class="settings-hero-kicker">关于 Autoto</div>
           <div class="settings-hero-title">${escapeHtml(state.settings?.version || "0.1.0-dev")}</div>
-          <p>本地优先的 Go AI coding agent server。这里展示构建时依赖和许可证，方便发布前做开源合规检查。</p>
+          <p>Autoto 是本地优先的 Go AI 编程 Agent 服务。这里展示构建时依赖和许可证，方便发布前做开源合规检查。</p>
         </div>
         <div class="settings-action-row">
           <button id="refreshLicensesBtn" class="settings-action-btn primary" type="button">刷新依赖</button>
@@ -214,7 +214,7 @@ export function createSystemSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">本地设置备份</div>
-          <div class="settings-provider-meta">导出/导入浏览器 localStorage 中的 CodeHarbor 白名单偏好，用于迁移主题、技能草案、聊天草稿、提示词历史、通知、搜索策略和最近目录。</div>
+          <div class="settings-provider-meta">导出/导入浏览器 localStorage 中的 Autoto 白名单偏好，用于迁移主题、技能草案、聊天草稿、提示词历史、通知、搜索策略和最近目录。</div>
         </div>
         <div class="settings-action-row compact-actions">
           <button id="copyLocalPrefsBackupBtn" class="settings-action-btn subtle" type="button">复制备份</button>
@@ -230,7 +230,7 @@ export function createSystemSettingsController({
         ${labels.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}
       </div>
       <div class="settings-inline-success">备份不包含 API Key、数据库、项目文件、CLIProxyAPI 凭证文件或后端 registry；导入只会覆盖上述白名单 localStorage 偏好。</div>
-      <textarea id="localPrefsImportText" class="settings-token-input settings-backup-import" placeholder='粘贴 codeharbor.local-preferences JSON 后点击“导入备份”'></textarea>
+      <textarea id="localPrefsImportText" class="settings-token-input settings-backup-import" placeholder='粘贴 autoto.local-preferences JSON 后点击“导入备份”'></textarea>
       <div class="settings-action-row settings-form-actions">
         <button id="clearLocalPrefsImportBtn" class="settings-action-btn subtle" type="button">清空输入</button>
         <button id="importLocalPrefsBackupBtn" class="settings-action-btn primary" type="button">导入备份</button>
@@ -299,7 +299,7 @@ export function createSystemSettingsController({
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `codeharbor-local-preferences-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `autoto-local-preferences-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -382,7 +382,7 @@ export function createSystemSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">当前能力</div>
-          <div class="settings-provider-meta">CodeHarbor 仍面向可信本地使用；用户管理页先提供清晰状态与安全边界。</div>
+          <div class="settings-provider-meta">Autoto 仍面向可信本地使用；用户管理页先提供清晰状态与安全边界。</div>
         </div>
         <span class="settings-status-pill ${registrationOpen ? "warn" : "ok"}">${escapeHtml(registrationOpen ? "注册开放" : "注册关闭")}</span>
       </div>
@@ -435,7 +435,7 @@ export function createSystemSettingsController({
         <div>
           <div class="settings-hero-kicker">储存空间</div>
           <div class="settings-hero-title">本地路径与容量概览</div>
-          <p>检查 CodeHarbor home、SQLite 数据库、配置文件和默认项目目录的存在状态、大小和扫描是否被上限截断。</p>
+          <p>检查 Autoto home、SQLite 数据库、配置文件和默认项目目录的存在状态、大小和扫描是否被上限截断。</p>
         </div>
         <div class="settings-action-row">
           <button id="refreshStorageSummaryBtn" class="settings-action-btn primary" type="button">刷新储存统计</button>
@@ -495,7 +495,7 @@ export function createSystemSettingsController({
 
   function storageEntryLabel(entry) {
     const labels = {
-      home: "CodeHarbor home",
+      home: "Autoto home",
       database: "SQLite 数据库",
       config: "配置文件",
       projects: "默认项目目录",
@@ -545,8 +545,8 @@ export function createSystemSettingsController({
     return `
     <div class="usage-summary-grid">
       ${renderUsageMetricCard("项目", counts.projects, "本地项目工作区")}
-      ${renderUsageMetricCard("章节", counts.chapters, "项目下的工作线")}
-      ${renderUsageMetricCard("CodeHarbor", counts.narrators, "主代理与子代理")}
+      ${renderUsageMetricCard("工作线", counts.worklines, "项目下的工作线")}
+      ${renderUsageMetricCard("Agent", counts.agents, "主代理与子代理")}
       ${renderUsageMetricCard("消息", counts.messages, `最新：${formatTimestamp(summary.messages?.latestAt)}`)}
       ${renderUsageMetricCard("工具调用", counts.toolCalls, `平均耗时：${formatDuration(toolCalls.averageDurationMs || 0)}`)}
       ${renderUsageMetricCard("模型请求", counts.apiRequests, `成本：${formatMoney(api.totalCostUsd || 0)}`)}

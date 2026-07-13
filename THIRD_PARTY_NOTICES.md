@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This file is an initial development aid for CodeHarbor's direct Go dependencies. It is not legal advice and is not a complete transitive dependency notice.
+This file is an initial development aid for Autoto's direct Go dependencies. It is not legal advice and is not a complete transitive dependency notice.
 
 Before formal distribution, regenerate a complete notice using a license scanner such as `go-licenses` and review the results.
 
@@ -19,8 +19,8 @@ Before formal distribution, regenerate a complete notice using a license scanner
 ## Suggested verification
 
 ```bash
-go run github.com/google/go-licenses@latest report ./cmd/codeharbor
-go run github.com/google/go-licenses@latest check ./cmd/codeharbor
+go run github.com/google/go-licenses@latest report ./cmd/autoto
+go run github.com/google/go-licenses@latest check ./cmd/autoto
 ```
 
 The runtime `/api/licenses` endpoint is also a best-effort development helper. It should not replace a reviewed third-party notice for release artifacts.

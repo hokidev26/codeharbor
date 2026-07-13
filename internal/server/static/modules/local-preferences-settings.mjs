@@ -68,13 +68,13 @@ export function createLocalPreferencesSettingsController({
               <input id="profileDisplayName" class="settings-field" value="${escapeAttr(profile.displayName)}" placeholder="例如 Ada" />
             </label>
             <label>头像缩写
-              <input id="profileAvatarInitials" class="settings-field" value="${escapeAttr(profile.avatarInitials)}" placeholder="CH" maxlength="4" />
+              <input id="profileAvatarInitials" class="settings-field" value="${escapeAttr(profile.avatarInitials)}" placeholder="AT" maxlength="4" />
             </label>
             <label>身份标签
               <input id="profileRoleLabel" class="settings-field" value="${escapeAttr(profile.roleLabel)}" placeholder="Local developer" />
             </label>
             <label>工作台标签
-              <input id="profileWorkspaceLabel" class="settings-field" value="${escapeAttr(profile.workspaceLabel)}" placeholder="CodeHarbor Local" />
+              <input id="profileWorkspaceLabel" class="settings-field" value="${escapeAttr(profile.workspaceLabel)}" placeholder="Autoto Local" />
             </label>
             <label>Git user.name
               <input id="profileGitName" class="settings-field" value="${escapeAttr(profile.gitName)}" placeholder="用于复制 git config 示例" />
@@ -157,7 +157,7 @@ export function createLocalPreferencesSettingsController({
         </div>
         <form id="searchSettingsForm" class="settings-search-form">
           <div class="appearance-toggle-list">
-            ${renderSearchToggle("enabled", "允许网络搜索", "总开关；关闭时 Agent/Search UI 应保持本地优先，不主动联网。", prefs.enabled)}
+            ${renderSearchToggle("enabled", "允许网络搜索", "总开关；关闭时 Autoto/Search UI 应保持本地优先，不主动联网。", prefs.enabled)}
             ${renderSearchToggle("confirmBeforeSearch", "搜索前确认", "建议保持开启，尤其是在查询可能包含项目路径、错误日志或业务信息时。", prefs.confirmBeforeSearch)}
             ${renderSearchToggle("safeSearch", "安全搜索", "让兼容提供商优先返回过滤后的网页结果。", prefs.safeSearch)}
             ${renderSearchToggle("preferGitHub", "优先 GitHub / 开源结果", "适合查找开源库、issue、README 和示例实现。", prefs.preferGitHub)}
@@ -193,7 +193,7 @@ export function createLocalPreferencesSettingsController({
         <div class="search-provider-grid">
           ${renderSearchProviderChoice("duckduckgo", "DuckDuckGo", "无需账号的通用网页搜索预设。", prefs.provider)}
           ${renderSearchProviderChoice("brave", "Brave Search", "适合正式 API key 网关接入。", prefs.provider)}
-          ${renderSearchProviderChoice("tavily", "Tavily", "偏 Agent/RAG 工作流的搜索 API。", prefs.provider)}
+          ${renderSearchProviderChoice("tavily", "Tavily", "偏 Autoto/RAG 工作流的搜索 API。", prefs.provider)}
           ${renderSearchProviderChoice("searxng", "SearXNG", "适合自托管开源 metasearch。", prefs.provider)}
           ${renderSearchProviderChoice("custom", "自定义端点", "连接内部搜索、企业网关或 MCP adapter。", prefs.provider)}
         </div>
@@ -274,7 +274,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head">
           <div>
             <div class="settings-provider-title">安全策略</div>
-            <div class="settings-provider-meta">默认要求确认和签名，避免 IM 消息直接触发本地 Agent 操作。</div>
+            <div class="settings-provider-meta">默认要求确认和签名，避免 IM 消息直接触发本地 Autoto 操作。</div>
           </div>
           <span class="settings-status-pill ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? "需要安全网关" : "仅本地预案")}</span>
         </div>
@@ -332,7 +332,7 @@ export function createLocalPreferencesSettingsController({
         </div>
         <div class="appearance-toggle-list">
           ${renderIMGatewayToggle("allowInboundMessages", "允许入站消息", "允许 IM 消息进入待确认队列。", prefs.allowInboundMessages)}
-          ${renderIMGatewayToggle("notifyOnTaskDone", "任务完成通知", "Agent 完成后可发送摘要通知。", prefs.notifyOnTaskDone)}
+          ${renderIMGatewayToggle("notifyOnTaskDone", "任务完成通知", "Autoto 完成后可发送摘要通知。", prefs.notifyOnTaskDone)}
           ${renderIMGatewayToggle("notifyOnErrors", "错误通知", "模型、工具或终端错误可发送提醒。", prefs.notifyOnErrors)}
           ${renderIMGatewayToggle("notifyOnToolCalls", "工具调用通知", "高频事件，默认关闭，适合审计环境。", prefs.notifyOnToolCalls)}
         </div>
@@ -413,7 +413,7 @@ export function createLocalPreferencesSettingsController({
         <div>
           <div class="settings-hero-kicker">通知</div>
           <div class="settings-hero-title">${escapeHtml(prefs.toastEnabled ? "Toast 已启用" : "Toast 已关闭")}</div>
-          <p>控制本地工作台的弹窗提醒和 UI 操作日志。偏好只保存在当前浏览器，不影响 Agent、PTY 终端和后端运行。</p>
+          <p>控制本地工作台的弹窗提醒和 UI 操作日志。偏好只保存在当前浏览器，不影响 Autoto、PTY 终端和后端运行。</p>
         </div>
         <div class="settings-action-row">
           <button id="testNotificationBtn" class="settings-action-btn primary" type="button">测试通知</button>
@@ -439,7 +439,7 @@ export function createLocalPreferencesSettingsController({
             ${renderServerNotificationToggle("enabled", "启用 Webhook 通知", "关闭后不会向外部端点发送 run 事件。", serverSettings.enabled)}
             ${renderServerNotificationToggle("notifyOnApproval", "等待审批时通知", "工具需要你批准时主动提醒。", serverSettings.notifyOnApproval !== false)}
             ${renderServerNotificationToggle("notifyOnDone", "任务完成/中断时通知", "completed、interrupted、superseded 会走这一类通知。", serverSettings.notifyOnDone !== false)}
-            ${renderServerNotificationToggle("notifyOnError", "错误通知", "模型、工具或 agent loop 失败时发送。", serverSettings.notifyOnError !== false)}
+            ${renderServerNotificationToggle("notifyOnError", "错误通知", "模型、工具或 Agent loop 失败时发送。", serverSettings.notifyOnError !== false)}
           </div>
           <div class="settings-provider-form-grid im-form-grid">
             <label class="settings-form-span-2">Webhook URL

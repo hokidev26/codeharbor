@@ -13,9 +13,9 @@ import (
 
 	"nhooyr.io/websocket"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
@@ -92,6 +92,33 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 	}
 }
 
+func TestLocalRequestGuardAcceptsLegacyTokenHeader(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "localhost:7788"
+	request.Header.Set("Origin", "http://localhost:7788")
+	request.Header.Set(legacyLocalTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected legacy local token header compatibility, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLocalRequestGuardCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "localhost:7788"
+	request.Header.Set("Origin", "http://localhost:7788")
+	request.Header.Set(localTokenHeader, "wrong-token")
+	request.Header.Set(legacyLocalTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected canonical token header to take priority, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestLocalRequestGuardAllowsNonBrowserLocalAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
@@ -116,19 +143,21 @@ func TestIndexInjectsLocalToken(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "window.CODEHARBOR_LOCAL_TOKEN=") || !strings.Contains(recorder.Body.String(), app.localToken) {
-		t.Fatalf("expected local token injection in index")
+	body := recorder.Body.String()
+	if !strings.Contains(body, "window.AUTOTO_LOCAL_TOKEN=") || !strings.Contains(body, "window.CODEHARBOR_LOCAL_TOKEN=window.AUTOTO_LOCAL_TOKEN") || !strings.Contains(body, app.localToken) {
+		t.Fatalf("expected canonical and legacy local token globals in index")
 	}
-	if cookie := recorder.Result().Cookies(); len(cookie) == 0 {
-		t.Fatal("expected local token cookie")
+	cookies := recorder.Result().Cookies()
+	if len(cookies) == 0 || cookies[0].Name != localTokenCookieName {
+		t.Fatalf("expected canonical local token cookie, got %+v", cookies)
 	}
 }
 
 func TestWebSocketRejectsBadOriginAndMissingToken(t *testing.T) {
-	app := New(config.Config{}, nil, nil, agent.NewHub())
+	app := New(config.Config{}, nil, nil, agentpkg.NewHub())
 	server := httptest.NewServer(app.Routes())
 	defer server.Close()
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/narrator?id=n1"
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/agent?id=n1"
 
 	ctx := t.Context()
 	_, _, err := websocket.Dial(ctx, wsURL+"&token="+app.localToken, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"http://evil.test"}}})
@@ -154,8 +183,11 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 login page, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "CODEHARBOR_ACCESS_PASSWORD") {
-		t.Fatalf("expected password configuration guidance, got %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "AUTOTO_ACCESS_PASSWORD") || strings.Contains(recorder.Body.String(), "CODEHARBOR_ACCESS_PASSWORD") {
+		t.Fatalf("expected canonical password configuration guidance, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "Autoto 远程访问保护") || strings.Contains(recorder.Body.String(), "NarraFork") {
+		t.Fatalf("expected Autoto remote access branding, got %s", recorder.Body.String())
 	}
 	if strings.Contains(recorder.Body.String(), "window.CODEHARBOR_LOCAL_TOKEN=") {
 		t.Fatal("remote login page must not leak local token")
@@ -189,6 +221,47 @@ func TestRemoteAccessGateAllowsRemoteRequestAfterPasswordLogin(t *testing.T) {
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200 after remote login, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessGateAcceptsCanonicalAndLegacyHeadersAndCookie(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	tests := []struct {
+		name   string
+		header string
+		cookie string
+		value  string
+	}{
+		{name: "canonical header", header: remoteAccessHeader, value: "secret"},
+		{name: "legacy header", header: legacyRemoteAccessHeader, value: "secret"},
+		{name: "legacy cookie", cookie: legacyRemoteAccessCookieName, value: app.remoteAccessToken},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			request.Host = "demo.trycloudflare.com"
+			if tt.header != "" {
+				request.Header.Set(tt.header, tt.value)
+			}
+			if tt.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: tt.cookie, Value: tt.value})
+			}
+			app.Routes().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected compatibility credential to pass, got %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestRemoteAccessGateCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.Header.Set(remoteAccessHeader, "wrong-secret")
+	request.Header.Set(legacyRemoteAccessHeader, "secret")
+	if app.validRemoteAccess(request) {
+		t.Fatal("expected canonical remote access header to take priority over the legacy header")
 	}
 }
 
@@ -536,17 +609,17 @@ func TestRemoteAccessLogoutClearsCookie(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200 logout, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	var found bool
+	found := map[string]bool{}
 	for _, cookie := range recorder.Result().Cookies() {
-		if cookie.Name == remoteAccessCookieName {
-			found = true
+		if cookie.Name == remoteAccessCookieName || cookie.Name == legacyRemoteAccessCookieName {
+			found[cookie.Name] = true
 			if cookie.MaxAge >= 0 || cookie.Value != "" {
 				t.Fatalf("expected clearing cookie, got %+v", cookie)
 			}
 		}
 	}
-	if !found {
-		t.Fatal("expected clearing remote access cookie")
+	if !found[remoteAccessCookieName] || !found[legacyRemoteAccessCookieName] {
+		t.Fatalf("expected canonical and legacy remote access cookies to clear, got %+v", found)
 	}
 }
 
@@ -557,14 +630,14 @@ func TestRemoteHardeningRejectsTerminalWebSocketByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
 	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, store, nil, nil)
 	server := httptest.NewServer(app.Routes())
 	defer server.Close()
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/terminal?narratorId=" + narrator.ID + "&token=" + app.localToken
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/terminal?agentId=" + agent.ID + "&token=" + app.localToken
 
 	_, _, err = websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer secret"}}})
 	if err == nil {
@@ -579,14 +652,14 @@ func TestRemoteHardeningRejectsBypassPermissionMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
 	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/narrators/"+narrator.ID+"/permission-mode", strings.NewReader(`{"permissionMode":"bypassPermissions"}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/permission-mode", strings.NewReader(`{"permissionMode":"bypassPermissions"}`))
 	request.Host = "localhost:7788"
 	request.Header.Set("Authorization", "Bearer secret")
 	request.Header.Set("Content-Type", "application/json")
@@ -625,12 +698,12 @@ func TestRemoteHardeningClampsDefaultBypassForNewProject(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var body struct {
-		Narrator db.Narrator `json:"narrator"`
+		Agent db.Agent `json:"agent"`
 	}
 	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Narrator.PermissionMode != "acceptEdits" {
-		t.Fatalf("expected acceptEdits cap, got %q", body.Narrator.PermissionMode)
+	if body.Agent.PermissionMode != "acceptEdits" {
+		t.Fatalf("expected acceptEdits cap, got %q", body.Agent.PermissionMode)
 	}
 }

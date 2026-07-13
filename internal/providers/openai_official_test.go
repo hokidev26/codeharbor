@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 func TestOpenAIOfficialStreamsTextAndUsage(t *testing.T) {

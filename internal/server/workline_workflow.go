@@ -12,12 +12,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
-const chapterGitOutputMaxBytes = 512 << 10
+const worklineGitOutputMaxBytes = 512 << 10
 
-type forkChapterRequest struct {
+type forkWorklineRequest struct {
 	Title          string `json:"title"`
 	Branch         string `json:"branch"`
 	WorktreePath   string `json:"worktreePath"`
@@ -25,47 +25,47 @@ type forkChapterRequest struct {
 	PermissionMode string `json:"permissionMode"`
 }
 
-type forkChapterResponse struct {
-	Chapter   db.Chapter  `json:"chapter"`
-	Narrator  db.Narrator `json:"narrator"`
+type forkWorklineResponse struct {
+	Workline  db.Workline `json:"workline"`
+	Agent     db.Agent    `json:"agent"`
 	ForkPoint string      `json:"forkPoint"`
 }
 
-type chapterMergeCheckResponse struct {
-	GeneratedAt     string   `json:"generatedAt"`
-	SourceChapterID string   `json:"sourceChapterId"`
-	TargetChapterID string   `json:"targetChapterId"`
-	SourceBranch    string   `json:"sourceBranch,omitempty"`
-	TargetBranch    string   `json:"targetBranch,omitempty"`
-	SourceHead      string   `json:"sourceHead,omitempty"`
-	TargetHead      string   `json:"targetHead,omitempty"`
-	CanMerge        bool     `json:"canMerge"`
-	Conflicts       []string `json:"conflicts,omitempty"`
-	Output          string   `json:"output,omitempty"`
+type worklineMergeCheckResponse struct {
+	GeneratedAt      string   `json:"generatedAt"`
+	SourceWorklineID string   `json:"sourceWorklineId"`
+	TargetWorklineID string   `json:"targetWorklineId"`
+	SourceBranch     string   `json:"sourceBranch,omitempty"`
+	TargetBranch     string   `json:"targetBranch,omitempty"`
+	SourceHead       string   `json:"sourceHead,omitempty"`
+	TargetHead       string   `json:"targetHead,omitempty"`
+	CanMerge         bool     `json:"canMerge"`
+	Conflicts        []string `json:"conflicts,omitempty"`
+	Output           string   `json:"output,omitempty"`
 }
 
-type chapterMergeRequest struct {
-	TargetChapterID string `json:"targetChapterId"`
-	Message         string `json:"message"`
+type worklineMergeRequest struct {
+	TargetWorklineID string `json:"targetWorklineId"`
+	Message          string `json:"message"`
 }
 
-type chapterMergeResponse struct {
-	GeneratedAt     string     `json:"generatedAt"`
-	SourceChapterID string     `json:"sourceChapterId"`
-	TargetChapterID string     `json:"targetChapterId"`
-	SourceHead      string     `json:"sourceHead,omitempty"`
-	PreMergeTarget  string     `json:"preMergeTarget,omitempty"`
-	MergeCommit     string     `json:"mergeCommit,omitempty"`
-	Merged          bool       `json:"merged"`
-	Conflicts       []string   `json:"conflicts,omitempty"`
-	Output          string     `json:"output,omitempty"`
-	Chapter         db.Chapter `json:"chapter,omitempty"`
+type worklineMergeResponse struct {
+	GeneratedAt      string      `json:"generatedAt"`
+	SourceWorklineID string      `json:"sourceWorklineId"`
+	TargetWorklineID string      `json:"targetWorklineId"`
+	SourceHead       string      `json:"sourceHead,omitempty"`
+	PreMergeTarget   string      `json:"preMergeTarget,omitempty"`
+	MergeCommit      string      `json:"mergeCommit,omitempty"`
+	Merged           bool        `json:"merged"`
+	Conflicts        []string    `json:"conflicts,omitempty"`
+	Output           string      `json:"output,omitempty"`
+	Workline         db.Workline `json:"workline,omitempty"`
 }
 
-func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
-	parent, project, err := s.chapterAndProject(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) forkWorkline(w http.ResponseWriter, r *http.Request) {
+	parent, project, err := s.worklineAndProject(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
 	sourcePath := strings.TrimSpace(parent.WorktreePath)
@@ -73,11 +73,11 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 		sourcePath = strings.TrimSpace(project.GitPath)
 	}
 	if sourcePath == "" {
-		writeGitError(w, gitCommandError{Status: http.StatusBadRequest, Msg: "source chapter worktree is not configured"})
+		writeGitError(w, gitCommandError{Status: http.StatusBadRequest, Msg: "source workline worktree is not configured"})
 		return
 	}
 	if err := validateDir(sourcePath); err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
 	repoRoot, _, err := runGitCommand(r.Context(), sourcePath, 4096, 3*time.Second, nil, "rev-parse", "--show-toplevel")
@@ -101,7 +101,7 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	forkPoint = strings.TrimSpace(forkPoint)
-	var req forkChapterRequest
+	var req forkWorklineRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -112,7 +112,7 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 	}
 	branch := strings.TrimSpace(req.Branch)
 	if branch == "" {
-		branch = defaultChapterBranch(title)
+		branch = defaultWorklineBranch(title)
 	}
 	branch, err = validateGitBranchName(r.Context(), repoRoot, branch)
 	if err != nil {
@@ -128,7 +128,7 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 		writeGitError(w, err)
 		return
 	}
-	if _, _, err := runGitCommand(r.Context(), repoRoot, chapterGitOutputMaxBytes, 15*time.Second, nil, "worktree", "add", "-b", branch, worktreePath, baseRef); err != nil {
+	if _, _, err := runGitCommand(r.Context(), repoRoot, worklineGitOutputMaxBytes, 15*time.Second, nil, "worktree", "add", "-b", branch, worktreePath, baseRef); err != nil {
 		writeGitError(w, err)
 		return
 	}
@@ -150,97 +150,97 @@ func (s *Server) forkChapter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	chapter, narrator, err := s.store.CreateChapterFork(r.Context(), parent, title, branch, worktreePath, baseRef, forkPoint, model, permissionMode)
+	workline, agent, err := s.store.CreateWorklineFork(r.Context(), parent, title, branch, worktreePath, baseRef, forkPoint, model, permissionMode)
 	if err != nil {
 		_ = removeGitWorktree(context.Background(), repoRoot, worktreePath)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, forkChapterResponse{Chapter: chapter, Narrator: narrator, ForkPoint: forkPoint})
+	writeJSON(w, http.StatusCreated, forkWorklineResponse{Workline: workline, Agent: agent, ForkPoint: forkPoint})
 }
 
-func (s *Server) chapterMergeCheck(w http.ResponseWriter, r *http.Request) {
-	source, project, err := s.chapterAndProject(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) worklineMergeCheck(w http.ResponseWriter, r *http.Request) {
+	source, project, err := s.worklineAndProject(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
-	target, err := s.mergeTargetChapter(r.Context(), project.ID, r.URL.Query().Get("targetChapterId"))
+	target, err := s.mergeTargetWorkline(r.Context(), project.ID, r.URL.Query().Get("targetWorklineId"))
 	if err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
 	if source.ID == target.ID {
-		writeError(w, http.StatusBadRequest, "source and target chapters must differ")
+		writeError(w, http.StatusBadRequest, "source and target worklines must differ")
 		return
 	}
-	_, sourceHead, err := s.chapterRepoAndHead(r.Context(), project, source)
+	_, sourceHead, err := s.worklineRepoAndHead(r.Context(), project, source)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
-	targetRepo, targetHead, err := s.chapterRepoAndHead(r.Context(), project, target)
+	targetRepo, targetHead, err := s.worklineRepoAndHead(r.Context(), project, target)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
-	tempDir, err := os.MkdirTemp("", "codeharbor-merge-check-*")
+	tempDir, err := os.MkdirTemp("", "autoto-merge-check-*")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer os.RemoveAll(tempDir)
-	if _, _, err := runGitCommand(r.Context(), targetRepo, chapterGitOutputMaxBytes, 15*time.Second, nil, "worktree", "add", "--detach", tempDir, targetHead); err != nil {
+	if _, _, err := runGitCommand(r.Context(), targetRepo, worklineGitOutputMaxBytes, 15*time.Second, nil, "worktree", "add", "--detach", tempDir, targetHead); err != nil {
 		writeGitError(w, err)
 		return
 	}
 	defer removeGitWorktree(context.Background(), targetRepo, tempDir)
-	mergeOut, _, mergeErr := runGitCommand(r.Context(), tempDir, chapterGitOutputMaxBytes, 20*time.Second, nil, "merge", "--no-commit", "--no-ff", sourceHead)
+	mergeOut, _, mergeErr := runGitCommand(r.Context(), tempDir, worklineGitOutputMaxBytes, 20*time.Second, nil, "merge", "--no-commit", "--no-ff", sourceHead)
 	conflicts := mergeCheckConflicts(r.Context(), tempDir)
 	if mergeErr != nil && len(conflicts) == 0 {
 		writeGitError(w, mergeErr)
 		return
 	}
-	writeJSON(w, http.StatusOK, chapterMergeCheckResponse{
-		GeneratedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		SourceChapterID: source.ID,
-		TargetChapterID: target.ID,
-		SourceBranch:    source.Branch,
-		TargetBranch:    target.Branch,
-		SourceHead:      sourceHead,
-		TargetHead:      targetHead,
-		CanMerge:        mergeErr == nil && len(conflicts) == 0,
-		Conflicts:       conflicts,
-		Output:          strings.TrimSpace(mergeOut),
+	writeJSON(w, http.StatusOK, worklineMergeCheckResponse{
+		GeneratedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		SourceWorklineID: source.ID,
+		TargetWorklineID: target.ID,
+		SourceBranch:     source.Branch,
+		TargetBranch:     target.Branch,
+		SourceHead:       sourceHead,
+		TargetHead:       targetHead,
+		CanMerge:         mergeErr == nil && len(conflicts) == 0,
+		Conflicts:        conflicts,
+		Output:           strings.TrimSpace(mergeOut),
 	})
 }
 
-func (s *Server) chapterMerge(w http.ResponseWriter, r *http.Request) {
-	source, project, err := s.chapterAndProject(r.Context(), chi.URLParam(r, "id"))
+func (s *Server) worklineMerge(w http.ResponseWriter, r *http.Request) {
+	source, project, err := s.worklineAndProject(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
-	var req chapterMergeRequest
+	var req worklineMergeRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	target, err := s.mergeTargetChapter(r.Context(), project.ID, req.TargetChapterID)
+	target, err := s.mergeTargetWorkline(r.Context(), project.ID, req.TargetWorklineID)
 	if err != nil {
-		writeChapterWorkflowError(w, err)
+		writeWorklineWorkflowError(w, err)
 		return
 	}
 	if source.ID == target.ID {
-		writeError(w, http.StatusBadRequest, "source and target chapters must differ")
+		writeError(w, http.StatusBadRequest, "source and target worklines must differ")
 		return
 	}
-	sourceRepo, sourceHead, err := s.chapterRepoAndHead(r.Context(), project, source)
+	sourceRepo, sourceHead, err := s.worklineRepoAndHead(r.Context(), project, source)
 	if err != nil {
 		writeGitError(w, err)
 		return
 	}
-	targetRepo, targetHead, err := s.chapterRepoAndHead(r.Context(), project, target)
+	targetRepo, targetHead, err := s.worklineRepoAndHead(r.Context(), project, target)
 	if err != nil {
 		writeGitError(w, err)
 		return
@@ -249,26 +249,26 @@ func (s *Server) chapterMerge(w http.ResponseWriter, r *http.Request) {
 		writeGitError(w, err)
 		return
 	} else if dirty {
-		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "source chapter worktree has uncommitted changes"})
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "source workline worktree has uncommitted changes"})
 		return
 	}
 	if dirty, err := gitRepoDirty(r.Context(), targetRepo); err != nil {
 		writeGitError(w, err)
 		return
 	} else if dirty {
-		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "target chapter worktree has uncommitted changes"})
+		writeGitError(w, gitCommandError{Status: http.StatusConflict, Msg: "target workline worktree has uncommitted changes"})
 		return
 	}
 	message := strings.TrimSpace(req.Message)
 	if message == "" {
-		message = "Merge chapter " + source.Title
+		message = "Merge workline " + source.Title
 	}
-	mergeOut, _, mergeErr := runGitCommand(r.Context(), targetRepo, chapterGitOutputMaxBytes, 30*time.Second, nil, "merge", "--no-ff", sourceHead, "-m", message)
+	mergeOut, _, mergeErr := runGitCommand(r.Context(), targetRepo, worklineGitOutputMaxBytes, 30*time.Second, nil, "merge", "--no-ff", sourceHead, "-m", message)
 	if mergeErr != nil {
 		conflicts := mergeCheckConflicts(r.Context(), targetRepo)
 		_ = abortGitMerge(context.Background(), targetRepo)
 		if len(conflicts) > 0 {
-			writeJSON(w, http.StatusConflict, chapterMergeResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceChapterID: source.ID, TargetChapterID: target.ID, SourceHead: sourceHead, PreMergeTarget: targetHead, Merged: false, Conflicts: conflicts, Output: strings.TrimSpace(mergeOut)})
+			writeJSON(w, http.StatusConflict, worklineMergeResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceWorklineID: source.ID, TargetWorklineID: target.ID, SourceHead: sourceHead, PreMergeTarget: targetHead, Merged: false, Conflicts: conflicts, Output: strings.TrimSpace(mergeOut)})
 			return
 		}
 		writeGitError(w, mergeErr)
@@ -280,45 +280,45 @@ func (s *Server) chapterMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mergeCommit = strings.TrimSpace(mergeCommit)
-	updated, err := s.store.MarkChapterMerged(r.Context(), source.ID, target.ID, targetHead, mergeCommit, "no-ff")
+	updated, err := s.store.MarkWorklineMerged(r.Context(), source.ID, target.ID, targetHead, mergeCommit, "no-ff")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, chapterMergeResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceChapterID: source.ID, TargetChapterID: target.ID, SourceHead: sourceHead, PreMergeTarget: targetHead, MergeCommit: mergeCommit, Merged: true, Output: strings.TrimSpace(mergeOut), Chapter: updated})
+	writeJSON(w, http.StatusOK, worklineMergeResponse{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceWorklineID: source.ID, TargetWorklineID: target.ID, SourceHead: sourceHead, PreMergeTarget: targetHead, MergeCommit: mergeCommit, Merged: true, Output: strings.TrimSpace(mergeOut), Workline: updated})
 }
 
-func (s *Server) chapterAndProject(ctx context.Context, chapterID string) (db.Chapter, db.Project, error) {
-	chapter, err := s.store.GetChapter(ctx, chapterID)
+func (s *Server) worklineAndProject(ctx context.Context, worklineID string) (db.Workline, db.Project, error) {
+	workline, err := s.store.GetWorkline(ctx, worklineID)
 	if err != nil {
-		return db.Chapter{}, db.Project{}, err
+		return db.Workline{}, db.Project{}, err
 	}
-	project, err := s.store.GetProject(ctx, chapter.ProjectID)
+	project, err := s.store.GetProject(ctx, workline.ProjectID)
 	if err != nil {
-		return db.Chapter{}, db.Project{}, err
+		return db.Workline{}, db.Project{}, err
 	}
-	return chapter, project, nil
+	return workline, project, nil
 }
 
-func (s *Server) mergeTargetChapter(ctx context.Context, projectID, targetChapterID string) (db.Chapter, error) {
-	targetChapterID = strings.TrimSpace(targetChapterID)
-	if targetChapterID != "" {
-		return s.store.GetChapter(ctx, targetChapterID)
+func (s *Server) mergeTargetWorkline(ctx context.Context, projectID, targetWorklineID string) (db.Workline, error) {
+	targetWorklineID = strings.TrimSpace(targetWorklineID)
+	if targetWorklineID != "" {
+		return s.store.GetWorkline(ctx, targetWorklineID)
 	}
-	chapters, err := s.store.ListChaptersByProject(ctx, projectID)
+	worklines, err := s.store.ListWorklinesByProject(ctx, projectID)
 	if err != nil {
-		return db.Chapter{}, err
+		return db.Workline{}, err
 	}
-	for _, chapter := range chapters {
-		if chapter.IsRoot {
-			return chapter, nil
+	for _, workline := range worklines {
+		if workline.IsRoot {
+			return workline, nil
 		}
 	}
-	return db.Chapter{}, sql.ErrNoRows
+	return db.Workline{}, sql.ErrNoRows
 }
 
-func (s *Server) chapterRepoAndHead(ctx context.Context, project db.Project, chapter db.Chapter) (string, string, error) {
-	path := strings.TrimSpace(chapter.WorktreePath)
+func (s *Server) worklineRepoAndHead(ctx context.Context, project db.Project, workline db.Workline) (string, string, error) {
+	path := strings.TrimSpace(workline.WorktreePath)
 	if path == "" {
 		path = strings.TrimSpace(project.GitPath)
 	}
@@ -330,7 +330,7 @@ func (s *Server) chapterRepoAndHead(ctx context.Context, project db.Project, cha
 		return "", "", err
 	}
 	repoRoot = strings.TrimSpace(repoRoot)
-	if !s.projectAllowsRepoRoot(project, repoRoot) && !pathWithin(chapter.WorktreePath, repoRoot) {
+	if !s.projectAllowsRepoRoot(project, repoRoot) && !pathWithin(workline.WorktreePath, repoRoot) {
 		return "", "", gitCommandError{Status: http.StatusForbidden, Msg: "git repository is outside the configured project boundary"}
 	}
 	head, _, err := runGitCommand(ctx, repoRoot, 256, 3*time.Second, nil, "rev-parse", "HEAD")
@@ -361,9 +361,9 @@ func validateDir(path string) error {
 	return nil
 }
 
-func currentGitRef(ctx context.Context, repoRoot string, chapter db.Chapter) (string, error) {
-	if strings.TrimSpace(chapter.Branch) != "" {
-		return strings.TrimSpace(chapter.Branch), nil
+func currentGitRef(ctx context.Context, repoRoot string, workline db.Workline) (string, error) {
+	if strings.TrimSpace(workline.Branch) != "" {
+		return strings.TrimSpace(workline.Branch), nil
 	}
 	branch, _, _ := runGitCommand(ctx, repoRoot, 512, 2*time.Second, nil, "branch", "--show-current")
 	if strings.TrimSpace(branch) != "" {
@@ -392,18 +392,18 @@ func validateGitBranchName(ctx context.Context, repoRoot, branch string) (string
 
 var branchUnsafeRE = regexp.MustCompile(`[^a-zA-Z0-9._/-]+`)
 
-func defaultChapterBranch(title string) string {
+func defaultWorklineBranch(title string) string {
 	base := strings.ToLower(strings.TrimSpace(title))
 	base = branchUnsafeRE.ReplaceAllString(base, "-")
 	base = strings.Trim(base, "-./")
 	if base == "" {
-		base = "chapter"
+		base = "workline"
 	}
-	return "codeharbor/" + base + "-" + db.NewID()[:8]
+	return "autoto/" + base + "-" + db.NewID()[:8]
 }
 
 func (s *Server) resolveForkWorktreePath(project db.Project, repoRoot, branch, requested string) (string, error) {
-	base := s.chapterWorktreeBaseDir(project)
+	base := s.worklineWorktreeBaseDir(project)
 	var path string
 	if strings.TrimSpace(requested) == "" {
 		path = filepath.Join(base, slugify(branch))
@@ -428,20 +428,20 @@ func (s *Server) resolveForkWorktreePath(project db.Project, repoRoot, branch, r
 	return path, nil
 }
 
-func (s *Server) chapterWorktreeBaseDir(project db.Project) string {
+func (s *Server) worklineWorktreeBaseDir(project db.Project) string {
 	projectPath := strings.TrimSpace(project.GitPath)
 	defaultDir := strings.TrimSpace(s.configSnapshot().Paths.DefaultProjectDir)
 	if defaultDir != "" && (projectPath == "" || pathWithin(defaultDir, projectPath)) {
-		return filepath.Join(defaultDir, ".codeharbor-worktrees", slugify(project.Name))
+		return filepath.Join(defaultDir, ".autoto-worktrees", slugify(project.Name))
 	}
 	if projectPath != "" {
-		return filepath.Join(filepath.Dir(projectPath), ".codeharbor-worktrees", slugify(project.Name))
+		return filepath.Join(filepath.Dir(projectPath), ".autoto-worktrees", slugify(project.Name))
 	}
-	return filepath.Join(os.TempDir(), "codeharbor-worktrees", slugify(project.Name))
+	return filepath.Join(os.TempDir(), ".autoto-worktrees", slugify(project.Name))
 }
 
 func removeGitWorktree(ctx context.Context, repoRoot, worktreePath string) error {
-	_, _, err := runGitCommand(ctx, repoRoot, chapterGitOutputMaxBytes, 10*time.Second, []int{128}, "worktree", "remove", "--force", worktreePath)
+	_, _, err := runGitCommand(ctx, repoRoot, worklineGitOutputMaxBytes, 10*time.Second, []int{128}, "worktree", "remove", "--force", worktreePath)
 	return err
 }
 
@@ -454,7 +454,7 @@ func gitRepoDirty(ctx context.Context, repoRoot string) (bool, error) {
 }
 
 func abortGitMerge(ctx context.Context, repoRoot string) error {
-	_, _, err := runGitCommand(ctx, repoRoot, chapterGitOutputMaxBytes, 10*time.Second, []int{128}, "merge", "--abort")
+	_, _, err := runGitCommand(ctx, repoRoot, worklineGitOutputMaxBytes, 10*time.Second, []int{128}, "merge", "--abort")
 	return err
 }
 
@@ -483,12 +483,12 @@ func isUnmergedStatus(index, worktree string) bool {
 	}
 }
 
-func writeChapterWorkflowError(w http.ResponseWriter, err error) {
+func writeWorklineWorkflowError(w http.ResponseWriter, err error) {
 	if err == nil {
 		return
 	}
 	if err == sql.ErrNoRows {
-		writeError(w, http.StatusNotFound, "chapter not found")
+		writeError(w, http.StatusNotFound, "workline not found")
 		return
 	}
 	writeGitError(w, err)

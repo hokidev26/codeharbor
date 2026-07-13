@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/providers"
+	"autoto/internal/config"
+	"autoto/internal/providers"
 )
 
 func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
@@ -195,6 +195,25 @@ func TestUpdateProviderConfigCreatesCustomProvider(t *testing.T) {
 	}
 	if !bytes.Contains(written, []byte("groq")) {
 		t.Fatalf("expected custom provider to be persisted, got %s", string(written))
+	}
+}
+
+func TestProviderConfigUpdatePreservesProfileWithoutNameBasedAPIKeyOverride(t *testing.T) {
+	existing := config.ProviderConfig{Name: "local-codex", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI, Model: "gpt-5.5"}
+	updated, err := providerConfigFromUpdateRequest("local-codex", existing, providerConfigUpdateRequest{
+		Name:    "local-codex",
+		Type:    "openai-compatible",
+		BaseURL: "http://127.0.0.1:8317/v1",
+		Model:   "gpt-5.5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Profile != config.ProviderProfileCLIProxyAPI {
+		t.Fatalf("expected profile preservation, got %+v", updated)
+	}
+	if updated.APIKeyOptional {
+		t.Fatalf("apiKeyOptional should only follow config, got %+v", updated)
 	}
 }
 

@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { api } from "./runtime.mjs";
+import { visibleMessageText } from "./skills-commands.mjs";
 
 export function createChatRenderingController({
   state,
@@ -15,36 +16,42 @@ export function createChatRenderingController({
   showError,
   showToast,
 } = {}) {
-  async function loadMessages(narratorId = state.narrator?.id) {
-    if (!narratorId) return;
+  async function loadMessages(agentId = state.agent?.id) {
+    if (!agentId) return;
     let messages = [];
     try {
-      messages = await api(`/api/narrators/${narratorId}/messages`);
+      messages = await api(`/api/agents/${agentId}/messages`);
     } catch (err) {
-      if (state.narrator?.id === narratorId) throw err;
+      if (state.agent?.id === agentId) throw err;
       return;
     }
-    if (state.narrator?.id !== narratorId) return;
+    applyMessageSnapshot(messages, agentId);
+  }
+
+  function applyMessageSnapshot(messages, agentId = state.agent?.id) {
+    if (!agentId || state.agent?.id !== agentId) return false;
+    const normalized = Array.isArray(messages) ? messages : [];
     const el = $("messages");
-    state.currentMessages = messages;
-    state.messageCopyTexts = messages.map((message) => String(message.contentText || ""));
+    state.currentMessages = normalized;
+    state.messageCopyTexts = normalized.map(visibleMessageText);
     updateConversationCopyButton();
+    if (!el) return true;
     const liveToolCards = renderLiveToolOutputCardsHTML();
     const runSummaryCard = renderRunSummaryCardHTML();
     const approvalCards = renderApprovalCardsHTML();
-    if (!messages.length && !liveToolCards && !runSummaryCard && !approvalCards) {
+    if (!normalized.length && !liveToolCards && !runSummaryCard && !approvalCards) {
       el.classList.add("empty");
       el.textContent = "还没有消息。输入你的需求开始对话。";
-      return;
+      return true;
     }
     el.classList.remove("empty");
-    el.innerHTML = `${messages.map((message, index) => `
+    el.innerHTML = `${normalized.map((message, index) => `
       <div class="message ${escapeAttr(message.role)}">
         <div class="message-head">
           <div class="message-role">${escapeHtml(message.role)}</div>
           <button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="复制消息原文">复制</button>
         </div>
-        <div class="message-content">${renderMarkdown(friendlyMessageText(message.contentText || ""))}</div>
+        <div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>
         ${renderMessageAttachments(message)}
       </div>
     `).join("")}${liveToolCards}${runSummaryCard}${approvalCards}`;
@@ -53,6 +60,7 @@ export function createChatRenderingController({
     bindApprovalButtons(el);
     bindCopyCodeButtons(el);
     el.scrollTop = el.scrollHeight;
+    return true;
   }
 
   function clearRunSummary() {
@@ -65,8 +73,8 @@ export function createChatRenderingController({
     renderRunSummaryCard();
   }
 
-  async function loadLatestRunSummary(narratorId = state.narrator?.id) {
-    if (!narratorId) return null;
+  async function loadLatestRunSummary(agentId = state.agent?.id) {
+    if (!agentId) return null;
     const seq = Number(state.runSummarySeq || 0) + 1;
     state.runSummarySeq = seq;
     state.activeRunSummary = null;
@@ -75,16 +83,16 @@ export function createChatRenderingController({
     state.runSummaryError = "";
     state.runRollbackBusy = false;
     try {
-      const runs = await api(`/api/narrators/${narratorId}/runs?limit=1`);
-      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      const runs = await api(`/api/agents/${agentId}/runs?limit=1`);
+      if (seq !== state.runSummarySeq || state.agent?.id !== agentId) return null;
       const run = Array.isArray(runs) ? runs[0] : null;
       if (!run || !isTerminalRunStatus(run.status)) {
         renderRunSummaryCard();
         return null;
       }
-      return await loadRunSummary(run.id, { narratorId });
+      return await loadRunSummary(run.id, { agentId });
     } catch (err) {
-      if (seq === state.runSummarySeq && state.narrator?.id === narratorId) {
+      if (seq === state.runSummarySeq && state.agent?.id === agentId) {
         state.runSummaryError = err.message || String(err);
         renderRunSummaryCard();
       }
@@ -94,8 +102,8 @@ export function createChatRenderingController({
   }
 
   async function loadRunSummary(runId, options = {}) {
-    const narratorId = options.narratorId || state.narrator?.id;
-    if (!narratorId || !runId) return null;
+    const agentId = options.agentId || state.agent?.id;
+    if (!agentId || !runId) return null;
     const seq = Number(state.runSummarySeq || 0) + 1;
     state.runSummarySeq = seq;
     state.activeRunSummaryRunId = runId;
@@ -103,8 +111,8 @@ export function createChatRenderingController({
     state.runSummaryError = "";
     renderRunSummaryCard();
     try {
-      const summary = await api(`/api/narrators/${narratorId}/runs/${encodeURIComponent(runId)}`);
-      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      const summary = await api(`/api/agents/${agentId}/runs/${encodeURIComponent(runId)}`);
+      if (seq !== state.runSummarySeq || state.agent?.id !== agentId) return null;
       state.activeRunSummary = summary;
       state.activeRunSummaryRunId = summary?.run?.id || runId;
       state.runSummaryLoading = false;
@@ -113,7 +121,7 @@ export function createChatRenderingController({
       if (options.notify) showToast("Run 回顾已刷新。", "success");
       return summary;
     } catch (err) {
-      if (seq !== state.runSummarySeq || state.narrator?.id !== narratorId) return null;
+      if (seq !== state.runSummarySeq || state.agent?.id !== agentId) return null;
       state.runSummaryLoading = false;
       state.runSummaryError = err.message || String(err);
       renderRunSummaryCard();
@@ -196,13 +204,38 @@ export function createChatRenderingController({
   }
 
   function runCheckpointState(run) {
+    const state = String(run?.checkpointState || "").trim();
+    if (state === "rolled_back") {
+      return { available: false, tone: "muted", reason: "此 Run 已回滚，不能重复执行。" };
+    }
+    if (state === "rolling_back") {
+      return { available: false, tone: "warn", reason: "此 Run 正在回滚，等待状态更新后再操作。" };
+    }
+    if (state === "invalid") {
+      return { available: false, tone: "warn", reason: run?.checkpointError || "本轮 checkpoint 校验失败，不能安全自动回滚。" };
+    }
+    if (state === "capturing") {
+      return { available: false, tone: "warn", reason: "工具变更仍在采集，checkpoint 尚不可回滚。" };
+    }
+    if (state === "tracking") {
+      return { available: false, tone: "muted", reason: "本轮仍在跟踪工具变更，完成后才可回滚。" };
+    }
     if (!run?.baseHead) {
       return { available: false, tone: "muted", reason: "本轮开始时工作区不干净或无法读取 Git HEAD，不能自动回滚。" };
     }
     if (run.endHead && run.endHead !== run.baseHead) {
       return { available: false, tone: "warn", reason: "本轮产生了提交，自动回滚不会跨 commit 执行。" };
     }
-    return { available: true, tone: "ok", reason: `可恢复到 ${shortGitHash(run.baseHead)}，并清理 checkpoint 之后产生的未跟踪文件。` };
+    if (state === "none") {
+      return { available: false, tone: "muted", reason: "本轮未完成可验证的工具调用归属快照，不能安全自动回滚。" };
+    }
+    if (state !== "ready") {
+      return { available: false, tone: "warn", reason: "checkpoint 状态未知，已禁用自动回滚。" };
+    }
+    if (!run.gitSnapshotAt || !run.checkpointRepoRoot) {
+      return { available: false, tone: "muted", reason: "本轮未完成可验证的工具调用归属快照，不能安全自动回滚。" };
+    }
+    return { available: true, tone: "ok", reason: `仅恢复可归属到本 Run 工具调用、且之后未变化的文件到 ${shortGitHash(run.baseHead)}；不会清理其他未跟踪文件。` };
   }
 
   function shortGitHash(hash) {
@@ -245,7 +278,7 @@ export function createChatRenderingController({
           ${messages.slice(-3).map((message) => `
             <div class="run-message-preview">
               <span>${escapeHtml(message.role || "message")}</span>
-              <strong>${escapeHtml(compactText(message.contentText || "", 120))}</strong>
+              <strong>${escapeHtml(compactText(visibleMessageText(message), 120))}</strong>
             </div>
           `).join("")}
         </div>
@@ -280,29 +313,49 @@ export function createChatRenderingController({
   }
 
   async function rollbackRunToCheckpoint(runId) {
-    const narratorId = state.narrator?.id;
+    const agentId = state.agent?.id;
     const run = state.activeRunSummary?.run;
     const checkpoint = runCheckpointState(run);
-    if (!narratorId || !runId || !checkpoint.available) {
+    if (!agentId || !runId || !checkpoint.available) {
       showToast(checkpoint.reason || "当前 Run 没有可用 checkpoint。", "warn", { force: true });
       return;
     }
-    const confirmed = window.confirm("确认回滚到本轮开始前的 Git checkpoint？\n\n这会恢复 tracked/staged 文件，并删除 checkpoint 之后产生的未跟踪文件；不会 push，也不会跨 commit 回滚。");
+    const preview = await api(`/api/agents/${agentId}/runs/${encodeURIComponent(runId)}/rollback`);
+    if (state.agent?.id !== agentId) return;
+    if (!preview?.available) {
+      const reason = preview?.reason || "当前 Run 没有可用 checkpoint。";
+      state.runSummaryError = reason;
+      renderRunSummaryCard();
+      showToast(reason, "warn", { force: true });
+      return;
+    }
+    const confirmed = window.confirm(rollbackPreviewConfirmation(preview));
     if (!confirmed) return;
     state.runRollbackBusy = true;
     state.runSummaryError = "";
     renderRunSummaryCard();
     try {
-      const result = await api(`/api/narrators/${narratorId}/runs/${encodeURIComponent(runId)}/rollback`, {
+      const result = await api(`/api/agents/${agentId}/runs/${encodeURIComponent(runId)}/rollback`, {
         method: "POST",
         body: JSON.stringify({ confirm: true }),
       });
-      if (state.narrator?.id !== narratorId) return;
+      if (state.agent?.id !== agentId) return;
       if (result?.status) {
         state.gitStatus = result.status;
         state.gitDiff = null;
       }
-      showToast("已回滚到任务开始前 checkpoint。", "success", { force: true });
+      try {
+        await loadRunSummary(runId);
+      } catch (err) {
+        notifyTerminal?.(`[warn] Run 回顾刷新失败：${err.message || err}\n`);
+      }
+      const rollbackWarning = String(result?.warning || "").trim();
+      if (rollbackWarning) {
+        notifyTerminal?.(`[warn] ${rollbackWarning}\n`);
+        showToast("已完成回滚，但 Git 状态刷新失败；请稍后手动刷新。", "warn", { force: true });
+      } else {
+        showToast("已回滚到任务开始前 checkpoint。", "success", { force: true });
+      }
       if (typeof refreshGitWorkflow === "function") {
         try {
           await refreshGitWorkflow({ silent: true });
@@ -311,16 +364,31 @@ export function createChatRenderingController({
         }
       }
     } catch (err) {
-      if (state.narrator?.id !== narratorId) return;
+      if (state.agent?.id !== agentId) return;
       state.runSummaryError = err.message || String(err);
       renderRunSummaryCard();
       throw err;
     } finally {
-      if (state.narrator?.id === narratorId) {
+      if (state.agent?.id === agentId) {
         state.runRollbackBusy = false;
         renderRunSummaryCard();
       }
     }
+  }
+
+  function rollbackPreviewConfirmation(preview) {
+    const restorePaths = Array.isArray(preview?.restorePaths) ? preview.restorePaths : [];
+    const deletePaths = Array.isArray(preview?.deletePaths) ? preview.deletePaths : [];
+    const lines = [
+      "确认回滚到本轮开始前的 Git checkpoint？",
+      "",
+      `将恢复 ${Number(preview?.restoreCount || 0)} 个 tracked/staged 路径，并删除 ${Number(preview?.deleteCount || 0)} 个本 Run 新建未跟踪路径。`,
+    ];
+    if (restorePaths.length) lines.push("", "恢复路径：", ...restorePaths.map((path) => `- ${path}`));
+    if (deletePaths.length) lines.push("", "删除路径：", ...deletePaths.map((path) => `- ${path}`));
+    if (preview?.truncated) lines.push("", "仅显示部分路径；服务端会在执行前重新验证全部路径。");
+    lines.push("", "不会清理其他文件、不会 push，也不会跨 commit 回滚。");
+    return lines.join("\n");
   }
 
   async function copyActiveRunSummaryMarkdown(button) {
@@ -359,7 +427,7 @@ export function createChatRenderingController({
     const messages = Array.isArray(summary.recentMessages) ? summary.recentMessages : [];
     if (messages.length) {
       lines.push("", "## 最近消息");
-      messages.slice(-6).forEach((message) => lines.push(`- ${message.role || "message"}: ${compactText(message.contentText || "", 180)}`));
+      messages.slice(-6).forEach((message) => lines.push(`- ${message.role || "message"}: ${compactText(visibleMessageText(message), 180)}`));
     }
     return lines.join("\n");
   }
@@ -448,7 +516,7 @@ export function createChatRenderingController({
     state.liveToolOutputs = {
       ...(state.liveToolOutputs || {}),
       [toolUseId]: {
-        narratorId: event.narratorId || state.narrator?.id,
+        agentId: event.agentId || state.agent?.id,
         runId: data.runId || "",
         toolUseId,
         toolName,
@@ -467,7 +535,7 @@ export function createChatRenderingController({
     const toolUseId = data.toolUseId || data.tool_use_id;
     if (!toolUseId) return;
     const current = state.liveToolOutputs?.[toolUseId] || {
-      narratorId: event.narratorId || state.narrator?.id,
+      agentId: event.agentId || state.agent?.id,
       runId: data.runId || "",
       toolUseId,
       toolName: data.toolName || "Bash",
@@ -505,10 +573,10 @@ export function createChatRenderingController({
       },
     };
     renderLiveToolOutputCards();
-    const narratorId = current.narratorId || state.narrator?.id || "";
+    const agentId = current.agentId || state.agent?.id || "";
     window.setTimeout(() => {
       const existing = state.liveToolOutputs?.[toolUseId];
-      if (!existing || (existing.narratorId && narratorId && existing.narratorId !== narratorId)) return;
+      if (!existing || (existing.agentId && agentId && existing.agentId !== agentId)) return;
       const next = { ...(state.liveToolOutputs || {}) };
       delete next[toolUseId];
       state.liveToolOutputs = next;
@@ -517,9 +585,9 @@ export function createChatRenderingController({
   }
 
   function currentLiveToolOutputList() {
-    const narratorId = state.narrator?.id || "";
+    const agentId = state.agent?.id || "";
     return Object.values(state.liveToolOutputs || {})
-      .filter((item) => item && (!item.narratorId || item.narratorId === narratorId))
+      .filter((item) => item && (!item.agentId || item.agentId === agentId))
       .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   }
 
@@ -579,9 +647,9 @@ export function createChatRenderingController({
   }
 
   function currentApprovalList() {
-    const narratorId = state.narrator?.id || "";
+    const agentId = state.agent?.id || "";
     return Object.values(state.pendingToolApprovals || {})
-      .filter((item) => item && (!item.narratorId || item.narratorId === narratorId))
+      .filter((item) => item && (!item.agentId || item.agentId === agentId))
       .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   }
 
@@ -606,7 +674,7 @@ export function createChatRenderingController({
         <div class="approval-card-head">
           <div>
             <div class="approval-title">${escapeHtml(title)}</div>
-            <div class="approval-meta">${escapeHtml(approval.toolName || "tool")} · ${escapeHtml(risk)} · ${escapeHtml(shortPath(approval.cwd || state.narrator?.cwd || ""))}</div>
+            <div class="approval-meta">${escapeHtml(approval.toolName || "tool")} · ${escapeHtml(risk)} · ${escapeHtml(shortPath(approval.cwd || state.agent?.cwd || ""))}</div>
           </div>
           <span class="approval-risk">${escapeHtml(risk)}</span>
         </div>
@@ -648,12 +716,12 @@ export function createChatRenderingController({
   }
 
   async function approveToolCall(toolUseId, decision, button) {
-    if (!state.narrator?.id || !toolUseId || !decision) return;
+    if (!state.agent?.id || !toolUseId || !decision) return;
     const approval = state.pendingToolApprovals?.[toolUseId];
     const buttons = button?.closest(".approval-card")?.querySelectorAll("button") || [];
     buttons.forEach((node) => { node.disabled = true; });
     try {
-      await api(`/api/narrators/${state.narrator.id}/tool-calls/${encodeURIComponent(toolUseId)}/approval`, {
+      await api(`/api/agents/${state.agent.id}/tool-calls/${encodeURIComponent(toolUseId)}/approval`, {
         method: "POST",
         body: JSON.stringify({ decision, reason: decision === "deny" ? "denied in UI" : "approved in UI" }),
       });
@@ -663,11 +731,40 @@ export function createChatRenderingController({
       renderApprovalCards();
       showToast(decision === "deny" ? "已拒绝工具执行。" : "已批准工具执行。", decision === "deny" ? "warn" : "success");
       notifyTerminal(`[tool] ${decision}: ${approval?.toolName || "tool"} ${toolUseId}\n`);
-      scheduleMessageRefresh(120, state.narrator.id);
+      scheduleMessageRefresh(120, state.agent.id);
     } catch (err) {
       buttons.forEach((node) => { node.disabled = false; });
       showError(err);
     }
+  }
+
+  function replacePendingApprovals(approvals, agentId = state.agent?.id) {
+    if (!agentId || state.agent?.id !== agentId) return false;
+    const next = { ...(state.pendingToolApprovals || {}) };
+    for (const [key, value] of Object.entries(next)) {
+      if (!value?.agentId || value.agentId === agentId) delete next[key];
+    }
+    for (const call of Array.isArray(approvals) ? approvals : []) {
+      const toolUseId = call?.toolUseId || call?.tool_use_id;
+      if (!toolUseId) continue;
+      const input = call.inputJson && typeof call.inputJson === "object" ? call.inputJson : {};
+      const toolName = call.toolName || "tool";
+      const lowerToolName = String(toolName).toLowerCase();
+      next[toolUseId] = {
+        ...call,
+        agentId,
+        toolUseId,
+        toolName,
+        command: input.command || input.file_path || input.path || JSON.stringify(input),
+        cwd: input.cwd || state.agent?.cwd || "",
+        risk: lowerToolName === "bash" ? "exec" : (["write", "edit"].includes(lowerToolName) ? "write" : "read"),
+        warning: call.permissionSuggestions || call.permissionDecisionReason || "此工具调用正在等待审批。",
+        createdAt: call.createdAt || new Date().toISOString(),
+      };
+    }
+    state.pendingToolApprovals = next;
+    renderApprovalCards();
+    return true;
   }
 
   function rememberToolApproval(event) {
@@ -678,7 +775,7 @@ export function createChatRenderingController({
       ...(state.pendingToolApprovals || {}),
       [toolUseId]: {
         ...data,
-        narratorId: event.narratorId || state.narrator?.id,
+        agentId: event.agentId || state.agent?.id,
         toolUseId,
         createdAt: event.createdAt || new Date().toISOString(),
       },
@@ -694,12 +791,12 @@ export function createChatRenderingController({
     renderApprovalCards();
   }
 
-  function clearCurrentNarratorApprovals() {
-    const narratorId = state.narrator?.id;
-    if (!narratorId) return;
+  function clearCurrentAgentApprovals() {
+    const agentId = state.agent?.id;
+    if (!agentId) return;
     const next = { ...(state.pendingToolApprovals || {}) };
     for (const [key, value] of Object.entries(next)) {
-      if (!value?.narratorId || value.narratorId === narratorId) delete next[key];
+      if (!value?.agentId || value.agentId === agentId) delete next[key];
     }
     state.pendingToolApprovals = next;
     renderApprovalCards();
@@ -734,7 +831,7 @@ export function createChatRenderingController({
   }
 
   function attachmentURL(message, attachment) {
-    return `/api/narrators/${encodeURIComponent(message.narratorId || state.narrator?.id || "")}/messages/${encodeURIComponent(message.id || attachment.messageId || "")}/attachments/${encodeURIComponent(attachment.id || "")}`;
+    return `/api/agents/${encodeURIComponent(message.agentId || state.agent?.id || "")}/messages/${encodeURIComponent(message.id || attachment.messageId || "")}/attachments/${encodeURIComponent(attachment.id || "")}`;
   }
 
   function messageAttachmentsMarkdown(message) {
@@ -762,20 +859,20 @@ export function createChatRenderingController({
 
   function conversationMarkdown() {
     const messages = Array.isArray(state.currentMessages) ? state.currentMessages : [];
-    const title = state.project?.name || state.narrator?.title || "CodeHarbor Conversation";
+    const title = state.project?.name || state.agent?.title || "Autoto Conversation";
     const meta = [
       `# ${title} 对话导出`,
       "",
       `- 导出时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
       `- 项目：${state.project?.name || "未选择"}`,
-      `- 路径：${state.narrator?.cwd || state.project?.gitPath || "未设置"}`,
-      `- 代理：${state.narrator?.title || state.narrator?.id || "未选择"}`,
-      `- 模型：${state.narrator?.model || selectedModelValue() || "未选择"}`,
+      `- 路径：${state.agent?.cwd || state.project?.gitPath || "未设置"}`,
+      `- 代理：${state.agent?.title || state.agent?.id || "未选择"}`,
+      `- 模型：${state.agent?.model || selectedModelValue() || "未选择"}`,
       "",
     ];
     const body = messages.map((message, index) => {
       const role = String(message.role || "message").toUpperCase();
-      const text = String(message.contentText || "").trim() || "（空消息）";
+      const text = visibleMessageText(message).trim() || "（空消息）";
       return `## ${index + 1}. ${role}\n\n${text}${messageAttachmentsMarkdown(message)}`;
     });
     return [...meta, ...body].join("\n");
@@ -794,41 +891,41 @@ export function createChatRenderingController({
     showToast("复制当前对话失败，请稍后重试。", "warn");
   }
 
-  function clearMessageRefreshTimer(narratorId) {
-    const timer = state.messageRefreshTimersByNarrator?.[narratorId];
+  function clearMessageRefreshTimer(agentId) {
+    const timer = state.messageRefreshTimersByAgent?.[agentId];
     if (!timer) return;
     window.clearTimeout(timer);
-    const next = { ...(state.messageRefreshTimersByNarrator || {}) };
-    delete next[narratorId];
-    state.messageRefreshTimersByNarrator = next;
+    const next = { ...(state.messageRefreshTimersByAgent || {}) };
+    delete next[agentId];
+    state.messageRefreshTimersByAgent = next;
   }
 
-  function scheduleMessageRefresh(delay = 0, narratorId = state.narrator?.id) {
-    if (!narratorId) return;
-    clearMessageRefreshTimer(narratorId);
+  function scheduleMessageRefresh(delay = 0, agentId = state.agent?.id) {
+    if (!agentId) return;
+    clearMessageRefreshTimer(agentId);
     const timer = window.setTimeout(() => {
-      clearMessageRefreshTimer(narratorId);
-      loadMessages(narratorId).catch((err) => notifyTerminal(`[warn] 消息刷新失败：${err.message || err}\n`));
+      clearMessageRefreshTimer(agentId);
+      loadMessages(agentId).catch((err) => notifyTerminal(`[warn] 消息刷新失败：${err.message || err}\n`));
     }, Math.max(0, delay));
-    state.messageRefreshTimersByNarrator = { ...(state.messageRefreshTimersByNarrator || {}), [narratorId]: timer };
+    state.messageRefreshTimersByAgent = { ...(state.messageRefreshTimersByAgent || {}), [agentId]: timer };
   }
 
   function friendlyMessageText(text) {
     const value = String(text || "");
     if (value.includes("OpenAI official provider is not configured")) {
-      return "当前 OpenAI 模型尚未配置 API Key。请在启动 CodeHarbor 前设置 `OPENAI_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
+      return "当前 OpenAI 模型尚未配置 API Key。请在启动 Autoto 前设置 `OPENAI_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
     }
     if (value.includes("Anthropic provider is not configured")) {
-      return "当前 Anthropic 模型尚未配置 API Key。请在启动 CodeHarbor 前设置 `ANTHROPIC_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
+      return "当前 Anthropic 模型尚未配置 API Key。请在启动 Autoto 前设置 `ANTHROPIC_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
     }
     if (value.includes("OpenAI-compatible provider is not configured")) {
       return "当前 OpenAI-compatible 模型尚未配置 API Key。请设置 `OPENAI_COMPATIBLE_API_KEY` 或 `OPENAI_API_KEY`，并确认 Base URL 后重启服务。";
     }
     if (value.includes("cliproxyapi provider request failed") && value.includes("127.0.0.1:8317")) {
-      return "无法连接本地 CLIProxyAPI。请先启动 CLIProxyAPI，并确认它监听 `http://127.0.0.1:8317/v1`；如果你改过端口，请设置 `CLIPROXYAPI_BASE_URL` 后重启 CodeHarbor。";
+      return "无法连接本地 CLIProxyAPI。请先启动 CLIProxyAPI，并确认它监听 `http://127.0.0.1:8317/v1`；如果你改过端口，请设置 `CLIPROXYAPI_BASE_URL` 后重启 Autoto。";
     }
     if (value.includes("cliproxyapi model request failed: 401")) {
-      return "CLIProxyAPI 返回 401。请确认 CLIProxyAPI 的 `api-keys` 配置；如启用了客户端鉴权，请在启动 CodeHarbor 前设置 `CLIPROXYAPI_API_KEY`。";
+      return "CLIProxyAPI 返回 401。请确认 CLIProxyAPI 的 `api-keys` 配置；如启用了客户端鉴权，请在启动 Autoto 前设置 `CLIPROXYAPI_API_KEY`。";
     }
     return value;
   }
@@ -925,7 +1022,8 @@ export function createChatRenderingController({
 
   return {
     appendToolOutput,
-    clearCurrentNarratorApprovals,
+    applyMessageSnapshot,
+    clearCurrentAgentApprovals,
     clearMessageRefreshTimer,
     clearRunSummary,
     clearToolApproval,
@@ -936,6 +1034,7 @@ export function createChatRenderingController({
     loadRunSummary,
     rememberToolApproval,
     rememberToolStarted,
+    replacePendingApprovals,
     scheduleMessageRefresh,
     updateConversationCopyButton,
   };

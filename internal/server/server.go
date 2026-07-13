@@ -10,10 +10,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
 )
 
 type Server struct {
@@ -27,13 +27,13 @@ type Server struct {
 	remoteAccessFailure map[string]remoteAccessFailure
 	remoteAccessMu      sync.Mutex
 	store               *db.Store
-	runner              *agent.Runner
-	hub                 *agent.Hub
+	runner              *agentpkg.Runner
+	hub                 *agentpkg.Hub
 	providers           *providers.Registry
 	notifier            *WebhookNotifier
 }
 
-func New(cfg config.Config, store *db.Store, runner *agent.Runner, hub *agent.Hub, providerRegistries ...*providers.Registry) *Server {
+func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agentpkg.Hub, providerRegistries ...*providers.Registry) *Server {
 	var providerRegistry *providers.Registry
 	if len(providerRegistries) > 0 {
 		providerRegistry = providerRegistries[0]
@@ -85,10 +85,8 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/storage/summary", s.storageSummary)
 	r.Get("/api/usage/summary", s.usageSummary)
 	r.Put("/api/providers/{name}/config", s.updateProviderConfig)
-	r.Route("/api/providers/cliproxyapi", func(r chi.Router) {
-		r.Get("/auth-files", s.listCLIProxyAPIAuthFiles)
-		r.Post("/auth-files/import", s.importCLIProxyAPIAuthFile)
-	})
+	r.Get("/api/providers/{name}/auth-files", s.listProviderAuthFiles)
+	r.Post("/api/providers/{name}/auth-files/import", s.importProviderAuthFile)
 	r.Route("/api/backends", func(r chi.Router) {
 		r.Get("/", s.listBackends)
 		r.Post("/", s.createBackend)
@@ -97,6 +95,28 @@ func (s *Server) Routes() http.Handler {
 		r.Delete("/{id}", s.deleteBackend)
 		r.Post("/{id}/activate", s.activateBackend)
 		r.Get("/{id}/health", s.backendHealth)
+	})
+	r.Route("/api/skills", func(r chi.Router) {
+		r.Get("/", s.listSkills)
+		r.Post("/", s.createSkill)
+		r.Post("/import/preview", s.previewSkillImport)
+		r.Post("/import", s.importSkill)
+		r.Get("/{id}", s.getSkill)
+		r.Patch("/{id}", s.updateSkill)
+		r.Delete("/{id}", s.deleteSkill)
+	})
+	r.Route("/api/v2/skills", func(r chi.Router) {
+		r.Get("/", s.listSkillsV2)
+		r.Post("/", s.createSkillV2)
+		r.Post("/import/preview", s.previewSkillImport)
+		r.Post("/import", s.importSkillV2)
+		r.Get("/{id}", s.getSkillV2)
+		r.Patch("/{id}", s.updateSkillV2)
+		r.Delete("/{id}", s.deleteSkillV2)
+		r.Get("/{id}/revisions", s.listSkillRevisionsV2)
+		r.Get("/{id}/revisions/{revisionNo}", s.getSkillRevisionV2)
+		r.Post("/{id}/restore", s.restoreSkillV2)
+		r.Post("/{id}/revisions/{revisionNo}/restore", s.restoreSkillV2)
 	})
 	r.Route("/api/mcp/servers", func(r chi.Router) {
 		r.Get("/", s.listMCPServers)
@@ -112,6 +132,15 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/test", s.testNotification)
 	})
 
+	r.Route("/api/workflow", func(r chi.Router) {
+		r.Get("/preferences", s.getWorkflowPreferences)
+		r.Put("/preferences", s.updateWorkflowPreferences)
+		r.Get("/tool-permissions", s.listToolPermissionRules)
+		r.Post("/tool-permissions", s.createToolPermissionRule)
+		r.Patch("/tool-permissions/{id}", s.updateToolPermissionRule)
+		r.Delete("/tool-permissions/{id}", s.deleteToolPermissionRule)
+	})
+
 	r.Route("/api/fs", func(r chi.Router) {
 		r.Get("/browse", s.fsBrowse)
 		r.Get("/directories", s.fsDirectories)
@@ -124,24 +153,32 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/", s.listProjects)
 		r.Post("/", s.createProject)
 		r.Get("/{id}", s.getProject)
-		r.Get("/{id}/chapters", s.listProjectChapters)
+		r.Get("/{id}/worklines", s.listProjectWorklines)
+		r.Get("/{id}/chapters", s.listProjectWorklines)
 	})
-	r.Get("/api/chapters/{id}", s.getChapter)
-	r.Post("/api/chapters/{id}/fork", s.forkChapter)
-	r.Get("/api/chapters/{id}/merge-check", s.chapterMergeCheck)
-	r.Post("/api/chapters/{id}/merge", s.chapterMerge)
-	r.Get("/api/chapters/{id}/narrators", s.listChapterNarrators)
-	r.Route("/api/narrators", func(r chi.Router) {
-		r.Get("/{id}", s.getNarrator)
-		r.Patch("/{id}/cwd", s.updateNarratorCWD)
-		r.Patch("/{id}/model", s.updateNarratorModel)
-		r.Patch("/{id}/permission-mode", s.updateNarratorPermissionMode)
-		r.Post("/{id}/interrupt", s.interruptNarrator)
+	r.Get("/api/worklines/{id}", s.getWorkline)
+	r.Post("/api/worklines/{id}/fork", s.forkWorkline)
+	r.Get("/api/worklines/{id}/merge-check", s.worklineMergeCheck)
+	r.Post("/api/worklines/{id}/merge", s.worklineMerge)
+	r.Get("/api/worklines/{id}/agents", s.listWorklineAgents)
+	r.Get("/api/chapters/{id}", s.getWorkline)
+	r.Post("/api/chapters/{id}/fork", s.forkWorkline)
+	r.Get("/api/chapters/{id}/merge-check", s.worklineMergeCheck)
+	r.Post("/api/chapters/{id}/merge", s.worklineMerge)
+	r.Get("/api/chapters/{id}/narrators", s.listWorklineAgents)
+	agentRoutes := func(r chi.Router) {
+		r.Get("/{id}", s.getAgent)
+		r.Get("/{id}/live-snapshot", s.getAgentLiveSnapshot)
+		r.Patch("/{id}/cwd", s.updateAgentCWD)
+		r.Patch("/{id}/model", s.updateAgentModel)
+		r.Patch("/{id}/permission-mode", s.updateAgentPermissionMode)
+		r.Post("/{id}/interrupt", s.interruptAgent)
 		r.Get("/{id}/messages", s.listMessages)
 		r.Post("/{id}/messages", s.postMessage)
 		r.Get("/{id}/messages/{messageId}/attachments/{attachmentId}", s.getMessageAttachment)
 		r.Get("/{id}/runs", s.listRuns)
 		r.Get("/{id}/runs/{runId}", s.getRunSummary)
+		r.Get("/{id}/runs/{runId}/rollback", s.rollbackRunPreview)
 		r.Post("/{id}/runs/{runId}/rollback", s.rollbackRun)
 		r.Get("/{id}/runs/{runId}/tool-calls", s.listRunToolCalls)
 		r.Get("/{id}/tools", s.listTools)
@@ -153,8 +190,13 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/git/diff", s.gitDiff)
 		r.Get("/{id}/git/log", s.gitLog)
 		r.Post("/{id}/git/commit", s.gitCommit)
-	})
-	r.Get("/ws/narrator", s.narratorWS)
+	}
+	r.Route("/api/agents", agentRoutes)
+	r.Route("/api/narrators", agentRoutes)
+	r.Get("/api/v2/agents/{id}/live-snapshot", s.getAgentLiveSnapshot)
+	r.Get("/api/v2/agents/{id}/skills/effective", s.listEffectiveSkillsV2)
+	r.Get("/ws/agent", s.agentWS)
+	r.Get("/ws/narrator", s.agentWS)
 	r.Get("/ws/terminal", s.terminalWS)
 	return r
 }
@@ -182,6 +224,9 @@ func statusFromError(err error) int {
 	}
 	if db.IsNotFound(err) || errors.Is(err, http.ErrMissingFile) {
 		return http.StatusNotFound
+	}
+	if db.IsConflict(err) {
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }

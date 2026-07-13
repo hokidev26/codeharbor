@@ -1,3 +1,4 @@
+import { createAgentStreamController } from "./agent-stream.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs";
 import { createChatRenderingController } from "./chat-rendering.mjs";
@@ -16,6 +17,7 @@ import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs";
+import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, webSocketURL } from "./runtime.mjs";
 import { settingsItems, settingsSections } from "./settings-data.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
@@ -52,8 +54,8 @@ const state = {
   projects: [],
   projectsLoadSeq: 0,
   project: null,
-  chapter: null,
-  narrator: null,
+  workline: null,
+  agent: null,
   healthSeq: 0,
   settings: null,
   settingsLoadSeq: 0,
@@ -83,7 +85,23 @@ const state = {
   searchPrefs: null,
   imGatewayPrefs: null,
   skillsPrefs: null,
+  serverSkills: [],
+  serverSkillsStatus: "idle",
+  serverSkillsHadServerData: false,
+  serverSkillsLoadSeq: 0,
+  serverSkillsSaving: false,
+  serverSkillsError: "",
   activeSkillTab: "commands",
+  skillContextScope: "global",
+  skillsV2: { contexts: {}, effective: {} },
+  workflowPreferences: null,
+  workflowError: "",
+  workflowLoading: false,
+  workflowSaving: false,
+  toolPermissionRules: [],
+  toolPermissionRulesLoading: false,
+  toolPermissionRulesSaving: false,
+  toolPermissionRulesError: "",
   notifications: null,
   serverNotificationSettings: null,
   serverNotificationError: "",
@@ -102,10 +120,10 @@ const state = {
   slashCommandQuery: "",
   terminalStatus: "idle",
   agentRefreshing: false,
-  narratorSaving: false,
-  narratorSavePending: false,
-  messageSendingByNarrator: {},
-  messageRefreshTimersByNarrator: {},
+  agentSaving: false,
+  agentSavePending: false,
+  messageSendingByAgent: {},
+  messageRefreshTimersByAgent: {},
   currentMessages: [],
   messageCopyTexts: [],
   activeRunSummary: null,
@@ -152,10 +170,10 @@ const state = {
   mcpRegistryLoading: false,
   mcpRegistryActionBusy: {},
   mcpRegistryEditingId: "",
-  projectChapters: [],
-  chapterNarrators: [],
-  chaptersError: "",
-  chaptersSeq: 0,
+  projectWorklines: [],
+  worklineAgents: [],
+  worklinesError: "",
+  worklinesSeq: 0,
   directoryPath: "",
   directoryParent: "",
   directoryShortcuts: [],
@@ -232,21 +250,32 @@ const {
 } = gitWorkflow;
 
 const {
-  clearCurrentNarratorApprovals,
+  appendToolOutput,
+  applyMessageSnapshot,
+  clearCurrentAgentApprovals,
   clearMessageRefreshTimer,
   clearRunSummary,
   clearToolApproval,
   copyCurrentConversationMarkdown,
-  appendToolOutput,
   finishToolOutput,
   loadLatestRunSummary,
   loadMessages,
   loadRunSummary,
   rememberToolApproval,
   rememberToolStarted,
+  replacePendingApprovals,
   scheduleMessageRefresh,
   updateConversationCopyButton,
 } = chatRendering;
+
+const agentStream = createAgentStreamController({
+  api,
+  webSocketURL,
+  onEvent: handleAgentStreamEvent,
+  onSnapshot: applyAgentLiveSnapshot,
+  onStatus: updateAgentStreamStatus,
+  onError: (error) => notifyTerminal(`[warn] Agent 实时流恢复失败：${error?.message || error}\n`),
+});
 
 const directoryBrowser = createDirectoryBrowserController({
   state,
@@ -555,11 +584,11 @@ const workspaceSettings = createWorkspaceSettingsController({
   api,
   copyText,
   currentProviderConfig,
-  disconnectNarratorTransports,
-  enterNarrator,
+  disconnectAgentTransports,
+  enterAgent,
   getPreferredModel,
   hideSlashCommandPalette,
-  loadChapterContainerData,
+  loadWorklineContainerData,
   notifyTerminal,
   openDirectoryChooser,
   providerLabel,
@@ -577,26 +606,84 @@ const workspaceSettings = createWorkspaceSettingsController({
 
 const {
   bindAgentSettingsActions,
-  bindChaptersSettingsActions,
+  bindWorklinesSettingsActions,
   renderAgentSettingsContent,
-  renderChaptersSettingsContent,
+  renderWorklinesSettingsContent,
 } = workspaceSettings;
+
+function getSkillContext() {
+  return normalizeSkillContext({
+    scope: state.skillContextScope,
+    projectId: state.project?.id || "",
+    worklineId: state.workline?.id || "",
+  });
+}
+
+function setSkillContext(context = {}) {
+  const requested = normalizeSkillContext({
+    ...context,
+    projectId: state.project?.id || context.projectId || "",
+    worklineId: state.workline?.id || context.worklineId || "",
+  });
+  if (requested.scope === "project" && !requested.projectId) {
+    state.skillContextScope = "global";
+    showToast("请先选择项目，再查看项目级 Skills。", "warn");
+    return getSkillContext();
+  }
+  if (requested.scope === "workspace" && !requested.worklineId) {
+    state.skillContextScope = state.project?.id ? "project" : "global";
+    showToast("请先选择工作线，再查看工作区 Skills。", "warn");
+    return getSkillContext();
+  }
+  state.skillContextScope = requested.scope;
+  return requested;
+}
+
+let skillsPhaseBRenderQueued = false;
+const skillsPhaseB = createSkillsPhaseBController({
+  state,
+  api,
+  getContext: getSkillContext,
+  onChange: () => {
+    if (skillsPhaseBRenderQueued || state.activeSettingsPanel !== "skills") return;
+    skillsPhaseBRenderQueued = true;
+    queueMicrotask(() => {
+      skillsPhaseBRenderQueued = false;
+      if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+    });
+  },
+});
 
 const skillsWorkbench = createSkillsWorkbenchController({
   state,
   bindMCPRegistryActions,
   copyText,
+  createServerSkill,
+  createToolPermissionRule,
   currentSkillsPreferences,
+  deleteServerSkill,
+  deleteToolPermissionRule,
   isMCPRegistryActionBusy,
+  importServerSkill,
+  loadServerSkills,
+  loadServerSkillDetail,
+  loadWorkflowPolicy,
   localSkillID,
   normalizeMCPServer,
   normalizeSkillCommand,
   notifyTerminal,
+  previewServerSkillImport,
   renderMCPRegistryList,
   resetSkillsPreferences,
   saveSkillsPreferences,
+  saveWorkflowPreferences,
   showError,
+  skillsPhaseB,
   skillsPrefsExport,
+  getSkillContext,
+  setSkillContext,
+  updateServerSkill,
+  updateToolPermissionRule,
 });
 
 const {
@@ -684,6 +771,257 @@ async function testServerNotification() {
   }
 }
 
+function sortServerSkills(a, b) {
+  return Number(Boolean(b?.enabled)) - Number(Boolean(a?.enabled))
+    || String(a?.command || "").localeCompare(String(b?.command || ""));
+}
+
+function refreshServerSkillsUI() {
+  updateSlashCommandPalette();
+  updatePromptHistoryHint();
+  if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+}
+
+async function loadServerSkills({ notify = false } = {}) {
+  const seq = ++state.serverSkillsLoadSeq;
+  const previous = Array.isArray(state.serverSkills) ? state.serverSkills : [];
+  if (state.serverSkillsStatus === "ready" || state.serverSkillsStatus === "stale") state.serverSkillsHadServerData = true;
+  const hadServerData = state.serverSkillsHadServerData;
+  state.serverSkillsStatus = "loading";
+  state.serverSkillsError = "";
+  refreshServerSkillsUI();
+  const result = await loadServerSkillsWithFallback(async () => {
+    const summaries = await api("/api/skills");
+    return hydrateServerSkillSummaries(summaries, (id) => api(`/api/skills/${encodeURIComponent(id)}`), 4);
+  }, previous, { hadServerData });
+  if (seq !== state.serverSkillsLoadSeq) return state.serverSkills;
+  applyServerSkillsLoadResult(state, seq, { ...result, skills: result.skills.sort(sortServerSkills) });
+  if (result.status === "ready") state.serverSkillsHadServerData = true;
+  if (notify) {
+    const fallback = hadServerData ? "已保留上次加载的服务端策略" : "已回退到浏览器本地模板";
+    notifyTerminal(result.error
+      ? `[warn] 服务端技能刷新失败，${fallback}：${result.error}\n`
+      : "[info] 服务端技能已刷新。\n");
+  }
+  refreshServerSkillsUI();
+  return state.serverSkills;
+}
+
+async function loadServerSkillDetail(id) {
+  const skill = (state.serverSkills || []).find((item) => item.id === id);
+  if (!skill) throw new Error("服务端技能不存在");
+  if (skill.detailLoaded && String(skill.prompt || "").trim()) return skill;
+  const requestedUpdatedAt = skill.updatedAt;
+  try {
+    const detail = await api(`/api/skills/${encodeURIComponent(id)}`);
+    const latest = (state.serverSkills || []).find((item) => item.id === id);
+    if (!latest) throw new Error("服务端技能不存在");
+    if (latest.updatedAt !== requestedUpdatedAt && detail.updatedAt !== latest.updatedAt) {
+      throw new Error("技能详情已变化，请重新打开后重试");
+    }
+    const merged = { ...latest, ...detail, detailLoaded: true, detailError: "" };
+    state.serverSkills = (state.serverSkills || []).map((item) => item.id === id ? merged : item).sort(sortServerSkills);
+    refreshServerSkillsUI();
+    return merged;
+  } catch (err) {
+    const message = err?.message || String(err);
+    state.serverSkills = (state.serverSkills || []).map((item) => {
+      if (item.id !== id || item.updatedAt !== requestedUpdatedAt) return item;
+      return { ...item, detailLoaded: false, detailError: message };
+    }).sort(sortServerSkills);
+    refreshServerSkillsUI();
+    throw err;
+  }
+}
+
+async function createServerSkill(payload, { silent = false } = {}) {
+  state.serverSkillsSaving = true;
+  state.serverSkillsError = "";
+  try {
+    const created = await api("/api/skills", { method: "POST", body: JSON.stringify(payload) });
+    state.serverSkills = [{ ...created, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== created.id)].sort(sortServerSkills);
+    state.serverSkillsStatus = "ready";
+    if (!silent) showToast("服务端技能已保存。", "success", { force: true });
+    return created;
+  } catch (err) {
+    state.serverSkillsError = err.message || String(err);
+    throw err;
+  } finally {
+    state.serverSkillsSaving = false;
+    refreshServerSkillsUI();
+  }
+}
+
+async function updateServerSkill(id, payload, { silent = false } = {}) {
+  state.serverSkillsSaving = true;
+  state.serverSkillsError = "";
+  try {
+    const current = (state.serverSkills || []).find((item) => item.id === id);
+    if (!current?.updatedAt) throw new Error("服务端技能版本缺失，请刷新后重试");
+    const updated = await api(`/api/skills/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...payload, expectedUpdatedAt: current.updatedAt }),
+    });
+    state.serverSkills = (state.serverSkills || []).map((item) => item.id === updated.id ? { ...updated, detailLoaded: true } : item).sort(sortServerSkills);
+    state.serverSkillsStatus = "ready";
+    if (!silent) showToast("服务端技能已更新。", "success", { force: true });
+    return updated;
+  } catch (err) {
+    if (isOptimisticSkillConflict(err)) {
+      await loadServerSkills();
+      const message = state.serverSkillsStatus === "ready"
+        ? "技能已被其他客户端更新；已刷新服务端列表，请检查后重试。"
+        : "技能已被其他客户端更新，但自动刷新失败；请手动刷新后重试。";
+      state.serverSkillsError = message;
+      throw new Error(message);
+    }
+    state.serverSkillsError = err.message || String(err);
+    throw err;
+  } finally {
+    state.serverSkillsSaving = false;
+    refreshServerSkillsUI();
+  }
+}
+
+async function deleteServerSkill(id) {
+  state.serverSkillsSaving = true;
+  state.serverSkillsError = "";
+  try {
+    await api(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+    state.serverSkills = (state.serverSkills || []).filter((item) => item.id !== id);
+    showToast("服务端技能已删除。", "success", { force: true });
+  } catch (err) {
+    state.serverSkillsError = err.message || String(err);
+    throw err;
+  } finally {
+    state.serverSkillsSaving = false;
+    refreshServerSkillsUI();
+  }
+}
+
+async function previewServerSkillImport(content) {
+  return api("/api/skills/import/preview", { method: "POST", body: JSON.stringify({ content }) });
+}
+
+async function importServerSkill(content) {
+  state.serverSkillsSaving = true;
+  state.serverSkillsError = "";
+  try {
+    const imported = await api("/api/skills/import", { method: "POST", body: JSON.stringify({ content }) });
+    state.serverSkills = [{ ...imported, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== imported.id)].sort(sortServerSkills);
+    state.serverSkillsStatus = "ready";
+    showToast("SKILL.md 已导入并保持停用状态。", "success", { force: true });
+    return imported;
+  } catch (err) {
+    state.serverSkillsError = err.message || String(err);
+    throw err;
+  } finally {
+    state.serverSkillsSaving = false;
+    refreshServerSkillsUI();
+  }
+}
+
+async function loadWorkflowPreferences({ notify = false } = {}) {
+  state.workflowLoading = true;
+  state.workflowError = "";
+  try {
+    state.workflowPreferences = await api("/api/workflow/preferences");
+    if (notify) notifyTerminal("[info] 工作流权限偏好已刷新。\n");
+  } catch (err) {
+    state.workflowError = err.message || String(err);
+    if (notify) notifyTerminal(`[warn] 工作流权限偏好刷新失败：${state.workflowError}\n`);
+  } finally {
+    state.workflowLoading = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+async function saveWorkflowPreferences(payload) {
+  state.workflowSaving = true;
+  state.workflowError = "";
+  try {
+    state.workflowPreferences = await api("/api/workflow/preferences", { method: "PUT", body: JSON.stringify(payload) });
+    showToast("工具权限偏好已保存。", "success", { force: true });
+  } catch (err) {
+    state.workflowError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.workflowSaving = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+async function loadToolPermissionRules({ notify = false } = {}) {
+  state.toolPermissionRulesLoading = true;
+  state.toolPermissionRulesError = "";
+  try {
+    state.toolPermissionRules = await api("/api/workflow/tool-permissions");
+    if (notify) notifyTerminal("[info] 工具权限规则已刷新。\n");
+  } catch (err) {
+    state.toolPermissionRulesError = err.message || String(err);
+    if (notify) notifyTerminal(`[warn] 工具权限规则刷新失败：${state.toolPermissionRulesError}\n`);
+  } finally {
+    state.toolPermissionRulesLoading = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+async function createToolPermissionRule(payload) {
+  state.toolPermissionRulesSaving = true;
+  state.toolPermissionRulesError = "";
+  try {
+    const rule = await api("/api/workflow/tool-permissions", { method: "POST", body: JSON.stringify(payload) });
+    state.toolPermissionRules = [rule, ...(state.toolPermissionRules || [])].sort(toolPermissionRuleSort);
+    showToast("工具权限规则已添加。", "success", { force: true });
+  } catch (err) {
+    state.toolPermissionRulesError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.toolPermissionRulesSaving = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+async function updateToolPermissionRule(id, payload) {
+  state.toolPermissionRulesSaving = true;
+  state.toolPermissionRulesError = "";
+  try {
+    const rule = await api(`/api/workflow/tool-permissions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) });
+    state.toolPermissionRules = (state.toolPermissionRules || []).map((item) => item.id === id ? rule : item).sort(toolPermissionRuleSort);
+    showToast("工具权限规则已更新。", "success", { force: true });
+  } catch (err) {
+    state.toolPermissionRulesError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.toolPermissionRulesSaving = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+async function deleteToolPermissionRule(id) {
+  state.toolPermissionRulesSaving = true;
+  state.toolPermissionRulesError = "";
+  try {
+    await api(`/api/workflow/tool-permissions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    state.toolPermissionRules = (state.toolPermissionRules || []).filter((item) => item.id !== id);
+    showToast("工具权限规则已删除。", "success", { force: true });
+  } catch (err) {
+    state.toolPermissionRulesError = err.message || String(err);
+    showError(err);
+  } finally {
+    state.toolPermissionRulesSaving = false;
+    if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
+  }
+}
+
+function toolPermissionRuleSort(a, b) {
+  return Number(b?.priority || 0) - Number(a?.priority || 0) || String(a?.createdAt || "").localeCompare(String(b?.createdAt || ""));
+}
+
+async function loadWorkflowPolicy({ notify = false } = {}) {
+  await Promise.allSettled([loadWorkflowPreferences({ notify }), loadToolPermissionRules({ notify })]);
+}
+
 async function loadModelCatalog() {
   const seq = ++state.modelCatalogSeq;
   try {
@@ -761,44 +1099,45 @@ async function loadUsageSummary({ notify = false } = {}) {
   if (seq === state.usageSeq && state.activeSettingsPanel === "usage") refreshActiveSettingsPanel();
 }
 
-async function loadChapterContainerData({ notify = false } = {}) {
-  const seq = ++state.chaptersSeq;
-  const button = $("refreshChaptersBtn");
+async function loadWorklineContainerData({ notify = false } = {}) {
+  const seq = ++state.worklinesSeq;
+  const button = $("refreshWorklinesBtn");
   setButtonBusy(button, true, "刷新中");
   const projectId = state.project?.id || "";
   try {
     if (!projectId) {
-      state.projectChapters = [];
-      state.chapterNarrators = [];
-      state.chaptersError = "";
+      state.projectWorklines = [];
+      state.worklineAgents = [];
+      state.worklinesError = "";
       return;
     }
-    const chapters = await api(`/api/projects/${projectId}/chapters`);
-    if (seq !== state.chaptersSeq || state.project?.id !== projectId) return;
-    state.projectChapters = Array.isArray(chapters) ? chapters : [];
-    if (!state.chapter && state.projectChapters.length) state.chapter = state.projectChapters[0];
-    const currentChapter = state.projectChapters.find((chapter) => chapter.id === state.chapter?.id) || state.projectChapters[0] || null;
-    if (currentChapter) state.chapter = currentChapter;
-    if (currentChapter?.id) {
-      const chapterId = currentChapter.id;
-      const narrators = await api(`/api/chapters/${chapterId}/narrators`);
-      if (seq !== state.chaptersSeq || state.project?.id !== projectId || state.chapter?.id !== chapterId) return;
-      state.chapterNarrators = Array.isArray(narrators) ? narrators : [];
+    const worklines = await api(`/api/projects/${projectId}/worklines`);
+    if (seq !== state.worklinesSeq || state.project?.id !== projectId) return;
+    state.projectWorklines = Array.isArray(worklines) ? worklines : [];
+    if (!state.workline && state.projectWorklines.length) state.workline = state.projectWorklines[0];
+    const currentWorkline = state.projectWorklines.find((workline) => workline.id === state.workline?.id) || state.projectWorklines[0] || null;
+    if (currentWorkline) state.workline = currentWorkline;
+    if (currentWorkline?.id) {
+      const worklineId = currentWorkline.id;
+      const agents = await api(`/api/worklines/${worklineId}/agents`);
+      if (seq !== state.worklinesSeq || state.workline?.id !== worklineId) return;
+      state.worklineAgents = Array.isArray(agents) ? agents : [];
+
     } else {
-      state.chapterNarrators = [];
+      state.worklineAgents = [];
     }
-    state.chaptersError = "";
-    if (notify) notifyTerminal("[info] 章节与叙述者状态已刷新。\n");
+    state.worklinesError = "";
+    if (notify) notifyTerminal("[info] 工作线与代理状态已刷新。\n");
   } catch (err) {
-    if (seq !== state.chaptersSeq || state.project?.id !== projectId) return;
-    state.projectChapters = [];
-    state.chapterNarrators = [];
-    state.chaptersError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 章节与叙述者刷新失败：${state.chaptersError}\n`);
+    if (seq !== state.worklinesSeq || state.project?.id !== projectId) return;
+    state.projectWorklines = [];
+    state.worklineAgents = [];
+    state.worklinesError = err.message || String(err);
+    if (notify) notifyTerminal(`[warn] 工作线与代理刷新失败：${state.worklinesError}\n`);
   } finally {
-    if (seq === state.chaptersSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.worklinesSeq) setButtonBusy(button, false, "刷新中");
   }
-  if (seq === state.chaptersSeq && state.activeSettingsPanel === "chapters-containers") refreshActiveSettingsPanel();
+  if (seq === state.worklinesSeq && state.activeSettingsPanel === "worklines-containers") refreshActiveSettingsPanel();
 }
 
 async function loadAuthStatus({ notify = false } = {}) {
@@ -856,6 +1195,9 @@ function warmSettingsData() {
   if (!state.licenseSummary && !state.licenseError) tasks.push(loadLicenseSummary());
   if (!state.providerAuthFiles && !state.providerAuthError) tasks.push(loadProviderAuthFiles({ silent: true }));
   if (!state.serverNotificationSettings && !state.serverNotificationError) tasks.push(loadServerNotificationSettings());
+  if (!state.workflowPreferences && !state.workflowError) tasks.push(loadWorkflowPreferences());
+  if (!state.toolPermissionRules.length && !state.toolPermissionRulesError) tasks.push(loadToolPermissionRules());
+  if (state.serverSkillsStatus === "idle") tasks.push(loadServerSkills());
   Promise.allSettled(tasks).catch(() => {});
 }
 
@@ -959,7 +1301,7 @@ function focusSettingsSearchInput({ select = false } = {}) {
 function selectSettingsPanel(key) {
   const item = settingsItems.find((entry) => entry.key === key) || settingsItems[0];
   state.activeSettingsPanel = item.key;
-  $("settingsContentTitle").textContent = item.key === "skills" ? "套路" : item.label;
+  $("settingsContentTitle").textContent = item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
   $("settingsContentBody").innerHTML = renderSettingsContent(item);
   $("settingsNav").querySelectorAll(".settings-nav-item").forEach((node) => {
@@ -985,7 +1327,7 @@ function renderSettingsContent(item) {
   if (item.key === "notifications") return renderNotificationSettingsContent();
   if (item.key === "appearance") return renderAppearanceSettingsContent();
   if (item.key === "agent-admin") return renderAgentAdminSettingsContent();
-  if (item.key === "chapters-containers") return renderChaptersSettingsContent();
+  if (item.key === "worklines-containers") return renderWorklinesSettingsContent();
   if (item.key === "storage") return renderStorageSettingsContent();
   if (item.key === "usage") return renderUsageSettingsContent();
   if (item.key === "servers-system") return renderServerSystemSettingsContent();
@@ -1024,7 +1366,7 @@ function bindSettingsContent(key) {
   if (key === "notifications") bindNotificationSettingsActions();
   if (key === "appearance") bindAppearanceSettingsActions();
   if (key === "agent-admin") bindAgentAdminSettingsActions();
-  if (key === "chapters-containers") bindChaptersSettingsActions();
+  if (key === "worklines-containers") bindWorklinesSettingsActions();
   if (key === "storage") bindStorageSettingsActions();
   if (key === "usage") bindUsageSettingsActions();
   if (key === "servers-system" || key === "runtime") bindRuntimeSettingsActions();
@@ -1097,7 +1439,7 @@ function settingsPanelDetails(key) {
       { title: "版本", text: state.settings?.version || "0.1.0-dev" },
     ],
     about: [
-      { title: "CodeHarbor", text: "Local-first Go AI coding agent server MVP." },
+      { title: "Autoto", text: "Local-first Go AI coding Autoto server MVP." },
       { title: "License", text: "MIT License；第三方依赖请查看 THIRD_PARTY_NOTICES.md。" },
     ],
   };
@@ -1107,7 +1449,7 @@ function settingsPanelDetails(key) {
   ];
 }
 
-function renderEmptyWorkspaceCard({ title = "选择资料夹，让 AI 开始工作", text = "CodeHarbor 会在该资料夹内读取、编辑文件，并按权限执行命令。", action = "选择资料夹", hint = "也可以点击左侧 AI 代理右侧的 ＋。", icon = "☻" } = {}) {
+function renderEmptyWorkspaceCard({ title = "选择资料夹，让 AI 开始工作", text = "Autoto 会在该资料夹内读取、编辑文件，并按权限执行命令。", action = "选择资料夹", hint = "也可以点击左侧 AI 代理右侧的 ＋。", icon = "☻" } = {}) {
   return `
     <div class="empty-workspace-card">
       <div class="empty-workspace-icon">${escapeHtml(icon)}</div>
@@ -1130,11 +1472,18 @@ function permissionLabel(value) {
   const labels = {
     readOnly: "只读",
     acceptEdits: "可编辑",
-    bypassPermissions: "自动执行",
-    dontAsk: "少询问",
-    default: "默认",
+    bypassPermissions: "全部允许",
+    dontAsk: "不询问",
+    default: "自动",
   };
-  return labels[value] || value || "默认";
+  return labels[value] || value || "自动";
+}
+
+function updatePermissionModeDisplay() {
+  const select = $("permissionMode");
+  const display = document.querySelector(".mode-display");
+  if (!select || !display) return;
+  display.textContent = permissionLabel(effectivePermissionForDisplay(select.value));
 }
 
 function currentSecuritySummary() {
@@ -1164,11 +1513,12 @@ function enforcePermissionSelectCap() {
   const option = Array.from(select.options).find((item) => item.value === "bypassPermissions");
   if (option) {
     option.disabled = disabled;
-    option.textContent = disabled ? "bypassPermissions（远程禁用）" : "bypassPermissions";
+    option.textContent = disabled ? "全部允许（远程禁用）" : "全部允许";
   }
   if (disabled && select.value === "bypassPermissions") {
     select.value = "acceptEdits";
   }
+  updatePermissionModeDisplay();
 }
 
 async function logoutRemoteAccess() {
@@ -1218,19 +1568,19 @@ function updateSecurityModeUI() {
 }
 
 function currentWorkspaceModel() {
-  return state.narrator?.model || selectedModelValue() || currentModelValue() || "未选择模型";
+  return state.agent?.model || selectedModelValue() || currentModelValue() || "未选择模型";
 }
 
 function updateWorkspaceMetaPills() {
   const el = $("workspaceMetaPills");
   if (!el) return;
-  if (!state.project && !state.narrator) {
+  if (!state.project && !state.agent) {
     el.classList.add("hidden");
     el.innerHTML = "";
     return;
   }
-  const cwd = canonicalLocalPath(state.narrator?.cwd || state.project?.gitPath || "");
-  const permission = effectivePermissionForDisplay(state.narrator?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
+  const cwd = canonicalLocalPath(state.agent?.cwd || state.project?.gitPath || "");
+  const permission = effectivePermissionForDisplay(state.agent?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
   const model = currentWorkspaceModel();
   const securityText = remoteSecurityHardeningActive() ? "隧道收紧" : "本地";
   el.innerHTML = `
@@ -1336,12 +1686,12 @@ async function createProjectFromDirectory(path, options = {}) {
       state.projects = [created.project, ...state.projects];
     }
     state.project = created.project;
-    state.chapter = created.chapter;
-    state.narrator = created.narrator;
-    state.projectChapters = created.chapter ? [created.chapter] : [];
-    state.chapterNarrators = created.narrator ? [created.narrator] : [];
+    state.workline = created.workline;
+    state.agent = created.agent;
+    state.projectWorklines = created.workline ? [created.workline] : [];
+    state.worklineAgents = created.agent ? [created.agent] : [];
     renderProjects();
-    await enterNarrator();
+    await enterAgent();
     showToast(`已选择资料夹：${shortPath(created.project?.gitPath || normalizedPath)}`, "success", { force: true });
     appendTerminal(`Created project: ${created.project.name}\nPath: ${created.project.gitPath}\n`);
   } catch (err) {
@@ -1362,18 +1712,18 @@ async function selectProject(id) {
   closeMobileSidebar();
   state.projectCreateSeq++;
   const seq = ++state.projectSelectSeq;
-  disconnectNarratorTransports();
+  disconnectAgentTransports();
   state.project = state.projects.find((project) => project.id === id) || null;
-  state.chapter = null;
-  state.narrator = null;
+  state.workline = null;
+  state.agent = null;
   syncMessageComposerBusy();
   state.currentMessages = [];
   state.messageCopyTexts = [];
   resetGitWorkflowState();
   updateConversationCopyButton();
   setMessageInputValue("", { saveDraft: false });
-  state.projectChapters = [];
-  state.chapterNarrators = [];
+  state.projectWorklines = [];
+  state.worklineAgents = [];
   renderProjects();
   if (!state.project) {
     updateWorkspaceMetaPills();
@@ -1385,48 +1735,48 @@ async function selectProject(id) {
   updateWorkspaceMetaPills();
   showEmptyWorkspaceState({
     title: "正在加载项目",
-    text: "CodeHarbor 正在准备章节和 AI 代理。",
+    text: "Autoto 正在准备工作线和 AI 代理。",
     action: "选择其他资料夹",
     hint: state.project.gitPath || "",
     icon: "…",
   });
   try {
-    const chapters = await api(`/api/projects/${id}/chapters`);
+    const worklines = await api(`/api/projects/${id}/worklines`);
     if (seq !== state.projectSelectSeq || state.project?.id !== id) return;
-    state.projectChapters = Array.isArray(chapters) ? chapters : [];
-    state.chapter = state.projectChapters[0] || null;
-    if (!state.chapter) {
+    state.projectWorklines = Array.isArray(worklines) ? worklines : [];
+    state.workline = state.projectWorklines[0] || null;
+    if (!state.workline) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "此项目还没有可用章节";
+      $("currentMeta").textContent = "此项目还没有可用工作线";
       updateWorkspaceMetaPills();
-      showEmptyWorkspaceState({ title: "此项目还没有可用章节", text: "你可以重新选择一个资料夹，或稍后在章节管理中创建工作线。", action: "选择其他资料夹", icon: "◇" });
+      showEmptyWorkspaceState({ title: "此项目还没有可用工作线", text: "你可以重新选择一个资料夹，或稍后在工作线管理中创建工作线。", action: "选择其他资料夹", icon: "◇" });
       return;
     }
-    const chapterId = state.chapter.id;
-    const narrators = await api(`/api/chapters/${chapterId}/narrators`);
-    if (seq !== state.projectSelectSeq || state.project?.id !== id || state.chapter?.id !== chapterId) return;
-    state.chapterNarrators = Array.isArray(narrators) ? narrators : [];
-    state.narrator = state.chapterNarrators.find((narrator) => narrator.type === "primary") || state.chapterNarrators[0] || null;
-    if (!state.narrator) {
+    const worklineId = state.workline.id;
+    const agents = await api(`/api/worklines/${worklineId}/agents`);
+    if (seq !== state.projectSelectSeq || state.project?.id !== id || state.workline?.id !== worklineId) return;
+    state.worklineAgents = Array.isArray(agents) ? agents : [];
+    state.agent = state.worklineAgents.find((agent) => agent.type === "primary") || state.worklineAgents[0] || null;
+    if (!state.agent) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "未选择 CodeHarbor 代理";
+      $("currentMeta").textContent = "未选择 Agent";
       updateWorkspaceMetaPills();
-      showEmptyWorkspaceState({ title: "此章节还没有可用代理", text: "你可以重新选择一个资料夹，或稍后在代理管理中创建代理。", action: "选择其他资料夹", icon: "♧" });
+      showEmptyWorkspaceState({ title: "此工作线还没有可用代理", text: "你可以重新选择一个资料夹，或稍后在代理管理中创建代理。", action: "选择其他资料夹", icon: "♧" });
       return;
     }
-    await enterNarrator();
+    await enterAgent();
     if (seq !== state.projectSelectSeq) return;
   } catch (err) {
     if (seq === state.projectSelectSeq && state.project?.id === id) throw err;
   }
 }
 
-async function enterNarrator() {
-  if (!state.narrator) return;
-  const narratorId = state.narrator.id;
-  $("currentTitle").textContent = state.project?.name || state.narrator.title;
-  $("currentMeta").textContent = state.narrator.title || "AI 代理已就绪";
-  $("permissionMode").value = state.narrator.permissionMode || "acceptEdits";
+async function enterAgent() {
+  if (!state.agent) return;
+  const agentId = state.agent.id;
+  $("currentTitle").textContent = state.project?.name || state.agent.title;
+  $("currentMeta").textContent = state.agent.title || "AI 代理已就绪";
+  $("permissionMode").value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
   renderModelOptions();
@@ -1436,8 +1786,8 @@ async function enterNarrator() {
   connectWS();
   connectTerminal();
   loadGitStatus({ silent: true }).catch(() => {});
-  await loadLatestRunSummary(narratorId);
-  await loadMessages(narratorId);
+  await loadLatestRunSummary(agentId);
+  await loadMessages(agentId);
 }
 
 function showModelSetupNotice() {
@@ -1464,13 +1814,10 @@ function setComposerConnectionStatus(text, ok = false) {
   if (dot) dot.classList.toggle("ok", ok);
 }
 
-function disconnectNarratorTransports() {
-  clearMessageRefreshTimer(state.narrator?.id);
-  if (state.ws) {
-    const socket = state.ws;
-    state.ws = null;
-    try { socket.close(); } catch {}
-  }
+function disconnectAgentTransports() {
+  clearMessageRefreshTimer(state.agent?.id);
+  agentStream.disconnect();
+  state.ws = null;
   if (state.terminalWS) {
     const socket = state.terminalWS;
     state.terminalWS = null;
@@ -1486,107 +1833,120 @@ function disconnectNarratorTransports() {
 }
 
 function connectWS() {
-  if (!state.narrator) return;
-  if (state.ws) state.ws.close();
-  const narratorId = state.narrator.id;
-  const socket = new WebSocket(webSocketURL(`/ws/narrator?id=${encodeURIComponent(narratorId)}`));
-  state.ws = socket;
-  const isCurrentSocket = () => state.ws === socket && state.narrator?.id === narratorId;
-  socket.onopen = () => {
-    if (!isCurrentSocket()) return;
-    $("wsBadge").textContent = "ws connected";
-    $("wsBadge").classList.add("ok");
-    setComposerConnectionStatus("已连接", true);
-  };
-  socket.onclose = () => {
-    if (!isCurrentSocket()) return;
-    $("wsBadge").textContent = "ws closed";
-    $("wsBadge").classList.remove("ok");
-    setComposerConnectionStatus("离线");
-  };
-  socket.onmessage = (message) => {
-    if (!isCurrentSocket()) return;
-    try {
-      const event = JSON.parse(message.data);
-      if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
-      const runId = event.data?.runId || "";
-      if (event.type === "agent.started") {
-        clearRunSummary();
-      }
-      if (event.type === "tool.started") {
-        rememberToolStarted(event);
-      }
-      if (event.type === "tool.output") {
-        appendToolOutput(event);
-      }
-      if (event.type === "tool.approval_required") {
-        rememberToolApproval(event);
-        showToast(event.data?.risk === "danger" ? "危险工具调用已被阻止。" : "有工具调用等待审批。", event.data?.risk === "danger" ? "error" : "warn");
-      }
-      if (event.type === "tool.finished") {
-        clearToolApproval(event.data?.toolUseId);
-        finishToolOutput(event);
-      }
-      if (event.type === "agent.interrupted") {
-        clearCurrentNarratorApprovals();
-      }
-      if (event.type === "message.created" || event.type === "agent.done" || event.type === "agent.error" || event.type === "agent.interrupted") {
-        scheduleMessageRefresh(80, narratorId);
-      }
-      if ((event.type === "agent.done" || event.type === "agent.error" || event.type === "agent.interrupted") && runId) {
-        loadRunSummary(runId, { narratorId }).catch((err) => notifyTerminal(`[warn] Run 回顾加载失败：${err.message || err}\n`));
-      }
-    } catch {
-      if (shouldLogAgentEvents()) appendTerminal(`[event] ${message.data}\n`);
-    }
-  };
+  if (!state.agent?.id) return;
+  agentStream.connect(state.agent.id).catch((error) => {
+    if (state.agent?.id) notifyTerminal(`[warn] Agent 实时快照加载失败：${error?.message || error}\n`);
+  });
 }
 
-async function saveNarratorSettings() {
-  if (state.narratorSaving) {
-    state.narratorSavePending = true;
+function updateAgentStreamStatus(detail = {}) {
+  const badge = $("wsBadge");
+  const streamStatus = detail.status || "idle";
+  const labels = {
+    idle: ["ws idle", "空闲", false],
+    syncing: ["ws syncing", "同步中", false],
+    resyncing: ["ws resync", "恢复中", false],
+    connecting: ["ws connecting", "连接中", false],
+    reconnecting: ["ws reconnecting", "重连中", false],
+    connected: [detail.resume === "replayed" ? "ws replayed" : "ws connected", "已连接", true],
+    offline: ["ws offline", "离线", false],
+  };
+  const [badgeText, composerText, ok] = labels[streamStatus] || labels.offline;
+  if (badge) {
+    badge.textContent = badgeText;
+    badge.classList.toggle("ok", ok);
+  }
+  setComposerConnectionStatus(composerText, ok);
+}
+
+function applyAgentLiveSnapshot(snapshot) {
+  const agentId = snapshot?.agent?.id || "";
+  if (!agentId || state.agent?.id !== agentId) return;
+  state.agent = snapshot.agent;
+  state.liveToolOutputs = Object.fromEntries(Object.entries(state.liveToolOutputs || {}).filter(([, value]) => value?.agentId && value.agentId !== agentId));
+  clearRunSummary();
+  replacePendingApprovals(snapshot.pendingApprovals, agentId);
+  applyMessageSnapshot(snapshot.messages, agentId);
+  const permissionMode = $("permissionMode");
+  if (permissionMode) permissionMode.value = state.agent.permissionMode || "acceptEdits";
+  enforcePermissionSelectCap();
+  renderModelOptions();
+  updateWorkspaceMetaPills();
+  syncMessageComposerBusy();
+  const latestRun = snapshot.latestRun;
+  if (latestRun?.id && ["completed", "failed", "interrupted"].includes(latestRun.status)) {
+    loadRunSummary(latestRun.id, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾恢复失败：${error?.message || error}\n`));
+  }
+}
+
+function handleAgentStreamEvent(event) {
+  const agentId = state.agent?.id || "";
+  if (!agentId || (event.agentId && event.agentId !== agentId)) return;
+  if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
+  const runId = event.data?.runId || "";
+  if (event.type === "agent.started") clearRunSummary();
+  if (event.type === "tool.started") rememberToolStarted(event);
+  if (event.type === "tool.output") appendToolOutput(event);
+  if (event.type === "tool.approval_required") {
+    rememberToolApproval(event);
+    showToast(event.data?.risk === "danger" ? "危险工具调用已被阻止。" : "有工具调用等待审批。", event.data?.risk === "danger" ? "error" : "warn");
+  }
+  if (event.type === "tool.finished") {
+    clearToolApproval(event.data?.toolUseId);
+    finishToolOutput(event);
+  }
+  if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
+  if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) scheduleMessageRefresh(80, agentId);
+  if (["agent.done", "agent.error", "agent.interrupted"].includes(event.type) && runId) {
+    loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾加载失败：${error?.message || error}\n`));
+  }
+}
+
+async function saveAgentSettings() {
+  if (state.agentSaving) {
+    state.agentSavePending = true;
     return;
   }
-  const button = $("saveNarratorBtn");
-  let narratorId = "";
-  state.narratorSaving = true;
+  const button = $("saveAgentBtn");
+  let agentId = "";
+  state.agentSaving = true;
   setButtonBusy(button, true, "保存中");
   try {
     const model = $("modelSelect").value.trim();
     if (model) setPreferredModel(model);
-    if (!state.narrator) {
+    if (!state.agent) {
       renderModelOptions();
       refreshActiveSettingsPanel();
       notifyTerminal(model ? `[info] 已保存首选模型：${model}\n` : "[info] 尚未选择模型。\n");
       return;
     }
-    narratorId = state.narrator.id;
-    const id = narratorId;
+    agentId = state.agent.id;
+    const id = agentId;
     const permissionMode = $("permissionMode").value;
-    const applyNarratorPatch = async (path, payload) => {
-      const updated = await api(`/api/narrators/${id}/${path}`, { method: "PATCH", body: JSON.stringify(payload) });
-      if (state.narrator?.id !== id) return false;
-      state.narrator = updated;
+    const applyAgentPatch = async (path, payload) => {
+      const updated = await api(`/api/agents/${id}/${path}`, { method: "PATCH", body: JSON.stringify(payload) });
+      if (state.agent?.id !== id) return false;
+      state.agent = updated;
       return true;
     };
-    if (model && model !== state.narrator.model) {
-      if (!await applyNarratorPatch("model", { model })) return;
+    if (model && model !== state.agent.model) {
+      if (!await applyAgentPatch("model", { model })) return;
     }
-    if (permissionMode && permissionMode !== state.narrator.permissionMode) {
-      if (!await applyNarratorPatch("permission-mode", { permissionMode })) return;
+    if (permissionMode && permissionMode !== state.agent.permissionMode) {
+      if (!await applyAgentPatch("permission-mode", { permissionMode })) return;
     }
-    if (state.narrator?.id !== id) return;
-    await enterNarrator();
-    if (state.narrator?.id !== id) return;
-    notifyTerminal(`Saved settings: ${state.narrator.model}, ${state.narrator.permissionMode}\n`);
+    if (state.agent?.id !== id) return;
+    await enterAgent();
+    if (state.agent?.id !== id) return;
+    notifyTerminal(`Saved settings: ${state.agent.model}, ${state.agent.permissionMode}\n`);
   } catch (err) {
-    if (!narratorId || state.narrator?.id === narratorId) throw err;
+    if (!agentId || state.agent?.id === agentId) throw err;
   } finally {
-    state.narratorSaving = false;
+    state.agentSaving = false;
     setButtonBusy(button, false, "保存中");
-    if (state.narratorSavePending) {
-      state.narratorSavePending = false;
-      saveNarratorSettings().catch(showError);
+    if (state.agentSavePending) {
+      state.agentSavePending = false;
+      saveAgentSettings().catch(showError);
     }
   }
 }
@@ -1746,7 +2106,6 @@ $("chooseDirectoryBtn").addEventListener("click", () => createProjectFromDirecto
 $("messageForm").addEventListener("submit", (event) => sendMessage(event).catch(showError));
 $("attachFileBtn")?.addEventListener("click", openAttachmentPicker);
 $("attachFileInput")?.addEventListener("change", (event) => importAttachmentFiles(event).catch(showError));
-$("composerInputShell")?.addEventListener("dragenter", handleAttachmentDragOver);
 $("composerInputShell")?.addEventListener("dragover", handleAttachmentDragOver);
 $("composerInputShell")?.addEventListener("dragleave", handleAttachmentDragLeave);
 $("composerInputShell")?.addEventListener("drop", handleAttachmentDrop);
@@ -1763,15 +2122,19 @@ $("terminalOutput").addEventListener("paste", (event) => {
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", resizeTerminal);
 window.addEventListener("beforeunload", saveCurrentChatDraft);
-$("saveNarratorBtn").addEventListener("click", () => saveNarratorSettings().catch(showError));
+$("saveAgentBtn").addEventListener("click", () => saveAgentSettings().catch(showError));
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
 $("openProviderLoginBtn").addEventListener("click", () => openSettingsModal("providers"));
 $("modelSelect").addEventListener("change", () => {
   updateModelConfiguredState();
-  saveNarratorSettings().catch(showError);
+  saveAgentSettings().catch(showError);
 });
-$("permissionMode").addEventListener("change", () => saveNarratorSettings().catch(showError));
+$("permissionMode").addEventListener("change", () => {
+  updatePermissionModeDisplay();
+  saveAgentSettings().catch(showError);
+});
 $("toggleTerminalBtn").addEventListener("click", () => toggleTerminal());
+$("composerTerminalBtn")?.addEventListener("click", () => toggleTerminal());
 $("collapseTerminalBtn").addEventListener("click", () => toggleTerminal(true));
 $("expandTerminalBtn").addEventListener("click", () => toggleTerminal(false));
 
@@ -1796,9 +2159,9 @@ async function init() {
     autoResizeMessageInput();
     renderRecentSidebarDirectories();
     await loadHealth();
-    await Promise.all([loadSettings(), loadRuntimeSummary(), loadModelCatalog(), loadProjects(), loadBackends()]);
+    await Promise.all([loadSettings(), loadRuntimeSummary(), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);
     if (seq !== state.initSeq) return;
-    if (!state.narrator && state.projects.length) {
+    if (!state.agent && state.projects.length) {
       await selectProject(state.projects[0].id);
     }
   } finally {

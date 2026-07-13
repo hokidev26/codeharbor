@@ -16,7 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
 const (

@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/db"
+	"autoto/internal/db"
 )
 
 const backendHealthTimeout = 5 * time.Second

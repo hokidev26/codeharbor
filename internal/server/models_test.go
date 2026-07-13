@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
-	"codeharbor/internal/providers"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
 )
 
 type fakeModelProvider struct {
@@ -57,13 +58,13 @@ func TestCreateProjectUsesRequestedModel(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var body struct {
-		Narrator db.Narrator `json:"narrator"`
+		Agent db.Agent `json:"agent"`
 	}
 	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Narrator.Model != "cliproxyapi:gpt-dynamic" {
-		t.Fatalf("expected requested model, got %q", body.Narrator.Model)
+	if body.Agent.Model != "cliproxyapi:gpt-dynamic" {
+		t.Fatalf("expected requested model, got %q", body.Agent.Model)
 	}
 }
 
@@ -73,6 +74,7 @@ func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name:           "cliproxyapi",
 		Type:           "openai-compatible",
+		Profile:        config.ProviderProfileCLIProxyAPI,
 		BaseURL:        "http://127.0.0.1:8317/v1",
 		Model:          "fallback-model",
 		APIKeyOptional: true,
@@ -95,8 +97,11 @@ func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {
 	if provider.Error != "" {
 		t.Fatalf("expected no error, got %q", provider.Error)
 	}
-	if provider.ManagementURL != "http://127.0.0.1:8317/management.html" {
-		t.Fatalf("unexpected management URL %q", provider.ManagementURL)
+	if provider.Profile != config.ProviderProfileCLIProxyAPI || provider.ManagementURL != "http://127.0.0.1:8317/management.html" || provider.Management == nil || !provider.Management.AuthFiles {
+		t.Fatalf("unexpected provider management metadata: %+v", provider)
+	}
+	if provider.Capabilities != (providers.Capabilities{}) {
+		t.Fatalf("unknown provider capabilities must be false, got %+v", provider.Capabilities)
 	}
 	expected := []string{"a-model", "z-model"}
 	if len(provider.Models) != len(expected) {
@@ -115,6 +120,7 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name:           "cliproxyapi",
 		Type:           "openai-compatible",
+		Profile:        config.ProviderProfileCLIProxyAPI,
 		BaseURL:        "http://127.0.0.1:8317/v1",
 		Model:          "fallback-model",
 		APIKeyOptional: true,
@@ -136,5 +142,12 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 	}
 	if provider.Error == "" {
 		t.Fatal("expected provider error message")
+	}
+}
+
+func TestFriendlyModelListErrorUsesAutotoBranding(t *testing.T) {
+	message := friendlyModelListError(config.ProviderSummary{Profile: config.ProviderProfileCLIProxyAPI}, errors.New("401 unauthorized"))
+	if !strings.Contains(message, "后重启 Autoto。") {
+		t.Fatalf("expected Autoto-branded error message, got %q", message)
 	}
 }

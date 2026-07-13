@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"codeharbor/internal/config"
+	"autoto/internal/config"
 )
 
 type OpenAICompatible struct {
@@ -32,6 +32,10 @@ func NewOpenAICompatible(cfg config.OpenAICompatibleConfig) *OpenAICompatible {
 }
 
 func (p *OpenAICompatible) Name() string { return p.cfg.Name }
+
+func (p *OpenAICompatible) Capabilities() Capabilities {
+	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
+}
 
 func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 	if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {

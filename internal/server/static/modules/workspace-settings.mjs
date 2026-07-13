@@ -6,11 +6,11 @@ export function createWorkspaceSettingsController({
   api,
   copyText,
   currentProviderConfig,
-  disconnectNarratorTransports,
-  enterNarrator,
+  disconnectAgentTransports,
+  enterAgent,
   getPreferredModel,
   hideSlashCommandPalette,
-  loadChapterContainerData,
+  loadWorklineContainerData,
   notifyTerminal,
   openDirectoryChooser,
   providerLabel,
@@ -26,48 +26,48 @@ export function createWorkspaceSettingsController({
   syncMessageComposerBusy,
 } = {}) {
   function renderAgentSettingsContent() {
-    const agent = state.settings?.agent || {};
-    const narrator = state.narrator;
-    const currentModel = narrator?.model || getPreferredModel() || agent.defaultModel || "";
+    const agentConfig = state.settings?.agent || {};
+    const agent = state.agent;
+    const currentModel = agent?.model || getPreferredModel() || agentConfig.defaultModel || "";
     const provider = currentProviderConfig(currentModel);
-    const cwd = narrator?.cwd || state.project?.gitPath || "";
+    const cwd = agent?.cwd || state.project?.gitPath || "";
     return `
     <div class="settings-live-page agent-settings-page">
       <section class="settings-hero-card agents-hero-card">
         <div>
           <div class="settings-hero-kicker">AI 代理</div>
-          <div class="settings-hero-title">${escapeHtml(narrator?.title || "未选择代理")}</div>
-          <p>查看默认 Agent 策略，并快速调整当前 CodeHarbor 代理的模型、权限模式和工作目录。这里复用现有代理 API，不改全局配置文件。</p>
+          <div class="settings-hero-title">${escapeHtml(agent?.title || "未选择代理")}</div>
+          <p>查看默认 Agent 策略，并快速调整当前 Agent 的模型、权限模式和工作目录。这里复用现有 Agent API，不改全局配置文件。</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshAgentSettingsBtn" class="settings-action-btn primary" type="button" ${narrator ? "" : "disabled"}>刷新代理</button>
-          <button id="copyAgentIdBtn" class="settings-action-btn subtle" type="button" ${narrator ? "" : "disabled"}>复制 ID</button>
+          <button id="refreshAgentSettingsBtn" class="settings-action-btn primary" type="button" ${agent ? "" : "disabled"}>刷新代理</button>
+          <button id="copyAgentIdBtn" class="settings-action-btn subtle" type="button" ${agent ? "" : "disabled"}>复制 ID</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(narrator?.status || "未选择")}</strong><span>运行状态</span></div>
-        <div><strong>${escapeHtml(narrator?.permissionMode || agent.defaultPermissionMode || "acceptEdits")}</strong><span>权限模式</span></div>
+        <div><strong>${escapeHtml(agent?.status || "未选择")}</strong><span>运行状态</span></div>
+        <div><strong>${escapeHtml(agent?.permissionMode || agentConfig.defaultPermissionMode || "acceptEdits")}</strong><span>权限模式</span></div>
         <div><strong>${escapeHtml(providerStatusText(provider || {}))}</strong><span>模型提供商</span></div>
       </div>
       <div class="usage-summary-grid">
-        ${renderUsageMetricCard("默认模型", agent.defaultModel || "未配置", "新建代理默认使用")}
-        ${renderUsageMetricCard("摘要模型", agent.summaryModel || "未配置", "长上下文摘要预留")}
-        ${renderUsageMetricCard("最大轮次", agent.maxTurns || 0, "Agent loop 单次上限")}
-        ${renderUsageMetricCard("首 token 超时", formatDuration(agent.firstTokenTimeoutMs || 0), "Provider 响应等待时间")}
-        ${renderUsageMetricCard("瞬时重试", agent.maxTransientRetries || 0, "临时错误重试次数")}
-        ${renderUsageMetricCard("默认计划模式", agent.defaultStartInPlanMode ? "开启" : "关闭", "新建代理初始行为")}
+        ${renderUsageMetricCard("默认模型", agentConfig.defaultModel || "未配置", "新建代理默认使用")}
+        ${renderUsageMetricCard("摘要模型", agentConfig.summaryModel || "未配置", "长上下文摘要预留")}
+        ${renderUsageMetricCard("最大轮次", agentConfig.maxTurns || 0, "Agent loop 单次上限")}
+        ${renderUsageMetricCard("首 token 超时", formatDuration(agentConfig.firstTokenTimeoutMs || 0), "Provider 响应等待时间")}
+        ${renderUsageMetricCard("瞬时重试", agentConfig.maxTransientRetries || 0, "临时错误重试次数")}
+        ${renderUsageMetricCard("默认计划模式", agentConfig.defaultStartInPlanMode ? "开启" : "关闭", "新建代理初始行为")}
       </div>
-      ${narrator ? renderCurrentAgentEditor(narrator, currentModel, cwd) : renderNoAgentSelectedCard()}
+      ${agent ? renderCurrentAgentEditor(agent, currentModel, cwd) : renderNoAgentSelectedCard()}
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
             <div class="settings-provider-title">运行策略说明</div>
-            <div class="settings-provider-meta">这些值来自 `/api/settings`，当前页面只调整选中的 CodeHarbor 代理；默认策略仍由服务端 config 管理。</div>
+            <div class="settings-provider-meta">这些值来自 `/api/settings`，当前页面只调整选中的 Agent；默认策略仍由服务端 config 管理。</div>
           </div>
         </div>
         <div class="agent-policy-grid">
-          ${renderAgentPolicyCard("权限边界", agent.defaultPermissionMode || "acceptEdits", "新建代理默认权限；当前代理可在上方面板即时切换。")}
-          ${renderAgentPolicyCard("计划模式", agent.defaultStartInPlanMode ? "默认开启" : "默认关闭", "保留给后续更完整的计划/执行流。")}
+          ${renderAgentPolicyCard("权限边界", agentConfig.defaultPermissionMode || "acceptEdits", "新建代理默认权限；当前代理可在上方面板即时切换。")}
+          ${renderAgentPolicyCard("计划模式", agentConfig.defaultStartInPlanMode ? "默认开启" : "默认关闭", "保留给后续更完整的计划/执行流。")}
           ${renderAgentPolicyCard("模型路由", currentModel || "未选择", provider ? `${providerLabel(provider)} · ${providerStatusText(provider)}` : "等待模型列表加载")}
           ${renderAgentPolicyCard("工作目录", cwd || "未设置", "工具执行和终端默认围绕该目录工作。")}
         </div>
@@ -76,15 +76,15 @@ export function createWorkspaceSettingsController({
   `;
   }
 
-  function renderCurrentAgentEditor(narrator, currentModel, cwd) {
+  function renderCurrentAgentEditor(agent, currentModel, cwd) {
     return `
     <section class="settings-provider-section highlighted">
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">当前代理</div>
-          <div class="settings-provider-meta">${escapeHtml(narrator.type || "primary")} · ${escapeHtml(narrator.id)}</div>
+          <div class="settings-provider-meta">${escapeHtml(agent.type || "primary")} · ${escapeHtml(agent.id)}</div>
         </div>
-        <span class="settings-status-pill ${narrator.status === "running" ? "warn" : "ok"}">${escapeHtml(narrator.status || "idle")}</span>
+        <span class="settings-status-pill ${agent.status === "running" ? "warn" : "ok"}">${escapeHtml(agent.status || "idle")}</span>
       </div>
       <form id="agentSettingsForm" class="settings-agent-form">
         <div class="settings-provider-form-grid">
@@ -95,11 +95,11 @@ export function createWorkspaceSettingsController({
           </label>
           <label>权限模式
             <select id="agentSettingsPermissionMode" class="settings-field">
-              ${renderPermissionModeOptions(narrator.permissionMode || "acceptEdits")}
+              ${renderPermissionModeOptions(agent.permissionMode || "acceptEdits")}
             </select>
           </label>
           <label>消息数
-            <input class="settings-field" value="${escapeAttr(formatNumber(narrator.messageCount || 0))}" readonly />
+            <input class="settings-field" value="${escapeAttr(formatNumber(agent.messageCount || 0))}" readonly />
           </label>
           <label class="settings-form-span-2">工作目录
             <input id="agentSettingsCWD" class="settings-field" value="${escapeAttr(cwd)}" placeholder="例如 /Users/me/project" />
@@ -121,7 +121,7 @@ export function createWorkspaceSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">尚未选择代理</div>
-          <div class="settings-provider-meta">从左侧选择项目，或点击“选择目录”创建项目后，会在这里显示当前 CodeHarbor 主代理。</div>
+          <div class="settings-provider-meta">从左侧选择项目，或点击“选择目录”创建项目后，会在这里显示当前 Agent 主代理。</div>
         </div>
       </div>
       <div class="settings-action-row">
@@ -172,7 +172,7 @@ export function createWorkspaceSettingsController({
   function bindAgentSettingsActions() {
     $("agentSettingsForm")?.addEventListener("submit", (event) => saveAgentSettingsFromPanel(event).catch(showError));
     $("refreshAgentSettingsBtn")?.addEventListener("click", () => refreshCurrentAgent().catch(showError));
-    $("copyAgentIdBtn")?.addEventListener("click", () => copyText(state.narrator?.id || ""));
+    $("copyAgentIdBtn")?.addEventListener("click", () => copyText(state.agent?.id || ""));
     $("useProjectPathForAgentBtn")?.addEventListener("click", () => {
       if ($("agentSettingsCWD") && state.project?.gitPath) $("agentSettingsCWD").value = state.project.gitPath;
     });
@@ -182,21 +182,21 @@ export function createWorkspaceSettingsController({
 
   async function refreshCurrentAgent() {
     if (state.agentRefreshing) return;
-    if (!state.narrator?.id) throw new Error("请先选择一个代理");
-    const id = state.narrator.id;
+    if (!state.agent?.id) throw new Error("请先选择一个代理");
+    const id = state.agent.id;
     const button = $("refreshAgentSettingsBtn");
     state.agentRefreshing = true;
     setButtonBusy(button, true, "刷新中");
     try {
-      const updated = await api(`/api/narrators/${id}`);
-      if (state.narrator?.id !== id) return;
-      state.narrator = updated;
-      await enterNarrator();
-      if (state.narrator?.id !== id) return;
+      const updated = await api(`/api/agents/${id}`);
+      if (state.agent?.id !== id) return;
+      state.agent = updated;
+      await enterAgent();
+      if (state.agent?.id !== id) return;
       showToast("当前代理状态已刷新。", "success");
       refreshActiveSettingsPanel();
     } catch (err) {
-      if (state.narrator?.id === id) throw err;
+      if (state.agent?.id === id) throw err;
     } finally {
       state.agentRefreshing = false;
       setButtonBusy(button, false, "刷新中");
@@ -208,71 +208,71 @@ export function createWorkspaceSettingsController({
     const form = event.currentTarget;
     const submitButton = form?.querySelector("[data-agent-submit]");
     if (submitButton?.disabled) return;
-    if (!state.narrator?.id) throw new Error("请先选择一个代理");
-    const id = state.narrator.id;
+    if (!state.agent?.id) throw new Error("请先选择一个代理");
+    const id = state.agent.id;
     const model = $("agentSettingsModel")?.value.trim() || "";
     const permissionMode = $("agentSettingsPermissionMode")?.value || "acceptEdits";
     const cwd = $("agentSettingsCWD")?.value.trim() || "";
     if (!cwd) throw new Error("请填写工作目录");
     setSettingsSubmitButtonState(form, "[data-agent-submit]", true, "保存中");
     const applyPatch = async (path, payload) => {
-      const updated = await api(`/api/narrators/${id}/${path}`, { method: "PATCH", body: JSON.stringify(payload) });
-      if (state.narrator?.id !== id) return false;
-      state.narrator = updated;
+      const updated = await api(`/api/agents/${id}/${path}`, { method: "PATCH", body: JSON.stringify(payload) });
+      if (state.agent?.id !== id) return false;
+      state.agent = updated;
       return true;
     };
     try {
-      if (model && model !== state.narrator.model) {
+      if (model && model !== state.agent.model) {
         setPreferredModel(model);
         if (!await applyPatch("model", { model })) return;
       }
-      if (permissionMode && permissionMode !== state.narrator.permissionMode) {
+      if (permissionMode && permissionMode !== state.agent.permissionMode) {
         if (!await applyPatch("permission-mode", { permissionMode })) return;
       }
-      if (cwd && cwd !== state.narrator.cwd) {
+      if (cwd && cwd !== state.agent.cwd) {
         if (!await applyPatch("cwd", { cwd })) return;
       }
-      if (state.narrator?.id !== id) return;
-      await enterNarrator();
-      if (state.narrator?.id !== id) return;
+      if (state.agent?.id !== id) return;
+      await enterAgent();
+      if (state.agent?.id !== id) return;
       showToast("当前代理设置已保存。", "success");
-      notifyTerminal?.(`[info] 已保存当前代理：${state.narrator.model}, ${state.narrator.permissionMode}\n`);
+      notifyTerminal?.(`[info] 已保存当前代理：${state.agent.model}, ${state.agent.permissionMode}\n`);
       refreshActiveSettingsPanel();
     } catch (err) {
-      if (state.narrator?.id === id) throw err;
+      if (state.agent?.id === id) throw err;
     } finally {
       setSettingsSubmitButtonState(form, "[data-agent-submit]", false, "保存中");
     }
   }
-  function renderChaptersSettingsContent() {
-    const chapters = Array.isArray(state.projectChapters) ? state.projectChapters : [];
-    const narrators = Array.isArray(state.chapterNarrators) ? state.chapterNarrators : [];
-    const rootChapter = chapters.find((chapter) => chapter.isRoot) || chapters[0] || null;
+  function renderWorklinesSettingsContent() {
+    const worklines = Array.isArray(state.projectWorklines) ? state.projectWorklines : [];
+    const agents = Array.isArray(state.worklineAgents) ? state.worklineAgents : [];
+    const rootWorkline = worklines.find((workline) => workline.isRoot) || worklines[0] || null;
     return `
-    <div class="settings-live-page chapters-page">
-      <section class="settings-hero-card chapters-hero-card">
+    <div class="settings-live-page worklines-page">
+      <section class="settings-hero-card worklines-hero-card">
         <div>
-          <div class="settings-hero-kicker">章节与容器</div>
+          <div class="settings-hero-kicker">工作线与容器</div>
           <div class="settings-hero-title">${escapeHtml(state.project?.name || "未选择项目")}</div>
-          <p>查看当前项目的章节/workline、root chapter、叙述者和隔离状态。当前版本不创建容器，只展示本地工作目录和后续扩展边界。</p>
+          <p>查看当前项目的工作线、根工作线、Agent 和隔离状态。当前版本不创建容器，只展示本地工作目录和后续扩展边界。</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshChaptersBtn" class="settings-action-btn primary" type="button" ${state.project?.id ? "" : "disabled"}>刷新章节</button>
-          <button id="openChaptersDirectoryBtn" class="settings-action-btn subtle" type="button">选择目录</button>
+          <button id="refreshWorklinesBtn" class="settings-action-btn primary" type="button" ${state.project?.id ? "" : "disabled"}>刷新工作线</button>
+          <button id="openWorklinesDirectoryBtn" class="settings-action-btn subtle" type="button">选择目录</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(chapters.length))}</strong><span>章节</span></div>
-        <div><strong>${escapeHtml(formatNumber(narrators.length))}</strong><span>当前章节 CodeHarbor</span></div>
-        <div><strong>${escapeHtml(rootChapter?.title || "暂无")}</strong><span>Root chapter</span></div>
+        <div><strong>${escapeHtml(formatNumber(worklines.length))}</strong><span>工作线</span></div>
+        <div><strong>${escapeHtml(formatNumber(agents.length))}</strong><span>当前工作线 Agent</span></div>
+        <div><strong>${escapeHtml(rootWorkline?.title || "暂无")}</strong><span>Root workline</span></div>
       </div>
-      ${state.chaptersError ? `<div class="settings-inline-alert">${escapeHtml(state.chaptersError)}</div>` : ""}
-      ${state.project ? renderProjectChapterSummary(chapters, narrators) : renderNoProjectForChapters()}
+      ${state.worklinesError ? `<div class="settings-inline-alert">${escapeHtml(state.worklinesError)}</div>` : ""}
+      ${state.project ? renderProjectWorklineSummary(worklines, agents) : renderNoProjectForWorklines()}
     </div>
   `;
   }
 
-  function renderNoProjectForChapters() {
+  function renderNoProjectForWorklines() {
     return `
     <section class="settings-provider-section highlighted">
       <div class="settings-provider-section-head">
@@ -286,34 +286,34 @@ export function createWorkspaceSettingsController({
   `;
   }
 
-  function renderProjectChapterSummary(chapters, narrators) {
+  function renderProjectWorklineSummary(worklines, agents) {
     return `
     <div class="usage-summary-grid">
       ${renderUsageMetricCard("项目状态", state.project?.status || "active", state.project?.gitPath || "未配置路径")}
-      ${renderUsageMetricCard("当前章节", state.chapter?.title || "暂无", state.chapter?.role || "root")}
-      ${renderUsageMetricCard("当前代理", state.narrator?.title || "暂无", state.narrator?.permissionMode || "未选择")}
+      ${renderUsageMetricCard("当前工作线", state.workline?.title || "暂无", state.workline?.role || "root")}
+      ${renderUsageMetricCard("当前代理", state.agent?.title || "暂无", state.agent?.permissionMode || "未选择")}
       ${renderUsageMetricCard("Flow mode", state.project?.flowMode || "default", "项目工作流模式")}
     </div>
     <section class="settings-provider-section highlighted">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">章节 / 工作线</div>
+          <div class="settings-provider-title">工作线</div>
           <div class="settings-provider-meta path">${escapeHtml(state.project?.gitPath || "未配置项目路径")}</div>
         </div>
       </div>
-      <div class="chapter-list">
-        ${chapters.length ? chapters.map(renderChapterCard).join("") : `<div class="settings-empty-card compact">当前项目还没有章节记录。</div>`}
+      <div class="workline-list">
+        ${worklines.length ? worklines.map(renderWorklineCard).join("") : `<div class="settings-empty-card compact">当前项目还没有工作线记录。</div>`}
       </div>
     </section>
     <section class="settings-provider-section">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">当前章节 CodeHarbor</div>
-          <div class="settings-provider-meta">来自 `/api/chapters/{id}/narrators`；用于确认主代理、子代理和工作目录。</div>
+          <div class="settings-provider-title">当前工作线 Agent</div>
+          <div class="settings-provider-meta">来自 `/api/worklines/{id}/agents`；用于确认主代理、子代理和工作目录。</div>
         </div>
       </div>
-      <div class="chapter-narrator-list">
-        ${narrators.length ? narrators.map(renderChapterNarratorCard).join("") : `<div class="settings-empty-card compact">当前章节暂无 CodeHarbor 代理。</div>`}
+      <div class="workline-agent-list">
+        ${agents.length ? agents.map(renderWorklineAgentCard).join("") : `<div class="settings-empty-card compact">当前工作线暂无 Agent。</div>`}
       </div>
     </section>
     <section class="settings-provider-section">
@@ -324,51 +324,51 @@ export function createWorkspaceSettingsController({
         </div>
         <span class="settings-status-pill muted">本地目录模式</span>
       </div>
-      <div class="chapter-boundary-grid">
-        ${renderChapterBoundaryCard("工作目录", state.narrator?.cwd || state.project?.gitPath || "未设置", "工具和终端围绕该路径运行。")}
-        ${renderChapterBoundaryCard("Branch", state.chapter?.branch || "未绑定", "后续 Git worktree/branch 管理预留。")}
-        ${renderChapterBoundaryCard("Worktree", state.chapter?.worktreePath || "未启用", "当前未自动创建隔离 worktree。")}
-        ${renderChapterBoundaryCard("Base", state.chapter?.baseBranch || "未设置", "后续 merge/review 可使用。")}
+      <div class="workline-boundary-grid">
+        ${renderWorklineBoundaryCard("工作目录", state.agent?.cwd || state.project?.gitPath || "未设置", "工具和终端围绕该路径运行。")}
+        ${renderWorklineBoundaryCard("Branch", state.workline?.branch || "未绑定", "后续 Git worktree/branch 管理预留。")}
+        ${renderWorklineBoundaryCard("Worktree", state.workline?.worktreePath || "未启用", "当前未自动创建隔离 worktree。")}
+        ${renderWorklineBoundaryCard("Base", state.workline?.baseBranch || "未设置", "后续 merge/review 可使用。")}
       </div>
     </section>
   `;
   }
 
-  function renderChapterCard(chapter) {
-    const active = chapter.id === state.chapter?.id;
+  function renderWorklineCard(workline) {
+    const active = workline.id === state.workline?.id;
     return `
-    <div class="chapter-card ${active ? "active" : ""}">
+    <div class="workline-card ${active ? "active" : ""}">
       <div>
-        <div class="chapter-title">${escapeHtml(chapter.title || "Untitled chapter")} ${chapter.isRoot ? "<span class='settings-status-pill ok'>root</span>" : ""}</div>
-        <div class="settings-provider-meta">${escapeHtml(chapter.role || "chapter")} · ${escapeHtml(chapter.status || "active")} · ${escapeHtml(formatTimestamp(chapter.updatedAt))}</div>
-        <div class="settings-provider-meta path">${escapeHtml(chapter.worktreePath || chapter.branch || state.project?.gitPath || "未绑定路径")}</div>
+        <div class="workline-title">${escapeHtml(workline.title || "Untitled workline")} ${workline.isRoot ? "<span class='settings-status-pill ok'>root</span>" : ""}</div>
+        <div class="settings-provider-meta">${escapeHtml(workline.role || "workline")} · ${escapeHtml(workline.status || "active")} · ${escapeHtml(formatTimestamp(workline.updatedAt))}</div>
+        <div class="settings-provider-meta path">${escapeHtml(workline.worktreePath || workline.branch || state.project?.gitPath || "未绑定路径")}</div>
       </div>
       <div class="settings-action-row">
-        <button class="settings-action-btn subtle" type="button" data-select-chapter="${escapeAttr(chapter.id)}">查看</button>
+        <button class="settings-action-btn subtle" type="button" data-select-workline="${escapeAttr(workline.id)}">查看</button>
       </div>
     </div>
   `;
   }
 
-  function renderChapterNarratorCard(narrator) {
-    const active = narrator.id === state.narrator?.id;
+  function renderWorklineAgentCard(agent) {
+    const active = agent.id === state.agent?.id;
     return `
-    <div class="chapter-narrator-card ${active ? "active" : ""}">
+    <div class="workline-agent-card ${active ? "active" : ""}">
       <div>
-        <div class="chapter-title">${escapeHtml(narrator.title || state.project?.name || "CodeHarbor")} ${active ? "<span class='settings-status-pill ok'>current</span>" : ""}</div>
-        <div class="settings-provider-meta">${escapeHtml(narrator.type || "primary")} · ${escapeHtml(narrator.status || "idle")} · ${escapeHtml(narrator.permissionMode || "acceptEdits")}</div>
-        <div class="settings-provider-meta path">${escapeHtml(narrator.cwd || state.project?.gitPath || "未设置工作目录")}</div>
+        <div class="workline-title">${escapeHtml(agent.title || state.project?.name || "Agent")} ${active ? "<span class='settings-status-pill ok'>current</span>" : ""}</div>
+        <div class="settings-provider-meta">${escapeHtml(agent.type || "primary")} · ${escapeHtml(agent.status || "idle")} · ${escapeHtml(agent.permissionMode || "acceptEdits")}</div>
+        <div class="settings-provider-meta path">${escapeHtml(agent.cwd || state.project?.gitPath || "未设置工作目录")}</div>
       </div>
       <div class="settings-action-row">
-        <button class="settings-action-btn subtle" type="button" data-select-narrator="${escapeAttr(narrator.id)}">设为当前</button>
+        <button class="settings-action-btn subtle" type="button" data-select-agent="${escapeAttr(agent.id)}">设为当前</button>
       </div>
     </div>
   `;
   }
 
-  function renderChapterBoundaryCard(title, value, description) {
+  function renderWorklineBoundaryCard(title, value, description) {
     return `
-    <div class="chapter-boundary-card">
+    <div class="workline-boundary-card">
       <strong>${escapeHtml(value)}</strong>
       <span>${escapeHtml(title)}</span>
       <small>${escapeHtml(description)}</small>
@@ -376,60 +376,60 @@ export function createWorkspaceSettingsController({
   `;
   }
 
-  function bindChaptersSettingsActions() {
-    $("refreshChaptersBtn")?.addEventListener("click", () => loadChapterContainerData({ notify: true }).catch(showError));
-    $("openChaptersDirectoryBtn")?.addEventListener("click", (event) => openDirectoryChooser(state.project?.gitPath || "", { trigger: event.currentTarget }).catch(showError));
+  function bindWorklinesSettingsActions() {
+    $("refreshWorklinesBtn")?.addEventListener("click", () => loadWorklineContainerData({ notify: true }).catch(showError));
+    $("openWorklinesDirectoryBtn")?.addEventListener("click", (event) => openDirectoryChooser(state.project?.gitPath || "", { trigger: event.currentTarget }).catch(showError));
     document.querySelector("[data-open-project-directory]")?.addEventListener("click", (event) => openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError));
-    document.querySelectorAll("[data-select-chapter]").forEach((node) => {
-      node.addEventListener("click", () => selectChapterFromSettings(node.dataset.selectChapter).catch(showError));
+    document.querySelectorAll("[data-select-workline]").forEach((node) => {
+      node.addEventListener("click", () => selectWorklineFromSettings(node.dataset.selectWorkline).catch(showError));
     });
-    document.querySelectorAll("[data-select-narrator]").forEach((node) => {
-      node.addEventListener("click", () => selectNarratorFromSettings(node.dataset.selectNarrator).catch(showError));
+    document.querySelectorAll("[data-select-agent]").forEach((node) => {
+      node.addEventListener("click", () => selectAgentFromSettings(node.dataset.selectAgent).catch(showError));
     });
-    if (state.project?.id && !state.projectChapters.length && !state.chaptersError) {
-      loadChapterContainerData().catch(showError);
+    if (state.project?.id && !state.projectWorklines.length && !state.worklinesError) {
+      loadWorklineContainerData().catch(showError);
     }
   }
 
-  async function selectChapterFromSettings(chapterID) {
+  async function selectWorklineFromSettings(worklineID) {
     saveCurrentChatDraft();
     hideSlashCommandPalette();
-    const chapter = state.projectChapters.find((item) => item.id === chapterID);
-    if (!chapter) return;
+    const workline = state.projectWorklines.find((item) => item.id === worklineID);
+    if (!workline) return;
     const projectId = state.project?.id || "";
-    disconnectNarratorTransports();
-    state.chapter = chapter;
-    state.narrator = null;
+    disconnectAgentTransports();
+    state.workline = workline;
+    state.agent = null;
     syncMessageComposerBusy();
     try {
-      const narrators = await api(`/api/chapters/${chapter.id}/narrators`);
-      if (state.project?.id !== projectId || state.chapter?.id !== chapterID) return;
-      state.chapterNarrators = Array.isArray(narrators) ? narrators : [];
-      state.narrator = state.chapterNarrators.find((narrator) => narrator.type === "primary") || state.chapterNarrators[0] || state.narrator;
-      if (state.narrator) await enterNarrator();
-      if (state.project?.id !== projectId || state.chapter?.id !== chapterID) return;
+      const agents = await api(`/api/worklines/${workline.id}/agents`);
+      if (state.project?.id !== projectId || state.workline?.id !== worklineID) return;
+      state.worklineAgents = Array.isArray(agents) ? agents : [];
+      state.agent = state.worklineAgents.find((agent) => agent.type === "primary") || state.worklineAgents[0] || state.agent;
+      if (state.agent) await enterAgent();
+      if (state.project?.id !== projectId || state.workline?.id !== worklineID) return;
       refreshActiveSettingsPanel();
     } catch (err) {
-      if (state.project?.id === projectId && state.chapter?.id === chapterID) throw err;
+      if (state.project?.id === projectId && state.workline?.id === worklineID) throw err;
     }
   }
 
-  async function selectNarratorFromSettings(narratorID) {
+  async function selectAgentFromSettings(agentID) {
     saveCurrentChatDraft();
     hideSlashCommandPalette();
-    const narrator = state.chapterNarrators.find((item) => item.id === narratorID);
-    if (!narrator) return;
-    const chapterId = state.chapter?.id || "";
-    state.narrator = narrator;
-    await enterNarrator();
-    if (state.chapter?.id !== chapterId || state.narrator?.id !== narratorID) return;
+    const agent = state.worklineAgents.find((item) => item.id === agentID);
+    if (!agent) return;
+    const worklineId = state.workline?.id || "";
+    state.agent = agent;
+    await enterAgent();
+    if (state.workline?.id !== worklineId || state.agent?.id !== agentID) return;
     refreshActiveSettingsPanel();
   }
 
   return {
     bindAgentSettingsActions,
-    bindChaptersSettingsActions,
+    bindWorklinesSettingsActions,
     renderAgentSettingsContent,
-    renderChaptersSettingsContent,
+    renderWorklinesSettingsContent,
   };
 }

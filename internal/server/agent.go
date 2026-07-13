@@ -12,29 +12,62 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"codeharbor/internal/agent"
-	"codeharbor/internal/db"
-	"codeharbor/internal/tools"
+	agentpkg "autoto/internal/agent"
+	"autoto/internal/db"
+	"autoto/internal/tools"
 )
 
-func (s *Server) getNarrator(w http.ResponseWriter, r *http.Request) {
-	narrator, err := s.store.GetNarrator(r.Context(), chi.URLParam(r, "id"))
+type agentLiveSnapshotResponse struct {
+	Protocol         int                      `json:"protocol"`
+	Agent            db.Agent                 `json:"agent"`
+	Messages         []db.Message             `json:"messages"`
+	PendingApprovals []db.ToolCall            `json:"pendingApprovals"`
+	LatestRun        *db.Run                  `json:"latestRun,omitempty"`
+	Generations      db.PermissionGenerations `json:"generations"`
+	Stream           agentpkg.StreamWatermark `json:"stream"`
+}
+
+func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent event hub is not initialized")
+		return
+	}
+	agentID := chi.URLParam(r, "id")
+	watermark := s.hub.Watermark(agentID)
+	snapshot, err := s.store.ReadAgentLiveSnapshot(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, agentLiveSnapshotResponse{
+		Protocol:         agentpkg.ProtocolVersion,
+		Agent:            snapshot.Agent,
+		Messages:         snapshot.Messages,
+		PendingApprovals: snapshot.PendingApprovals,
+		LatestRun:        snapshot.LatestRun,
+		Generations:      snapshot.Generations,
+		Stream:           watermark,
+	})
+}
+
+func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
+	agent, err := s.store.GetAgent(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		if err == sql.ErrNoRows {
-			writeError(w, http.StatusNotFound, "narrator not found")
+			writeError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, narrator)
+	writeJSON(w, http.StatusOK, agent)
 }
 
 type updateCWDRequest struct {
 	CWD string `json:"cwd"`
 }
 
-func (s *Server) updateNarratorCWD(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateAgentCWD(w http.ResponseWriter, r *http.Request) {
 	var req updateCWDRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -53,19 +86,23 @@ func (s *Server) updateNarratorCWD(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cwd must be a directory")
 		return
 	}
-	narrator, err := s.store.UpdateNarratorCWD(r.Context(), chi.URLParam(r, "id"), req.CWD)
+	agentID := chi.URLParam(r, "id")
+	agent, err := s.store.UpdateAgentCWD(r.Context(), agentID, req.CWD)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, narrator)
+	if s.runner != nil {
+		s.runner.InvalidateAgentApprovals(agentID, "tool approval invalidated because the agent workspace changed")
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 type updateModelRequest struct {
 	Model string `json:"model"`
 }
 
-func (s *Server) updateNarratorModel(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateAgentModel(w http.ResponseWriter, r *http.Request) {
 	var req updateModelRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -75,19 +112,19 @@ func (s *Server) updateNarratorModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	narrator, err := s.store.UpdateNarratorModel(r.Context(), chi.URLParam(r, "id"), req.Model)
+	agent, err := s.store.UpdateAgentModel(r.Context(), chi.URLParam(r, "id"), req.Model)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, narrator)
+	writeJSON(w, http.StatusOK, agent)
 }
 
 type updatePermissionModeRequest struct {
 	PermissionMode string `json:"permissionMode"`
 }
 
-func (s *Server) updateNarratorPermissionMode(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateAgentPermissionMode(w http.ResponseWriter, r *http.Request) {
 	var req updatePermissionModeRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -98,12 +135,16 @@ func (s *Server) updateNarratorPermissionMode(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	narrator, err := s.store.UpdateNarratorPermissionMode(r.Context(), chi.URLParam(r, "id"), permissionMode)
+	agentID := chi.URLParam(r, "id")
+	agent, err := s.store.UpdateAgentPermissionMode(r.Context(), agentID, permissionMode)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, narrator)
+	if s.runner != nil {
+		s.runner.InvalidateAgentApprovals(agentID, "tool approval invalidated because the permission mode changed")
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 func validPermissionMode(mode string) bool {
@@ -115,7 +156,7 @@ func validPermissionMode(mode string) bool {
 	}
 }
 
-func (s *Server) interruptNarrator(w http.ResponseWriter, r *http.Request) {
+func (s *Server) interruptAgent(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
 		return
@@ -203,7 +244,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), req.Text, req.CreatedBy)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, statusFromError(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, msg)
@@ -226,7 +267,7 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), text, createdBy, attachments...)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, statusFromError(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, msg)
@@ -296,8 +337,10 @@ func (s *Server) executeTool(w http.ResponseWriter, r *http.Request) {
 }
 
 type approveToolCallRequest struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason"`
+	Decision             string `json:"decision"`
+	Reason               string `json:"reason"`
+	PermissionGeneration int64  `json:"permissionGeneration"`
+	PolicyGeneration     int64  `json:"policyGeneration"`
 }
 
 func (s *Server) approveToolCall(w http.ResponseWriter, r *http.Request) {
@@ -310,9 +353,9 @@ func (s *Server) approveToolCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	accepted, err := s.runner.ApproveToolCall(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "toolUseId"), agent.ToolApprovalDecision{Decision: req.Decision, Reason: req.Reason, DecidedBy: "user"})
+	accepted, err := s.runner.ApproveToolCall(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "toolUseId"), agentpkg.ToolApprovalDecision{Decision: req.Decision, Reason: req.Reason, DecidedBy: "user", PermissionGeneration: req.PermissionGeneration, PolicyGeneration: req.PolicyGeneration})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, statusFromError(err), err.Error())
 		return
 	}
 	if !accepted {

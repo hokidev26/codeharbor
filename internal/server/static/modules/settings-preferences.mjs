@@ -9,13 +9,17 @@ import {
   defaultSearchPrefs,
   defaultSkillsPrefs,
   imGatewayPrefsKey,
+  legacyLocalPreferenceBackupKind,
+  legacyLocalPreferenceKey,
   localPreferenceBackupKeys,
   localPreferenceBackupKind,
   localPreferenceBackupVersion,
+  migrateLegacyLocalPreferences,
   notificationPrefsKey,
   preferredModelKey,
   profilePrefsKey,
   promptHistoryKey,
+  readLocalPreference,
   recentDirectoriesKey,
   relayProtocolPrefsKey,
   searchPrefsKey,
@@ -45,9 +49,17 @@ export function createSettingsPreferencesController({
   updatePromptHistoryHint,
   updateSlashCommandPalette,
 } = {}) {
+  let localPreferencesMigrated = false;
+
+  function ensureLocalPreferencesMigrated() {
+    if (localPreferencesMigrated) return;
+    localPreferencesMigrated = true;
+    migrateLegacyLocalPreferences();
+  }
+
   function loadProfilePreferences() {
     try {
-      return normalizeProfilePreferences(JSON.parse(localStorage.getItem(profilePrefsKey) || "{}"));
+      return normalizeProfilePreferences(JSON.parse(safeReadLocalPreference(profilePrefsKey) || "{}"));
     } catch {
       return normalizeProfilePreferences({});
     }
@@ -84,9 +96,9 @@ export function createSettingsPreferencesController({
 
   function applyProfilePreferences() {
     const profile = currentProfilePreferences();
-    document.title = profile.workspaceLabel && profile.workspaceLabel !== "CodeHarbor Local"
-      ? `${profile.workspaceLabel} · CodeHarbor`
-      : "CodeHarbor";
+    document.title = profile.workspaceLabel && profile.workspaceLabel !== "Autoto Local"
+      ? `${profile.workspaceLabel} · Autoto`
+      : "Autoto";
     const displayName = profileDisplayName();
     const avatar = $("sidebarAvatar");
     const accountName = $("sidebarAccountName");
@@ -101,7 +113,7 @@ export function createSettingsPreferencesController({
 
   function profileDisplayName() {
     const profile = currentProfilePreferences();
-    return profile.displayName || profile.workspaceLabel || "CodeHarbor User";
+    return profile.displayName || profile.workspaceLabel || "Autoto User";
   }
 
   function updateSidebarAccountSummary() {
@@ -126,7 +138,7 @@ export function createSettingsPreferencesController({
 
   function loadSearchPreferences() {
     try {
-      return normalizeSearchPreferences(JSON.parse(localStorage.getItem(searchPrefsKey) || "{}"));
+      return normalizeSearchPreferences(JSON.parse(safeReadLocalPreference(searchPrefsKey) || "{}"));
     } catch {
       return normalizeSearchPreferences({});
     }
@@ -197,7 +209,7 @@ export function createSettingsPreferencesController({
 
   function loadSkillsPreferences() {
     try {
-      return normalizeSkillsPreferences(JSON.parse(localStorage.getItem(skillsPrefsKey) || "{}"));
+      return normalizeSkillsPreferences(JSON.parse(safeReadLocalPreference(skillsPrefsKey) || "{}"));
     } catch {
       return normalizeSkillsPreferences({});
     }
@@ -267,7 +279,7 @@ export function createSettingsPreferencesController({
 
   function loadIMGatewayPreferences() {
     try {
-      return normalizeIMGatewayPreferences(JSON.parse(localStorage.getItem(imGatewayPrefsKey) || "{}"));
+      return normalizeIMGatewayPreferences(JSON.parse(safeReadLocalPreference(imGatewayPrefsKey) || "{}"));
     } catch {
       return normalizeIMGatewayPreferences({});
     }
@@ -340,7 +352,7 @@ export function createSettingsPreferencesController({
 
   function loadNotificationPreferences() {
     try {
-      return normalizeNotificationPreferences(JSON.parse(localStorage.getItem(notificationPrefsKey) || "{}"));
+      return normalizeNotificationPreferences(JSON.parse(safeReadLocalPreference(notificationPrefsKey) || "{}"));
     } catch {
       return normalizeNotificationPreferences({});
     }
@@ -410,7 +422,7 @@ export function createSettingsPreferencesController({
 
   function loadAppearancePreferences() {
     try {
-      return normalizeAppearancePreferences(JSON.parse(localStorage.getItem(appearancePrefsKey) || "{}"));
+      return normalizeAppearancePreferences(JSON.parse(safeReadLocalPreference(appearancePrefsKey) || "{}"));
     } catch {
       return normalizeAppearancePreferences({});
     }
@@ -469,7 +481,8 @@ export function createSettingsPreferencesController({
 
   function safeReadLocalPreference(key) {
     try {
-      return localStorage.getItem(key);
+      ensureLocalPreferencesMigrated();
+      return readLocalPreference(key);
     } catch {
       return null;
     }
@@ -504,7 +517,7 @@ export function createSettingsPreferencesController({
     return {
       kind: localPreferenceBackupKind,
       version: localPreferenceBackupVersion,
-      app: "CodeHarbor",
+      app: "Autoto",
       appVersion: state.settings?.version || "0.1.0-dev",
       exportedAt: new Date().toISOString(),
       preferences,
@@ -554,14 +567,22 @@ export function createSettingsPreferencesController({
     } catch {
       throw new Error("备份 JSON 格式无效");
     }
+    const kind = String(payload?.kind || "").trim();
+    if (kind && kind !== localPreferenceBackupKind && kind !== legacyLocalPreferenceBackupKind) {
+      throw new Error("不支持的本地偏好备份格式");
+    }
     const preferences = payload?.preferences || payload?.settings || payload?.values;
     if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
       throw new Error("备份中未找到 preferences 配置");
     }
+    const hasPreference = (key) => Object.prototype.hasOwnProperty.call(preferences, key);
     const updates = localPreferenceBackupKeys
-      .filter((entry) => Object.prototype.hasOwnProperty.call(preferences, entry.key))
-      .map((entry) => ({ entry, raw: normalizeImportedLocalPreference(entry, preferences[entry.key]) }));
-    if (!updates.length) throw new Error("备份中没有可导入的 CodeHarbor 本地偏好");
+      .filter((entry) => hasPreference(entry.key) || hasPreference(legacyLocalPreferenceKey(entry.key)))
+      .map((entry) => {
+        const key = hasPreference(entry.key) ? entry.key : legacyLocalPreferenceKey(entry.key);
+        return { entry, raw: normalizeImportedLocalPreference(entry, preferences[key]) };
+      });
+    if (!updates.length) throw new Error("备份中没有可导入的 Autoto 本地偏好");
     try {
       updates.forEach(({ entry, raw }) => {
         if (!raw && entry.key !== relayProtocolPrefsKey) localStorage.removeItem(entry.key);

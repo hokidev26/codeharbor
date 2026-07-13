@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestStorageSummaryRouteReturnsConfiguredPathStats(t *testing.T) {
@@ -21,7 +21,7 @@ func TestStorageSummaryRouteReturnsConfiguredPathStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(homeDir, "config.json")
-	databasePath := filepath.Join(homeDir, "codeharbor.db")
+	databasePath := filepath.Join(homeDir, "autoto.db")
 	if err := os.MkdirAll(homeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

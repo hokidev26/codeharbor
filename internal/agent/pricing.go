@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"codeharbor/internal/providers"
+	"autoto/internal/providers"
 )
 
 type tokenPrice struct {
@@ -38,8 +38,7 @@ func estimateUsageCostUSD(providerName, model string, usage providers.Usage) flo
 //   - Anthropic pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 //
 // Relay/local models may bill differently from their public model-name match; unknown models return false.
-func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
-	provider := strings.ToLower(strings.TrimSpace(providerName))
+func modelTokenPrice(_ string, model string) (tokenPrice, bool) {
 	name := strings.ToLower(strings.TrimSpace(model))
 	if _, stripped := providers.SplitModel(name); stripped != name && stripped != "" {
 		name = stripped
@@ -57,11 +56,9 @@ func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
 		{match: "gpt-4o-mini", price: tokenPrice{InputPerMTok: 0.15, CachedInputPerMTok: 0.075, OutputPerMTok: 0.60}},
 		{match: "gpt-4o", price: tokenPrice{InputPerMTok: 2.50, CachedInputPerMTok: 1.25, OutputPerMTok: 10.00}},
 	}
-	if strings.Contains(provider, "openai") || strings.Contains(provider, "cliproxy") || strings.HasPrefix(name, "gpt-") {
-		for _, candidate := range openAIPrices {
-			if strings.HasPrefix(name, candidate.match) {
-				return candidate.price, true
-			}
+	for _, candidate := range openAIPrices {
+		if strings.HasPrefix(name, candidate.match) {
+			return candidate.price, true
 		}
 	}
 
@@ -82,7 +79,7 @@ func modelTokenPrice(providerName, model string) (tokenPrice, bool) {
 	case strings.HasPrefix(name, "claude-3-5-sonnet") || strings.HasPrefix(name, "claude-3-7-sonnet"):
 		anthropicPrice = tokenPrice{InputPerMTok: 3.00, CachedInputPerMTok: 0.30, OutputPerMTok: 15.00}
 	}
-	if anthropicPrice != (tokenPrice{}) && (strings.Contains(provider, "anthropic") || strings.HasPrefix(name, "claude-")) {
+	if anthropicPrice != (tokenPrice{}) {
 		return anthropicPrice, true
 	}
 	return tokenPrice{}, false

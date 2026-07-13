@@ -17,7 +17,7 @@ export const settingsSections = [
       { key: "providers", icon: "☁", label: "提供商", subtitle: "管理 OpenAI、Anthropic 与 OpenAI-compatible 提供商。" },
       { key: "network-search", icon: "⌕", label: "网络搜索", subtitle: "配置搜索提供商、权限与结果策略。" },
       { key: "agent-admin", icon: "⬡", label: "代理管理", subtitle: "查看、切换和治理本地 Agent Server 后端。" },
-      { key: "chapters-containers", icon: "◇", label: "章节与容器", subtitle: "管理章节、工作线、容器和隔离策略。" },
+      { key: "worklines-containers", icon: "◇", label: "工作线与容器", subtitle: "管理工作线、容器和隔离策略。" },
       { key: "servers-system", icon: "▤", label: "服务器与系统", subtitle: "查看服务状态、端口、版本与系统资源。" },
       { key: "users", icon: "♟", label: "用户管理", subtitle: "管理本地用户、角色和访问策略。" },
       { key: "terminals", icon: "▻", label: "终端管理", subtitle: "管理 PTY 终端、会话和默认 shell。" },
@@ -32,7 +32,7 @@ export const settingsSections = [
 export const settingsItems = settingsSections.flatMap((section) => section.items);
 
 export const skillTabs = [
-  { key: "commands", label: "命令", description: "用户级斜杠命令，展开为提示词模板。在聊天输入框中输入 /命令名 即可使用。", empty: "暂无命令，添加一个以开始使用。", action: "添加命令" },
+  { key: "commands", label: "命令", description: "服务端斜杠命令与 SKILL.md 模板，展开为聊天提示词；输入 /命令名 即可使用。", empty: "暂无命令，添加一个以开始使用。", action: "添加命令" },
   { key: "optional-tools", label: "可选工具", description: "控制代理可按需启用的辅助工具集合。", empty: "暂无可选工具配置。", action: "添加工具" },
   { key: "tool-permissions", label: "工具权限", description: "定义 Read、Write、Edit、Bash 等工具在不同权限模式下的行为。", empty: "尚未配置自定义工具权限。", action: "添加规则" },
   { key: "global-skills", label: "全局技能", description: "对所有项目生效的技能包和工作流。", empty: "暂无全局技能。", action: "添加技能" },

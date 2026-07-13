@@ -1,6 +1,6 @@
 (() => {
   const showBootError = (error) => {
-    console.error("Failed to load CodeHarbor frontend", error);
+    console.error("Failed to load Autoto frontend", error);
     const message = error && error.message ? error.message : String(error || "unknown error");
     const target = document.getElementById("messages") || document.body;
     if (target) {

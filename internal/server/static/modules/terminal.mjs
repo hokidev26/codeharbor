@@ -88,7 +88,7 @@ export function createTerminalController({
   }
 
   function remoteTerminalLockedMessage() {
-    return "远程收紧模式已禁用交互式终端；如确需远程 shell，请在可信边缘认证后显式设置 CODEHARBOR_REMOTE_TERMINAL=true。";
+    return "远程收紧模式已禁用交互式终端；如确需远程 shell，请在可信边缘认证后显式设置 AUTOTO_REMOTE_TERMINAL=true。";
   }
 
   function focusTerminalPanel() {
@@ -103,7 +103,7 @@ export function createTerminalController({
   }
 
   function reconnectTerminalFromSettings() {
-    if (!state.narrator) {
+    if (!state.agent) {
       showToast("请先选择一个 AI 代理再连接终端。", "warn");
       return;
     }
@@ -131,7 +131,7 @@ export function createTerminalController({
     const stats = terminalOutputStats();
     const collapsed = $("appShell")?.classList.contains("terminal-collapsed") || false;
     const wsLabel = terminalConnectionLabel();
-    const cwd = state.narrator?.cwd || state.project?.gitPath || "未选择代理";
+    const cwd = state.agent?.cwd || state.project?.gitPath || "未选择代理";
     const locked = remoteTerminalLocked();
     return `
       <div class="settings-live-page terminal-settings-page">
@@ -158,7 +158,7 @@ export function createTerminalController({
               <div class="settings-provider-title">当前会话</div>
               <div class="settings-provider-meta path">${escapeHtml(cwd)}</div>
             </div>
-            <span class="settings-status-pill ${state.narrator ? "ok" : "warn"}">${escapeHtml(state.narrator ? "已选择代理" : "未选择代理")}</span>
+            <span class="settings-status-pill ${state.agent ? "ok" : "warn"}">${escapeHtml(state.agent ? "已选择代理" : "未选择代理")}</span>
           </div>
           <div class="terminal-control-grid">
             <button class="terminal-control-card" type="button" data-terminal-action="reconnect" ${locked ? "disabled" : ""}>
@@ -214,7 +214,7 @@ export function createTerminalController({
   }
 
   function terminalConnectionLabel() {
-    if (!state.terminalWS) return state.narrator ? "未连接" : "未选择代理";
+    if (!state.terminalWS) return state.agent ? "未连接" : "未选择代理";
     if (state.terminalWS.readyState === WebSocket.OPEN) return "connected";
     if (state.terminalWS.readyState === WebSocket.CONNECTING) return "connecting";
     if (state.terminalWS.readyState === WebSocket.CLOSING) return "closing";
@@ -269,7 +269,7 @@ export function createTerminalController({
   }
 
   function connectTerminal() {
-    if (!state.narrator) return;
+    if (!state.agent) return;
     if (remoteTerminalLocked()) {
       if (state.terminalWS) state.terminalWS.close();
       appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
@@ -277,14 +277,14 @@ export function createTerminalController({
       return;
     }
     if (state.terminalWS) state.terminalWS.close();
-    const narratorId = state.narrator.id;
+    const agentId = state.agent.id;
     const output = $("terminalOutput");
     if (currentTerminalPreferences().clearOnReconnect) output.textContent = "Connecting terminal...\n";
     else appendTerminal("\n[terminal] reconnecting...\n");
     setTerminalStatus("connecting");
-    const socket = new WebSocket(webSocketURL(`/ws/terminal?narratorId=${encodeURIComponent(narratorId)}`));
+    const socket = new WebSocket(webSocketURL(`/ws/terminal?agentId=${encodeURIComponent(agentId)}`));
     state.terminalWS = socket;
-    const isCurrentSocket = () => state.terminalWS === socket && state.narrator?.id === narratorId;
+    const isCurrentSocket = () => state.terminalWS === socket && state.agent?.id === agentId;
     socket.onopen = () => {
       if (!isCurrentSocket()) return;
       setTerminalStatus("connected");
@@ -320,7 +320,7 @@ export function createTerminalController({
 
   function sendTerminalInput(data) {
     if (remoteTerminalLocked()) return;
-    if (!state.narrator || !state.terminalWS || state.terminalWS.readyState !== WebSocket.OPEN) return;
+    if (!state.agent || !state.terminalWS || state.terminalWS.readyState !== WebSocket.OPEN) return;
     state.terminalWS.send(JSON.stringify({ type: "input", data }));
   }
 
@@ -334,7 +334,7 @@ export function createTerminalController({
   }
 
   function handleTerminalKeydown(event) {
-    if (!state.narrator || remoteTerminalLocked()) return;
+    if (!state.agent || remoteTerminalLocked()) return;
     const keyMap = {
       Enter: "\r",
       Backspace: "\x7f",

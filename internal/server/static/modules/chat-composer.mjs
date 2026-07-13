@@ -2,6 +2,7 @@ import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes } from "./formatters.mjs";
 import { chatDraftsKey, promptHistoryKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
+import { mergeSlashCommands, slashCommandInsertion } from "./skills-commands.mjs";
 
 export function normalizeChatDrafts(value = {}) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -55,7 +56,7 @@ export function createChatComposerController({
   }
 
   function currentChatDraftKey() {
-    return state.narrator?.id || state.chapter?.id || state.project?.id || "global";
+    return state.agent?.id || state.workline?.id || state.project?.id || "global";
   }
 
   function writeChatDrafts(drafts) {
@@ -125,8 +126,8 @@ export function createChatComposerController({
     state.promptHistoryDraft = "";
   }
 
-  function isMessageSendingFor(narratorId = state.narrator?.id) {
-    return Boolean(narratorId && state.messageSendingByNarrator?.[narratorId]);
+  function isMessageSendingFor(agentId = state.agent?.id) {
+    return Boolean(agentId && state.messageSendingByAgent?.[agentId]);
   }
 
   function syncMessageComposerBusy() {
@@ -140,23 +141,23 @@ export function createChatComposerController({
     setButtonBusy($("sendMessageBtn"), busy, "发送中");
   }
 
-  function setMessageSendingFor(narratorId, sending) {
-    if (!narratorId) return;
-    const next = { ...(state.messageSendingByNarrator || {}) };
-    if (sending) next[narratorId] = true;
-    else delete next[narratorId];
-    state.messageSendingByNarrator = next;
+  function setMessageSendingFor(agentId, sending) {
+    if (!agentId) return;
+    const next = { ...(state.messageSendingByAgent || {}) };
+    if (sending) next[agentId] = true;
+    else delete next[agentId];
+    state.messageSendingByAgent = next;
     syncMessageComposerBusy();
   }
 
   async function sendMessage(event) {
     event.preventDefault();
-    if (!state.narrator) {
+    if (!state.agent) {
       await openDirectoryChooser();
       return;
     }
-    const narratorId = state.narrator.id;
-    if (isMessageSendingFor(narratorId)) return;
+    const agentId = state.agent.id;
+    if (isMessageSendingFor(agentId)) return;
     const draftKey = currentChatDraftKey();
     const input = $("messageText");
     const text = input.value.trim();
@@ -166,7 +167,7 @@ export function createChatComposerController({
       showModelSetupNotice();
       return;
     }
-    setMessageSendingFor(narratorId, true);
+    setMessageSendingFor(agentId, true);
     input.value = "";
     autoResizeMessageInput();
     try {
@@ -174,12 +175,12 @@ export function createChatComposerController({
         const form = new FormData();
         form.append("text", text);
         attachments.forEach((item) => form.append("files", item.file, item.file?.name || "attachment"));
-        await api(`/api/narrators/${narratorId}/messages`, {
+        await api(`/api/agents/${agentId}/messages`, {
           method: "POST",
           body: form,
         });
       } else {
-        await api(`/api/narrators/${narratorId}/messages`, {
+        await api(`/api/agents/${agentId}/messages`, {
           method: "POST",
           body: JSON.stringify({ text }),
         });
@@ -187,10 +188,10 @@ export function createChatComposerController({
       if (text) rememberPromptHistory(text);
       clearChatDraftForKey(draftKey);
       if (attachments.length) clearPendingAttachments();
-      await loadMessages(narratorId);
-      scheduleMessageRefresh(1200, narratorId);
+      await loadMessages(agentId);
+      scheduleMessageRefresh(1200, agentId);
     } catch (err) {
-      const stillCurrent = state.narrator?.id === narratorId;
+      const stillCurrent = state.agent?.id === agentId;
       saveChatDraftForKey(draftKey, text);
       if (stillCurrent) {
         if (!input.value.trim()) input.value = text;
@@ -199,8 +200,8 @@ export function createChatComposerController({
       }
       notifyTerminal(`[warn] 原代理消息发送失败，草稿已保留：${err.message || err}\n`);
     } finally {
-      setMessageSendingFor(narratorId, false);
-      if (state.narrator?.id === narratorId) input.focus();
+      setMessageSendingFor(agentId, false);
+      if (state.agent?.id === agentId) input.focus();
     }
   }
 
@@ -363,14 +364,14 @@ export function createChatComposerController({
     hint.textContent = active
       ? `历史 ${state.promptHistoryIndex + 1}/${count} · ↑ 更早，↓ 更新，Enter 发送，Esc 返回草稿。`
       : commandCount
-        ? `输入 / 可使用 ${commandCount} 个本地技能命令；空输入时 ↑/↓ 召回历史。`
+        ? `输入 / 可使用 ${commandCount} 个技能命令（服务端优先）；空输入时 ↑/↓ 召回历史。`
         : count
           ? `空输入时 ↑ 查看上一条提示，↓ 返回草稿。本地已保存 ${count}/30 条。`
           : "输入框为空时 ↑/↓ 可召回最近提示。";
   }
 
   function enabledSlashCommands() {
-    return currentSkillsPreferences().commands.filter((command) => command.enabled && command.name && command.prompt);
+    return mergeSlashCommands(state.serverSkills, currentSkillsPreferences().commands);
   }
 
   function slashCommandTrigger(value) {
@@ -419,7 +420,7 @@ export function createChatComposerController({
     input?.setAttribute("aria-activedescendant", slashCommandOptionId(matches[state.slashCommandIndex], state.slashCommandIndex));
     palette.classList.remove("hidden");
     palette.innerHTML = `
-      <div class="slash-command-head">本地技能命令</div>
+      <div class="slash-command-head">技能命令（服务端优先）</div>
       ${matches.map((command, index) => `
         <button id="${escapeAttr(slashCommandOptionId(command, index))}" class="slash-command-item ${index === state.slashCommandIndex ? "active" : ""}" type="button" role="option" aria-selected="${index === state.slashCommandIndex ? "true" : "false"}" data-slash-command="${escapeAttr(command.id)}">
           <span class="slash-command-name">${escapeHtml(command.name)}</span>
@@ -452,7 +453,8 @@ export function createChatComposerController({
     if (!command) return false;
     const input = $("messageText");
     const value = input?.value || "";
-    const next = value.replace(/^\s*\/[^\s]*$/, command.prompt);
+    const insertion = slashCommandInsertion(command);
+    const next = value.replace(/^\s*\/[^\s]*$/, insertion);
     setMessageInputValue(next);
     hideSlashCommandPalette();
     resetPromptHistoryNavigation();

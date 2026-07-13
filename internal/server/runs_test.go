@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeharbor/internal/config"
-	"codeharbor/internal/db"
+	"autoto/internal/config"
+	"autoto/internal/db"
 )
 
 func TestRunRoutesExposeSummaryAndPendingApprovals(t *testing.T) {
@@ -20,28 +20,28 @@ func TestRunRoutesExposeSummaryAndPendingApprovals(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, _, narrator, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.CreateRun(ctx, db.Run{NarratorID: narrator.ID, Status: "running"})
+	run, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, Status: "running"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddMessage(ctx, db.Message{NarratorID: narrator.ID, RunID: run.ID, Role: "assistant", ContentText: "hello"}); err != nil {
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, RunID: run.ID, Role: "assistant", ContentText: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddToolCall(ctx, db.ToolCall{NarratorID: narrator.ID, RunID: run.ID, ToolUseID: "tool-1", ToolName: "Bash", InputJSON: json.RawMessage(`{"command":"printf hi"}`), Status: "pending_approval"}); err != nil {
+	if _, err := store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: run.ID, ToolUseID: "tool-1", ToolName: "Bash", InputJSON: json.RawMessage(`{"command":"printf hi"}`), Status: "pending_approval"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddAPIRequest(ctx, db.APIRequest{NarratorID: narrator.ID, RunID: run.ID, Kind: "model", Provider: "fake", Model: "test", InputTokens: 12, OutputTokens: 3, CostUSD: 0.001}); err != nil {
+	if _, err := store.AddAPIRequest(ctx, db.APIRequest{AgentID: agent.ID, RunID: run.ID, Kind: "model", Provider: "fake", Model: "test", InputTokens: 12, OutputTokens: 3, CostUSD: 0.001}); err != nil {
 		t.Fatal(err)
 	}
 
 	app := New(config.Config{}, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/runs?limit=5", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/runs?limit=5", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -55,7 +55,7 @@ func TestRunRoutesExposeSummaryAndPendingApprovals(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/runs/"+run.ID, nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/runs/"+run.ID, nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -72,7 +72,7 @@ func TestRunRoutesExposeSummaryAndPendingApprovals(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/narrators/"+narrator.ID+"/tool-calls/pending", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/tool-calls/pending", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

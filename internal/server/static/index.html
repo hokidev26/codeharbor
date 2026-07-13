@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CodeHarbor</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=mobile-narrafork-4" />
+    <title>Autoto</title>
+    <link rel="stylesheet" href="/ui/styles.css?v=desktop-toolbar-1" />
   </head>
   <body>
     <main id="appShell" class="app-shell terminal-collapsed">
       <header class="mobile-topbar">
         <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单">☰</button>
         <div class="mobile-update-pill" aria-label="版本更新"><span class="mobile-update-icon">♙</span><span id="mobileVersionChip">更新: v0.1.0 → …</span></div>
-        <div class="mobile-brand">CodeHarbor</div>
+        <div class="mobile-brand">Autoto</div>
         <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端">▣</button>
         <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索">⌕</button>
       </header>
@@ -20,12 +20,12 @@
         <div class="mobile-drawer-header" aria-label="移动端菜单标题栏">
           <button id="mobileSidebarCloseBtn" class="mobile-icon-btn mobile-drawer-close-btn" type="button" title="关闭菜单" aria-label="关闭菜单">×</button>
           <div class="mobile-update-pill drawer-update-pill" aria-label="版本更新"><span class="mobile-update-icon">♙</span><span id="mobileDrawerVersionChip">更新: v0.1.0 → …</span></div>
-          <div class="mobile-drawer-brand">CodeHarbor</div>
+          <div class="mobile-drawer-brand">Autoto</div>
           <button id="mobileDrawerSearchBtn" class="mobile-icon-btn mobile-drawer-search-btn" type="button" title="搜索项目或目录" aria-label="搜索项目或目录">⌕</button>
         </div>
         <div class="brand-row">
           <div>
-            <div class="brand">CodeHarbor</div>
+            <div class="brand">Autoto</div>
             <div id="healthBadge" class="status-text">checking</div>
           </div>
           <button id="refreshBtn" class="icon-btn" type="button" title="刷新">↻</button>
@@ -64,7 +64,7 @@
         <div class="sidebar-footer">
           <div id="sidebarSettingsMenu" class="sidebar-settings-menu hidden" role="menu" aria-label="账户和设置菜单">
             <div class="sidebar-menu-profile">
-              <div id="sidebarMenuProfileName" class="sidebar-menu-name">CodeHarbor Local</div>
+              <div id="sidebarMenuProfileName" class="sidebar-menu-name">Autoto Local</div>
               <div id="sidebarMenuProfileMeta" class="sidebar-menu-meta">本地工作台</div>
             </div>
             <button id="settingsBtn" class="sidebar-menu-item" type="button" role="menuitem">
@@ -93,9 +93,9 @@
             </button>
           </div>
           <button id="sidebarAccountBtn" class="sidebar-account-btn" type="button" aria-expanded="false" aria-controls="sidebarSettingsMenu">
-            <span id="sidebarAvatar" class="sidebar-avatar">CH</span>
+            <span id="sidebarAvatar" class="sidebar-avatar">AT</span>
             <span class="sidebar-account-main">
-              <span id="sidebarAccountName" class="sidebar-account-name">CodeHarbor</span>
+              <span id="sidebarAccountName" class="sidebar-account-name">Autoto</span>
               <span class="sidebar-account-meta"><span id="sidebarBackendDot" class="sidebar-backend-dot"></span><span id="sidebarAccountMeta">v0.1.0-dev · 本地</span></span>
             </span>
             <span class="sidebar-account-chevron">⌄</span>
@@ -108,7 +108,7 @@
           <div class="header-left">
             <button class="icon-btn" type="button">←</button>
             <div>
-              <div id="currentTitle" class="chat-title">未选择 CodeHarbor</div>
+              <div id="currentTitle" class="chat-title">未选择 Agent</div>
               <div id="currentMeta" class="chat-subtitle">点击左侧 ＋ 或右上角目录按钮选择资料夹开始。</div>
               <div id="workspaceMetaPills" class="workspace-meta-pills hidden"></div>
             </div>
@@ -130,7 +130,7 @@
           <div class="empty-workspace-card">
             <div class="empty-workspace-icon">☻</div>
             <div class="empty-workspace-title">选择资料夹，让 AI 开始工作</div>
-            <div class="empty-workspace-text">CodeHarbor 会在该资料夹内读取、编辑文件，并按权限执行命令。</div>
+            <div class="empty-workspace-text">Autoto 会在该资料夹内读取、编辑文件，并按权限执行命令。</div>
             <button class="empty-workspace-action" type="button" data-open-directory-shortcut="new">选择资料夹</button>
             <div class="empty-workspace-hint">也可以点击左侧 AI 代理右侧的 ＋。</div>
           </div>
@@ -152,23 +152,26 @@
             <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
             <div id="promptHistoryHint" class="prompt-history-hint"></div>
             <div class="composer-toolbar">
-              <div class="composer-status" aria-live="polite">
+              <div class="composer-status" aria-live="polite" title="连接状态">
                 <span id="composerStatusDot" class="composer-status-dot"></span>
-                <span id="composerStatusText">空闲</span>
+                <span class="composer-status-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span id="composerStatusText" class="composer-status-text">空闲</span>
               </div>
-              <div class="composer-controls">
-                <span class="select-pill mode-pill"><span class="mode-display">Auto</span><select id="permissionMode" class="select permission-select" title="权限模式" aria-label="权限模式">
-                  <option value="readOnly">readOnly</option>
-                  <option value="acceptEdits">acceptEdits</option>
-                  <option value="bypassPermissions">bypassPermissions</option>
-                  <option value="default">default</option>
-                  <option value="dontAsk">dontAsk</option>
+              <div class="composer-controls" aria-label="模型和权限设置">
+                <span class="select-pill model-pill toolbar-model-pill"><select id="modelSelect" class="select compact-select" title="模型" aria-label="模型"></select></span>
+                <button id="saveAgentBtn" class="ghost-btn mini effort-pill" type="button" title="保存当前模型、权限和目录">超高</button>
+                <button id="openProviderLoginBtn" class="model-tool-btn icon-only toolbar-lightning-btn" type="button" title="打开凭证导入和中转站配置" aria-label="凭证和中转站">⚡</button>
+                <span class="select-pill mode-pill permission-toolbar-pill"><span class="permission-icon" aria-hidden="true">◌</span><span class="mode-display">可编辑</span><select id="permissionMode" class="select permission-select" title="权限模式" aria-label="权限模式">
+                  <option value="readOnly">只读</option>
+                  <option value="acceptEdits">可编辑</option>
+                  <option value="bypassPermissions">全部允许</option>
+                  <option value="default">自动</option>
+                  <option value="dontAsk">不询问</option>
                 </select></span>
-                <button id="openProviderLoginBtn" class="model-tool-btn icon-only" type="button" title="打开凭证导入和中转站配置" aria-label="凭证和中转站">♙</button>
               </div>
-              <div class="composer-actions">
-                <span class="select-pill model-pill"><select id="modelSelect" class="select compact-select" title="模型" aria-label="模型"></select></span>
-                <button id="saveNarratorBtn" class="ghost-btn mini effort-pill" type="button" title="保存当前模型、权限和目录">High</button>
+              <div class="composer-actions" aria-label="工作区快捷操作">
+                <button id="composerFolderBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-open-directory-shortcut="current">▱＋</button>
+                <button id="composerTerminalBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="收起/展开终端" aria-label="收起/展开终端">›_</button>
               </div>
             </div>
           </form>
@@ -182,7 +185,7 @@
           </div>
           <button id="collapseTerminalBtn" class="icon-btn" type="button" title="收起终端">×</button>
         </div>
-        <pre id="terminalOutput" class="terminal-output" tabindex="0">Terminal ready. 选择 CodeHarbor 代理后会连接交互式 PTY 终端。</pre>
+        <pre id="terminalOutput" class="terminal-output" tabindex="0">Terminal ready. 选择 Agent 后会连接交互式 PTY 终端。</pre>
         <div class="terminal-status-row">
           <span id="terminalStatus">terminal idle</span>
           <button id="reconnectTerminalBtn" class="ghost-btn mini" type="button">重连</button>
@@ -197,7 +200,7 @@
         <div class="folder-picker-head">
           <div>
             <div id="folderModalTitle" class="modal-title">选择目录</div>
-            <div class="folder-modal-subtitle">选择后会立即创建或打开 CodeHarbor 项目</div>
+            <div class="folder-modal-subtitle">选择后会立即创建或打开 Autoto 项目</div>
           </div>
           <button id="folderLocationPill" class="folder-location-pill" type="button" title="当前路径">
             <span class="folder-location-icon">📁</span>
@@ -308,7 +311,7 @@
         <div class="modal-head git-modal-head">
           <div>
             <div id="gitModalTitle" class="modal-title">Git 变更</div>
-            <div id="gitModalPath" class="modal-path">查看并提交当前 CodeHarbor 工作目录的 Git 变更。</div>
+            <div id="gitModalPath" class="modal-path">查看并提交当前 Agent 工作目录的 Git 变更。</div>
           </div>
           <button id="closeGitModalBtn" class="icon-btn" type="button" aria-label="关闭 Git 面板">×</button>
         </div>
@@ -317,6 +320,6 @@
     </div>
 
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=mobile-narrafork-1"></script>
+    <script src="/ui/app.js?v=autoto-agent-domain-1"></script>
   </body>
 </html>

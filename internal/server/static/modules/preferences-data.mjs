@@ -1,18 +1,68 @@
-export const recentDirectoriesKey = "codeharbor.recentDirectories";
-export const preferredModelKey = "codeharbor.preferredModel";
-export const modelVisibilityPrefsKey = "codeharbor.modelVisibility";
-export const profilePrefsKey = "codeharbor.profile";
-export const searchPrefsKey = "codeharbor.search";
-export const imGatewayPrefsKey = "codeharbor.imGateway";
-export const skillsPrefsKey = "codeharbor.skills";
-export const notificationPrefsKey = "codeharbor.notifications";
-export const appearancePrefsKey = "codeharbor.appearance";
-export const terminalPrefsKey = "codeharbor.terminal";
-export const chatDraftsKey = "codeharbor.chatDrafts";
-export const promptHistoryKey = "codeharbor.promptHistory";
-export const relayProtocolPrefsKey = "codeharbor.relayProtocol";
-export const localPreferenceBackupKind = "codeharbor.local-preferences";
+const canonicalLocalPreferencePrefix = "autoto.";
+const legacyLocalPreferencePrefix = "codeharbor.";
+
+export const recentDirectoriesKey = "autoto.recentDirectories";
+export const preferredModelKey = "autoto.preferredModel";
+export const modelVisibilityPrefsKey = "autoto.modelVisibility";
+export const profilePrefsKey = "autoto.profile";
+export const searchPrefsKey = "autoto.search";
+export const imGatewayPrefsKey = "autoto.imGateway";
+export const skillsPrefsKey = "autoto.skills";
+export const notificationPrefsKey = "autoto.notifications";
+export const appearancePrefsKey = "autoto.appearance";
+export const terminalPrefsKey = "autoto.terminal";
+export const chatDraftsKey = "autoto.chatDrafts";
+export const promptHistoryKey = "autoto.promptHistory";
+export const relayProtocolPrefsKey = "autoto.relayProtocol";
+export const localPreferenceBackupKind = "autoto.local-preferences";
+export const legacyLocalPreferenceBackupKind = "codeharbor.local-preferences";
 export const localPreferenceBackupVersion = 1;
+
+export const localPreferenceKeys = [
+  recentDirectoriesKey,
+  preferredModelKey,
+  modelVisibilityPrefsKey,
+  profilePrefsKey,
+  searchPrefsKey,
+  imGatewayPrefsKey,
+  skillsPrefsKey,
+  notificationPrefsKey,
+  appearancePrefsKey,
+  terminalPrefsKey,
+  chatDraftsKey,
+  promptHistoryKey,
+  relayProtocolPrefsKey,
+];
+
+export function legacyLocalPreferenceKey(key) {
+  const canonicalKey = String(key || "");
+  if (!canonicalKey.startsWith(canonicalLocalPreferencePrefix)) return "";
+  return `${legacyLocalPreferencePrefix}${canonicalKey.slice(canonicalLocalPreferencePrefix.length)}`;
+}
+
+export function readLocalPreference(key, storage = globalThis.localStorage) {
+  const canonicalKey = String(key || "");
+  const currentValue = storage.getItem(canonicalKey);
+  if (currentValue !== null) return currentValue;
+
+  const legacyKey = legacyLocalPreferenceKey(canonicalKey);
+  if (!legacyKey) return null;
+  const legacyValue = storage.getItem(legacyKey);
+  if (legacyValue === null) return null;
+
+  try {
+    storage.setItem(canonicalKey, legacyValue);
+  } catch {}
+  return legacyValue;
+}
+
+export function migrateLegacyLocalPreferences(storage = globalThis.localStorage) {
+  localPreferenceKeys.forEach((key) => {
+    try {
+      readLocalPreference(key, storage);
+    } catch {}
+  });
+}
 
 export const localPreferenceBackupKeys = [
   { key: profilePrefsKey, label: "个人资料", type: "json" },
@@ -32,10 +82,10 @@ export const localPreferenceBackupKeys = [
 export const defaultProfilePrefs = {
   displayName: "",
   roleLabel: "Local developer",
-  avatarInitials: "CH",
+  avatarInitials: "AT",
   gitName: "",
   gitEmail: "",
-  workspaceLabel: "CodeHarbor Local",
+  workspaceLabel: "Autoto Local",
 };
 
 export const defaultSearchPrefs = {
