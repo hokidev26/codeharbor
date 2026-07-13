@@ -401,4 +401,72 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL
+
+const automationAuditSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS automation_audit_events (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  subject_type TEXT,
+  subject_id TEXT,
+  outcome TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  CHECK (outcome IN ('success', 'failure', 'denied', 'error', 'unknown')),
+  CHECK (risk IN ('none', 'low', 'medium', 'high', 'critical'))
+);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_created ON automation_audit_events(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_category_action ON automation_audit_events(category, action, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_agent ON automation_audit_events(agent_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_run ON automation_audit_events(run_id, created_at DESC, id DESC);
+`
+
+const integrationConnectionsSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS integration_connections (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  endpoint TEXT NOT NULL DEFAULT '',
+  settings_json TEXT NOT NULL DEFAULT '{}',
+  secret_refs_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(kind, name),
+  CHECK (enabled IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_integration_connections_enabled ON integration_connections(enabled);
+CREATE INDEX IF NOT EXISTS idx_integration_connections_kind ON integration_connections(kind);
+`
+
+const memorySchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  keywords_json TEXT NOT NULL DEFAULT '[]',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (pinned IN (0, 1)),
+  CHECK (length(CAST(content AS BLOB)) BETWEEN 1 AND 16384)
+);
+CREATE INDEX IF NOT EXISTS idx_memories_pinned_updated ON memories(pinned DESC, updated_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived_at, updated_at DESC, id ASC);
+
+CREATE TABLE IF NOT EXISTS memory_injections (
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  injected_at TEXT NOT NULL,
+  PRIMARY KEY (memory_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_injections_agent ON memory_injections(agent_id, injected_at DESC, memory_id);
 `

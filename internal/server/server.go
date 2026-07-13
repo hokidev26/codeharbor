@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -11,9 +12,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	agentpkg "autoto/internal/agent"
+	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/preview"
 	"autoto/internal/providers"
+	"autoto/internal/tools"
 )
 
 type Server struct {
@@ -26,10 +30,14 @@ type Server struct {
 	remoteAccessToken   string
 	remoteAccessFailure map[string]remoteAccessFailure
 	remoteAccessMu      sync.Mutex
+	legacyWarnings      *compat.Registry
 	store               *db.Store
 	runner              *agentpkg.Runner
 	hub                 *agentpkg.Hub
 	providers           *providers.Registry
+	toolRegistry        *tools.Registry
+	toolRegistryMu      sync.RWMutex
+	previewManager      *preview.Manager
 	notifier            *WebhookNotifier
 }
 
@@ -45,11 +53,54 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		localToken:          newLocalToken(),
 		remoteAccessToken:   newLocalToken(),
 		remoteAccessFailure: make(map[string]remoteAccessFailure),
-		store:               store,
-		runner:              runner,
-		hub:                 hub,
-		providers:           providerRegistry,
+		legacyWarnings: compat.NewRegistry(func(usage compat.Usage) {
+			slog.Warn(
+				"legacy compatibility used",
+				"legacy", usage.Legacy,
+				"replacement", usage.Replacement,
+				"removalVersion", compat.RemovalVersion,
+			)
+		}),
+		store:        store,
+		runner:       runner,
+		hub:          hub,
+		providers:    providerRegistry,
+		toolRegistry: newCoreToolRegistry(),
 	}
+}
+
+func newCoreToolRegistry() *tools.Registry {
+	registry := tools.NewRegistry()
+	tools.RegisterCore(registry)
+	return registry
+}
+
+func (s *Server) SetToolRegistry(registry *tools.Registry) {
+	if registry == nil {
+		registry = newCoreToolRegistry()
+	}
+	s.toolRegistryMu.Lock()
+	defer s.toolRegistryMu.Unlock()
+	s.toolRegistry = registry
+}
+
+func (s *Server) toolRegistrySnapshot() *tools.Registry {
+	s.toolRegistryMu.RLock()
+	registry := s.toolRegistry
+	s.toolRegistryMu.RUnlock()
+	if registry != nil {
+		return registry
+	}
+
+	registry = newCoreToolRegistry()
+	s.toolRegistryMu.Lock()
+	if s.toolRegistry == nil {
+		s.toolRegistry = registry
+	} else {
+		registry = s.toolRegistry
+	}
+	s.toolRegistryMu.Unlock()
+	return registry
 }
 
 func (s *Server) SetConfigPath(path string) {
@@ -60,6 +111,22 @@ func (s *Server) SetConfigPath(path string) {
 
 func (s *Server) SetWebhookNotifier(notifier *WebhookNotifier) {
 	s.notifier = notifier
+}
+
+func (s *Server) SetPreviewManager(manager *preview.Manager) {
+	s.previewManager = manager
+}
+
+func (s *Server) warnLegacy(key, legacy, replacement, kind string) {
+	if s.legacyWarnings == nil {
+		return
+	}
+	s.legacyWarnings.Warn(compat.Usage{
+		Key:         key,
+		Legacy:      legacy,
+		Replacement: replacement,
+		Kind:        kind,
+	})
 }
 
 func (s *Server) configSnapshot() config.Config {
@@ -84,6 +151,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/runtime/summary", s.runtimeSummary)
 	r.Get("/api/storage/summary", s.storageSummary)
 	r.Get("/api/usage/summary", s.usageSummary)
+	r.Get("/api/navigation", s.navigation)
 	r.Put("/api/providers/{name}/config", s.updateProviderConfig)
 	r.Get("/api/providers/{name}/auth-files", s.listProviderAuthFiles)
 	r.Post("/api/providers/{name}/auth-files/import", s.importProviderAuthFile)
@@ -95,6 +163,13 @@ func (s *Server) Routes() http.Handler {
 		r.Delete("/{id}", s.deleteBackend)
 		r.Post("/{id}/activate", s.activateBackend)
 		r.Get("/{id}/health", s.backendHealth)
+	})
+	r.Route("/api/memories", func(r chi.Router) {
+		r.Get("/", s.listMemories)
+		r.Post("/", s.createMemory)
+		r.Get("/{id}", s.getMemory)
+		r.Patch("/{id}", s.updateMemory)
+		r.Delete("/{id}", s.deleteMemory)
 	})
 	r.Route("/api/skills", func(r chi.Router) {
 		r.Get("/", s.listSkills)
@@ -190,6 +265,14 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/git/diff", s.gitDiff)
 		r.Get("/{id}/git/log", s.gitLog)
 		r.Post("/{id}/git/commit", s.gitCommit)
+		r.Get("/{id}/workspace/tree", s.workspaceTree)
+		r.Get("/{id}/workspace/file", s.workspaceFile)
+		r.Put("/{id}/workspace/file", s.updateWorkspaceFile)
+		r.Get("/{id}/preview/detect", s.detectPreview)
+		r.Post("/{id}/preview/start", s.startPreview)
+		r.Post("/{id}/preview/stop", s.stopPreview)
+		r.Get("/{id}/preview/status", s.previewStatus)
+		r.Get("/{id}/preview/logs", s.previewLogs)
 	}
 	r.Route("/api/agents", agentRoutes)
 	r.Route("/api/narrators", agentRoutes)

@@ -85,21 +85,31 @@ func (s *Server) validateWebSocketRequest(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) validHeaderToken(r *http.Request) bool {
-	return validTokenFromHeaders(r, s.localToken, localTokenHeader, legacyLocalTokenHeader)
+	valid, legacy := validTokenFromHeadersWithSource(r, s.localToken, localTokenHeader, legacyLocalTokenHeader)
+	if valid && legacy {
+		s.warnLegacy("credential:"+legacyLocalTokenHeader, legacyLocalTokenHeader, localTokenHeader, "request-header")
+	}
+	return valid
 }
 
 func (s *Server) validWebSocketToken(r *http.Request) bool {
 	if constantTimeEqualToken(r.URL.Query().Get(localTokenQuery), s.localToken) {
 		return true
 	}
-	return validTokenFromHeaders(r, s.localToken, localTokenHeader, legacyLocalTokenHeader)
+	return s.validHeaderToken(r)
 }
 
 func validTokenFromHeaders(r *http.Request, want string, canonicalName, legacyName string) bool {
+	valid, _ := validTokenFromHeadersWithSource(r, want, canonicalName, legacyName)
+	return valid
+}
+
+func validTokenFromHeadersWithSource(r *http.Request, want string, canonicalName, legacyName string) (bool, bool) {
 	if canonicalValue := strings.TrimSpace(r.Header.Get(canonicalName)); canonicalValue != "" {
-		return constantTimeEqualToken(canonicalValue, want)
+		return constantTimeEqualToken(canonicalValue, want), false
 	}
-	return constantTimeEqualToken(r.Header.Get(legacyName), want)
+	valid := constantTimeEqualToken(r.Header.Get(legacyName), want)
+	return valid, valid
 }
 
 func constantTimeEqualToken(got, want string) bool {
@@ -268,7 +278,7 @@ func (s *Server) handleRemoteAccessLogout(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if s.validRemoteAccess(r) {
+	if s.validRemoteAccessWithoutWarning(r) {
 		s.clearRemoteAccessFailures(r)
 	}
 	s.clearRemoteAccessCookie(w, r)
@@ -467,16 +477,32 @@ func headerClientIP(value string) string {
 }
 
 func (s *Server) validRemoteAccess(r *http.Request) bool {
+	return s.validRemoteAccessReporting(r, true)
+}
+
+func (s *Server) validRemoteAccessWithoutWarning(r *http.Request) bool {
+	return s.validRemoteAccessReporting(r, false)
+}
+
+func (s *Server) validRemoteAccessReporting(r *http.Request, warn bool) bool {
 	password := strings.TrimSpace(s.configSnapshot().Security.AccessPassword)
 	if password == "" {
 		return false
 	}
-	for _, name := range []string{remoteAccessCookieName, legacyRemoteAccessCookieName} {
-		if cookie, err := r.Cookie(name); err == nil && constantTimeEqualToken(cookie.Value, s.remoteAccessToken) {
+	if cookie, err := r.Cookie(remoteAccessCookieName); err == nil {
+		if constantTimeEqualToken(cookie.Value, s.remoteAccessToken) {
 			return true
 		}
+	} else if legacyCookie, legacyErr := r.Cookie(legacyRemoteAccessCookieName); legacyErr == nil && constantTimeEqualToken(legacyCookie.Value, s.remoteAccessToken) {
+		if warn {
+			s.warnLegacy("credential:"+legacyRemoteAccessCookieName, legacyRemoteAccessCookieName, remoteAccessCookieName, "cookie")
+		}
+		return true
 	}
-	if validTokenFromHeaders(r, password, remoteAccessHeader, legacyRemoteAccessHeader) {
+	if valid, legacy := validTokenFromHeadersWithSource(r, password, remoteAccessHeader, legacyRemoteAccessHeader); valid {
+		if warn && legacy {
+			s.warnLegacy("credential:"+legacyRemoteAccessHeader, legacyRemoteAccessHeader, remoteAccessHeader, "request-header")
+		}
 		return true
 	}
 	bearer := strings.TrimSpace(r.Header.Get("Authorization"))

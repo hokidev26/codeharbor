@@ -2,6 +2,7 @@ package tools
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
@@ -35,6 +36,17 @@ func (r *Registry) List() []Tool {
 		out = append(out, tool)
 	}
 	return out
+}
+
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (r *Registry) MustGet(name string) (Tool, error) {

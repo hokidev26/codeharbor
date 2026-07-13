@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,9 +41,10 @@ type skillDeleteV2Request struct {
 }
 
 type skillRestoreRequest struct {
-	RevisionNo        int64  `json:"revisionNo"`
-	ExpectedUpdatedAt string `json:"expectedUpdatedAt"`
-	AcknowledgeRisk   bool   `json:"acknowledgeRisk"`
+	RevisionNo              int64  `json:"revisionNo"`
+	ExpectedUpdatedAt       string `json:"expectedUpdatedAt"`
+	AcknowledgeRisk         bool   `json:"acknowledgeRisk"`
+	AcknowledgedContentHash string `json:"acknowledgedContentHash"`
 }
 
 func skillScopeTargetFromRequest(scope, projectID, worklineID *string) db.SkillScopeTarget {
@@ -65,6 +67,29 @@ func skillScopeTargetFromQuery(r *http.Request) db.SkillScopeTarget {
 		ProjectID:  strings.TrimSpace(r.URL.Query().Get("projectId")),
 		WorklineID: strings.TrimSpace(r.URL.Query().Get("worklineId")),
 	}
+}
+
+func hasSkillScopeTargetQuery(r *http.Request) bool {
+	query := r.URL.Query()
+	return query.Has("scope") || query.Has("projectId") || query.Has("worklineId")
+}
+
+func skillScopeTargetMatchesSkill(target db.SkillScopeTarget, skill db.Skill) bool {
+	scope := strings.TrimSpace(target.Scope)
+	if scope == "" {
+		scope = db.SkillScopeGlobal
+	}
+	return scope == skill.Scope && strings.TrimSpace(target.ProjectID) == skill.ProjectID && strings.TrimSpace(target.WorklineID) == skill.WorklineID
+}
+
+func validateSkillRequestContext(r *http.Request, skill db.Skill) error {
+	if !hasSkillScopeTargetQuery(r) {
+		return nil
+	}
+	if !skillScopeTargetMatchesSkill(skillScopeTargetFromQuery(r), skill) {
+		return db.ErrConflict
+	}
+	return nil
 }
 
 func skillPageParams(r *http.Request) (int, string) {
@@ -124,6 +149,9 @@ func (s *Server) createSkillV2(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSkillV2(w http.ResponseWriter, r *http.Request) {
 	skill, err := s.store.GetSkill(r.Context(), chi.URLParam(r, "id"))
+	if err == nil {
+		err = validateSkillRequestContext(r, skill)
+	}
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
@@ -134,6 +162,9 @@ func (s *Server) getSkillV2(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateSkillV2(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	existing, err := s.store.GetSkill(r.Context(), id)
+	if err == nil {
+		err = validateSkillRequestContext(r, existing)
+	}
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
@@ -195,12 +226,21 @@ func (s *Server) updateSkillV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteSkillV2(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	current, err := s.store.GetSkill(r.Context(), id)
+	if err == nil {
+		err = validateSkillRequestContext(r, current)
+	}
+	if err != nil {
+		writeError(w, statusFromSkillError(err), err.Error())
+		return
+	}
 	var req skillDeleteV2Request
 	if err := decodeSkillJSON(w, r, &req); err != nil {
 		writeError(w, statusFromSkillDecodeError(err), err.Error())
 		return
 	}
-	deleted, err := s.store.DeleteSkillCAS(r.Context(), chi.URLParam(r, "id"), req.ExpectedUpdatedAt, "api_request")
+	deleted, err := s.store.DeleteSkillCAS(r.Context(), id, req.ExpectedUpdatedAt, "api_request")
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
@@ -238,8 +278,17 @@ func (s *Server) importSkillV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSkillRevisionsV2(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	skill, err := s.store.GetSkillIncludingDeleted(r.Context(), id)
+	if err == nil {
+		err = validateSkillRequestContext(r, skill)
+	}
+	if err != nil {
+		writeError(w, statusFromSkillError(err), err.Error())
+		return
+	}
 	limit, cursor := skillPageParams(r)
-	page, err := s.store.ListSkillRevisionsPage(r.Context(), chi.URLParam(r, "id"), limit, cursor)
+	page, err := s.store.ListSkillRevisionsPage(r.Context(), id, limit, cursor)
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
@@ -248,12 +297,21 @@ func (s *Server) listSkillRevisionsV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSkillRevisionV2(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	current, err := s.store.GetSkillIncludingDeleted(r.Context(), id)
+	if err == nil {
+		err = validateSkillRequestContext(r, current)
+	}
+	if err != nil {
+		writeError(w, statusFromSkillError(err), err.Error())
+		return
+	}
 	revisionNo, err := strconv.ParseInt(chi.URLParam(r, "revisionNo"), 10, 64)
 	if err != nil || revisionNo < 1 {
 		writeError(w, http.StatusBadRequest, "invalid revision number")
 		return
 	}
-	revision, err := s.store.GetSkillRevision(r.Context(), chi.URLParam(r, "id"), revisionNo)
+	revision, err := s.store.GetSkillRevision(r.Context(), id, revisionNo)
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
@@ -262,6 +320,15 @@ func (s *Server) getSkillRevisionV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restoreSkillV2(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	current, err := s.store.GetSkillIncludingDeleted(r.Context(), id)
+	if err == nil {
+		err = validateSkillRequestContext(r, current)
+	}
+	if err != nil {
+		writeError(w, statusFromSkillError(err), err.Error())
+		return
+	}
 	var req skillRestoreRequest
 	if err := decodeSkillJSON(w, r, &req); err != nil {
 		writeError(w, statusFromSkillDecodeError(err), err.Error())
@@ -279,8 +346,20 @@ func (s *Server) restoreSkillV2(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "revisionNo and expectedUpdatedAt are required")
 		return
 	}
-	restored, err := s.store.RestoreSkillAs(r.Context(), chi.URLParam(r, "id"), req.RevisionNo, req.ExpectedUpdatedAt, req.AcknowledgeRisk, "api_request")
+	restored, err := s.store.RestoreSkillAs(r.Context(), id, req.RevisionNo, req.ExpectedUpdatedAt, req.AcknowledgeRisk, req.AcknowledgedContentHash, "api_request")
 	if err != nil {
+		var challenge *db.SkillRestoreReviewRequiredError
+		if errors.As(err, &challenge) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":          err.Error(),
+				"code":           "skill_restore_review_required",
+				"scanVerdict":    challenge.ScanVerdict,
+				"scanFindings":   challenge.ScanFindings,
+				"contentHash":    challenge.ContentHash,
+				"scannerVersion": challenge.ScannerVersion,
+			})
+			return
+		}
 		writeError(w, statusFromSkillError(err), err.Error())
 		return
 	}
@@ -289,8 +368,15 @@ func (s *Server) restoreSkillV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEffectiveSkillsV2(w http.ResponseWriter, r *http.Request) {
+	agentID := chi.URLParam(r, "id")
+	if hasSkillScopeTargetQuery(r) {
+		if err := s.store.ValidateEffectiveSkillContext(r.Context(), agentID, skillScopeTargetFromQuery(r)); err != nil {
+			writeError(w, statusFromSkillError(err), err.Error())
+			return
+		}
+	}
 	limit, cursor := skillPageParams(r)
-	page, err := s.store.ListEffectiveSkillsPage(r.Context(), chi.URLParam(r, "id"), limit, cursor)
+	page, err := s.store.ListEffectiveSkillsPage(r.Context(), agentID, limit, cursor)
 	if err != nil {
 		writeError(w, statusFromSkillError(err), err.Error())
 		return

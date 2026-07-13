@@ -3,6 +3,7 @@ export const settingsSections = [
     title: "个人设置",
     items: [
       { key: "profile", icon: "♙", label: "个人资料", subtitle: "管理当前用户的显示信息、头像与身份。" },
+      { key: "memory", icon: "◈", label: "记忆", subtitle: "管理跨会话保留并按关键词注入的长期记忆。" },
       { key: "models", icon: "⚙", label: "模型", subtitle: "配置默认模型、模型列表与推理偏好。" },
       { key: "agents", icon: "♧", label: "AI 代理", subtitle: "设置代理默认行为、权限模式与运行策略。" },
       { key: "skills", icon: "✦", label: "技能", subtitle: "管理技能、命令和 MCP 工具，增强你的 AI 工作流。" },

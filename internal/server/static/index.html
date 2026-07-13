@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoto</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=desktop-toolbar-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1" />
   </head>
-  <body>
+  <body class="theme-light white-shell ui-density-comfortable">
     <main id="appShell" class="app-shell terminal-collapsed">
       <header class="mobile-topbar">
         <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单">☰</button>
@@ -16,36 +16,66 @@
         <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索">⌕</button>
       </header>
       <button id="mobileSidebarBackdrop" class="mobile-backdrop hidden" type="button" aria-label="关闭菜单"></button>
-      <aside class="sidebar">
+      <aside class="global-rail" aria-label="全局导航">
+        <div class="global-rail-brand" aria-label="AUTOTO">
+          <span class="global-rail-brand-mark" aria-hidden="true">A</span>
+          <span class="global-rail-brand-text">AUTOTO</span>
+        </div>
+        <nav class="global-rail-nav" aria-label="主要功能">
+          <button class="global-rail-button active" type="button" data-global-rail-target="conversation" aria-pressed="true" title="对话">
+            <span class="global-rail-icon" aria-hidden="true">◫</span><span class="global-rail-label">对话</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="skills" aria-pressed="false" title="技能">
+            <span class="global-rail-icon" aria-hidden="true">✦</span><span class="global-rail-label">技能</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="runtime" aria-pressed="false" title="监控">
+            <span class="global-rail-icon" aria-hidden="true">◎</span><span class="global-rail-label">监控</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="im-gateway" aria-pressed="false" title="家电">
+            <span class="global-rail-icon" aria-hidden="true">⌂</span><span class="global-rail-label">家电</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="agents" aria-pressed="false" title="员工">
+            <span class="global-rail-icon" aria-hidden="true">♧</span><span class="global-rail-label">员工</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="profile" aria-pressed="false" title="设置">
+            <span class="global-rail-icon" aria-hidden="true">⚙</span><span class="global-rail-label">设置</span>
+          </button>
+        </nav>
+      </aside>
+      <aside class="sidebar" aria-label="会话栏">
         <div class="mobile-drawer-header" aria-label="移动端菜单标题栏">
           <button id="mobileSidebarCloseBtn" class="mobile-icon-btn mobile-drawer-close-btn" type="button" title="关闭菜单" aria-label="关闭菜单">×</button>
           <div class="mobile-update-pill drawer-update-pill" aria-label="版本更新"><span class="mobile-update-icon">♙</span><span id="mobileDrawerVersionChip">更新: v0.1.0 → …</span></div>
           <div class="mobile-drawer-brand">Autoto</div>
           <button id="mobileDrawerSearchBtn" class="mobile-icon-btn mobile-drawer-search-btn" type="button" title="搜索项目或目录" aria-label="搜索项目或目录">⌕</button>
         </div>
-        <div class="brand-row">
-          <div>
-            <div class="brand">Autoto</div>
+        <header class="session-sidebar-header">
+          <div class="session-sidebar-heading">
+            <div class="session-sidebar-title">会话</div>
             <div id="healthBadge" class="status-text">checking</div>
           </div>
-          <button id="refreshBtn" class="icon-btn" type="button" title="刷新">↻</button>
-        </div>
-
-        <nav class="nav-stack">
-          <button class="nav-item" type="button">▣ 工作线</button>
-          <div class="nav-item-shell selected">
-            <button class="nav-item nav-item-main" type="button">☻ AI 代理</button>
-            <button id="projectSearchToggleBtn" class="nav-inline-action" type="button" title="搜索项目或目录" aria-label="搜索项目或目录">⌕</button>
-            <button id="newProjectBtn" class="nav-inline-action" type="button" title="选择资料夹开始对话" aria-label="选择资料夹开始对话" data-open-directory-shortcut="new">＋</button>
+          <div class="session-sidebar-actions" aria-label="会话操作">
+            <button id="projectSearchToggleBtn" class="icon-btn session-sidebar-action" type="button" title="搜索项目或目录" aria-label="搜索项目或目录">⌕</button>
+            <button id="newProjectBtn" class="icon-btn session-sidebar-action" type="button" title="选择资料夹开始对话" aria-label="选择资料夹开始对话" data-open-directory-shortcut="new">＋</button>
+            <button id="refreshBtn" class="icon-btn session-sidebar-action" type="button" title="刷新会话" aria-label="刷新会话">↻</button>
           </div>
-        </nav>
+        </header>
 
         <section class="sidebar-section agent-list-section">
+          <div id="navigationFilters" class="navigation-filters" role="group" aria-label="导航筛选">
+            <button class="navigation-filter active" type="button" data-navigation-mode="all" aria-pressed="true">全部</button>
+            <button class="navigation-filter" type="button" data-navigation-mode="projects" aria-pressed="false">项目</button>
+            <button class="navigation-filter" type="button" data-navigation-mode="conversations" aria-pressed="false">会话</button>
+          </div>
           <div id="projectSearchWrap" class="sidebar-search-wrap hidden">
-            <input id="projectSearch" class="sidebar-search" placeholder="搜索项目或目录..." />
+            <input id="projectSearch" class="sidebar-search" placeholder="搜索项目、工作线、Agent 或模型..." aria-label="搜索项目、工作线、Agent 或模型" />
             <button id="projectSearchClearBtn" class="sidebar-search-clear" type="button" aria-label="关闭搜索">×</button>
           </div>
-          <div id="projects" class="project-list"></div>
+          <div id="projects" class="project-list navigation-list"></div>
+          <div class="recent-sidebar recent-conversations-sidebar">
+            <div class="recent-title">最近会话</div>
+            <div id="recentSidebarConversations" class="recent-list"></div>
+          </div>
           <div class="recent-sidebar">
             <div class="recent-title">最近目录</div>
             <div id="recentSidebarDirectories" class="recent-list"></div>
@@ -118,6 +148,7 @@
             <span id="securityModeBadge" class="pill security-mode-pill">本地</span>
             <div class="header-tool-group" aria-label="工作区操作">
               <button id="openFolderBtn" class="icon-btn header-tool-btn primary" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-open-directory-shortcut="current">□</button>
+              <button id="workspaceExplorerBtn" class="icon-btn header-tool-btn" type="button" title="请先选择 Agent" aria-label="打开工作区文件和预览" aria-expanded="false" aria-controls="workspaceModal" disabled>▤</button>
               <button id="gitWorkflowBtn" class="icon-btn header-tool-btn" type="button" title="查看 Git 变更" aria-label="查看 Git 变更" disabled>⑂</button>
               <button id="copyConversationBtn" class="icon-btn header-tool-btn" type="button" title="复制当前对话 Markdown" aria-label="复制当前对话 Markdown" disabled>⧉</button>
               <button id="toggleTerminalBtn" class="icon-btn header-tool-btn" type="button" title="收起/展开终端" aria-label="收起/展开终端">▣</button>
@@ -138,19 +169,6 @@
 
         <footer class="composer-wrap">
           <form id="messageForm" class="composer-card">
-            <div id="pendingAttachments" class="pending-attachments hidden" aria-live="polite"></div>
-            <div id="composerInputShell" class="composer-input-shell">
-              <div class="composer-attach-wrap" title="导入文件到聊天框">
-                <button id="attachFileBtn" class="composer-attach-btn" type="button" tabindex="-1" aria-hidden="true">＋</button>
-                <input id="attachFileInput" class="attachment-native-input" type="file" multiple aria-label="导入文件到聊天框" />
-              </div>
-              <div class="message-input-frame">
-                <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息…" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
-              </div>
-              <button id="sendMessageBtn" class="send-btn round composer-send-btn" type="submit" title="发送" aria-label="发送消息">↵</button>
-            </div>
-            <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
-            <div id="promptHistoryHint" class="prompt-history-hint"></div>
             <div class="composer-toolbar">
               <div class="composer-status" aria-live="polite" title="连接状态">
                 <span id="composerStatusDot" class="composer-status-dot"></span>
@@ -174,6 +192,19 @@
                 <button id="composerTerminalBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="收起/展开终端" aria-label="收起/展开终端">›_</button>
               </div>
             </div>
+            <div id="pendingAttachments" class="pending-attachments hidden" aria-live="polite"></div>
+            <div id="composerInputShell" class="composer-input-shell">
+              <div class="composer-attach-wrap" title="导入文件到聊天框">
+                <button id="attachFileBtn" class="composer-attach-btn" type="button" tabindex="-1" aria-hidden="true">＋</button>
+                <input id="attachFileInput" class="attachment-native-input" type="file" multiple aria-label="导入文件到聊天框" />
+              </div>
+              <div class="message-input-frame">
+                <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息…" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
+              </div>
+              <button id="sendMessageBtn" class="send-btn round composer-send-btn" type="submit" title="发送" aria-label="发送消息">↵</button>
+            </div>
+            <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
+            <div id="promptHistoryHint" class="prompt-history-hint"></div>
           </form>
         </footer>
       </section>
@@ -319,7 +350,82 @@
       </div>
     </div>
 
+    <div id="workspaceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="workspaceModalTitle">
+      <div class="modal-card workspace-modal-card">
+        <header class="workspace-modal-head">
+          <div class="workspace-modal-heading">
+            <div id="workspaceModalTitle" class="modal-title">工作区</div>
+            <div id="workspaceModalSubtitle" class="modal-path">当前 Agent 工作目录</div>
+          </div>
+          <div class="workspace-tabs" role="tablist" aria-label="工作区面板">
+            <button id="workspaceFilesTab" class="workspace-tab active" type="button" role="tab" aria-selected="true" aria-controls="workspaceFilesPanel">文件</button>
+            <button id="workspacePreviewTab" class="workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="workspacePreviewPanel">Preview</button>
+          </div>
+          <button id="closeWorkspaceModalBtn" class="workspace-close-btn" type="button" aria-label="关闭工作区">×</button>
+        </header>
+
+        <section id="workspaceFilesPanel" class="workspace-files-panel" role="tabpanel" aria-labelledby="workspaceFilesTab">
+          <aside class="workspace-tree-panel">
+            <div class="workspace-tree-toolbar">
+              <button id="workspaceParentBtn" class="workspace-tool-btn" type="button" title="返回上级目录" aria-label="返回上级目录">↑</button>
+              <div id="workspaceTreePath" class="workspace-tree-path" title="当前相对路径">/</div>
+              <button id="workspaceRefreshTreeBtn" class="workspace-tool-btn" type="button" title="刷新目录" aria-label="刷新目录">↻</button>
+            </div>
+            <div id="workspaceTree" class="workspace-tree" aria-live="polite">
+              <div class="workspace-empty-state">打开工作区后加载文件。</div>
+            </div>
+          </aside>
+
+          <section class="workspace-editor-panel">
+            <div class="workspace-editor-head">
+              <div class="workspace-editor-heading">
+                <div id="workspaceEditorPath" class="workspace-editor-path">未选择文件</div>
+                <div id="workspaceEditorStatus" class="workspace-editor-status" aria-live="polite">请选择左侧文件。</div>
+              </div>
+              <div class="workspace-editor-actions">
+                <button id="workspaceReloadFileBtn" class="workspace-secondary-btn" type="button" disabled>重新加载</button>
+                <button id="workspaceSaveFileBtn" class="workspace-primary-btn" type="button" disabled>保存</button>
+              </div>
+            </div>
+            <textarea id="workspaceEditor" class="workspace-editor" aria-label="工作区文本编辑器" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="从左侧选择可编辑文本文件" readonly></textarea>
+          </section>
+        </section>
+
+        <section id="workspacePreviewPanel" class="workspace-preview-panel hidden" role="tabpanel" aria-labelledby="workspacePreviewTab">
+          <div class="workspace-preview-toolbar">
+            <label class="workspace-preview-field">
+              <span>Profile</span>
+              <select id="workspacePreviewProfile" class="workspace-preview-select" aria-label="预览配置" disabled>
+                <option value="">未检测到预览配置</option>
+              </select>
+            </label>
+            <label class="workspace-preview-field workspace-preview-port-field">
+              <span>端口（可选）</span>
+              <input id="workspacePreviewPort" class="workspace-preview-port" type="number" min="1" max="65535" inputmode="numeric" placeholder="自动" />
+            </label>
+            <div class="workspace-preview-actions">
+              <button id="workspaceDetectPreviewBtn" class="workspace-secondary-btn" type="button">重新检测</button>
+              <button id="workspaceStartPreviewBtn" class="workspace-primary-btn" type="button" disabled>启动</button>
+              <button id="workspaceStopPreviewBtn" class="workspace-secondary-btn danger" type="button" disabled>停止</button>
+              <button id="workspaceOpenPreviewBtn" class="workspace-secondary-btn" type="button" disabled>外部打开</button>
+            </div>
+            <div id="workspacePreviewStatus" class="workspace-preview-status" aria-live="polite">预览未启动</div>
+          </div>
+          <div id="workspacePreviewError" class="workspace-preview-error hidden" role="alert"></div>
+          <div class="workspace-preview-layout">
+            <div id="workspacePreviewFrameHost" class="workspace-preview-frame-host">
+              <div class="workspace-preview-empty">启动预览后会在此处显示页面。</div>
+            </div>
+            <aside class="workspace-preview-log-panel">
+              <div class="workspace-preview-log-title">预览日志（最近 400 行）</div>
+              <pre id="workspacePreviewLogs" class="workspace-preview-logs">暂无预览日志。</pre>
+            </aside>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=autoto-agent-domain-1"></script>
+    <script src="/ui/app.js?v=white-shell-2-workspace-1"></script>
   </body>
 </html>

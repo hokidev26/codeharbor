@@ -2,6 +2,7 @@ const canonicalLocalPreferencePrefix = "autoto.";
 const legacyLocalPreferencePrefix = "codeharbor.";
 
 export const recentDirectoriesKey = "autoto.recentDirectories";
+export const recentConversationsKey = "autoto.recentConversations";
 export const preferredModelKey = "autoto.preferredModel";
 export const modelVisibilityPrefsKey = "autoto.modelVisibility";
 export const profilePrefsKey = "autoto.profile";
@@ -20,6 +21,7 @@ export const localPreferenceBackupVersion = 1;
 
 export const localPreferenceKeys = [
   recentDirectoriesKey,
+  recentConversationsKey,
   preferredModelKey,
   modelVisibilityPrefsKey,
   profilePrefsKey,
@@ -75,6 +77,7 @@ export const localPreferenceBackupKeys = [
   { key: chatDraftsKey, label: "聊天草稿", type: "json" },
   { key: promptHistoryKey, label: "提示词历史", type: "json" },
   { key: recentDirectoriesKey, label: "最近目录", type: "json" },
+  { key: recentConversationsKey, label: "最近会话", type: "json" },
   { key: preferredModelKey, label: "首选模型", type: "string" },
   { key: relayProtocolPrefsKey, label: "中转协议", type: "string" },
 ];
@@ -152,8 +155,11 @@ export const defaultNotificationPrefs = {
   duration: "normal",
 };
 
+export const appearanceStyleVersion = 2;
+
 export const defaultAppearancePrefs = {
-  theme: "dark",
+  styleVersion: appearanceStyleVersion,
+  theme: "light",
   density: "comfortable",
   terminalDefaultOpen: false,
   showEventLog: true,

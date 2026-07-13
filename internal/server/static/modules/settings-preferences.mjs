@@ -1,6 +1,7 @@
 import { $ } from "./dom.mjs";
 import {
   appearancePrefsKey,
+  appearanceStyleVersion,
   chatDraftsKey,
   defaultAppearancePrefs,
   defaultIMGatewayPrefs,
@@ -422,16 +423,29 @@ export function createSettingsPreferencesController({
 
   function loadAppearancePreferences() {
     try {
-      return normalizeAppearancePreferences(JSON.parse(safeReadLocalPreference(appearancePrefsKey) || "{}"));
+      const raw = safeReadLocalPreference(appearancePrefsKey);
+      const value = JSON.parse(raw || "{}");
+      const normalized = normalizeAppearancePreferences(value);
+      if (raw !== null && Number(value?.styleVersion || 0) < appearanceStyleVersion) {
+        try {
+          localStorage.setItem(appearancePrefsKey, JSON.stringify(normalized));
+        } catch {}
+      }
+      return normalized;
     } catch {
       return normalizeAppearancePreferences({});
     }
   }
 
   function normalizeAppearancePreferences(value = {}) {
-    const theme = ["dark", "light"].includes(value.theme) ? value.theme : defaultAppearancePrefs.theme;
+    const sourceStyleVersion = Number(value.styleVersion || 0);
+    const requestedTheme = ["dark", "light"].includes(value.theme) ? value.theme : defaultAppearancePrefs.theme;
+    const theme = sourceStyleVersion >= appearanceStyleVersion || requestedTheme === "light"
+      ? requestedTheme
+      : defaultAppearancePrefs.theme;
     const density = ["comfortable", "compact"].includes(value.density) ? value.density : defaultAppearancePrefs.density;
     return {
+      styleVersion: appearanceStyleVersion,
       theme,
       density,
       terminalDefaultOpen: value.terminalDefaultOpen !== undefined ? Boolean(value.terminalDefaultOpen) : defaultAppearancePrefs.terminalDefaultOpen,
@@ -445,7 +459,7 @@ export function createSettingsPreferencesController({
   }
 
   function saveAppearancePreferences(next, { applyTerminalDefault = false, notify = false } = {}) {
-    state.appearance = normalizeAppearancePreferences(next);
+    state.appearance = normalizeAppearancePreferences({ ...next, styleVersion: appearanceStyleVersion });
     try {
       localStorage.setItem(appearancePrefsKey, JSON.stringify(state.appearance));
     } catch {}

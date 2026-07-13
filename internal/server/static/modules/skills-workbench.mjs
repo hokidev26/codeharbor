@@ -2,6 +2,55 @@ import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { normalizeSlashCommandName } from "./skills-commands.mjs";
 import { skillTabs } from "./settings-data.mjs";
 
+function currentRestoreReviewChallenge(error) {
+  const body = error?.body;
+  const contentHash = String(body?.contentHash || "").trim();
+  const scannerVersion = Number(body?.scannerVersion);
+  if (
+    error?.status !== 409
+    || body?.code !== "skill_restore_review_required"
+    || String(body?.scanVerdict || "").toLowerCase() !== "review"
+    || !Array.isArray(body?.scanFindings)
+    || !contentHash
+    || !Number.isSafeInteger(scannerVersion)
+    || scannerVersion < 1
+  ) return null;
+  return {
+    scanVerdict: "review",
+    scanFindings: body.scanFindings,
+    contentHash,
+    scannerVersion,
+  };
+}
+
+export function isCurrentRestoreReviewConflict(error) {
+  return Boolean(currentRestoreReviewChallenge(error));
+}
+
+export function formatRestoreReviewChallenge(challenge) {
+  const hash = challenge.contentHash.length > 16 ? `${challenge.contentHash.slice(0, 16)}…` : challenge.contentHash;
+  const findings = challenge.scanFindings.length
+    ? challenge.scanFindings.map((finding) => {
+      const code = String(finding?.code || "scan");
+      const severity = String(finding?.severity || challenge.scanVerdict);
+      const message = String(finding?.message || "需要人工复核");
+      return `- [${severity}] ${code}: ${message}`;
+    }).join("\n")
+    : "- 当前 scanner 未返回 findings 文本";
+  return `服务端已用当前 scanner 重新扫描，此版本结论为 review。\n\nScanner version: ${challenge.scannerVersion}\nContent hash: ${hash}\nFindings:\n${findings}\n\n确认已阅读以上当前扫描结果并再次恢复？`;
+}
+
+export async function restoreRevisionWithCurrentRiskConfirmation(restore, confirmRisk) {
+  try {
+    return await restore({ acknowledgeRisk: false, acknowledgedContentHash: "" });
+  } catch (error) {
+    const challenge = currentRestoreReviewChallenge(error);
+    if (!challenge) throw error;
+    if (!confirmRisk?.(formatRestoreReviewChallenge(challenge), challenge)) return null;
+    return restore({ acknowledgeRisk: true, acknowledgedContentHash: challenge.contentHash });
+  }
+}
+
 export function createSkillsWorkbenchController({
   state,
   bindMCPRegistryActions,
@@ -132,7 +181,7 @@ export function createSkillsWorkbenchController({
       <section class="settings-provider-section highlighted skills-v2-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">服务端 Skills（Phase B）</div>
+            <div class="settings-provider-title">服务端 Skills（作用域与修订）</div>
             <div class="settings-provider-meta">${escapeHtml(skillContextLabel(context))} · 快照 ${escapeHtml(String(bucket.snapshotSequence ?? "—"))}</div>
           </div>
           <div class="skill-workbench-actions">
@@ -494,12 +543,15 @@ export function createSkillsWorkbenchController({
     const revision = revisions.find((item) => String(item.revisionNo ?? item.revision) === String(revisionNo));
     if (!revision) throw new Error("技能修订版本不存在");
     const current = bucket.items.find((item) => item.id === skillId);
-    await skillsPhaseB.restoreRevision(skillId, revision, context, {
-      expectedUpdatedAt: current?.updatedAt,
-      acknowledgeRisk: String(revision.scanVerdict || "").toLowerCase() === "review",
-    });
-    await skillsPhaseB.loadRevisions(skillId, context);
-    rerenderSkillPanel();
+    const restored = await restoreRevisionWithCurrentRiskConfirmation(
+      ({ acknowledgeRisk, acknowledgedContentHash }) => skillsPhaseB.restoreRevision(skillId, revision, context, {
+        expectedUpdatedAt: current?.updatedAt,
+        acknowledgeRisk,
+        acknowledgedContentHash,
+      }),
+      (message) => window.confirm(message),
+    );
+    if (restored) rerenderSkillPanel();
   }
 
   function closeSkillRevisionDrawer() {

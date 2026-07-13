@@ -3,6 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +19,86 @@ func TestResolveInCWDRejectsEscape(t *testing.T) {
 	_, err := resolveInCWD(t.TempDir(), "../outside.txt")
 	if err == nil {
 		t.Fatal("expected escape error")
+	}
+}
+
+func TestResolveInCWDRejectsFileSymlinkEscape(t *testing.T) {
+	cwd := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cwd, "link.txt")
+	requireSymlink(t, outside, link)
+
+	_, err := resolveInCWD(cwd, "link.txt")
+	if err == nil || !strings.Contains(err.Error(), "escapes working directory") {
+		t.Fatalf("expected symlink escape error, got %v", err)
+	}
+	if strings.Contains(err.Error(), outside) {
+		t.Fatalf("error leaked resolved target: %v", err)
+	}
+}
+
+func TestWriteToolRejectsDirectorySymlinkEscape(t *testing.T) {
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	requireSymlink(t, outside, filepath.Join(cwd, "linked-dir"))
+
+	input, _ := json.Marshal(map[string]string{"file_path": "linked-dir/new.txt", "content": "blocked"})
+	result, err := (WriteTool{}).Execute(context.Background(), Call{ID: "w-symlink-escape", Name: "Write", Input: input}, Env{CWD: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Output, "escapes working directory") {
+		t.Fatalf("expected directory symlink escape rejection, got %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside file should not exist, stat error: %v", err)
+	}
+}
+
+func TestResolveInCWDAllowsInternalSymlink(t *testing.T) {
+	cwd := t.TempDir()
+	realDir := filepath.Join(cwd, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(realDir, "inside.txt")
+	if err := os.WriteFile(realFile, []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cwd, "link.txt")
+	requireSymlink(t, realFile, link)
+
+	got, err := resolveInCWD(cwd, "link.txt")
+	if err != nil {
+		t.Fatalf("expected internal symlink to be allowed: %v", err)
+	}
+	if got != link {
+		t.Fatalf("expected lexical path %q, got %q", link, got)
+	}
+}
+
+func TestResolveInCWDAllowsOrdinaryNewFilePath(t *testing.T) {
+	cwd := t.TempDir()
+	want := filepath.Join(cwd, "new", "nested", "file.txt")
+	got, err := resolveInCWD(cwd, filepath.Join("new", "nested", "file.txt"))
+	if err != nil {
+		t.Fatalf("expected new file path to be allowed: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func requireSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" || errors.Is(err, os.ErrPermission) {
+			t.Skipf("symbolic links are not supported: %v", err)
+		}
+		t.Fatal(err)
 	}
 }
 
@@ -95,6 +178,12 @@ func TestBashToolStreamsOutputAndReturnsFinalResult(t *testing.T) {
 	}
 }
 
+type webFetchResolverFunc func(context.Context, string) ([]net.IPAddr, error)
+
+func (f webFetchResolverFunc) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return f(ctx, host)
+}
+
 func TestWebFetchRejectsLocalHosts(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"url": "http://127.0.0.1:7788/api/health"})
 	result, err := (WebFetchTool{}).Execute(context.Background(), Call{ID: "wf1", Name: "WebFetch", Input: input}, Env{})
@@ -103,6 +192,112 @@ func TestWebFetchRejectsLocalHosts(t *testing.T) {
 	}
 	if !result.IsError || !strings.Contains(result.Output, "local/private") {
 		t.Fatalf("expected local/private rejection, got %+v", result)
+	}
+}
+
+func TestWebFetchRedirectRejectsPrivateTarget(t *testing.T) {
+	resolver := webFetchResolverFunc(func(_ context.Context, host string) ([]net.IPAddr, error) {
+		switch host {
+		case "private.example":
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.8")}}, nil
+		case "public.example":
+			return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+		default:
+			return nil, errors.New("unexpected host")
+		}
+	})
+	original, err := http.NewRequest(http.MethodGet, "https://public.example/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := http.NewRequest(http.MethodGet, "http://private.example/secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = webFetchRedirectPolicy(resolver)(redirect, []*http.Request{original})
+	if err == nil || !strings.Contains(err.Error(), "local/private") {
+		t.Fatalf("expected public-to-private redirect rejection, got %v", err)
+	}
+}
+
+func TestWebFetchRejectsResolutionContainingPrivateIP(t *testing.T) {
+	resolver := webFetchResolverFunc(func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "mixed.example" {
+			t.Fatalf("unexpected host %q", host)
+		}
+		return []net.IPAddr{
+			{IP: net.ParseIP("8.8.8.8")},
+			{IP: net.ParseIP("192.168.1.20")},
+		}, nil
+	})
+
+	_, err := validatePublicFetchURLWithResolver(context.Background(), "https://mixed.example/docs", resolver)
+	if err == nil || !strings.Contains(err.Error(), "local/private") {
+		t.Fatalf("expected mixed public/private resolution rejection, got %v", err)
+	}
+}
+
+func TestWebFetchDialContextUsesValidatedIP(t *testing.T) {
+	resolver := webFetchResolverFunc(func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "public.example" {
+			t.Fatalf("unexpected host %q", host)
+		}
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+	})
+	dialStopped := errors.New("dial stopped after address capture")
+	var dialedAddress string
+	dial := newPublicFetchDialContext(resolver, func(_ context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" {
+			t.Fatalf("expected tcp network, got %q", network)
+		}
+		dialedAddress = address
+		return nil, dialStopped
+	})
+
+	_, err := dial(context.Background(), "tcp", "public.example:443")
+	if !errors.Is(err, dialStopped) {
+		t.Fatalf("expected recording dial error, got %v", err)
+	}
+	if dialedAddress != "8.8.8.8:443" {
+		t.Fatalf("expected validated IP dial, got %q", dialedAddress)
+	}
+}
+
+func TestWebFetchDialContextRejectsPrivateExplicitIP(t *testing.T) {
+	resolverCalled := false
+	underlyingDialCalled := false
+	resolver := webFetchResolverFunc(func(context.Context, string) ([]net.IPAddr, error) {
+		resolverCalled = true
+		return nil, errors.New("explicit IP must not use resolver")
+	})
+	dial := newPublicFetchDialContext(resolver, func(context.Context, string, string) (net.Conn, error) {
+		underlyingDialCalled = true
+		return nil, errors.New("private IP must not be dialed")
+	})
+
+	_, err := dial(context.Background(), "tcp", "169.254.169.254:80")
+	if err == nil || !strings.Contains(err.Error(), "local/private") {
+		t.Fatalf("expected private explicit IP rejection, got %v", err)
+	}
+	if resolverCalled || underlyingDialCalled {
+		t.Fatalf("private explicit IP reached resolver=%v dialer=%v", resolverCalled, underlyingDialCalled)
+	}
+}
+
+func TestWebFetchRejectsTooManyRedirects(t *testing.T) {
+	resolver := webFetchResolverFunc(func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+	})
+	redirect, err := http.NewRequest(http.MethodGet, "https://public.example/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via := make([]*http.Request, webFetchMaxRedirects)
+
+	err = webFetchRedirectPolicy(resolver)(redirect, via)
+	if err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("expected redirect limit rejection, got %v", err)
 	}
 }
 

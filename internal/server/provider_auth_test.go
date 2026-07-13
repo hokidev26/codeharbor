@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -155,10 +156,14 @@ func TestCLIProxyAPIManagementUsesAutotoDefaultKey(t *testing.T) {
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name: "cliproxyapi", Type: "openai-compatible", BaseURL: upstream.URL + "/v1", Model: "gpt-5.5", APIKeyOptional: true,
 	}}}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
 	recorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/providers/cliproxyapi/auth-files", nil))
 	if recorder.Code != http.StatusOK || requests != 1 {
 		t.Fatalf("expected one successful request, got status=%d requests=%d body=%s", recorder.Code, requests, recorder.Body.String())
+	}
+	if usages := capture.snapshot(); len(usages) != 0 {
+		t.Fatalf("canonical default success must not warn: %+v", usages)
 	}
 }
 
@@ -167,20 +172,14 @@ func TestCLIProxyAPIManagementRetriesLegacyDefaultKeyAfterUnauthorized(t *testin
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		switch requests {
-		case 1:
-			if got := r.Header.Get("X-Management-Key"); got != defaultCLIProxyAPIManagementKey {
-				t.Fatalf("expected Autoto default key first, got %q", got)
-			}
+		switch got := r.Header.Get("X-Management-Key"); got {
+		case defaultCLIProxyAPIManagementKey:
 			w.WriteHeader(http.StatusUnauthorized)
-		case 2:
-			if got := r.Header.Get("X-Management-Key"); got != legacyCLIProxyAPIManagementKey {
-				t.Fatalf("expected legacy compatibility key second, got %q", got)
-			}
+		case legacyCLIProxyAPIManagementKey:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"files":[]}`))
 		default:
-			t.Fatalf("unexpected management request %d", requests)
+			t.Fatalf("unexpected management key %q", got)
 		}
 	}))
 	defer upstream.Close()
@@ -188,10 +187,45 @@ func TestCLIProxyAPIManagementRetriesLegacyDefaultKeyAfterUnauthorized(t *testin
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name: "cliproxyapi", Type: "openai-compatible", BaseURL: upstream.URL + "/v1", Model: "gpt-5.5", APIKeyOptional: true,
 	}}}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+	for i := 0; i < 2; i++ {
+		recorder := httptest.NewRecorder()
+		app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/providers/cliproxyapi/auth-files", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected compatibility retry to succeed, got status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	if requests != 4 {
+		t.Fatalf("expected two compatibility retry pairs, got requests=%d", requests)
+	}
+	usages := capture.snapshot()
+	if len(usages) != 1 || usages[0].Replacement != "CLIPROXYAPI_MANAGEMENT_KEY" {
+		t.Fatalf("expected one successful fallback warning, got %+v", usages)
+	}
+	warning := fmt.Sprint(usages)
+	if strings.Contains(warning, defaultCLIProxyAPIManagementKey) || strings.Contains(warning, legacyCLIProxyAPIManagementKey) {
+		t.Fatalf("management credential leaked in warning: %+v", usages)
+	}
+}
+
+func TestCLIProxyAPIManagementFailedLegacyFallbackDoesNotWarn(t *testing.T) {
+	t.Setenv("CLIPROXYAPI_MANAGEMENT_KEY", "")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
+		Name: "cliproxyapi", Type: "openai-compatible", BaseURL: upstream.URL + "/v1", Model: "gpt-5.5", APIKeyOptional: true,
+	}}}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
 	recorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/providers/cliproxyapi/auth-files", nil))
-	if recorder.Code != http.StatusOK || requests != 2 {
-		t.Fatalf("expected compatibility retry to succeed, got status=%d requests=%d body=%s", recorder.Code, requests, recorder.Body.String())
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected failed legacy fallback, got status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if usages := capture.snapshot(); len(usages) != 0 {
+		t.Fatalf("failed legacy fallback must not warn: %+v", usages)
 	}
 }
 
@@ -211,6 +245,7 @@ func TestCLIProxyAPIManagementDoesNotRetryExplicitKeyOrExposeIt(t *testing.T) {
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name: "cliproxyapi", Type: "openai-compatible", BaseURL: upstream.URL + "/v1", Model: "gpt-5.5", APIKeyOptional: true,
 	}}}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
 	recorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/providers/cliproxyapi/auth-files", nil))
 	if recorder.Code != http.StatusBadGateway || requests != 1 {
@@ -218,5 +253,8 @@ func TestCLIProxyAPIManagementDoesNotRetryExplicitKeyOrExposeIt(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), explicitKey) {
 		t.Fatalf("management key leaked in response: %s", recorder.Body.String())
+	}
+	if usages := capture.snapshot(); len(usages) != 0 {
+		t.Fatalf("explicit key must not trigger legacy warning: %+v", usages)
 	}
 }

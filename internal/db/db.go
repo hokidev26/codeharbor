@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"autoto/internal/secrets"
 	"autoto/internal/skills"
 )
 
@@ -87,6 +88,27 @@ type Agent struct {
 	PrunedPercent          int    `json:"-"`
 	CreatedAt              string `json:"createdAt"`
 	UpdatedAt              string `json:"updatedAt"`
+}
+
+type NavigationConversation struct {
+	ProjectID         string `json:"projectId"`
+	ProjectName       string `json:"projectName"`
+	ProjectPath       string `json:"projectPath"`
+	ProjectUpdatedAt  string `json:"projectUpdatedAt"`
+	WorklineID        string `json:"worklineId"`
+	WorklineTitle     string `json:"worklineTitle"`
+	WorklineRole      string `json:"worklineRole"`
+	WorklineBranch    string `json:"worklineBranch"`
+	WorklineUpdatedAt string `json:"worklineUpdatedAt"`
+	AgentID           string `json:"agentId"`
+	AgentTitle        string `json:"agentTitle"`
+	AgentType         string `json:"agentType"`
+	AgentStatus       string `json:"agentStatus"`
+	Model             string `json:"model"`
+	PermissionMode    string `json:"permissionMode"`
+	CWD               string `json:"cwd"`
+	MessageCount      int    `json:"messageCount"`
+	LastActivityAt    string `json:"lastActivityAt"`
 }
 
 type Message struct {
@@ -367,6 +389,70 @@ type SkillAuditEvent struct {
 	FindingCodes       json.RawMessage `json:"findingCodes"`
 	RiskAcknowledgedAt string          `json:"riskAcknowledgedAt,omitempty"`
 	CreatedAt          string          `json:"createdAt"`
+}
+
+const (
+	AutomationAuditDetailsMaxBytes = 16 * 1024
+	AutomationAuditMaxListLimit    = 100
+)
+
+// AutomationAuditEvent contains structured security metadata. DetailsJSON is
+// deliberately limited to a small JSON object and must not contain secrets or
+// raw tool input.
+type AutomationAuditEvent struct {
+	ID          string          `json:"id"`
+	Category    string          `json:"category"`
+	Action      string          `json:"action"`
+	Actor       string          `json:"actor"`
+	AgentID     string          `json:"agentId,omitempty"`
+	RunID       string          `json:"runId,omitempty"`
+	SubjectType string          `json:"subjectType,omitempty"`
+	SubjectID   string          `json:"subjectId,omitempty"`
+	Outcome     string          `json:"outcome"`
+	Risk        string          `json:"risk"`
+	DetailsJSON json.RawMessage `json:"details"`
+	CreatedAt   string          `json:"createdAt"`
+}
+
+const (
+	IntegrationSettingsMaxBytes   = 16 * 1024
+	IntegrationSecretRefsMaxBytes = 8 * 1024
+)
+
+// IntegrationConnection stores configuration and secret references only. Secret
+// values are resolved outside the database package and are never serialized.
+type IntegrationConnection struct {
+	ID               string            `json:"id"`
+	Kind             string            `json:"kind"`
+	Name             string            `json:"name"`
+	Enabled          bool              `json:"enabled"`
+	Endpoint         string            `json:"endpoint,omitempty"`
+	SettingsJSON     json.RawMessage   `json:"settings"`
+	SecretRefs       map[string]string `json:"-"`
+	SecretConfigured map[string]bool   `json:"secretConfigured"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
+}
+
+const (
+	MemoryContentMaxBytes = 16 * 1024
+	MemoryMaxKeywords     = 20
+	MemoryKeywordMaxRunes = 64
+)
+
+type Memory struct {
+	ID         string   `json:"id"`
+	Content    string   `json:"content"`
+	Keywords   []string `json:"keywords"`
+	Pinned     bool     `json:"pinned"`
+	ArchivedAt string   `json:"archivedAt,omitempty"`
+	CreatedAt  string   `json:"createdAt"`
+	UpdatedAt  string   `json:"updatedAt"`
+}
+
+type MemoryListOptions struct {
+	Query           string `json:"query"`
+	IncludeArchived bool   `json:"includeArchived"`
 }
 
 type NotificationSettings struct {
@@ -809,12 +895,19 @@ func validStoredToolPermissionMode(mode string) bool {
 }
 
 func validStoredToolPermissionToolName(name string) bool {
-	switch name {
-	case "*", "Bash", "Edit", "Glob", "Grep", "MCPCallTool", "MCPListTools", "Read", "WebFetch", "WebSearch", "Write":
+	if name == "*" {
 		return true
-	default:
+	}
+	if len(name) == 0 || len(name) > 128 {
 		return false
 	}
+	for i, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') || (i > 0 && strings.ContainsRune("_.:-", r)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validStoredToolPermissionRisk(risk string) bool {
@@ -1299,6 +1392,67 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		projects = append(projects, p)
 	}
 	return projects, rows.Err()
+}
+
+func (s *Store) ListNavigationConversations(ctx context.Context) ([]NavigationConversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT
+  p.id,
+  p.name,
+  COALESCE(p.git_path, ''),
+  p.updated_at,
+  w.id,
+  w.title,
+  w.role,
+  COALESCE(w.branch, ''),
+  w.updated_at,
+  a.id,
+  a.title,
+  a.type,
+  a.status,
+  a.model,
+  a.permission_mode,
+  COALESCE(a.cwd, ''),
+  a.message_count,
+  COALESCE(NULLIF(a.last_message_at, ''), a.updated_at) AS last_activity_at
+FROM projects p
+JOIN worklines w ON w.project_id = p.id
+JOIN agents a ON a.workline_id = w.id
+WHERE p.status = 'active'
+ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	conversations := make([]NavigationConversation, 0)
+	for rows.Next() {
+		var conversation NavigationConversation
+		if err := rows.Scan(
+			&conversation.ProjectID,
+			&conversation.ProjectName,
+			&conversation.ProjectPath,
+			&conversation.ProjectUpdatedAt,
+			&conversation.WorklineID,
+			&conversation.WorklineTitle,
+			&conversation.WorklineRole,
+			&conversation.WorklineBranch,
+			&conversation.WorklineUpdatedAt,
+			&conversation.AgentID,
+			&conversation.AgentTitle,
+			&conversation.AgentType,
+			&conversation.AgentStatus,
+			&conversation.Model,
+			&conversation.PermissionMode,
+			&conversation.CWD,
+			&conversation.MessageCount,
+			&conversation.LastActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, conversation)
+	}
+	return conversations, rows.Err()
 }
 
 func (s *Store) CreateProject(ctx context.Context, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
@@ -2083,6 +2237,905 @@ func (s *Store) ListSkillAuditEvents(ctx context.Context, skillID string, limit 
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) CreateMemory(ctx context.Context, memory Memory) (Memory, error) {
+	canonical, keywordsJSON, err := canonicalMemory(memory, false)
+	if err != nil {
+		return Memory{}, err
+	}
+	if canonical.ID == "" {
+		canonical.ID = NewID()
+	}
+	if err := validateMemoryID(canonical.ID); err != nil {
+		return Memory{}, err
+	}
+	now := Now()
+	canonical.CreatedAt = now
+	canonical.UpdatedAt = now
+	_, err = s.db.ExecContext(ctx, `INSERT INTO memories (id, content, keywords_json, pinned, archived_at, created_at, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, canonical.ID, canonical.Content, keywordsJSON, boolInt(canonical.Pinned), canonical.ArchivedAt, canonical.CreatedAt, canonical.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Memory{}, fmt.Errorf("%w: memory id already exists", ErrConflict)
+		}
+		return Memory{}, err
+	}
+	return canonical, nil
+}
+
+func (s *Store) GetMemory(ctx context.Context, id string) (Memory, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Memory{}, sql.ErrNoRows
+	}
+	return scanMemory(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, content, keywords_json, pinned, COALESCE(archived_at,''), created_at, updated_at FROM memories WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+// ListMemories accepts no options, a MemoryListOptions value, a query string,
+// or a query string followed by includeArchived. Results are pinned first and
+// then newest-updated first.
+func (s *Store) ListMemories(ctx context.Context, args ...any) ([]Memory, error) {
+	options, err := parseMemoryListOptions(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content, keywords_json, pinned, COALESCE(archived_at,''), created_at, updated_at FROM memories WHERE ? = 1 OR archived_at IS NULL ORDER BY pinned DESC, updated_at DESC, id ASC`, boolInt(options.IncludeArchived))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	query := strings.ToLower(strings.TrimSpace(options.Query))
+	memories := make([]Memory, 0)
+	for rows.Next() {
+		memory, err := scanMemory(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		if query == "" || memoryMatchesQuery(memory, query) {
+			memories = append(memories, memory)
+		}
+	}
+	return memories, rows.Err()
+}
+
+func (s *Store) UpdateMemory(ctx context.Context, memory Memory) (Memory, error) {
+	canonical, keywordsJSON, err := canonicalMemory(memory, true)
+	if err != nil {
+		return Memory{}, err
+	}
+	existing, err := s.GetMemory(ctx, canonical.ID)
+	if err != nil {
+		return Memory{}, err
+	}
+	canonical.CreatedAt = existing.CreatedAt
+	canonical.UpdatedAt = nextMemoryUpdatedAt(existing.UpdatedAt)
+	result, err := s.db.ExecContext(ctx, `UPDATE memories SET content = ?, keywords_json = ?, pinned = ?, archived_at = NULLIF(?, ''), updated_at = ? WHERE id = ?`, canonical.Content, keywordsJSON, boolInt(canonical.Pinned), canonical.ArchivedAt, canonical.UpdatedAt, canonical.ID)
+	if err != nil {
+		return Memory{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Memory{}, err
+	} else if affected != 1 {
+		return Memory{}, sql.ErrNoRows
+	}
+	return canonical, nil
+}
+
+func (s *Store) DeleteMemory(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sql.ErrNoRows
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) SetMemoryPinned(ctx context.Context, id string, pinned bool) (Memory, error) {
+	memory, err := s.GetMemory(ctx, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	memory.Pinned = pinned
+	return s.UpdateMemory(ctx, memory)
+}
+
+func (s *Store) PinMemory(ctx context.Context, id string, pinned ...bool) (Memory, error) {
+	value := true
+	if len(pinned) > 1 {
+		return Memory{}, errors.New("pin memory accepts at most one pinned value")
+	}
+	if len(pinned) == 1 {
+		value = pinned[0]
+	}
+	return s.SetMemoryPinned(ctx, id, value)
+}
+
+func (s *Store) UnpinMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryPinned(ctx, id, false)
+}
+
+func (s *Store) SetMemoryArchived(ctx context.Context, id string, archived bool) (Memory, error) {
+	memory, err := s.GetMemory(ctx, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	if archived {
+		memory.ArchivedAt = Now()
+	} else {
+		memory.ArchivedAt = ""
+	}
+	return s.UpdateMemory(ctx, memory)
+}
+
+func (s *Store) ArchiveMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryArchived(ctx, id, true)
+}
+
+func (s *Store) UnarchiveMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryArchived(ctx, id, false)
+}
+
+func (s *Store) ListMatchingUninjectedMemories(ctx context.Context, agentID, text string, limit int) ([]Memory, error) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return nil, errors.New("memory injection agent id is required")
+	}
+	if limit <= 0 {
+		return []Memory{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.content, m.keywords_json, m.pinned, COALESCE(m.archived_at,''), m.created_at, m.updated_at FROM memories m WHERE m.archived_at IS NULL AND m.keywords_json <> '[]' AND NOT EXISTS (SELECT 1 FROM memory_injections i WHERE i.memory_id = m.id AND i.agent_id = ?) ORDER BY m.pinned DESC, m.updated_at DESC, m.id ASC`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	lowerText := strings.ToLower(text)
+	matches := make([]Memory, 0, limit)
+	for rows.Next() {
+		memory, err := scanMemory(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		if len(memory.Keywords) == 0 || !memoryKeywordsMatch(memory.Keywords, lowerText) {
+			continue
+		}
+		matches = append(matches, memory)
+		if len(matches) == limit {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return matches, nil
+}
+
+func (s *Store) MarkMemoriesInjected(ctx context.Context, agentID string, memoryIDs []string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("memory injection agent id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ?`, agentID).Scan(&exists); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(memoryIDs))
+	seen := make(map[string]struct{}, len(memoryIDs))
+	for _, rawID := range memoryIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return errors.New("memory injection memory id is required")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	injectedAt := Now()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_injections (memory_id, agent_id, injected_at) VALUES (?, ?, ?) ON CONFLICT(memory_id, agent_id) DO NOTHING`, id, agentID, injectedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func parseMemoryListOptions(args []any) (MemoryListOptions, error) {
+	var options MemoryListOptions
+	switch len(args) {
+	case 0:
+		return options, nil
+	case 1:
+		switch value := args[0].(type) {
+		case MemoryListOptions:
+			return value, nil
+		case *MemoryListOptions:
+			if value == nil {
+				return options, nil
+			}
+			return *value, nil
+		case string:
+			options.Query = value
+			return options, nil
+		case bool:
+			options.IncludeArchived = value
+			return options, nil
+		default:
+			return options, errors.New("invalid memory list options")
+		}
+	case 2:
+		query, queryOK := args[0].(string)
+		includeArchived, archivedOK := args[1].(bool)
+		if !queryOK || !archivedOK {
+			return options, errors.New("invalid memory list options")
+		}
+		options.Query = query
+		options.IncludeArchived = includeArchived
+		return options, nil
+	default:
+		return options, errors.New("invalid memory list options")
+	}
+}
+
+func canonicalMemory(memory Memory, requireID bool) (Memory, string, error) {
+	memory.ID = strings.TrimSpace(memory.ID)
+	memory.ArchivedAt = strings.TrimSpace(memory.ArchivedAt)
+	if requireID || memory.ID != "" {
+		if err := validateMemoryID(memory.ID); err != nil {
+			return Memory{}, "", err
+		}
+	}
+	if strings.TrimSpace(memory.Content) == "" {
+		return Memory{}, "", errors.New("memory content is required")
+	}
+	if len(memory.Content) > MemoryContentMaxBytes {
+		return Memory{}, "", fmt.Errorf("memory content exceeds %d bytes", MemoryContentMaxBytes)
+	}
+	if !utf8.ValidString(memory.Content) || strings.ContainsRune(memory.Content, 0) {
+		return Memory{}, "", errors.New("invalid memory content")
+	}
+	keywords, err := normalizeMemoryKeywords(memory.Keywords)
+	if err != nil {
+		return Memory{}, "", err
+	}
+	encoded, err := json.Marshal(keywords)
+	if err != nil {
+		return Memory{}, "", fmt.Errorf("encode memory keywords: %w", err)
+	}
+	memory.Keywords = keywords
+	if memory.ArchivedAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, memory.ArchivedAt); err != nil {
+			return Memory{}, "", errors.New("invalid memory archived_at")
+		}
+	}
+	return memory, string(encoded), nil
+}
+
+func validateMemoryID(id string) error {
+	if id == "" {
+		return errors.New("memory id is required")
+	}
+	if len(id) > 128 || !utf8.ValidString(id) || strings.ContainsRune(id, 0) {
+		return errors.New("invalid memory id")
+	}
+	return nil
+}
+
+func normalizeMemoryKeywords(keywords []string) ([]string, error) {
+	normalized := make([]string, 0, len(keywords))
+	seen := make(map[string]struct{}, len(keywords))
+	for _, keyword := range keywords {
+		keyword = strings.ToLower(strings.TrimSpace(keyword))
+		if keyword == "" {
+			return nil, errors.New("memory keyword must not be empty")
+		}
+		if !utf8.ValidString(keyword) || strings.ContainsRune(keyword, 0) {
+			return nil, errors.New("invalid memory keyword")
+		}
+		if utf8.RuneCountInString(keyword) > MemoryKeywordMaxRunes {
+			return nil, fmt.Errorf("memory keyword exceeds %d runes", MemoryKeywordMaxRunes)
+		}
+		if _, duplicate := seen[keyword]; duplicate {
+			continue
+		}
+		seen[keyword] = struct{}{}
+		normalized = append(normalized, keyword)
+		if len(normalized) > MemoryMaxKeywords {
+			return nil, fmt.Errorf("memory keywords exceed maximum of %d", MemoryMaxKeywords)
+		}
+	}
+	return normalized, nil
+}
+
+func memoryMatchesQuery(memory Memory, lowerQuery string) bool {
+	if strings.Contains(strings.ToLower(memory.Content), lowerQuery) {
+		return true
+	}
+	return memoryKeywordsMatch(memory.Keywords, lowerQuery)
+}
+
+func memoryKeywordsMatch(keywords []string, lowerText string) bool {
+	for _, keyword := range keywords {
+		if strings.Contains(lowerText, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func nextMemoryUpdatedAt(previous string) string {
+	now := time.Now().UTC()
+	if prior, err := time.Parse(time.RFC3339Nano, previous); err == nil && !now.After(prior) {
+		now = prior.Add(time.Nanosecond)
+	}
+	return now.Format(time.RFC3339Nano)
+}
+
+type memoryScanner func(dest ...any) error
+
+func scanMemory(scan memoryScanner) (Memory, error) {
+	var memory Memory
+	var keywordsJSON string
+	var pinned int
+	if err := scan(&memory.ID, &memory.Content, &keywordsJSON, &pinned, &memory.ArchivedAt, &memory.CreatedAt, &memory.UpdatedAt); err != nil {
+		return Memory{}, err
+	}
+	var keywords []string
+	if err := json.Unmarshal([]byte(keywordsJSON), &keywords); err != nil || keywords == nil {
+		return Memory{}, fmt.Errorf("stored memory keywords for %s are invalid", memory.ID)
+	}
+	normalized, err := normalizeMemoryKeywords(keywords)
+	if err != nil {
+		return Memory{}, fmt.Errorf("stored memory keywords for %s are invalid: %w", memory.ID, err)
+	}
+	memory.Keywords = normalized
+	memory.Pinned = pinned != 0
+	return memory, nil
+}
+
+func (s *Store) ListIntegrationConnections(ctx context.Context) ([]IntegrationConnection, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at FROM integration_connections ORDER BY kind ASC, name ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	connections := make([]IntegrationConnection, 0)
+	for rows.Next() {
+		connection, err := scanIntegrationConnection(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		connections = append(connections, connection)
+	}
+	return connections, rows.Err()
+}
+
+func (s *Store) GetIntegrationConnection(ctx context.Context, id string) (IntegrationConnection, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return IntegrationConnection{}, sql.ErrNoRows
+	}
+	return scanIntegrationConnection(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at FROM integration_connections WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+func (s *Store) CreateIntegrationConnection(ctx context.Context, connection IntegrationConnection) (IntegrationConnection, error) {
+	canonical, settings, refs, err := canonicalIntegrationConnection(connection)
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if canonical.ID == "" {
+		canonical.ID = NewID()
+	}
+	if err := validateIntegrationText("id", canonical.ID, 128, true, false); err != nil {
+		return IntegrationConnection{}, err
+	}
+	now := Now()
+	canonical.CreatedAt, canonical.UpdatedAt = now, now
+	_, err = s.db.ExecContext(ctx, `INSERT INTO integration_connections (id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, canonical.ID, canonical.Kind, canonical.Name, boolInt(canonical.Enabled), canonical.Endpoint, settings, refs, canonical.CreatedAt, canonical.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return IntegrationConnection{}, fmt.Errorf("%w: integration connection kind and name already exist", ErrConflict)
+		}
+		return IntegrationConnection{}, err
+	}
+	return canonical, nil
+}
+
+func (s *Store) UpdateIntegrationConnection(ctx context.Context, connection IntegrationConnection) (IntegrationConnection, error) {
+	canonical, settings, refs, err := canonicalIntegrationConnection(connection)
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if err := validateIntegrationText("id", canonical.ID, 128, true, false); err != nil {
+		return IntegrationConnection{}, err
+	}
+	canonical.UpdatedAt = Now()
+	result, err := s.db.ExecContext(ctx, `UPDATE integration_connections SET kind = ?, name = ?, enabled = ?, endpoint = ?, settings_json = ?, secret_refs_json = ?, updated_at = ? WHERE id = ?`, canonical.Kind, canonical.Name, boolInt(canonical.Enabled), canonical.Endpoint, settings, refs, canonical.UpdatedAt, canonical.ID)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return IntegrationConnection{}, fmt.Errorf("%w: integration connection kind and name already exist", ErrConflict)
+		}
+		return IntegrationConnection{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if affected == 0 {
+		return IntegrationConnection{}, sql.ErrNoRows
+	}
+	return s.GetIntegrationConnection(ctx, canonical.ID)
+}
+
+func (s *Store) DeleteIntegrationConnection(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sql.ErrNoRows
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM integration_connections WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func canonicalIntegrationConnection(connection IntegrationConnection) (IntegrationConnection, string, string, error) {
+	connection.ID = strings.TrimSpace(connection.ID)
+	connection.Kind = strings.TrimSpace(connection.Kind)
+	connection.Name = strings.TrimSpace(connection.Name)
+	connection.Endpoint = strings.TrimSpace(connection.Endpoint)
+	if err := validateIntegrationText("kind", connection.Kind, 64, true, true); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	if err := validateIntegrationText("name", connection.Name, 120, true, false); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	if err := validateIntegrationText("endpoint", connection.Endpoint, 2048, false, false); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	settings, err := normalizeIntegrationSettings(connection.SettingsJSON)
+	if err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	secretRefs, encodedRefs, err := normalizeIntegrationSecretRefs(connection.SecretRefs)
+	if err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	connection.SettingsJSON = settings
+	connection.SecretRefs = secretRefs
+	connection.SecretConfigured = integrationSecretConfigured(secretRefs)
+	return connection, string(settings), string(encodedRefs), nil
+}
+
+func validateIntegrationText(name, value string, maxBytes int, required, token bool) error {
+	if required && value == "" {
+		return fmt.Errorf("integration connection %s is required", name)
+	}
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxBytes || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid integration connection %s", name)
+	}
+	if token {
+		for i, char := range value {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (i > 0 && char >= '0' && char <= '9') || (i > 0 && strings.ContainsRune("_.:-", char)) {
+				continue
+			}
+			return fmt.Errorf("invalid integration connection %s", name)
+		}
+	}
+	return nil
+}
+
+func normalizeIntegrationSettings(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		trimmed = `{}`
+	}
+	if len(trimmed) > IntegrationSettingsMaxBytes {
+		return nil, fmt.Errorf("integration settings exceed %d bytes", IntegrationSettingsMaxBytes)
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return nil, errors.New("integration settings must be a valid JSON object")
+	}
+	var settings map[string]any
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&settings); err != nil || settings == nil {
+		return nil, errors.New("integration settings must be a valid JSON object")
+	}
+	if key, found := integrationSensitiveKey(settings); found {
+		return nil, fmt.Errorf("integration settings contain forbidden sensitive key %q", key)
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("encode integration settings: %w", err)
+	}
+	if len(encoded) > IntegrationSettingsMaxBytes {
+		return nil, fmt.Errorf("integration settings exceed %d bytes", IntegrationSettingsMaxBytes)
+	}
+	return encoded, nil
+}
+
+func integrationSensitiveKey(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if forbiddenIntegrationSettingsKey(key) {
+				return key, true
+			}
+			if nested, found := integrationSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if nested, found := integrationSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	}
+	return "", false
+}
+
+func forbiddenIntegrationSettingsKey(key string) bool {
+	var normalized strings.Builder
+	for _, char := range strings.ToLower(strings.TrimSpace(key)) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			normalized.WriteRune(char)
+		}
+	}
+	value := normalized.String()
+	for _, marker := range []string{"password", "passwd", "secret", "token", "apikey", "credential", "privatekey", "accesskey", "authorization", "cookie"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeIntegrationSecretRefs(input map[string]string) (map[string]string, json.RawMessage, error) {
+	if input == nil {
+		input = map[string]string{}
+	}
+	refs := make(map[string]string, len(input))
+	for rawName, value := range input {
+		name := strings.TrimSpace(rawName)
+		if !validIntegrationSecretName(name) {
+			return nil, nil, errors.New("invalid integration secret logical name")
+		}
+		if _, exists := refs[name]; exists {
+			return nil, nil, errors.New("duplicate integration secret logical name")
+		}
+		ref, err := secrets.ParseRef(value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid integration secret reference for %q: %w", name, err)
+		}
+		refs[name] = ref.String()
+	}
+	encoded, err := json.Marshal(refs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode integration secret references: %w", err)
+	}
+	if len(encoded) > IntegrationSecretRefsMaxBytes {
+		return nil, nil, fmt.Errorf("integration secret references exceed %d bytes", IntegrationSecretRefsMaxBytes)
+	}
+	return refs, encoded, nil
+}
+
+func validIntegrationSecretName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (i > 0 && char >= '0' && char <= '9') || (i > 0 && strings.ContainsRune("_.-", char)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func integrationSecretConfigured(refs map[string]string) map[string]bool {
+	configured := make(map[string]bool, len(refs))
+	for name := range refs {
+		configured[name] = true
+	}
+	return configured
+}
+
+type integrationConnectionScanner func(dest ...any) error
+
+func scanIntegrationConnection(scan integrationConnectionScanner) (IntegrationConnection, error) {
+	var connection IntegrationConnection
+	var enabled int
+	var settingsJSON, refsJSON string
+	if err := scan(&connection.ID, &connection.Kind, &connection.Name, &enabled, &connection.Endpoint, &settingsJSON, &refsJSON, &connection.CreatedAt, &connection.UpdatedAt); err != nil {
+		return IntegrationConnection{}, err
+	}
+	settings, err := normalizeIntegrationSettings(json.RawMessage(settingsJSON))
+	if err != nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration settings for %s are invalid: %w", connection.ID, err)
+	}
+	var refs map[string]string
+	if err := json.Unmarshal([]byte(refsJSON), &refs); err != nil || refs == nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration secret references for %s are invalid", connection.ID)
+	}
+	refs, _, err = normalizeIntegrationSecretRefs(refs)
+	if err != nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration secret references for %s are invalid: %w", connection.ID, err)
+	}
+	connection.Enabled = enabled != 0
+	connection.SettingsJSON = settings
+	connection.SecretRefs = refs
+	connection.SecretConfigured = integrationSecretConfigured(refs)
+	return connection, nil
+}
+
+func (s *Store) AddAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	canonical, err := canonicalAutomationAuditEvent(event)
+	if err != nil {
+		return AutomationAuditEvent{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO automation_audit_events (id, category, action, actor, agent_id, run_id, subject_type, subject_id, outcome, risk, details_json, created_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?)`, canonical.ID, canonical.Category, canonical.Action, canonical.Actor, canonical.AgentID, canonical.RunID, canonical.SubjectType, canonical.SubjectID, canonical.Outcome, canonical.Risk, string(canonical.DetailsJSON), canonical.CreatedAt)
+	if err != nil {
+		return AutomationAuditEvent{}, fmt.Errorf("insert automation audit event: %w", err)
+	}
+	return canonical, nil
+}
+
+// RecordAutomationAuditEvent is an explicit audit-oriented alias for callers
+// that do not otherwise use Store's Add naming convention.
+func (s *Store) RecordAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	return s.AddAutomationAuditEvent(ctx, event)
+}
+
+func (s *Store) CreateAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	return s.AddAutomationAuditEvent(ctx, event)
+}
+
+// ListAutomationAuditEvents returns newest events first. A zero limit uses 50;
+// callers may request at most AutomationAuditMaxListLimit rows and paginate with
+// a non-negative offset.
+func (s *Store) ListAutomationAuditEvents(ctx context.Context, limit, offset int) ([]AutomationAuditEvent, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 0 || limit > AutomationAuditMaxListLimit {
+		return nil, fmt.Errorf("automation audit limit must be between 1 and %d", AutomationAuditMaxListLimit)
+	}
+	if offset < 0 {
+		return nil, errors.New("automation audit offset must not be negative")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, category, action, actor, COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(subject_type,''), COALESCE(subject_id,''), outcome, risk, details_json, created_at FROM automation_audit_events ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]AutomationAuditEvent, 0)
+	for rows.Next() {
+		var event AutomationAuditEvent
+		var details string
+		if err := rows.Scan(&event.ID, &event.Category, &event.Action, &event.Actor, &event.AgentID, &event.RunID, &event.SubjectType, &event.SubjectID, &event.Outcome, &event.Risk, &details, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		event.DetailsJSON, err = normalizeAutomationAuditDetails(json.RawMessage(details))
+		if err != nil {
+			return nil, fmt.Errorf("stored automation audit details for %s are invalid: %w", event.ID, err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func canonicalAutomationAuditEvent(event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	event.ID = strings.TrimSpace(event.ID)
+	event.Category = strings.TrimSpace(event.Category)
+	event.Action = strings.TrimSpace(event.Action)
+	event.Actor = strings.TrimSpace(event.Actor)
+	event.AgentID = strings.TrimSpace(event.AgentID)
+	event.RunID = strings.TrimSpace(event.RunID)
+	event.SubjectType = strings.TrimSpace(event.SubjectType)
+	event.SubjectID = strings.TrimSpace(event.SubjectID)
+	event.Outcome = strings.TrimSpace(event.Outcome)
+	event.Risk = strings.TrimSpace(event.Risk)
+	event.CreatedAt = strings.TrimSpace(event.CreatedAt)
+
+	if event.ID == "" {
+		event.ID = NewID()
+	}
+	if event.CreatedAt == "" {
+		event.CreatedAt = Now()
+	}
+	for _, field := range []struct {
+		name     string
+		value    string
+		maxBytes int
+		required bool
+		token    bool
+	}{
+		{"id", event.ID, 128, true, false},
+		{"category", event.Category, 64, true, true},
+		{"action", event.Action, 96, true, true},
+		{"actor", event.Actor, 200, true, false},
+		{"agent_id", event.AgentID, 128, false, false},
+		{"run_id", event.RunID, 128, false, false},
+		{"subject_type", event.SubjectType, 64, false, true},
+		{"subject_id", event.SubjectID, 256, false, false},
+	} {
+		if err := validateAutomationAuditText(field.name, field.value, field.maxBytes, field.required, field.token); err != nil {
+			return AutomationAuditEvent{}, err
+		}
+	}
+	if (event.SubjectType == "") != (event.SubjectID == "") {
+		return AutomationAuditEvent{}, errors.New("automation audit subject_type and subject_id must be provided together")
+	}
+	if !validAutomationAuditOutcome(event.Outcome) {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit outcome")
+	}
+	if !validAutomationAuditRisk(event.Risk) {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit risk")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, event.CreatedAt); err != nil {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit created_at")
+	}
+	var err error
+	event.DetailsJSON, err = normalizeAutomationAuditDetails(event.DetailsJSON)
+	if err != nil {
+		return AutomationAuditEvent{}, err
+	}
+	return event, nil
+}
+
+func validateAutomationAuditText(name, value string, maxBytes int, required, token bool) error {
+	if required && value == "" {
+		return fmt.Errorf("automation audit %s is required", name)
+	}
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxBytes || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid automation audit %s", name)
+	}
+	if token && !validAutomationAuditToken(value) {
+		return fmt.Errorf("invalid automation audit %s", name)
+	}
+	return nil
+}
+
+func validAutomationAuditToken(value string) bool {
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '.', '_', ':', '-', '/':
+			continue
+		default:
+			return false
+		}
+	}
+	return value != ""
+}
+
+func validAutomationAuditOutcome(value string) bool {
+	switch value {
+	case "success", "failure", "denied", "error", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAutomationAuditRisk(value string) bool {
+	switch value {
+	case "none", "low", "medium", "high", "critical":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAutomationAuditDetails(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if len(trimmed) == 0 {
+		trimmed = `{}`
+	}
+	if len(trimmed) > AutomationAuditDetailsMaxBytes {
+		return nil, fmt.Errorf("automation audit details exceed %d bytes", AutomationAuditDetailsMaxBytes)
+	}
+	var details map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &details); err != nil {
+		return nil, errors.New("automation audit details must be a valid JSON object")
+	}
+	if details == nil {
+		return nil, errors.New("automation audit details must be a valid JSON object")
+	}
+	if key, found := automationAuditSensitiveKey(details); found {
+		return nil, fmt.Errorf("automation audit details contain forbidden sensitive key %q", key)
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return nil, fmt.Errorf("encode automation audit details: %w", err)
+	}
+	if len(encoded) > AutomationAuditDetailsMaxBytes {
+		return nil, fmt.Errorf("automation audit details exceed %d bytes", AutomationAuditDetailsMaxBytes)
+	}
+	return json.RawMessage(encoded), nil
+}
+
+func automationAuditSensitiveKey(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if forbiddenAutomationAuditKey(key) {
+				return key, true
+			}
+			if nested, found := automationAuditSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if nested, found := automationAuditSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	}
+	return "", false
+}
+
+func forbiddenAutomationAuditKey(key string) bool {
+	var normalized strings.Builder
+	for _, char := range strings.ToLower(strings.TrimSpace(key)) {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			normalized.WriteRune(char)
+		}
+	}
+	value := normalized.String()
+	if value == "input" || strings.Contains(value, "rawinput") || strings.Contains(value, "inputjson") || strings.Contains(value, "toolinput") || value == "toolargs" || value == "toolarguments" {
+		return true
+	}
+	for _, marker := range []string{"password", "passwd", "secret", "apikey", "privatekey", "accesskey", "credential", "authorization", "cookie"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	if value == "token" || strings.HasSuffix(value, "token") {
+		return true
+	}
+	return false
 }
 
 func nextSkillUpdatedAt(previous string) string {

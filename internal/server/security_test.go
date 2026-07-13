@@ -8,15 +8,40 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nhooyr.io/websocket"
 
 	agentpkg "autoto/internal/agent"
+	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
 )
+
+type legacyWarningCapture struct {
+	mu     sync.Mutex
+	usages []compat.Usage
+}
+
+func (c *legacyWarningCapture) add(usage compat.Usage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.usages = append(c.usages, usage)
+}
+
+func (c *legacyWarningCapture) snapshot() []compat.Usage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]compat.Usage(nil), c.usages...)
+}
+
+func captureLegacyWarnings(app *Server) *legacyWarningCapture {
+	capture := &legacyWarningCapture{}
+	app.legacyWarnings = compat.NewRegistry(capture.add)
+	return capture
+}
 
 func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
@@ -116,6 +141,68 @@ func TestLocalRequestGuardCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected canonical token header to take priority, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLegacyLocalTokenWarningOnceCanonicalPriorityAndNoSecret(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyRequest.Header.Set(legacyLocalTokenHeader, app.localToken)
+	if !app.validHeaderToken(legacyRequest) || !app.validHeaderToken(legacyRequest) {
+		t.Fatal("expected valid legacy local token")
+	}
+	usages := capture.snapshot()
+	if len(usages) != 1 || usages[0].Legacy != legacyLocalTokenHeader || usages[0].Replacement != localTokenHeader {
+		t.Fatalf("expected one keyed legacy warning, got %+v", usages)
+	}
+	if strings.Contains(fmt.Sprint(usages), app.localToken) {
+		t.Fatalf("legacy warning leaked local token: %+v", usages)
+	}
+
+	canonicalApp := New(config.Config{}, nil, nil, nil)
+	canonicalCapture := captureLegacyWarnings(canonicalApp)
+	canonicalRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	canonicalRequest.Header.Set(localTokenHeader, canonicalApp.localToken)
+	canonicalRequest.Header.Set(legacyLocalTokenHeader, canonicalApp.localToken)
+	if !canonicalApp.validHeaderToken(canonicalRequest) {
+		t.Fatal("expected canonical local token to pass")
+	}
+	if usages := canonicalCapture.snapshot(); len(usages) != 0 {
+		t.Fatalf("canonical token must suppress legacy warning: %+v", usages)
+	}
+
+	invalidApp := New(config.Config{}, nil, nil, nil)
+	invalidCapture := captureLegacyWarnings(invalidApp)
+	invalidRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	invalidRequest.Header.Set(legacyLocalTokenHeader, "invalid-secret")
+	if invalidApp.validHeaderToken(invalidRequest) {
+		t.Fatal("expected invalid legacy local token to fail")
+	}
+	if usages := invalidCapture.snapshot(); len(usages) != 0 {
+		t.Fatalf("invalid legacy token must not warn: %+v", usages)
+	}
+}
+
+func TestLegacyLocalTokenWarningConcurrentOnce(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+	const workers = 64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			request.Header.Set(legacyLocalTokenHeader, app.localToken)
+			if !app.validHeaderToken(request) {
+				panic("valid legacy local token rejected")
+			}
+		}()
+	}
+	wg.Wait()
+	if usages := capture.snapshot(); len(usages) != 1 {
+		t.Fatalf("expected one concurrent warning, got %+v", usages)
 	}
 }
 
@@ -262,6 +349,72 @@ func TestRemoteAccessGateCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
 	request.Header.Set(legacyRemoteAccessHeader, "secret")
 	if app.validRemoteAccess(request) {
 		t.Fatal("expected canonical remote access header to take priority over the legacy header")
+	}
+}
+
+func TestLegacyRemoteAccessWarningsAreSuccessfulKeyedAndLogoutSilent(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+
+	legacyHeader := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyHeader.Header.Set(legacyRemoteAccessHeader, "remote-secret")
+	if !app.validRemoteAccess(legacyHeader) || !app.validRemoteAccess(legacyHeader) {
+		t.Fatal("expected valid legacy remote access header")
+	}
+	legacyCookie := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: app.remoteAccessToken})
+	if !app.validRemoteAccess(legacyCookie) || !app.validRemoteAccess(legacyCookie) {
+		t.Fatal("expected valid legacy remote access cookie")
+	}
+	usages := capture.snapshot()
+	if len(usages) != 2 {
+		t.Fatalf("expected one warning per legacy credential, got %+v", usages)
+	}
+	serialized := fmt.Sprint(usages)
+	if strings.Contains(serialized, "remote-secret") || strings.Contains(serialized, app.remoteAccessToken) {
+		t.Fatalf("legacy warnings leaked credentials: %+v", usages)
+	}
+
+	logoutApp := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
+	logoutCapture := captureLegacyWarnings(logoutApp)
+	logoutRequest := httptest.NewRequest(http.MethodPost, remoteAccessLogoutPath, nil)
+	logoutRequest.Header.Set("Accept", "application/json")
+	logoutRequest.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: logoutApp.remoteAccessToken})
+	logoutRecorder := httptest.NewRecorder()
+	logoutApp.handleRemoteAccessLogout(logoutRecorder, logoutRequest)
+	if logoutRecorder.Code != http.StatusOK {
+		t.Fatalf("expected successful logout, got %d", logoutRecorder.Code)
+	}
+	if usages := logoutCapture.snapshot(); len(usages) != 0 {
+		t.Fatalf("logout cleanup must not warn: %+v", usages)
+	}
+}
+
+func TestLegacyRemoteAccessInvalidAndCanonicalPriorityDoNotWarn(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+
+	invalid := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	invalid.Header.Set(legacyRemoteAccessHeader, "invalid-secret")
+	if app.validRemoteAccess(invalid) {
+		t.Fatal("expected invalid legacy remote access header to fail")
+	}
+
+	canonical := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	canonical.Header.Set(remoteAccessHeader, "remote-secret")
+	canonical.Header.Set(legacyRemoteAccessHeader, "remote-secret")
+	if !app.validRemoteAccess(canonical) {
+		t.Fatal("expected canonical remote access header to pass")
+	}
+
+	canonicalCookie := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	canonicalCookie.AddCookie(&http.Cookie{Name: remoteAccessCookieName, Value: "invalid-secret"})
+	canonicalCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: app.remoteAccessToken})
+	if app.validRemoteAccess(canonicalCookie) {
+		t.Fatal("expected canonical cookie to take priority over legacy cookie")
+	}
+	if usages := capture.snapshot(); len(usages) != 0 {
+		t.Fatalf("invalid or canonical credentials must not warn: %+v", usages)
 	}
 }
 

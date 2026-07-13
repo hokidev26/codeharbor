@@ -1,32 +1,40 @@
 # Autoto
 
+Autoto is a local-first coding-agent server that turns a task into a background run with approval-gated tools, a run summary, diff review, and an explicit-path local commit.
+
+**Task → background run → approval → run summary → diff → explicit-path commit**
+
 ![Autoto local agent workflow demo](docs/demo.svg)
 
-Autoto is a local-first Go MVP for an AI coding-agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, Agent Server and MCP server registries, and a simple embedded web UI.
+Autoto is an experimental local-development MVP, not an untrusted multi-user or production service. Its current IM surface is a browser-local policy draft plus server-side outbound Webhook notifications; there is no inbound IM Gateway yet.
 
-The project is currently an experimental MVP. It is intended for local development and iteration, not for untrusted multi-user or production deployments.
+## Quick start
 
-> **Real local dogfood:** the current code has been run end-to-end against temporary local projects. The latest tracked-file smoke created a project through the HTTP API, edited a tracked file with the `Write` tool, reviewed the resulting Git diff, and committed only the selected path. See [Dogfood demo](#dogfood-demo-historical-evidence).
+Requires Go 1.26 or newer:
 
-## Naming and migration
+```bash
+go run ./cmd/autoto
+```
 
-Use these canonical names for new documentation, automation, and integrations:
+Then open:
 
-- **Product:** Autoto
-- **CLI, binary, release assets, and module namespace:** `autoto`
-- **Default home:** `~/.autoto`; default config: `~/.autoto/config.json`; default database: `~/.autoto/autoto.db`
-- **Environment variables:** `AUTOTO_*`
-- **Browser request headers:** `X-Autoto-*`
-- **Browser-local preference keys:** `autoto.*`
-- **Domain entities and canonical routes:** `Agent` / `Workline`, `/api/agents`, `/api/worklines`, and `/ws/agent`
+```text
+http://localhost:7788
+```
 
-Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-CodeHarbor-*` headers, and `codeharbor.*` browser-local preference keys are read for migration compatibility. New scripts and clients must write the Autoto names above. The legacy Narrator/Chapter routes are also compatibility aliases; they invoke the canonical Agent/Workline handlers and return the canonical payload shape.
+Default local state:
+
+```text
+Config:   ~/.autoto/config.json
+Database: ~/.autoto/autoto.db
+Projects: ~/projects
+```
 
 ## Features
 
 - Local HTTP server with embedded HTML/CSS/JS UI, using a no-build ES module seam for frontend bootstrap/runtime helpers and extracted Settings local-preference panels
 - SQLite persistence for projects, worklines, agents, messages, tool calls, backend registry entries, and stdio MCP server registry entries
-- Provider abstraction for:
+- Provider abstraction with a minimal `Tools` / `Streaming` / `ImageInput` capability contract for:
   - OpenAI official Responses API with SDK streaming text deltas and usage capture
   - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, usage capture, and automatic 5m prompt-cache breakpoints for sufficiently large requests
   - OpenAI-compatible Chat Completions APIs
@@ -43,7 +51,7 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
   - MCPListTools
   - MCPCallTool
 - Git workspace APIs and UI for status, diff, log, and explicit-path commits without automatic push, amend, reset, clean, force, or `git add -A`
-- WebSocket Agent event stream: `/ws/agent`, with current-Agent controls for model, permission mode, and working directory
+- Agent WebSocket protocol 2 on `/ws/agent`, with per-process monotonic sequence, bounded in-memory replay, and authoritative live-snapshot resync; it is not a durable or cross-process event log
 - Workline and container settings backed by project Workline/Agent APIs, with backend workline-fork support that creates Git worktrees, merge-check preflight, and clean-worktree merge APIs
 - Interactive PTY terminal WebSocket: `/ws/terminal`, with terminal-management controls and browser-local retention/focus preferences
 - Filesystem browse/preview/mkdir APIs
@@ -55,8 +63,8 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
 - Chat-composer slash command palette backed by enabled local Skills command templates
 - Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
 - Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules, plus `WebSearch` and `WebFetch` core tools for public web/documentation lookup
-- Browser-local Settings → IM Gateway integration policy preferences for webhook/bot presets, confirmation, signatures, redaction, and event routing
-- Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export; it can create/enable/delete persisted stdio MCP registry entries, run `tools/list` discovery, and let core tools list/call registered MCP servers with explicit exec-risk approval
+- Browser-local Settings → IM Gateway policy draft for future webhook/bot integration; it does not receive inbound IM messages, approvals, or tasks
+- Server-backed Skills with global/project/workspace CRUD, effective-skill resolution, revision history/restore, and snapshot-stable cursor pagination. The Settings scoped panel can browse by scope, inspect details, paginate, and view/restore revisions; create, SKILL.md import, enable/disable, edit, and delete UI actions still operate only on global scope. MCP registry actions remain available with explicit exec-risk approval
 - Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices
 - Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and Agent event-log display
 - Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and Agent limits
@@ -72,7 +80,7 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
 - SQLite is provided through the pure-Go `modernc.org/sqlite` driver
 - Node.js is optional and only used for `node --check` and `node --test` on embedded frontend scripts during validation
 
-## Install
+## Installation details
 
 Tagged releases publish Autoto release assets for macOS, Linux, and Windows, named like `autoto_<version>_<os>_<arch>`. Download the matching asset from GitHub Releases, unpack it, then run the `autoto` binary.
 
@@ -189,7 +197,9 @@ AGENT_SERVER_API_KEY
 
 If a backend URL is configured, Autoto seeds the backend registry on first startup. Local backends use `X-Session-API-Key`; cloud backends use `Authorization: Bearer ...`.
 
-### Migration compatibility
+### Naming and migration compatibility
+
+Canonical names for all new documentation, automation, and integrations are **Autoto**, `autoto`, `~/.autoto`, `AUTOTO_*`, `X-Autoto-*`, `autoto.*`, **Agent / Workline**, `/api/agents`, `/api/worklines`, and `/ws/agent`.
 
 For a non-disruptive upgrade, Autoto continues to read the following legacy inputs:
 
@@ -197,8 +207,10 @@ For a non-disruptive upgrade, Autoto continues to read the following legacy inpu
 - `CODEHARBOR_*` environment variables as fallbacks for their `AUTOTO_*` counterparts
 - `X-CodeHarbor-Token` and `X-CodeHarbor-Access` request headers alongside `X-Autoto-Token` and `X-Autoto-Access`
 - `codeharbor.*` browser `localStorage` preference keys alongside canonical `autoto.*` keys
+- legacy CodeHarbor CLI and Narrator/Chapter route aliases
+- `window.CODEHARBOR_LOCAL_TOKEN`, which is still injected with the same value as canonical `window.AUTOTO_LOCAL_TOKEN` and read by `runtime.mjs` only as a fallback
 
-Do not introduce new dependencies on the legacy names. They exist solely to preserve existing local installations during the rename.
+Canonical values take precedence when both forms are present. Do not introduce new writes or dependencies on legacy names. The local-token JS global is an explicit compatibility-response-write exception until first-party runtime no longer reads it and the old-UI migration window is complete. The compatibility lifecycle and removal gates are defined only in `PROJECT_PLAN.md`; no legacy surface may be removed before v0.4.0 or without at least two tagged releases of migration runway.
 
 ## API overview
 

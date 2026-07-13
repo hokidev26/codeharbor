@@ -9,17 +9,23 @@ All notable changes to Autoto are tracked here. The project is still an experime
 - Renamed the current product to **Autoto**. The canonical Go module and CLI are `autoto` and `cmd/autoto` / `autoto`; `cmd/codeharbor` remains a legacy compatibility shim.
 - Moved default runtime state to `~/.autoto/config.json` and `~/.autoto/autoto.db`. When the canonical config is absent, a legacy `~/.codeharbor/config.json` is copied forward for compatibility.
 - Made `AUTOTO_*` environment variables and `X-Autoto-*` headers canonical. Corresponding `CODEHARBOR_*`, `X-CodeHarbor-*`, and legacy remote-access cookie names remain accepted only for migration compatibility.
+- Legacy compatibility actually used at runtime now warns once per process/compatibility key: the `codeharbor` CLI shim, effective `CODEHARBOR_*` or legacy-config fallback, successful legacy token/access header or cookie use, and the successful CLIProxyAPI legacy management-credential fallback report their canonical replacement. Canonical values suppress fallback warnings, invalid credentials do not warn, and logs never include token, password, cookie, API-key, or credential values.
+- Defined the legacy compatibility lifecycle in `PROJECT_PLAN.md`: canonical names win, legacy aliases are compatibility reads/forwards only, removal is no earlier than v0.4.0, and every runtime surface requires at least two tagged releases of migration runway plus the documented deletion gates. The explicit response-write exception is `window.CODEHARBOR_LOCAL_TOKEN`: the server still injects it with the same value as canonical `window.AUTOTO_LOCAL_TOKEN`, and `runtime.mjs` reads it only as a fallback until first-party runtime no longer depends on it and the old-UI migration window is complete.
 - Historical entries below intentionally retain pre-rename CodeHarbor terminology, endpoint names, commit messages, and other recorded facts; they are legacy history rather than current naming guidance.
 
 ### Added
 
 - Added a frontend Run Summary card that loads completed/error/interrupted run summaries, shows tool/message/token/cost metrics, and links the review flow to the existing Git changes modal.
 - Added streaming Bash tool output over Agent WebSocket events, with a live output card in the chat UI while commands run.
-- Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block.
+- Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block. These are outbound notifications; no inbound IM Gateway is implemented.
+- Added Agent stream protocol 2 with per-process stream sessions and monotonic sequences, bounded in-memory replay, explicit resync reasons, and authoritative live-snapshot recovery. Durable event persistence and cross-process/restart replay remain unimplemented.
+- Added server-backed scoped and revisioned Skills with global/project/workspace CRUD, effective-skill resolution, revision history/detail, optimistic-lock restore, and snapshot-stable cursor pagination. The Settings scoped panel supports scope browsing, detail, pagination, revision history, and restore; create, SKILL.md import, enable/disable, edit, and delete UI actions remain global-only.
 
 ### Changed
 
 - Updated the July 9 planning notes and project roadmap to reflect completed provider reliability, database migration, project instruction loading, and run tracking work.
+- Added the minimal Provider capability contract (`Tools`, `Streaming`, `ImageInput`) and exposed it through provider/model metadata; Agent execution now uses declared capabilities instead of provider-name branching.
+- Clarified product Phase naming: Phase B refers only to the future inbound IM Gateway. Skills closeout is limited to backend scope/effective/revision/pagination semantics and the current scoped browse/restore UI; future work is defect-only and does not imply that all scoped write operations have UI coverage.
 
 ## v0.1.0 - 2026-07-07
 

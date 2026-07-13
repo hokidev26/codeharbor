@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"autoto/internal/compat"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -172,9 +174,12 @@ func TestLoadMigratesLegacyConfigToCanonicalPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(canonicalPath)
+	cfg, report, err := LoadWithReport(canonicalPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected copied legacy config report, got %+v", report.Usages)
 	}
 	if cfg.Server.Port != 9091 || cfg.Paths.DatabasePath != legacyDatabasePath {
 		t.Fatalf("expected migrated legacy values and database path, got %+v", cfg)
@@ -328,6 +333,141 @@ func TestNormalizeProvidersPreservesExplicitProfile(t *testing.T) {
 	if len(providers.Instances) != 1 || providers.Instances[0].Profile != ProviderProfileCLIProxyAPI {
 		t.Fatalf("expected explicit profile to remain intact, got %+v", providers.Instances)
 	}
+}
+
+func TestDefaultWithReportTracksOnlyEffectiveLegacyFallbacks(t *testing.T) {
+	for _, name := range []string{
+		"AUTOTO_DEFAULT_MODEL",
+		"CODEHARBOR_DEFAULT_MODEL",
+		"AUTOTO_SUMMARY_MODEL",
+		"CODEHARBOR_SUMMARY_MODEL",
+	} {
+		t.Setenv(name, "")
+	}
+	const secretValue = "legacy-secret-model"
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", secretValue)
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != secretValue || cfg.Agent.SummaryModel != secretValue {
+		t.Fatalf("expected effective legacy fallback, got %+v", cfg.Agent)
+	}
+	if len(report.Usages) != 1 || report.Usages[0].Legacy != "CODEHARBOR_DEFAULT_MODEL" || report.Usages[0].Replacement != "AUTOTO_DEFAULT_MODEL" {
+		t.Fatalf("unexpected legacy report: %+v", report.Usages)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secretValue) {
+		t.Fatalf("legacy report leaked fallback value: %s", encoded)
+	}
+}
+
+func TestDefaultWithReportCanonicalEnvSuppressesLegacyReport(t *testing.T) {
+	t.Setenv("AUTOTO_DEFAULT_MODEL", "canonical-model")
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy-secret-model")
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "canonical-model" {
+		t.Fatalf("expected canonical value, got %q", cfg.Agent.DefaultModel)
+	}
+	if reportHasLegacy(report, "CODEHARBOR_DEFAULT_MODEL") {
+		t.Fatalf("canonical env must suppress legacy report: %+v", report.Usages)
+	}
+}
+
+func TestDefaultWithReportInvalidLegacyEnvIsNotReported(t *testing.T) {
+	t.Setenv("AUTOTO_EXPOSED", "")
+	t.Setenv("CODEHARBOR_EXPOSED", "not-a-bool")
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.Exposed {
+		t.Fatal("invalid legacy bool must not become effective")
+	}
+	if reportHasLegacy(report, "CODEHARBOR_EXPOSED") {
+		t.Fatalf("invalid legacy env must not be reported: %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportFiltersConfigOverriddenLegacyDefaults(t *testing.T) {
+	t.Setenv("AUTOTO_DEFAULT_MODEL", "")
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy-secret-model")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"agent":{"defaultModel":"canonical:file","summaryModel":"canonical:summary"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, report, err := LoadWithReport(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "canonical:file" || cfg.Agent.SummaryModel != "canonical:summary" {
+		t.Fatalf("expected config values, got %+v", cfg.Agent)
+	}
+	if reportHasLegacy(report, "CODEHARBOR_DEFAULT_MODEL") {
+		t.Fatalf("config-overridden fallback must not be reported: %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportTracksExplicitLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyPath := filepath.Join(home, ".codeharbor", "config.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"server":{"port":9092}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, report, err := LoadWithReport(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 9092 {
+		t.Fatalf("expected explicitly loaded legacy config, got port %d", cfg.Server.Port)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected explicit legacy config report, got %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportTracksNewConfigCreatedAtExplicitLegacyPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyPath := filepath.Join(home, ".codeharbor", "config.json")
+
+	cfg, report, err := LoadWithReport(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 7788 {
+		t.Fatalf("expected default config at explicit legacy path, got port %d", cfg.Server.Port)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected explicit legacy path usage report, got %+v", report.Usages)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("expected config to be written at explicit legacy path: %v", err)
+	}
+}
+
+func reportHasLegacy(report compat.Report, legacy string) bool {
+	for _, usage := range report.Usages {
+		if usage.Legacy == legacy {
+			return true
+		}
+	}
+	return false
 }
 
 func providerByName(cfg Config, name string) *ProviderConfig {

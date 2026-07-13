@@ -129,6 +129,14 @@ func (s *Server) providerManagementRequest(ctx context.Context, provider config.
 	data, status, err := cliProxyAPIManagementRequestWithKey(ctx, method, endpoint, payload, contentType, key)
 	if !explicitlyConfigured && status == http.StatusUnauthorized {
 		legacyData, _, legacyErr := cliProxyAPIManagementRequestWithKey(ctx, method, endpoint, payload, contentType, legacyCLIProxyAPIManagementKey)
+		if legacyErr == nil {
+			s.warnLegacy(
+				"credential:cliproxyapi-legacy-default-management-key",
+				"CLIProxyAPI legacy default management credential",
+				"CLIPROXYAPI_MANAGEMENT_KEY",
+				"management-credential",
+			)
+		}
 		return legacyData, legacyErr
 	}
 	return data, err

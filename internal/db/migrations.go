@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const CurrentDBVersion = 15
+const CurrentDBVersion = 18
 
 type migration struct {
 	version int
@@ -31,6 +31,9 @@ var migrations = []migration{
 	{version: 13, name: "agent and workline naming", up: migrateV13AgentWorklineNaming},
 	{version: 14, name: "agent stream and permission generations", up: migrateV14AgentStreamGenerations},
 	{version: 15, name: "scoped skill revisions", up: migrateV15ScopedSkillRevisions},
+	{version: 16, name: "automation audit events", up: migrateV16AutomationAuditEvents},
+	{version: 17, name: "integration connections", up: migrateV17IntegrationConnections},
+	{version: 18, name: "memories", up: migrateV18Memories},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -392,7 +395,7 @@ func migrateV13AgentWorklineNaming(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 	}
-	columns := [][3]string{{"projects", "chapter_settings", "workline_settings"}, {"worklines", "parent_chapter_id", "parent_workline_id"}, {"worklines", "merged_into_chapter_id", "merged_into_workline_id"}, {"worklines", "review_source_chapter_id", "review_source_workline_id"}, {"agents", "chapter_id", "workline_id"}, {"agents", "parent_narrator_id", "parent_agent_id"}, {"runs", "narrator_id", "agent_id"}, {"agent_messages", "narrator_id", "agent_id"}, {"agent_message_attachments", "narrator_id", "agent_id"}, {"agent_tool_calls", "narrator_id", "agent_id"}, {"api_requests", "narrator_id", "agent_id"}}
+	columns := [][3]string{{"projects", "chapter_settings", "workline_settings"}, {"worklines", "parent_chapter_id", "parent_workline_id"}, {"worklines", "merged_into_chapter_id", "merged_into_workline_id"}, {"worklines", "review_source_chapter_id", "review_source_workline_id"}, {"agents", "chapter_id", "workline_id"}, {"agents", "parent_narrator_id", "parent_agent_id"}, {"runs", "narrator_id", "agent_id"}, {"agent_messages", "narrator_id", "agent_id"}, {"agent_message_attachments", "narrator_id", "agent_id"}, {"agent_tool_calls", "narrator_id", "agent_id"}, {"api_requests", "narrator_id", "agent_id"}, {"automation_audit_events", "narrator_id", "agent_id"}, {"memory_injections", "narrator_id", "agent_id"}}
 	for _, column := range columns {
 		if err := renameColumn(ctx, tx, column[0], column[1], column[2]); err != nil {
 			return err
@@ -582,6 +585,21 @@ CREATE INDEX idx_skill_audit_events_skill_created ON skill_audit_events(skill_id
 		}
 	}
 	return nil
+}
+
+func migrateV16AutomationAuditEvents(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, automationAuditSchemaSQL)
+	return err
+}
+
+func migrateV17IntegrationConnections(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, integrationConnectionsSchemaSQL)
+	return err
+}
+
+func migrateV18Memories(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, memorySchemaSQL)
+	return err
 }
 
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {

@@ -18,42 +18,71 @@
 - 简单内嵌 Web UI
 - 公开仓库入口文档、MIT License、CI 与安全说明
 
-长期目标是逐步扩展到：
+### 1.1 Legacy compatibility lifecycle（唯一事实源）
 
-- 多模型 Provider
-- MCP
-- 子代理
-- Git worktree / fork / merge / review
-- 终端 PTY
-- 浏览器工具
-- 权限审批 UI
-- 前端 Web UI
-- 存储清理与运行时管理
+本节是 legacy 兼容面的**唯一生命周期事实源**；README、CHANGELOG、SECURITY 与历史计划只能引用，不得另设不同移除日期或窗口。
+
+**规范名称（canonical names）**：
+
+- 产品、CLI、module、release asset：Autoto / `autoto`
+- 本地状态与配置：`~/.autoto`、`AUTOTO_*`
+- HTTP/WebSocket header 与浏览器偏好：`X-Autoto-*`、`autoto.*`
+- 领域与路由：Agent / Workline、`/api/agents`、`/api/worklines`、`/ws/agent`
+
+**当前兼容面**：
+
+- `cmd/codeharbor` / `codeharbor` legacy CLI shim；
+- `~/.codeharbor/config.json` 到 canonical home 的一次性配置迁移读取；
+- `CODEHARBOR_*` 环境变量 fallback；
+- `X-CodeHarbor-*` header、`codeharbor_remote_access` cookie 与 `codeharbor.*` localStorage key；
+- `window.CODEHARBOR_LOCAL_TOKEN` legacy JS global：服务端仍将 canonical `window.AUTOTO_LOCAL_TOKEN` 的同值注入该 global，`runtime.mjs` 仅将其作为 fallback 读取；
+- Narrator / Chapter API 与 `/ws/narrator` 路由别名；
+- migration、测试夹具与 CHANGELOG 历史中的旧名。
+
+**优先级与写入规则**：canonical 值存在时必须优先；legacy alias 在移除前只做兼容读取、迁移或路由转发。新代码、文档、配置保存、响应 payload 与客户端写入不得产生新的 legacy 名称依赖。明确例外：服务端当前仍把 canonical `window.AUTOTO_LOCAL_TOKEN` 的同值写入 `window.CODEHARBOR_LOCAL_TOKEN`，供旧 UI 兼容；first-party `runtime.mjs` 只把 legacy global 作为 fallback，不得优先于 canonical global。
+
+**最早移除版本与迁移窗口**：任何 runtime legacy surface **最早只能在 v0.4.0 移除**，并且从首次发布明确 deprecation warning / release note 起，必须至少跨越 **两个 tagged release** 的迁移窗口。历史 CHANGELOG、migration 名称和解释旧数据所必需的测试记录不因 runtime alias 移除而改写。
+
+**删除门槛（全部满足才可移除）**：
+
+1. canonical 替代项已稳定发布并覆盖同等使用场景；
+2. legacy 实际使用会每进程或每兼容面 warn once，且日志只记录 alias 类型，不记录 token、password、cookie 或其他 secret 值；
+3. 至少两个 tagged release 的 CHANGELOG / release note 已持续给出迁移指引；
+4. 仓库自身、示例、CI 与生成配置已不再写入 legacy 名称；
+5. migration 与兼容测试证明 canonical 优先、旧安装可迁移，并为删除后的错误行为提供测试；
+6. 删除项清单经过逐项审查，不把历史文本或数据库迁移事实误删。
+
+`window.CODEHARBOR_LOCAL_TOKEN` 的 canonical 替代是 `window.AUTOTO_LOCAL_TOKEN`，最早移除版本同样为 **v0.4.0**；除上述通用门槛外，必须等到 first-party runtime 不再读取 legacy global，且旧 UI 迁移窗口完成后，才能停止兼容响应写入并删除该 fallback。
+
+MVP 已逐步扩展出：
+
+- 多模型 Provider、流式/tool calling 与最小 capability contract
+- MCP registry、stdio discovery/execution
+- Git worktree / fork / merge-check / merge、run summary 与显式路径 commit
+- 终端 PTY、WebSearch/WebFetch、权限审批与内嵌 Web UI
+- 服务端 Skills 的 global/project/workspace CRUD、effective 解析、revision/restore 与 cursor 分页；设置页 scoped 面板已支持按作用域浏览、详情、分页和修订恢复，写操作 UI 仍限 global scope
+- Agent stream protocol 2 的有界内存 replay 与 snapshot resync
+
+后续长期能力包括入站 IM Gateway、review workline / AI conflict resolve、子代理、任务队列、排程与 runtime cleanup。
 
 ---
 
 ## 2. 当前 MVP 范围
 
-当前 MVP 的重点是建立后端核心闭环：
+当前 MVP 的核心闭环是：
 
 ```txt
-用户输入
-  -> agent_messages 入库
-  -> agent loop
-  -> provider 生成回复
-  -> assistant message 入库
-  -> WebSocket 推送事件
+Task / 用户消息
+  -> message + run 持久化
+  -> background agent loop
+  -> provider streaming / tool call
+  -> permission rule 或显式 approval
+  -> tool result 回灌 provider
+  -> run summary + Git diff review
+  -> explicit-path local commit
 ```
 
-并补充手动工具执行闭环：
-
-```txt
-POST /api/agents/{id}/tool-calls
-  -> permission 判断
-  -> 执行工具
-  -> agent_tool_calls 入库
-  -> 返回工具结果
-```
+Agent WebSocket protocol 2 推送运行事件并支持当前进程内的有界 replay；无法 replay 时由 live snapshot 恢复。手动 tool-call API 仍保留，但不再是唯一工具闭环。
 
 ---
 
@@ -346,6 +375,8 @@ tool.started
 tool.finished
 ```
 
+Agent stream 已使用 protocol 2 envelope（`protocol`、`streamSession`、`sequence`）：同一进程内由有界 ring buffer 提供有限 replay，并在 cursor 过期、replay 超限、订阅者溢出、stream 淘汰、session 不匹配或前端检测到序列缺口时要求读取 authoritative live snapshot 后 resync。该机制不持久化事件，服务重启或跨进程后不能 replay，不能称为 durable event log。
+
 ---
 
 ### 3.7 Provider 抽象
@@ -377,7 +408,7 @@ openai-compatible:gpt-4.1-mini
 cliproxyapi:gpt-5.5
 ```
 
-如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前 Anthropic 官方 Messages API 与 OpenAI 官方 Responses API provider 已支持流式文本输出；Anthropic Messages API 已支持 tool calling 自动循环与 tool result 回灌。OpenAI 官方 Responses API tool calling、OpenAI-compatible streaming/tool calling 保留为后续增强。
+如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。内建 OpenAI official、Anthropic official 与 OpenAI-compatible Provider 均已接入流式输出、tool calling 与 tool result 回灌，并通过统一最小能力契约声明 `Tools`、`Streaming`、`ImageInput`。未知或未实现 capability 接口的 Provider 按不支持可选能力处理，Agent loop 按能力降级，不在业务层按 Provider 名称特判。
 
 环境变量：
 
@@ -424,6 +455,9 @@ Bash
 Glob
 Grep
 WebFetch
+WebSearch
+MCPListTools
+MCPCallTool
 ```
 
 工具接口：
@@ -611,8 +645,8 @@ GET /ui/app.js
 
 - 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
 - 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略；Agent 工具层已提供 `WebSearch` 公网搜索结果工具和 `WebFetch` 公网 HTTP(S) 文档抓取工具
-- 设置 → IM 网关页内完成浏览器本地 Webhook/Discord/Slack/Telegram/Lark/企业微信预设、入站确认、签名、脱敏和事件路由策略
-- 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出；已接入后端 MCP registry，可创建/启停/删除 server 并运行 tools/list discovery；后端已提供 stdio MCP discovery/execution core tools（exec-risk 审批）
+- 设置 → IM 网关页当前只是浏览器本地策略草稿（渠道预设、未来入站确认/签名/脱敏/路由选项），不会启动服务或接收入站消息；服务端另有单向 Webhook run 通知，两者不得混称为入站 IM Gateway
+- 设置 → 技能页已接入服务端 Skills：后端支持 global/project/workspace CRUD、effective Skills、revision 历史/restore 与 snapshot-stable cursor 分页；scoped 面板支持按作用域浏览、详情、分页、修订历史与恢复，但创建、SKILL.md 导入、启停、编辑、删除 UI 仍只操作 global scope。MCP registry 仍可创建/启停/删除 server、运行 tools/list，并通过 exec-risk 审批调用 stdio MCP tools
 - 设置 → 工作线与容器页内完成当前项目工作线、当前工作线 Agent、worktree/branch/容器隔离边界概览和快速切换
 - 设置 → AI 代理页内完成默认 Agent 策略概览、当前 agent 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
@@ -699,7 +733,7 @@ docs/ARCHITECTURE.md
 - `docs/ARCHITECTURE.md` 面向贡献者说明请求如何流过 server、agent、provider、tools、WebSocket 和 SQLite。
 - `THIRD_PARTY_NOTICES.md` 是直接依赖初版说明，不是法律意见；正式发布前仍应生成完整 transitive notice。
 - CI 会检查 Go 格式、测试、vet、构建、内嵌 JavaScript 语法，并通过 `golangci-lint` 增加 static analysis。
-- `v*` tag 会触发 GoReleaser release workflow，构建 macOS/Linux/Windows archives；README 顶部已有轻量 `docs/demo.gif` 工作流预览；后续仍可替换为真实产品录屏。
+- `v*` tag 会触发 GoReleaser release workflow，构建 macOS/Linux/Windows archives；README 保留轻量 `docs/demo.svg` 工作流预览，后续如有真实录屏可再替换。
 
 ---
 
@@ -769,9 +803,11 @@ make check
 
 ---
 
-## 5. 短期路线图
+## 5. 工程工作流状态（历史 Phase 1–6）
 
-### Phase 1：当前 MVP 完善
+本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指尚未实现的 IM Gateway**，不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
+
+### Engineering Phase 1：当前 MVP 完善
 
 目标：让后端更适合手工/CLI 调试。
 
@@ -790,7 +826,7 @@ make check
 
 ---
 
-### Phase 2：工具系统增强
+### Engineering Phase 2：工具系统增强
 
 目标：让工具更接近可用编码 Agent。
 
@@ -808,7 +844,7 @@ make check
 
 ---
 
-### Phase 3：Provider 增强
+### Engineering Phase 3：Provider 增强
 
 目标：支持真实模型流式与 tool calling。
 
@@ -829,7 +865,7 @@ make check
 
 ---
 
-### Phase 4：Git / Workline 工作流
+### Engineering Phase 4：Git / Workline 工作流
 
 目标：实现多分支、多工作线能力。
 
@@ -848,7 +884,7 @@ make check
 
 ---
 
-### Phase 5：MCP / Terminal / Runtime
+### Engineering Phase 5：MCP / Terminal / Runtime
 
 目标：补齐高级能力。
 
@@ -868,7 +904,7 @@ make check
 
 ---
 
-### Phase 6：前端
+### Engineering Phase 6：前端
 
 目标：提供本地 Web UI。
 
@@ -881,7 +917,7 @@ make check
 - [ ] Tool calls panel
 - [x] File browser
 - [x] Settings
-- [ ] License report
+- [x] License report
 
 可选技术：
 
@@ -958,29 +994,26 @@ license
 
 当前 MVP 仍有这些限制：
 
-- 前端 UI 已开始无构建 ES module 拆分（bootstrap + app-main + 多个 feature controller/helper），但仍有大量业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现
-- 没有真实权限审批流程
-- Agent loop 暂未支持所有 provider 的完整模型 tool calling（Anthropic 路径已具备自动工具循环基础）
-- OpenAI-compatible provider 暂未流式输出；官方 OpenAI/Anthropic provider 已支持 SDK streaming
-- Bash 工具默认在 `acceptEdits` 下不可执行
-- `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制
-- Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址
-- Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；后续 AI conflict resolve 需要延续同一边界
-- license API 只确认了部分依赖协议
-- 已有后端 Git worktree/fork/merge-check/merge；尚未实现 AI resolve conflict 和前端完整操作面板
-- 已有 stdio MCP discovery/execution core tools、后端 MCP server registry，以及 Settings 创建/启停/删除/发现工具接入；尚未实现 MCP 长连接复用和完整编辑/update UI
+- 当前 IM 能力只有浏览器本地策略草稿与服务端单向 Webhook 通知；不存在入站 IM Gateway，不能从 IM 派任务、查状态或审批工具。
+- Agent stream protocol 2 的 replay 仅位于当前进程的有界内存；没有 durable event log、持久 retention、服务重启后或跨进程 replay。
+- 前端 UI 已按 ES module 拆分，但仍有较多业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现。
+- `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制。
+- Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址。
+- Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；尚未实现 AI conflict resolve 与完整 review workline。
+- license API 只确认了部分依赖协议。
+- 已有 stdio MCP discovery/execution 与 registry；尚未实现 MCP 长连接会话池。
+- background schedules、任务队列、进程列表与 runtime cleanup 尚未实现。
 
 ---
 
 ## 8. 下一步建议
 
-建议下一轮优先做：
+产品 Phase A 的 Provider capability 与 Agent stream 基础已经收口；Skills 的“收口”仅指后端 scope/effective/revision/pagination 语义和当前 scoped 浏览/恢复能力已稳定，未来仅修缺陷，不表示非 global scope 的创建、导入、启停、编辑、删除 UI 已齐全。下一轮主线回到 **IM foundation**：
 
-1. OpenAI Responses API tool calling 与 tool result 回灌
-2. OpenAI-compatible streaming/tool calling
-3. 将 provider streaming 事件更细粒度地接入 agent loop / WebSocket（首 token、usage、tool delta、done）
-4. retry/backoff 与 first-token timeout 策略落地
-5. 权限审批 UI 与 whitelist/blacklist 规则
-6. Codex 凭证导入、账号额度和 provider 中转配置继续增强
+1. 明确 Channel Adapter、command router 与出站通知复用边界；
+2. 先完成配对、账号白名单、审计、限流、重放保护与权限天花板；
+3. 只选一个渠道实现 `/status`、`/approve`、`/deny`；
+4. 通知历史与重试队列必须可见且不阻塞 agent loop；
+5. 闭环稳定后才考虑默认关闭的 `/task` 入站派任务。
 
-这样可以从“可交互 MVP”继续推进到“能自动执行工具的本地 Agent”。
+在上述能力落地前，所有文档与 UI 都必须继续明确：当前没有入站 IM Gateway。

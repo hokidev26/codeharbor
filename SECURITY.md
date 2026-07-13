@@ -28,9 +28,18 @@ Do not commit:
 
 Autoto stores its default config at `~/.autoto/config.json` and its database at `~/.autoto/autoto.db`. On first use, a legacy `~/.codeharbor/config.json` is copied into the canonical config location when it exists; review that copied configuration before sharing it. The repository `.gitignore` excludes common local secret and runtime files, but you should still inspect commits before pushing.
 
+## Legacy compatibility and deprecation logs
+
+Canonical Autoto inputs always take precedence when canonical and legacy forms are both present. Until removal, old CodeHarbor names are accepted only for compatibility reads, one-time migration, or route/header/cookie aliases; new configuration, responses, examples, and clients must write canonical Autoto names.
+
+Deprecation warnings may record that a successfully used legacy command, fallback, credential alias class, or its canonical replacement was selected, but they must never record token, password, cookie, Authorization header, API key, MCP environment value, or other secret values. Warnings are deduplicated once per process or compatibility key so repeated requests do not amplify sensitive operational metadata; invalid credentials and canonical-preferred paths do not emit legacy-use warnings.
+
+The removal schedule and gates are defined only in `PROJECT_PLAN.md`: no runtime legacy surface is removed before v0.4.0 or before at least two tagged releases of migration runway.
+
 ## Current security boundaries
 
 - Autoto is intended for local use. The embedded UI is served by the same local Go service.
+- The current IM settings are browser-local policy drafts, and the server-side Webhook feature is outbound-only. Autoto does not currently expose an inbound IM Gateway for remote tasks, commands, or approvals.
 - Browser-originated API calls must pass a per-process local token injected into the UI; cross-site `Origin` requests are rejected, and `Sec-Fetch-Site: cross-site` is rejected even when `Origin` is absent.
 - `X-Autoto-Token` is the canonical browser API and WebSocket token header. `X-CodeHarbor-Token` is accepted only for legacy-client compatibility; WebSocket clients may also provide the local token through the `token` query parameter.
 - The local token is a browser cross-site protection, not a multi-user authentication system. A process or user that can read the local UI response on the same machine can also obtain the token.

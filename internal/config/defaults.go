@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"autoto/internal/compat"
 )
 
 const Version = "0.1.0-dev"
@@ -104,16 +106,27 @@ type ProviderSummary struct {
 }
 
 func Default() (Config, error) {
+	cfg, _, err := DefaultWithReport()
+	return cfg, err
+}
+
+func DefaultWithReport() (Config, compat.Report, error) {
+	var report compat.Report
+	cfg, err := defaultWithReport(&report)
+	return cfg, report, err
+}
+
+func defaultWithReport(report *compat.Report) (Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Config{}, err
 	}
 	appHome := filepath.Join(home, ".autoto")
-	defaultModel := firstEnv("AUTOTO_DEFAULT_MODEL", "CODEHARBOR_DEFAULT_MODEL")
+	defaultModel := firstEnvFallback(report, "AUTOTO_DEFAULT_MODEL", "CODEHARBOR_DEFAULT_MODEL")
 	if defaultModel == "" {
 		defaultModel = "openai:gpt-4.1-mini"
 	}
-	summaryModel := firstEnv("AUTOTO_SUMMARY_MODEL", "CODEHARBOR_SUMMARY_MODEL")
+	summaryModel := firstEnvFallback(report, "AUTOTO_SUMMARY_MODEL", "CODEHARBOR_SUMMARY_MODEL")
 	if summaryModel == "" {
 		summaryModel = defaultModel
 	}
@@ -131,15 +144,15 @@ func Default() (Config, error) {
 			DefaultPermissionMode:  "acceptEdits",
 			DefaultStartInPlanMode: false,
 			MaxTurns:               200,
-			ContextTokenLimit:      getenvIntFallback([]string{"AUTOTO_CONTEXT_TOKEN_LIMIT", "CODEHARBOR_CONTEXT_TOKEN_LIMIT"}, 120000),
+			ContextTokenLimit:      getenvIntFallbackReported(report, []string{"AUTOTO_CONTEXT_TOKEN_LIMIT", "CODEHARBOR_CONTEXT_TOKEN_LIMIT"}, 120000),
 			FirstTokenTimeoutMs:    60000,
 			MaxTransientRetries:    10,
 		},
 		Auth: AuthConfig{RegistrationOpen: true},
 		Security: SecurityConfig{
-			Exposed:             getenvBoolFallback([]string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
-			AccessPassword:      firstEnv("AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
-			AllowRemoteTerminal: getenvBoolFallback([]string{"AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"}, false),
+			Exposed:             getenvBoolFallbackReported(report, []string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
+			AccessPassword:      firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
+			AllowRemoteTerminal: getenvBoolFallbackReported(report, []string{"AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"}, false),
 		},
 		Providers: ProvidersConfig{Instances: []ProviderConfig{
 			{
@@ -164,7 +177,7 @@ func Default() (Config, error) {
 				Model:   getenv("OPENAI_COMPATIBLE_MODEL", getenv("OPENAI_MODEL", "gpt-4.1-mini")),
 			},
 		}},
-		Backends: BackendsConfig{Instances: defaultBackendsFromEnv()},
+		Backends: BackendsConfig{Instances: defaultBackendsFromEnv(report)},
 	}, nil
 }
 
@@ -180,52 +193,70 @@ func ResolvePath(path string) (string, error) {
 }
 
 func Load(path string) (Config, error) {
-	cfg, err := Default()
+	cfg, _, err := LoadWithReport(path)
+	return cfg, err
+}
+
+func LoadWithReport(path string) (Config, compat.Report, error) {
+	var report compat.Report
+	cfg, err := defaultWithReport(&report)
 	if err != nil {
-		return Config{}, err
+		return Config{}, report, err
 	}
 	path, err = ResolvePath(path)
 	if err != nil {
-		return Config{}, err
+		return Config{}, report, err
 	}
+	legacyPath, err := legacyConfigPath()
+	if err != nil {
+		return Config{}, report, err
+	}
+	explicitLegacyPath := filepath.Clean(path) == filepath.Clean(legacyPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return Config{}, err
+		return Config{}, report, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if isCanonicalConfigPath(path, cfg) {
-				legacyPath, legacyErr := legacyConfigPath()
-				if legacyErr != nil {
-					return Config{}, legacyErr
-				}
 				if copied, copyErr := copyLegacyConfig(legacyPath, path); copyErr != nil {
-					return Config{}, copyErr
+					return Config{}, report, copyErr
 				} else if copied {
+					report.Add(legacyConfigUsage("copied"))
 					data, err = os.ReadFile(path)
 					if err != nil {
-						return Config{}, err
+						return Config{}, report, err
 					}
 					goto decode
 				}
 			}
 			if writeErr := writeDefaultConfig(path, cfg); writeErr != nil {
-				return Config{}, writeErr
+				return Config{}, report, writeErr
 			}
-			return cfg, nil
+			if explicitLegacyPath {
+				report.Add(legacyConfigUsage("loaded"))
+			}
+			return cfg, report, nil
 		}
-		return Config{}, err
+		return Config{}, report, err
 	}
 
 decode:
+	filterOverriddenDefaultUsages(&report, data)
 	if len(data) == 0 {
-		return cfg, nil
+		if explicitLegacyPath {
+			report.Add(legacyConfigUsage("loaded"))
+		}
+		return cfg, report, nil
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+		return Config{}, report, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	cfg = normalizeConfig(cfg)
-	return cfg, nil
+	cfg = normalizeConfigWithReport(cfg, &report)
+	if explicitLegacyPath {
+		report.Add(legacyConfigUsage("loaded"))
+	}
+	return cfg, report, nil
 }
 
 func isCanonicalConfigPath(path string, cfg Config) bool {
@@ -239,6 +270,60 @@ func legacyConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".codeharbor", "config.json"), nil
+}
+
+func legacyConfigUsage(operation string) compat.Usage {
+	return compat.Usage{
+		Key:         "config:" + operation + ":~/.codeharbor/config.json",
+		Legacy:      "~/.codeharbor/config.json",
+		Replacement: "~/.autoto/config.json",
+		Kind:        operation,
+	}
+}
+
+func filterOverriddenDefaultUsages(report *compat.Report, data []byte) {
+	if report == nil || len(data) == 0 {
+		return
+	}
+	var raw struct {
+		Agent    map[string]json.RawMessage `json:"agent"`
+		Backends map[string]json.RawMessage `json:"backends"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return
+	}
+	remove := map[string]bool{}
+	_, hasDefaultModel := raw.Agent["defaultModel"]
+	_, hasSummaryModel := raw.Agent["summaryModel"]
+	if hasDefaultModel && (hasSummaryModel || os.Getenv("AUTOTO_SUMMARY_MODEL") != "" || os.Getenv("CODEHARBOR_SUMMARY_MODEL") != "") {
+		remove[envUsageKey("CODEHARBOR_DEFAULT_MODEL")] = true
+	}
+	if hasSummaryModel {
+		remove[envUsageKey("CODEHARBOR_SUMMARY_MODEL")] = true
+	}
+	if _, ok := raw.Agent["contextTokenLimit"]; ok {
+		remove[envUsageKey("CODEHARBOR_CONTEXT_TOKEN_LIMIT")] = true
+	}
+	if _, ok := raw.Backends["instances"]; ok {
+		for _, name := range []string{
+			"CODEHARBOR_AGENT_BACKEND_URL",
+			"CODEHARBOR_AGENT_BACKEND_NAME",
+			"CODEHARBOR_AGENT_BACKEND_KIND",
+			"CODEHARBOR_AGENT_BACKEND_API_KEY",
+		} {
+			remove[envUsageKey(name)] = true
+		}
+	}
+	if len(remove) == 0 {
+		return
+	}
+	filtered := report.Usages[:0]
+	for _, usage := range report.Usages {
+		if !remove[usage.Key] {
+			filtered = append(filtered, usage)
+		}
+	}
+	report.Usages = filtered
 }
 
 func copyLegacyConfig(sourcePath, destinationPath string) (bool, error) {
@@ -295,8 +380,12 @@ func copyLegacyConfig(sourcePath, destinationPath string) (bool, error) {
 }
 
 func normalizeConfig(cfg Config) Config {
+	return normalizeConfigWithReport(cfg, nil)
+}
+
+func normalizeConfigWithReport(cfg Config, report *compat.Report) Config {
 	cfg = migrateConfig(cfg)
-	applySecurityEnvOverrides(&cfg.Security)
+	applySecurityEnvOverrides(&cfg.Security, report)
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)
 	return cfg
@@ -309,14 +398,14 @@ func migrateConfig(cfg Config) Config {
 	return cfg
 }
 
-func applySecurityEnvOverrides(security *SecurityConfig) {
-	if value, ok := lookupBoolEnvFallback("AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"); ok {
+func applySecurityEnvOverrides(security *SecurityConfig, report *compat.Report) {
+	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"); ok {
 		security.Exposed = value
 	}
-	if value := firstEnv("AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
+	if value := firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
 		security.AccessPassword = value
 	}
-	if value, ok := lookupBoolEnvFallback("AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"); ok {
+	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"); ok {
 		security.AllowRemoteTerminal = value
 	}
 }
@@ -532,16 +621,16 @@ func sanitizeConfigForDisk(cfg Config) Config {
 	return cfg
 }
 
-func defaultBackendsFromEnv() []BackendConfig {
-	baseURL := firstEnv("AUTOTO_AGENT_BACKEND_URL", "CODEHARBOR_AGENT_BACKEND_URL", "OPENHANDS_AGENT_SERVER_URL", "AGENT_SERVER_URL")
+func defaultBackendsFromEnv(report *compat.Report) []BackendConfig {
+	baseURL := firstEnvFallback(report, "AUTOTO_AGENT_BACKEND_URL", "CODEHARBOR_AGENT_BACKEND_URL", "OPENHANDS_AGENT_SERVER_URL", "AGENT_SERVER_URL")
 	if baseURL == "" {
 		return nil
 	}
-	name := firstEnv("AUTOTO_AGENT_BACKEND_NAME", "CODEHARBOR_AGENT_BACKEND_NAME")
+	name := firstEnvFallback(report, "AUTOTO_AGENT_BACKEND_NAME", "CODEHARBOR_AGENT_BACKEND_NAME")
 	if name == "" {
 		name = "Local Agent Server"
 	}
-	kind := firstEnv("AUTOTO_AGENT_BACKEND_KIND", "CODEHARBOR_AGENT_BACKEND_KIND")
+	kind := firstEnvFallback(report, "AUTOTO_AGENT_BACKEND_KIND", "CODEHARBOR_AGENT_BACKEND_KIND")
 	if kind == "" {
 		kind = "local"
 	}
@@ -550,7 +639,7 @@ func defaultBackendsFromEnv() []BackendConfig {
 			Name:    name,
 			Kind:    kind,
 			BaseURL: normalizeURL(baseURL),
-			APIKey:  firstEnv("AUTOTO_AGENT_BACKEND_API_KEY", "CODEHARBOR_AGENT_BACKEND_API_KEY", "OPENHANDS_SESSION_API_KEY", "AGENT_SERVER_API_KEY"),
+			APIKey:  firstEnvFallback(report, "AUTOTO_AGENT_BACKEND_API_KEY", "CODEHARBOR_AGENT_BACKEND_API_KEY", "OPENHANDS_SESSION_API_KEY", "AGENT_SERVER_API_KEY"),
 			Active:  true,
 		},
 	}
@@ -596,6 +685,35 @@ func firstEnv(keys ...string) string {
 	return ""
 }
 
+func firstEnvFallback(report *compat.Report, canonical string, fallbackKeys ...string) string {
+	if value := os.Getenv(canonical); value != "" {
+		return value
+	}
+	for _, key := range fallbackKeys {
+		if value := os.Getenv(key); value != "" {
+			reportLegacyEnv(report, key, canonical)
+			return value
+		}
+	}
+	return ""
+}
+
+func envUsageKey(name string) string {
+	return "env:" + name
+}
+
+func reportLegacyEnv(report *compat.Report, legacy, replacement string) {
+	if report == nil || !strings.HasPrefix(legacy, "CODEHARBOR_") {
+		return
+	}
+	report.Add(compat.Usage{
+		Key:         envUsageKey(legacy),
+		Legacy:      legacy,
+		Replacement: replacement,
+		Kind:        "environment-variable",
+	})
+}
+
 func getenv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -608,7 +726,11 @@ func getenvInt(key string, fallback int) int {
 }
 
 func getenvIntFallback(keys []string, fallback int) int {
-	for _, key := range keys {
+	return getenvIntFallbackReported(nil, keys, fallback)
+}
+
+func getenvIntFallbackReported(report *compat.Report, keys []string, fallback int) int {
+	for i, key := range keys {
 		value := strings.TrimSpace(os.Getenv(key))
 		if value == "" {
 			continue
@@ -616,6 +738,9 @@ func getenvIntFallback(keys []string, fallback int) int {
 		parsed, err := strconv.Atoi(value)
 		if err != nil || parsed <= 0 {
 			return fallback
+		}
+		if i > 0 && len(keys) > 0 {
+			reportLegacyEnv(report, key, keys[0])
 		}
 		return parsed
 	}
@@ -627,7 +752,11 @@ func getenvBool(key string, fallback bool) bool {
 }
 
 func getenvBoolFallback(keys []string, fallback bool) bool {
-	value, ok := lookupBoolEnvFallback(keys...)
+	return getenvBoolFallbackReported(nil, keys, fallback)
+}
+
+func getenvBoolFallbackReported(report *compat.Report, keys []string, fallback bool) bool {
+	value, ok := lookupBoolEnvFallbackReported(report, keys...)
 	if !ok {
 		return fallback
 	}
@@ -635,11 +764,19 @@ func getenvBoolFallback(keys []string, fallback bool) bool {
 }
 
 func lookupBoolEnvFallback(keys ...string) (bool, bool) {
-	for _, key := range keys {
+	return lookupBoolEnvFallbackReported(nil, keys...)
+}
+
+func lookupBoolEnvFallbackReported(report *compat.Report, keys ...string) (bool, bool) {
+	for i, key := range keys {
 		if strings.TrimSpace(os.Getenv(key)) == "" {
 			continue
 		}
-		return lookupBoolEnv(key)
+		value, ok := lookupBoolEnv(key)
+		if ok && i > 0 && len(keys) > 0 {
+			reportLegacyEnv(report, key, keys[0])
+		}
+		return value, ok
 	}
 	return false, false
 }

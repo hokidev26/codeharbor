@@ -2,7 +2,11 @@ import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes } from "./formatters.mjs";
 import { chatDraftsKey, promptHistoryKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
-import { mergeSlashCommands, slashCommandInsertion } from "./skills-commands.mjs";
+import { mergeAuthoritativeEffectiveCommands, mergeSlashCommands, slashCommandInsertion } from "./skills-commands.mjs";
+
+export function slashCommandsForEffectivePolicy(policy, localTemplates) {
+  return mergeAuthoritativeEffectiveCommands(policy, localTemplates);
+}
 
 export function normalizeChatDrafts(value = {}) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -33,6 +37,7 @@ export function createChatComposerController({
   state,
   attachmentKind,
   currentSkillsPreferences,
+  getEffectiveSkillsPolicy,
   isComposingInput,
   isCurrentModelConfigured,
   loadMessages,
@@ -371,7 +376,11 @@ export function createChatComposerController({
   }
 
   function enabledSlashCommands() {
-    return mergeSlashCommands(state.serverSkills, currentSkillsPreferences().commands);
+    const localTemplates = currentSkillsPreferences().commands;
+    if (typeof getEffectiveSkillsPolicy === "function") {
+      return slashCommandsForEffectivePolicy(getEffectiveSkillsPolicy(), localTemplates);
+    }
+    return mergeSlashCommands(state.serverSkills, localTemplates);
   }
 
   function slashCommandTrigger(value) {

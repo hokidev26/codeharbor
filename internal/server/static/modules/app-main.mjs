@@ -3,12 +3,20 @@ import { createBackendRegistryController } from "./backend-registry.mjs";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs";
 import { createChatRenderingController } from "./chat-rendering.mjs";
 import {
+  addRecentConversation,
+  buildNavigationView,
+  normalizeNavigationPayload,
+  normalizeRecentConversations,
+  parseNavigationTargetId,
+  renderNavigationHTML,
+  renderRecentConversationsHTML,
+} from "./conversation-navigation.mjs";
+import {
   basename,
   canonicalLocalPath,
   createDirectoryBrowserController,
   normalizePath,
   normalizeRecentDirectories,
-  projectPathLabel,
   shortPath,
 } from "./directory-browser.mjs";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
@@ -16,16 +24,20 @@ import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
+import { createMemorySettingsController } from "./memory-settings.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs";
+import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, webSocketURL } from "./runtime.mjs";
 import { settingsItems, settingsSections } from "./settings-data.mjs";
+import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs";
 import { createTerminalController } from "./terminal.mjs";
 import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs";
 import { createWorkspaceSettingsController } from "./workspace-settings.mjs";
+import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 
 let backendRegistry = null;
 let settingsPreferences = null;
@@ -50,9 +62,14 @@ function updateSidebarAccountSummary() {
   settingsPreferences.updateSidebarAccountSummary();
 }
 
+let skillsPhaseB = null;
+
 const state = {
   projects: [],
-  projectsLoadSeq: 0,
+  navigationConversations: [],
+  navigationLoadSeq: 0,
+  navigationMode: "all",
+  recentConversations: [],
   project: null,
   workline: null,
   agent: null,
@@ -200,6 +217,13 @@ const gitWorkflow = createGitWorkflowController({
   showToast,
 });
 
+const workspaceExplorer = createWorkspaceExplorerController({
+  state,
+  request: api,
+  showError,
+  showToast,
+});
+
 function getSelectedModelValue() {
   return selectedModelValue();
 }
@@ -248,6 +272,11 @@ const {
   openGitModal,
   resetGitWorkflowState,
 } = gitWorkflow;
+
+const {
+  bind: bindWorkspaceExplorer,
+  setAgent: setWorkspaceExplorerAgent,
+} = workspaceExplorer;
 
 const {
   appendToolOutput,
@@ -390,6 +419,9 @@ const chatComposer = createChatComposerController({
   state,
   attachmentKind,
   currentSkillsPreferences,
+  getEffectiveSkillsPolicy: () => skillsPhaseB?.getEffectivePolicy(state.agent?.id, getEffectiveSkillContext()) || {
+    items: [], status: "idle", error: "", hasAuthoritativeData: false,
+  },
   isComposingInput,
   isCurrentModelConfigured,
   loadMessages,
@@ -619,6 +651,18 @@ function getSkillContext() {
   });
 }
 
+function getEffectiveSkillContext() {
+  if (state.project?.id && state.workline?.id) {
+    return normalizeSkillContext({
+      scope: "workspace",
+      projectId: state.project.id,
+      worklineId: state.workline.id,
+    });
+  }
+  if (state.project?.id) return normalizeSkillContext({ scope: "project", projectId: state.project.id });
+  return normalizeSkillContext({ scope: "global" });
+}
+
 function setSkillContext(context = {}) {
   const requested = normalizeSkillContext({
     ...context,
@@ -640,11 +684,14 @@ function setSkillContext(context = {}) {
 }
 
 let skillsPhaseBRenderQueued = false;
-const skillsPhaseB = createSkillsPhaseBController({
+skillsPhaseB = createSkillsPhaseBController({
   state,
   api,
   getContext: getSkillContext,
+  onEffectiveInvalidated: () => refreshEffectiveSkillsPolicy(),
   onChange: () => {
+    updateSlashCommandPalette();
+    updatePromptHistoryHint();
     if (skillsPhaseBRenderQueued || state.activeSettingsPanel !== "skills") return;
     skillsPhaseBRenderQueued = true;
     queueMicrotask(() => {
@@ -653,6 +700,22 @@ const skillsPhaseB = createSkillsPhaseBController({
     });
   },
 });
+
+async function refreshEffectiveSkillsPolicy() {
+  const agentId = state.agent?.id || "";
+  if (!agentId || !skillsPhaseB) return [];
+  try {
+    return await skillsPhaseB.loadEffective(agentId, getEffectiveSkillContext());
+  } catch (error) {
+    notifyTerminal(`[warn] effective Skills 刷新失败：${error?.message || error}\n`);
+    return [];
+  }
+}
+
+function invalidateAndRefreshEffectiveSkillsPolicy() {
+  skillsPhaseB?.invalidateEffective({ drop: true });
+  return refreshEffectiveSkillsPolicy();
+}
 
 const skillsWorkbench = createSkillsWorkbenchController({
   state,
@@ -690,6 +753,38 @@ const {
   bindSkillTabs,
   renderSkillSettingsContent,
 } = skillsWorkbench;
+
+const memorySettings = createMemorySettingsController({
+  request: api,
+  onChange: () => {
+    if (state.activeSettingsPanel === "memory") refreshActiveSettingsPanel();
+  },
+  showError,
+  showToast,
+});
+
+const settingsPanelRegistry = createSettingsPanelRegistry();
+[
+  ["profile", { render: renderProfileSettingsContent, bind: bindProfileSettingsActions }],
+  ["memory", { render: memorySettings.render, bind: memorySettings.bind }],
+  ["skills", { render: () => renderSkillSettingsContent(state.activeSkillTab || "commands"), bind: () => bindSkillTabs("commands") }],
+  ["models", { render: renderModelSettingsContent, bind: bindModelSettingsActions }],
+  ["agents", { render: renderAgentSettingsContent, bind: bindAgentSettingsActions }],
+  ["providers", { render: renderProviderSettingsContent, bind: bindProviderSettingsActions }],
+  ["network-search", { render: renderNetworkSearchSettingsContent, bind: bindNetworkSearchSettingsActions }],
+  ["im-gateway", { render: renderIMGatewaySettingsContent, bind: bindIMGatewaySettingsActions }],
+  ["notifications", { render: renderNotificationSettingsContent, bind: bindNotificationSettingsActions }],
+  ["appearance", { render: renderAppearanceSettingsContent, bind: bindAppearanceSettingsActions }],
+  ["agent-admin", { render: renderAgentAdminSettingsContent, bind: bindAgentAdminSettingsActions }],
+  ["worklines-containers", { render: renderWorklinesSettingsContent, bind: bindWorklinesSettingsActions }],
+  ["storage", { render: renderStorageSettingsContent, bind: bindStorageSettingsActions }],
+  ["usage", { render: renderUsageSettingsContent, bind: bindUsageSettingsActions }],
+  ["servers-system", { render: renderServerSystemSettingsContent, bind: bindRuntimeSettingsActions }],
+  ["runtime", { render: renderRuntimeSettingsContent, bind: bindRuntimeSettingsActions }],
+  ["users", { render: renderUserSettingsContent, bind: bindUserSettingsActions }],
+  ["terminals", { render: renderTerminalSettingsContent, bind: bindTerminalSettingsActions }],
+  ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions }],
+].forEach(([key, panel]) => settingsPanelRegistry.register(key, panel));
 
 function setHealth(ok, text) {
   const badge = $("healthBadge");
@@ -798,7 +893,7 @@ async function loadServerSkills({ notify = false } = {}) {
   applyServerSkillsLoadResult(state, seq, { ...result, skills: result.skills.sort(sortServerSkills) });
   if (result.status === "ready") state.serverSkillsHadServerData = true;
   if (notify) {
-    const fallback = hadServerData ? "已保留上次加载的服务端策略" : "已回退到浏览器本地模板";
+    const fallback = hadServerData ? "已保留上次加载的服务端策略" : "尚无 authoritative policy，本地模板保持不可用";
     notifyTerminal(result.error
       ? `[warn] 服务端技能刷新失败，${fallback}：${result.error}\n`
       : "[info] 服务端技能已刷新。\n");
@@ -841,6 +936,7 @@ async function createServerSkill(payload, { silent = false } = {}) {
     const created = await api("/api/skills", { method: "POST", body: JSON.stringify(payload) });
     state.serverSkills = [{ ...created, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== created.id)].sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
+    await invalidateAndRefreshEffectiveSkillsPolicy();
     if (!silent) showToast("服务端技能已保存。", "success", { force: true });
     return created;
   } catch (err) {
@@ -864,6 +960,7 @@ async function updateServerSkill(id, payload, { silent = false } = {}) {
     });
     state.serverSkills = (state.serverSkills || []).map((item) => item.id === updated.id ? { ...updated, detailLoaded: true } : item).sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
+    await invalidateAndRefreshEffectiveSkillsPolicy();
     if (!silent) showToast("服务端技能已更新。", "success", { force: true });
     return updated;
   } catch (err) {
@@ -889,6 +986,7 @@ async function deleteServerSkill(id) {
   try {
     await api(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
     state.serverSkills = (state.serverSkills || []).filter((item) => item.id !== id);
+    await invalidateAndRefreshEffectiveSkillsPolicy();
     showToast("服务端技能已删除。", "success", { force: true });
   } catch (err) {
     state.serverSkillsError = err.message || String(err);
@@ -910,6 +1008,7 @@ async function importServerSkill(content) {
     const imported = await api("/api/skills/import", { method: "POST", body: JSON.stringify({ content }) });
     state.serverSkills = [{ ...imported, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== imported.id)].sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
+    await invalidateAndRefreshEffectiveSkillsPolicy();
     showToast("SKILL.md 已导入并保持停用状态。", "success", { force: true });
     return imported;
   } catch (err) {
@@ -1201,9 +1300,20 @@ function warmSettingsData() {
   Promise.allSettled(tasks).catch(() => {});
 }
 
+const globalRailSettingsTargets = new Set(["skills", "runtime", "im-gateway", "agents", "profile"]);
+
+function setGlobalRailActive(target = "conversation") {
+  document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
+    const active = node.dataset.globalRailTarget === target;
+    node.classList.toggle("active", active);
+    node.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
 function openSettingsModal(key = "profile") {
   state.settingsSearchQuery = "";
   $("settingsModal").classList.remove("hidden");
+  setGlobalRailActive(globalRailSettingsTargets.has(key) ? key : "profile");
   syncSettingsSearchInput();
   warmSettingsData();
   renderSettingsNav(key);
@@ -1212,6 +1322,18 @@ function openSettingsModal(key = "profile") {
 
 function closeSettingsModal() {
   $("settingsModal").classList.add("hidden");
+  setGlobalRailActive("conversation");
+}
+
+function activateGlobalRailTarget(target) {
+  const key = String(target || "conversation");
+  closeSidebarSettingsMenu();
+  closeMobileSidebar();
+  if (key === "conversation") {
+    closeSettingsModal();
+    return;
+  }
+  if (globalRailSettingsTargets.has(key)) openSettingsModal(key);
 }
 
 function normalizedSettingsSearchQuery() {
@@ -1300,14 +1422,15 @@ function focusSettingsSearchInput({ select = false } = {}) {
 
 function selectSettingsPanel(key) {
   const item = settingsItems.find((entry) => entry.key === key) || settingsItems[0];
+  const panel = settingsPanelRegistry.resolve(item.key);
   state.activeSettingsPanel = item.key;
   $("settingsContentTitle").textContent = item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
-  $("settingsContentBody").innerHTML = renderSettingsContent(item);
+  $("settingsContentBody").innerHTML = panel ? panel.render(item) : renderGenericSettingsContent(item);
   $("settingsNav").querySelectorAll(".settings-nav-item").forEach((node) => {
     node.classList.toggle("active", node.dataset.settingsKey === item.key);
   });
-  bindSettingsContent(item.key);
+  panel?.bind?.(item);
 }
 
 function refreshActiveSettingsPanel() {
@@ -1316,25 +1439,7 @@ function refreshActiveSettingsPanel() {
   selectSettingsPanel(state.activeSettingsPanel || "profile");
 }
 
-function renderSettingsContent(item) {
-  if (item.key === "profile") return renderProfileSettingsContent();
-  if (item.key === "skills") return renderSkillSettingsContent(state.activeSkillTab || "commands");
-  if (item.key === "models") return renderModelSettingsContent();
-  if (item.key === "agents") return renderAgentSettingsContent();
-  if (item.key === "providers") return renderProviderSettingsContent();
-  if (item.key === "network-search") return renderNetworkSearchSettingsContent();
-  if (item.key === "im-gateway") return renderIMGatewaySettingsContent();
-  if (item.key === "notifications") return renderNotificationSettingsContent();
-  if (item.key === "appearance") return renderAppearanceSettingsContent();
-  if (item.key === "agent-admin") return renderAgentAdminSettingsContent();
-  if (item.key === "worklines-containers") return renderWorklinesSettingsContent();
-  if (item.key === "storage") return renderStorageSettingsContent();
-  if (item.key === "usage") return renderUsageSettingsContent();
-  if (item.key === "servers-system") return renderServerSystemSettingsContent();
-  if (item.key === "runtime") return renderRuntimeSettingsContent();
-  if (item.key === "users") return renderUserSettingsContent();
-  if (item.key === "terminals") return renderTerminalSettingsContent();
-  if (item.key === "about") return renderAboutSettingsContent();
+function renderGenericSettingsContent(item) {
   const details = settingsPanelDetails(item.key);
   return `
     <div class="settings-panel-card">
@@ -1353,26 +1458,6 @@ function renderSettingsContent(item) {
       `).join("")}
     </div>
   `;
-}
-
-function bindSettingsContent(key) {
-  if (key === "profile") bindProfileSettingsActions();
-  if (key === "skills") bindSkillTabs("commands");
-  if (key === "models") bindModelSettingsActions();
-  if (key === "agents") bindAgentSettingsActions();
-  if (key === "providers") bindProviderSettingsActions();
-  if (key === "network-search") bindNetworkSearchSettingsActions();
-  if (key === "im-gateway") bindIMGatewaySettingsActions();
-  if (key === "notifications") bindNotificationSettingsActions();
-  if (key === "appearance") bindAppearanceSettingsActions();
-  if (key === "agent-admin") bindAgentAdminSettingsActions();
-  if (key === "worklines-containers") bindWorklinesSettingsActions();
-  if (key === "storage") bindStorageSettingsActions();
-  if (key === "usage") bindUsageSettingsActions();
-  if (key === "servers-system" || key === "runtime") bindRuntimeSettingsActions();
-  if (key === "users") bindUserSettingsActions();
-  if (key === "terminals") bindTerminalSettingsActions();
-  if (key === "about") bindAboutSettingsActions();
 }
 
 async function copyToClipboard(text) {
@@ -1592,60 +1677,74 @@ function updateWorkspaceMetaPills() {
   el.classList.remove("hidden");
 }
 
-async function loadProjects() {
-  const seq = ++state.projectsLoadSeq;
+function loadRecentConversations() {
   try {
-    const projects = await api("/api/projects");
-    if (seq !== state.projectsLoadSeq) return;
-    state.projects = Array.isArray(projects) ? projects : [];
+    return normalizeRecentConversations(JSON.parse(readLocalPreference(recentConversationsKey) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function rememberCurrentConversation() {
+  if (!state.project?.id || !state.workline?.id || !state.agent?.id) return;
+  state.recentConversations = addRecentConversation(state.recentConversations, {
+    projectId: state.project.id,
+    worklineId: state.workline.id,
+    agentId: state.agent.id,
+  });
+  try {
+    localStorage.setItem(recentConversationsKey, JSON.stringify(state.recentConversations));
+  } catch {}
+  renderRecentSidebarConversations();
+}
+
+function renderRecentSidebarConversations() {
+  const el = $("recentSidebarConversations");
+  if (!el) return;
+  el.innerHTML = renderRecentConversationsHTML(state.recentConversations, state.navigationConversations, state.agent?.id || "");
+  el.querySelectorAll("[data-navigation-target]").forEach((node) => {
+    node.addEventListener("click", () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
+  });
+}
+
+async function loadProjects() {
+  const seq = ++state.navigationLoadSeq;
+  try {
+    const payload = await api("/api/navigation");
+    if (seq !== state.navigationLoadSeq) return;
+    const navigation = normalizeNavigationPayload(payload);
+    state.projects = navigation.projects;
+    state.navigationConversations = navigation.conversations;
     renderProjects();
   } catch (err) {
-    if (seq === state.projectsLoadSeq) throw err;
+    if (seq === state.navigationLoadSeq) throw err;
   }
 }
 
 function renderProjects() {
   const el = $("projects");
-  const query = state.projectQuery.trim().toLowerCase();
-  const projects = state.projects.filter((project) => {
-    if (!query) return true;
-    return `${project.name} ${project.gitPath || ""}`.toLowerCase().includes(query);
+  if (!el) return;
+  const view = buildNavigationView({ projects: state.projects, conversations: state.navigationConversations }, {
+    mode: state.navigationMode,
+    query: state.projectQuery,
   });
-  renderRecentSidebarDirectories();
-  if (!state.projects.length) {
-    el.innerHTML = `
-      <button class="project-card project-card-empty" type="button" id="emptyProjectHint" data-open-directory-shortcut="new">
-        <div class="project-name">选择资料夹开始</div>
-        <div class="project-path">点击 AI 代理右侧 ＋ 或中间按钮</div>
-      </button>
-    `;
-    return;
-  }
-  if (!projects.length) {
-    el.innerHTML = `<div class="empty-list">没有匹配“${escapeHtml(state.projectQuery.trim())}”的项目。</div>`;
-    return;
-  }
-  el.innerHTML = projects.map((project, index) => {
-    const active = state.project?.id === project.id;
-    const status = active ? "当前" : (index === 0 ? "最近" : "");
-    const path = canonicalLocalPath(project.gitPath || project.id);
-    const pathLabel = projectPathLabel(path);
-    return `
-      <button class="project-card ${active ? "active" : ""}" type="button" data-project-id="${escapeAttr(project.id)}">
-        <span class="project-active-dot" aria-hidden="true"></span>
-        <span class="project-card-main">
-          <span class="project-card-top">
-            <span class="project-name">${escapeHtml(project.name)}</span>
-            ${status ? `<span class="project-badge ${active ? "active" : ""}">${escapeHtml(status)}</span>` : ""}
-          </span>
-          <span class="project-path" title="${escapeAttr(path)}">${escapeHtml(pathLabel)}</span>
-        </span>
-      </button>
-    `;
-  }).join("");
+  el.innerHTML = renderNavigationHTML(view, {
+    activeProjectId: state.project?.id || "",
+    activeAgentId: state.agent?.id || "",
+  });
+  $("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node) => {
+    const active = node.dataset.navigationMode === state.navigationMode;
+    node.classList.toggle("active", active);
+    node.setAttribute("aria-pressed", active ? "true" : "false");
+  });
   el.querySelectorAll("[data-project-id]").forEach((node) => {
     node.addEventListener("click", () => selectProject(node.dataset.projectId).catch(showError));
   });
+  el.querySelectorAll("[data-navigation-target]").forEach((node) => {
+    node.addEventListener("click", () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
+  });
+  renderRecentSidebarConversations();
+  renderRecentSidebarDirectories();
 }
 
 async function createProjectFromDirectory(path, options = {}) {
@@ -1706,16 +1805,17 @@ async function createProjectFromDirectory(path, options = {}) {
   }
 }
 
-async function selectProject(id) {
+function beginNavigationSelection(project) {
   saveCurrentChatDraft();
   hideSlashCommandPalette();
   closeMobileSidebar();
   state.projectCreateSeq++;
   const seq = ++state.projectSelectSeq;
   disconnectAgentTransports();
-  state.project = state.projects.find((project) => project.id === id) || null;
+  state.project = project || null;
   state.workline = null;
   state.agent = null;
+  setWorkspaceExplorerAgent(null);
   syncMessageComposerBusy();
   state.currentMessages = [];
   state.messageCopyTexts = [];
@@ -1725,6 +1825,11 @@ async function selectProject(id) {
   state.projectWorklines = [];
   state.worklineAgents = [];
   renderProjects();
+  return seq;
+}
+
+async function selectProject(id) {
+  const seq = beginNavigationSelection(state.projects.find((project) => project.id === id) || null);
   if (!state.project) {
     updateWorkspaceMetaPills();
     showEmptyWorkspaceState();
@@ -1771,9 +1876,67 @@ async function selectProject(id) {
   }
 }
 
+async function selectNavigationConversation(target) {
+  const parsed = typeof target === "string" ? parseNavigationTargetId(target) : parseNavigationTargetId(target?.targetId || "");
+  if (!parsed) throw new Error("无效的会话导航目标");
+  const navigationConversation = state.navigationConversations.find((item) => item.targetId === parsed.targetId) || null;
+  const project = state.projects.find((item) => item.id === parsed.projectId) || (navigationConversation ? {
+    id: navigationConversation.projectId,
+    name: navigationConversation.projectName,
+    gitPath: navigationConversation.projectPath,
+    updatedAt: navigationConversation.projectUpdatedAt,
+  } : null);
+  const seq = beginNavigationSelection(project);
+  if (!state.project) {
+    showEmptyWorkspaceState();
+    throw new Error("对应项目已不存在，请刷新导航后重试");
+  }
+
+  $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
+  $("currentMeta").textContent = "正在打开指定会话…";
+  updateWorkspaceMetaPills();
+  showEmptyWorkspaceState({
+    title: "正在打开会话",
+    text: "Autoto 正在定位指定工作线和 AI 代理。",
+    action: "选择其他资料夹",
+    hint: [navigationConversation?.worklineTitle, navigationConversation?.agentTitle].filter(Boolean).join(" / "),
+    icon: "…",
+  });
+
+  try {
+    const [worklines, agents] = await Promise.all([
+      api(`/api/projects/${encodeURIComponent(parsed.projectId)}/worklines`),
+      api(`/api/worklines/${encodeURIComponent(parsed.worklineId)}/agents`),
+    ]);
+    if (seq !== state.projectSelectSeq || state.project?.id !== parsed.projectId) return;
+    state.projectWorklines = Array.isArray(worklines) ? worklines : [];
+    state.workline = state.projectWorklines.find((item) => item.id === parsed.worklineId) || null;
+    state.worklineAgents = Array.isArray(agents) ? agents : [];
+    state.agent = state.worklineAgents.find((item) => item.id === parsed.agentId) || null;
+    if (!state.workline || !state.agent) {
+      $("currentTitle").textContent = state.project.name;
+      $("currentMeta").textContent = "指定会话已不可用";
+      updateWorkspaceMetaPills();
+      showEmptyWorkspaceState({
+        title: "指定会话已不可用",
+        text: "工作线或 Agent 可能已被删除，请刷新导航后选择其他会话。",
+        action: "选择其他资料夹",
+        icon: "◇",
+      });
+      throw new Error("指定工作线或 Agent 已不存在");
+    }
+    await enterAgent();
+    if (seq !== state.projectSelectSeq) return;
+    renderProjects();
+  } catch (err) {
+    if (seq === state.projectSelectSeq && state.project?.id === parsed.projectId) throw err;
+  }
+}
+
 async function enterAgent() {
   if (!state.agent) return;
   const agentId = state.agent.id;
+  setWorkspaceExplorerAgent(state.agent);
   $("currentTitle").textContent = state.project?.name || state.agent.title;
   $("currentMeta").textContent = state.agent.title || "AI 代理已就绪";
   $("permissionMode").value = state.agent.permissionMode || "acceptEdits";
@@ -1786,8 +1949,12 @@ async function enterAgent() {
   connectWS();
   connectTerminal();
   loadGitStatus({ silent: true }).catch(() => {});
+  const effectiveSkillsPromise = refreshEffectiveSkillsPolicy();
   await loadLatestRunSummary(agentId);
-  await loadMessages(agentId);
+  await Promise.all([loadMessages(agentId), effectiveSkillsPromise]);
+  if (state.agent?.id !== agentId) return;
+  rememberCurrentConversation();
+  renderProjects();
 }
 
 function showModelSetupNotice() {
@@ -1991,10 +2158,14 @@ function showError(err) {
   notifyTerminal(`[error] ${message}\n`);
 }
 
+bindWorkspaceExplorer();
 document.addEventListener("keydown", handleGlobalEscape);
 document.addEventListener("keydown", handleSettingsSearchShortcut);
 document.addEventListener("click", handleDirectoryShortcutClick);
 document.addEventListener("click", handleSidebarSettingsMenuDocumentClick);
+document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
+  node.addEventListener("click", () => activateGlobalRailTarget(node.dataset.globalRailTarget));
+});
 $("refreshBtn").addEventListener("click", () => init().catch(showError));
 $("sidebarAccountBtn")?.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -2042,6 +2213,12 @@ $("mobileSidebarLogoutBtn")?.addEventListener("click", () => {
   closeMobileSidebar();
   closeSidebarSettingsMenu();
   logoutRemoteAccess().catch(showError);
+});
+$("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node) => {
+  node.addEventListener("click", () => {
+    state.navigationMode = node.dataset.navigationMode || "all";
+    renderProjects();
+  });
 });
 $("projectSearchToggleBtn")?.addEventListener("click", (event) => {
   event.preventDefault();
@@ -2155,8 +2332,10 @@ async function init() {
     state.terminalPrefs = loadTerminalPreferences();
     state.chatDrafts = loadChatDrafts();
     state.promptHistory = loadPromptHistory();
+    state.recentConversations = loadRecentConversations();
     applyAppearancePreferences({ applyTerminalDefault: true });
     autoResizeMessageInput();
+    renderRecentSidebarConversations();
     renderRecentSidebarDirectories();
     await loadHealth();
     await Promise.all([loadSettings(), loadRuntimeSummary(), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);

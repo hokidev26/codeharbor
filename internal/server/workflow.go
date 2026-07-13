@@ -77,7 +77,7 @@ func (s *Server) createToolPermissionRule(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rule, err := ruleFromRequest(req, db.ToolPermissionRule{Mode: "*", ToolName: "*", Risk: "*", Enabled: true})
+	rule, err := s.ruleFromRequest(req, db.ToolPermissionRule{Mode: "*", ToolName: "*", Risk: "*", Enabled: true})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -106,7 +106,7 @@ func (s *Server) updateToolPermissionRule(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rule, err := ruleFromRequest(req, existing)
+	rule, err := s.ruleFromRequest(req, existing)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -136,7 +136,7 @@ func (s *Server) deleteToolPermissionRule(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 
-func ruleFromRequest(req toolPermissionRuleRequest, base db.ToolPermissionRule) (db.ToolPermissionRule, error) {
+func (s *Server) ruleFromRequest(req toolPermissionRuleRequest, base db.ToolPermissionRule) (db.ToolPermissionRule, error) {
 	if req.Mode != nil {
 		base.Mode = strings.TrimSpace(*req.Mode)
 	}
@@ -167,7 +167,7 @@ func ruleFromRequest(req toolPermissionRuleRequest, base db.ToolPermissionRule) 
 	if base.Risk == "" {
 		base.Risk = "*"
 	}
-	if err := validateToolPermissionRule(base); err != nil {
+	if err := validateToolPermissionRule(base, s.toolRegistrySnapshot()); err != nil {
 		return db.ToolPermissionRule{}, err
 	}
 	return base, nil
@@ -185,11 +185,11 @@ func logToolPermissionRuleChange(action string, rule db.ToolPermissionRule) {
 	)
 }
 
-func validateToolPermissionRule(rule db.ToolPermissionRule) error {
+func validateToolPermissionRule(rule db.ToolPermissionRule, registry *tools.Registry) error {
 	if !validRuleMode(rule.Mode) {
 		return gitCommandError{Status: http.StatusBadRequest, Msg: "invalid tool permission mode"}
 	}
-	if !validRuleToolName(rule.ToolName) {
+	if !validRuleToolName(rule.ToolName, registry) {
 		return gitCommandError{Status: http.StatusBadRequest, Msg: "invalid tool permission tool name"}
 	}
 	if !validRuleRisk(rule.Risk) {
@@ -214,13 +214,15 @@ func validRuleMode(mode string) bool {
 	return mode == "*" || validPermissionMode(mode)
 }
 
-func validRuleToolName(name string) bool {
-	switch name {
-	case "*", "Bash", "Edit", "Glob", "Grep", "MCPCallTool", "MCPListTools", "Read", "WebFetch", "WebSearch", "Write":
+func validRuleToolName(name string, registry *tools.Registry) bool {
+	if name == "*" {
 		return true
-	default:
+	}
+	if registry == nil {
 		return false
 	}
+	_, ok := registry.Get(name)
+	return ok
 }
 
 func validRuleRisk(risk string) bool {

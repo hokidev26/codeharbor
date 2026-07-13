@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,9 +12,12 @@ import (
 	"time"
 
 	"autoto/internal/agent"
+	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/preview"
 	"autoto/internal/providers"
+	"autoto/internal/runtime"
 	"autoto/internal/server"
 	"autoto/internal/tools"
 )
@@ -34,7 +36,7 @@ func Run(options Options) int {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 	if options.LegacyCommand {
-		logger.Warn("codeharbor command is deprecated; use autoto")
+		logger.Warn("codeharbor command is deprecated; use autoto", "replacement", "autoto", "removalVersion", compat.RemovalVersion)
 	}
 
 	resolvedConfigPath, err := config.ResolvePath(*configPath)
@@ -42,10 +44,18 @@ func Run(options Options) int {
 		logger.Error("resolve config", "error", err)
 		return 1
 	}
-	cfg, err := config.Load(resolvedConfigPath)
+	cfg, legacyReport, err := config.LoadWithReport(resolvedConfigPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
 		return 1
+	}
+	if !legacyReport.Empty() {
+		logger.Warn(
+			"legacy compatibility used",
+			"legacy", legacyReport.LegacyNames(),
+			"replacement", legacyReport.Replacements(),
+			"removalVersion", compat.RemovalVersion,
+		)
 	}
 
 	store, err := db.Open(context.Background(), cfg.Paths.DatabasePath)
@@ -83,8 +93,11 @@ func Run(options Options) int {
 	}
 	notifier := server.NewWebhookNotifier(store)
 	runner.SetNotifier(notifier)
+	previewManager := preview.NewManager()
 	application := server.New(cfg, store, runner, hub, providerRegistry)
+	application.SetToolRegistry(toolRegistry)
 	application.SetWebhookNotifier(notifier)
+	application.SetPreviewManager(previewManager)
 	application.SetConfigPath(resolvedConfigPath)
 
 	httpServer := &http.Server{
@@ -96,18 +109,29 @@ func Run(options Options) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("serve", "error", err)
-			stop()
-		}
-	}()
+	supervisor := runtime.NewSupervisor()
+	if err := supervisor.Register(previewManager); err != nil {
+		logger.Error("register preview service", "error", err)
+		return 1
+	}
+	if err := supervisor.Register(runtime.NewHTTPService(httpServer, func(err error) {
+		logger.Error("serve", "error", err)
+		stop()
+	})); err != nil {
+		logger.Error("register service", "error", err)
+		return 1
+	}
+
+	logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
+	if err := supervisor.Start(ctx); err != nil {
+		logger.Error("start services", "error", err)
+		return 1
+	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+	if err := supervisor.Close(shutdownCtx); err != nil {
 		logger.Error("shutdown", "error", err)
 		return 1
 	}
