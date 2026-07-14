@@ -1,3 +1,5 @@
+import { t } from "./messages-skills.mjs";
+
 const SKILL_SCOPES = new Set(["global", "project", "workspace"]);
 
 export function normalizeSkillScope(scope) {
@@ -12,21 +14,21 @@ export function normalizeSkillContext(context = {}) {
   const projectId = String(context.projectId || "").trim();
   const worklineId = String(context.worklineId || "").trim();
   if (scope === "project") return { scope, projectId, worklineId: "" };
-  if (scope === "workspace") return { scope, projectId: "", worklineId };
+  if (scope === "workspace") return { scope, projectId, worklineId };
   return { scope: "global", projectId: "", worklineId: "" };
 }
 
 export function skillContextKey(context) {
   const normalized = normalizeSkillContext(context);
   if (normalized.scope === "project") return `project:${normalized.projectId || "none"}`;
-  if (normalized.scope === "workspace") return `workspace:${normalized.worklineId || "none"}`;
+  if (normalized.scope === "workspace") return `workspace:${normalized.projectId || "none"}:${normalized.worklineId || "none"}`;
   return "global";
 }
 
 export function skillContextQuery(context, extra = {}) {
   const normalized = normalizeSkillContext(context);
   const params = new URLSearchParams({ scope: normalized.scope });
-  if (normalized.scope === "project" && normalized.projectId) params.set("projectId", normalized.projectId);
+  if ((normalized.scope === "project" || normalized.scope === "workspace") && normalized.projectId) params.set("projectId", normalized.projectId);
   if (normalized.scope === "workspace" && normalized.worklineId) params.set("worklineId", normalized.worklineId);
   Object.entries(extra).forEach(([key, value]) => {
     if (value !== undefined && value !== null && String(value) !== "") params.set(key, String(value));
@@ -36,7 +38,7 @@ export function skillContextQuery(context, extra = {}) {
 
 export function buildSkillsV2URL(context, { cursor = "", limit } = {}) {
   const params = skillContextQuery(context, { cursor, limit });
-  return `/api/v2/skills?${params.toString()}`;
+  return `/api/v2/skills/?${params.toString()}`;
 }
 
 export function buildSkillDetailV2URL(id, context) {
@@ -56,8 +58,9 @@ export function buildSkillRevisionRestoreV2URL(id, revisionId, context) {
   return `/api/v2/skills/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/restore?${skillContextQuery(context).toString()}`;
 }
 
-export function buildEffectiveSkillsV2URL(agentId, context) {
-  return `/api/v2/agents/${encodeURIComponent(agentId)}/skills/effective?${skillContextQuery(context).toString()}`;
+export function buildEffectiveSkillsV2URL(agentId, context, { cursor = "", limit } = {}) {
+  const params = skillContextQuery(context, { cursor, limit });
+  return `/api/v2/agents/${encodeURIComponent(agentId)}/skills/effective?${params.toString()}`;
 }
 
 export function normalizeSkillsPage(response = {}) {
@@ -69,12 +72,17 @@ export function normalizeSkillsPage(response = {}) {
   };
 }
 
-export function createSkillRestorePayload(revision, { expectedUpdatedAt, acknowledgeRisk = false } = {}) {
+export function createSkillRestorePayload(revision, { expectedUpdatedAt, acknowledgeRisk = false, acknowledgedContentHash = "" } = {}) {
   const revisionNo = Number(revision?.revisionNo ?? revision?.revision);
-  if (!Number.isSafeInteger(revisionNo) || revisionNo < 1) throw new Error("技能修订版本缺失，不能恢复");
+  if (!Number.isSafeInteger(revisionNo) || revisionNo < 1) throw new Error(t("skillsWorkbench.errors.restoreRevisionMissing"));
   const updatedAt = String(expectedUpdatedAt || "").trim();
-  if (!updatedAt) throw new Error("技能当前版本时间戳缺失，不能安全恢复");
-  return { revisionNo, expectedUpdatedAt: updatedAt, acknowledgeRisk: Boolean(acknowledgeRisk) };
+  if (!updatedAt) throw new Error(t("skillsWorkbench.errors.restoreTimestampMissing"));
+  return {
+    revisionNo,
+    expectedUpdatedAt: updatedAt,
+    acknowledgeRisk: Boolean(acknowledgeRisk),
+    acknowledgedContentHash: String(acknowledgedContentHash || "").trim(),
+  };
 }
 
 export function loadServerSkillsWithFallback(load, previousSkills = [], { hadServerData = false } = {}) {
@@ -144,13 +152,25 @@ export function ensureSkillsContextState(state, context) {
   return root.contexts[key];
 }
 
+function sameSnapshotSequence(expected, actual) {
+  return expected !== null && actual !== null && String(expected) === String(actual);
+}
+
+function resetPageCursor(pageState, { clearItems = false } = {}) {
+  pageState.requestSequence += 1;
+  pageState.nextCursor = "";
+  pageState.snapshotSequence = null;
+  if (clearItems) pageState.items = [];
+}
+
 // A reusable v2 controller. It is intentionally independent from app-main so
-// callers can choose their own renderer while retaining context isolation and
-// fail-closed detail semantics.
-export function createSkillsPhaseBController({ state = {}, api, getContext = () => ({}), pageSize = 50, onChange } = {}) {
+// callers can choose their own renderer while retaining context isolation,
+// snapshot-consistent pagination, and fail-closed effective-policy semantics.
+export function createSkillsPhaseBController({ state = {}, api, getContext = () => ({}), pageSize = 50, onChange, onEffectiveInvalidated } = {}) {
   if (typeof api !== "function") throw new Error("createSkillsPhaseBController requires api");
   const changed = () => onChange?.();
   const currentContext = (override) => normalizeSkillContext(override || getContext() || {});
+  const effectiveKey = (agentId, context) => `${String(agentId || "")}:${skillContextKey(context)}`;
 
   async function load(contextOverride, { append = false } = {}) {
     const context = currentContext(contextOverride);
@@ -165,6 +185,13 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
       const page = normalizeSkillsPage(await api(buildSkillsV2URL(context, { cursor, limit: pageSize })));
       // A scope switch / newer refresh cannot write into the active bucket.
       if (requestSequence !== bucket.requestSequence || skillContextKey(bucket.context) !== skillContextKey(context)) return bucket;
+      if (append && !sameSnapshotSequence(bucket.snapshotSequence, page.snapshotSequence)) {
+        resetPageCursor(bucket, { clearItems: true });
+        bucket.status = "loading";
+        bucket.error = t("skillsWorkbench.errors.pageSnapshotChanged");
+        changed();
+        return load(context);
+      }
       bucket.items = append ? [...bucket.items, ...page.items] : page.items;
       bucket.nextCursor = page.nextCursor;
       bucket.snapshotSequence = page.snapshotSequence;
@@ -188,7 +215,7 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
     const context = currentContext(contextOverride);
     const bucket = ensureSkillsContextState(state, context);
     const index = bucket.items.findIndex((item) => item.id === id);
-    if (index < 0) throw new Error("服务端技能不存在");
+    if (index < 0) throw new Error(t("skillsWorkbench.errors.skillNotFound"));
     const before = bucket.items[index];
     try {
       const detail = await api(buildSkillDetailV2URL(id, context));
@@ -223,10 +250,18 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
     try {
       const page = normalizeSkillsPage(await api(buildSkillRevisionsV2URL(id, context, { cursor, limit: pageSize })));
       if (requestSequence !== revisionState.requestSequence) return revisionState;
+      if (append && !sameSnapshotSequence(revisionState.snapshotSequence, page.snapshotSequence)) {
+        resetPageCursor(revisionState, { clearItems: true });
+        revisionState.status = "loading";
+        revisionState.error = t("skillsWorkbench.errors.revisionSnapshotChanged");
+        changed();
+        return loadRevisions(id, context);
+      }
       revisionState.items = append ? [...revisionState.items, ...page.items] : page.items;
       revisionState.nextCursor = page.nextCursor;
       revisionState.snapshotSequence = page.snapshotSequence;
       revisionState.status = "ready";
+      revisionState.error = "";
     } catch (error) {
       if (requestSequence === revisionState.requestSequence) {
         revisionState.status = revisionState.items.length ? "stale" : "error";
@@ -244,43 +279,83 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
     return api(buildSkillRevisionDetailV2URL(id, revisionId, context));
   }
 
-  async function restoreRevision(id, revision, contextOverride, options = {}) {
-    const context = currentContext(contextOverride);
-    const bucket = ensureSkillsContextState(state, context);
-    const payload = createSkillRestorePayload(revision, {
-      expectedUpdatedAt: options.expectedUpdatedAt,
-      acknowledgeRisk: options.acknowledgeRisk,
+  function invalidateEffective({ drop = true } = {}) {
+    const root = phaseBRoot(state);
+    Object.values(root.effective).forEach((entry) => {
+      entry.requestSequence = Number(entry.requestSequence || 0) + 1;
+      entry.status = "idle";
+      entry.error = "";
+      entry.nextCursor = "";
+      entry.snapshotSequence = null;
+      if (drop) {
+        entry.items = [];
+        entry.hasAuthoritativeData = false;
+      }
     });
-    const restored = await api(buildSkillRevisionRestoreV2URL(id, payload.revisionNo, context), {
-      method: "POST", body: JSON.stringify(payload),
-    });
-    const index = bucket.items.findIndex((item) => item.id === id);
-    if (index >= 0) bucket.items[index] = { ...bucket.items[index], ...restored, detailLoaded: true, detailError: "" };
     changed();
-    return restored;
   }
 
-  async function loadEffective(agentId, contextOverride) {
+  function getEffectivePolicy(agentId, contextOverride) {
     const context = currentContext(contextOverride);
-    const key = `${String(agentId || "")}:${skillContextKey(context)}`;
+    return phaseBRoot(state).effective[effectiveKey(agentId, context)] || {
+      items: [], status: "idle", error: "", hasAuthoritativeData: false, snapshotSequence: null,
+    };
+  }
+
+  async function loadEffective(agentId, contextOverride, { restarted = false } = {}) {
+    const normalizedAgentId = String(agentId || "").trim();
+    if (!normalizedAgentId) throw new Error(t("skillsWorkbench.errors.agentMissing"));
+    const context = currentContext(contextOverride);
+    const key = effectiveKey(normalizedAgentId, context);
     const root = phaseBRoot(state);
-    const previous = root.effective[key] || { items: [], status: "idle", error: "", requestSequence: 0 };
-    root.effective[key] = previous;
-    const requestSequence = ++previous.requestSequence;
-    previous.status = "loading";
-    previous.error = "";
+    const entry = root.effective[key] || {
+      items: [], status: "idle", error: "", requestSequence: 0,
+      hasAuthoritativeData: false, snapshotSequence: null, nextCursor: "",
+    };
+    root.effective[key] = entry;
+    const hadAuthoritativeData = Boolean(entry.hasAuthoritativeData);
+    const lastKnownItems = Array.isArray(entry.items) ? entry.items : [];
+    const lastKnownSnapshot = entry.snapshotSequence;
+    const requestSequence = ++entry.requestSequence;
+    entry.status = "loading";
+    entry.error = "";
     changed();
     try {
-      const response = await api(buildEffectiveSkillsV2URL(agentId, context));
-      if (requestSequence === previous.requestSequence) {
-        previous.items = normalizeSkillsPage(response).items;
-        previous.status = "ready";
+      const items = [];
+      let cursor = "";
+      let snapshotSequence = null;
+      do {
+        const page = normalizeSkillsPage(await api(buildEffectiveSkillsV2URL(normalizedAgentId, context, { cursor, limit: pageSize })));
+        if (requestSequence !== entry.requestSequence) return entry.items;
+        if (snapshotSequence !== null && !sameSnapshotSequence(snapshotSequence, page.snapshotSequence)) {
+          if (restarted) throw new Error(t("skillsWorkbench.errors.effectiveSnapshotMismatch"));
+          resetPageCursor(entry, { clearItems: true });
+          entry.hasAuthoritativeData = false;
+          entry.status = "loading";
+          entry.error = t("skillsWorkbench.errors.effectiveSnapshotChanged");
+          changed();
+          return loadEffective(normalizedAgentId, context, { restarted: true });
+        }
+        snapshotSequence = page.snapshotSequence;
+        items.push(...page.items);
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (requestSequence === entry.requestSequence) {
+        entry.items = items;
+        entry.nextCursor = "";
+        entry.snapshotSequence = snapshotSequence;
+        entry.hasAuthoritativeData = true;
+        entry.status = "ready";
+        entry.error = "";
       }
-      return previous.items;
+      return entry.items;
     } catch (error) {
-      if (requestSequence === previous.requestSequence) {
-        previous.status = previous.items.length ? "stale" : "error";
-        previous.error = error?.message || String(error);
+      if (requestSequence === entry.requestSequence) {
+        entry.items = hadAuthoritativeData ? lastKnownItems : [];
+        entry.snapshotSequence = hadAuthoritativeData ? lastKnownSnapshot : null;
+        entry.hasAuthoritativeData = hadAuthoritativeData;
+        entry.status = hadAuthoritativeData ? "stale" : "error";
+        entry.error = error?.message || String(error);
       }
       throw error;
     } finally {
@@ -288,5 +363,38 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
     }
   }
 
-  return { ensureContext: (context) => ensureSkillsContextState(state, currentContext(context)), load, loadMore, loadDetail, loadRevisions, loadRevisionDetail, restoreRevision, loadEffective };
+  async function restoreRevision(id, revision, contextOverride, options = {}) {
+    const context = currentContext(contextOverride);
+    const bucket = ensureSkillsContextState(state, context);
+    const payload = createSkillRestorePayload(revision, {
+      expectedUpdatedAt: options.expectedUpdatedAt,
+      acknowledgeRisk: options.acknowledgeRisk,
+      acknowledgedContentHash: options.acknowledgedContentHash,
+    });
+    const restored = await api(buildSkillRevisionRestoreV2URL(id, payload.revisionNo, context), {
+      method: "POST", body: JSON.stringify(payload),
+    });
+    resetPageCursor(bucket);
+    delete bucket.revisions[id];
+    const index = bucket.items.findIndex((item) => item.id === id);
+    if (index >= 0) bucket.items[index] = { ...bucket.items[index], ...restored, detailLoaded: true, detailError: "" };
+    invalidateEffective({ drop: true });
+    onEffectiveInvalidated?.();
+    changed();
+    await Promise.allSettled([load(context), loadRevisions(id, context)]);
+    return restored;
+  }
+
+  return {
+    ensureContext: (context) => ensureSkillsContextState(state, currentContext(context)),
+    getEffectivePolicy,
+    invalidateEffective,
+    load,
+    loadMore,
+    loadDetail,
+    loadRevisions,
+    loadRevisionDetail,
+    restoreRevision,
+    loadEffective,
+  };
 }

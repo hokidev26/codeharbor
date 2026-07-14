@@ -1,7 +1,28 @@
 import { $, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes, formatDuration, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
+import { currentUILocale, t as baseT } from "./i18n.mjs";
+import systemSettingsMessages from "./messages-system-settings.mjs";
 import { localPreferenceBackupVersion } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
+
+function lookupMessage(catalog, key) {
+  return String(key || "").split(".").reduce((value, part) => (
+    value && typeof value === "object" ? value[part] : undefined
+  ), catalog);
+}
+
+function interpolateMessage(message, params = {}) {
+  return String(message).replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name] ?? "") : match
+  ));
+}
+
+function t(key, params = {}) {
+  const locale = currentUILocale();
+  const message = lookupMessage(systemSettingsMessages[locale], key)
+    ?? lookupMessage(systemSettingsMessages["zh-CN"], key);
+  return message === undefined ? baseT(key, params) : interpolateMessage(message, params);
+}
 
 export function createSystemSettingsController({
   state,
@@ -10,6 +31,7 @@ export function createSystemSettingsController({
   loadLicenseSummary,
   loadRuntimeSummary,
   loadStorageSummary,
+  loadUpdateStatus,
   loadUsageSummary,
   localPreferencesBackupSummary,
   localPreferencesBackupText,
@@ -29,21 +51,21 @@ export function createSystemSettingsController({
     <div class="settings-live-page runtime-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">服务器与系统</div>
+          <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.serverSystem.kicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(address)}</div>
-          <p>查看本地服务监听地址、版本、配置路径和 Go 运行环境。该面板只读取当前进程状态，不写入配置。</p>
+          <p>${escapeHtml(t("systemSettings.serverSystem.description"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">刷新状态</button>
+          <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.serverSystem.refresh"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(summary?.version || state.settings?.version || "0.1.0-dev")}</strong><span>版本</span></div>
-        <div><strong>${escapeHtml(process.pid ? `#${process.pid}` : "暂无")}</strong><span>进程 ID</span></div>
-        <div><strong>${escapeHtml(go.version || "未加载")}</strong><span>Go 版本</span></div>
+        <div><strong>${escapeHtml(summary?.version || state.settings?.version || "0.1.0-dev")}</strong><span>${escapeHtml(t("systemSettings.serverSystem.version"))}</span></div>
+        <div><strong>${escapeHtml(process.pid ? `#${process.pid}` : t("systemSettings.serverSystem.unavailable"))}</strong><span>${escapeHtml(t("systemSettings.serverSystem.processId"))}</span></div>
+        <div><strong>${escapeHtml(go.version || t("systemSettings.serverSystem.notLoaded"))}</strong><span>${escapeHtml(t("systemSettings.serverSystem.goVersion"))}</span></div>
       </div>
       ${state.runtimeError ? `<div class="settings-inline-alert">${escapeHtml(state.runtimeError)}</div>` : ""}
-      ${summary ? renderServerSystemSummary(summary) : `<div class="settings-empty-card">正在加载服务器与系统状态。如果长时间没有变化，请点击“刷新状态”。</div>`}
+      ${summary ? renderServerSystemSummary(summary) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.serverSystem.loading"))}</div>`}
     </div>
   `;
   }
@@ -57,31 +79,31 @@ export function createSystemSettingsController({
     const security = summary.security || {};
     return `
     <div class="usage-summary-grid">
-      ${renderUsageMetricCard("监听地址", server.address || "未配置", "当前 Web UI 与 API 服务地址")}
-      ${renderUsageMetricCard("访问模式", security.remoteAccessRequired ? "隧道收紧" : "本地", security.message || "当前请求的安全状态")}
-      ${renderUsageMetricCard("自动执行", security.bypassPermissionsAllowed ? "允许" : "禁用", `权限上限：${security.maxPermissionMode || "bypassPermissions"}`)}
-      ${renderUsageMetricCard("远程终端", security.remoteTerminalAllowed ? "允许" : "禁用", "AUTOTO_REMOTE_TERMINAL")}
-      ${renderUsageMetricCard("访问密码", security.accessPasswordConfigured ? "已配置" : "未配置", "AUTOTO_ACCESS_PASSWORD")}
-      ${renderUsageMetricCard("运行时长", formatUptime(process.uptimeSeconds || 0), `启动：${formatTimestamp(process.startedAt)}`)}
-      ${renderUsageMetricCard("CPU", go.cpus || 0, `${go.os || "unknown"}/${go.arch || "unknown"}`)}
-      ${renderUsageMetricCard("Provider", providers.total || 0, `${formatNumber(providers.configured || 0)} 个已配置`)}
-      ${renderUsageMetricCard("后端种子", backends.configured || 0, `${formatNumber(backends.active || 0)} 个默认启用`)}
-      ${renderUsageMetricCard("生成时间", formatTimestamp(summary.generatedAt), "点击刷新可重新采样")}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.listenAddress"), server.address || t("systemSettings.serverSystem.notConfigured"), t("systemSettings.serverSystem.description"))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.accessMode"), security.remoteAccessRequired ? t("systemSettings.serverSystem.tunnelHardened") : t("systemSettings.serverSystem.local"), security.message || t("systemSettings.serverSystem.securityFallback"))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.autoExecution"), security.bypassPermissionsAllowed ? t("systemSettings.serverSystem.allowed") : t("systemSettings.serverSystem.disabled"), t("systemSettings.serverSystem.permissionCap", { mode: security.maxPermissionMode || "bypassPermissions" }))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.remoteTerminal"), security.remoteTerminalAllowed ? t("systemSettings.serverSystem.allowed") : t("systemSettings.serverSystem.disabled"), "AUTOTO_REMOTE_TERMINAL")}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.accessPassword"), security.accessPasswordConfigured ? t("systemSettings.serverSystem.configured") : t("systemSettings.serverSystem.notConfigured"), "AUTOTO_ACCESS_PASSWORD")}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.uptime"), formatUptime(process.uptimeSeconds || 0), t("systemSettings.serverSystem.startedAt", { timestamp: formatTimestamp(process.startedAt) }))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.cpu"), go.cpus || 0, `${go.os || t("systemSettings.serverSystem.unknown")}/${go.arch || t("systemSettings.serverSystem.unknown")}`)}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.provider"), providers.total || 0, t("systemSettings.serverSystem.providersConfigured", { count: formatNumber(providers.configured || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.backendSeeds"), backends.configured || 0, t("systemSettings.serverSystem.backendsActive", { count: formatNumber(backends.active || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.serverSystem.generatedAt"), formatTimestamp(summary.generatedAt), t("systemSettings.serverSystem.resampleHint"))}
     </div>
     <div class="usage-detail-grid">
       <section class="settings-info-card">
-        <div class="settings-info-title">服务配置</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.serverSystem.serviceConfig"))}</div>
         <div class="runtime-kv-list">
-          ${renderRuntimeKeyValue("Host", server.host || "localhost")}
-          ${renderRuntimeKeyValue("Port", server.port || 7788)}
-          ${renderRuntimeKeyValue("Config", server.configPath || "未配置")}
-          ${renderRuntimeKeyValue("Executable", process.executable || "未知")}
+          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.host"), server.host || "localhost")}
+          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.port"), server.port || 7788)}
+          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.config"), server.configPath || t("systemSettings.serverSystem.notConfigured"))}
+          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.executable"), process.executable || t("systemSettings.serverSystem.unknown"))}
         </div>
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">本地路径</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.serverSystem.localPaths"))}</div>
         <div class="runtime-kv-list">
-          ${(summary.paths || []).map((entry) => renderRuntimeKeyValue(entry.label || entry.key, entry.path || "未配置")).join("")}
+          ${(summary.paths || []).map((entry) => renderRuntimeKeyValue(entry.label || entry.key, entry.path || t("systemSettings.serverSystem.notConfigured"))).join("")}
         </div>
       </section>
     </div>
@@ -96,21 +118,21 @@ export function createSystemSettingsController({
     <div class="settings-live-page runtime-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">运行资源</div>
-          <div class="settings-hero-title">${escapeHtml(formatBytes(memory.allocBytes || 0))} · ${escapeHtml(formatNumber(go.goroutines || 0))} goroutines</div>
-          <p>查看 Go runtime 内存、goroutine、GC 与代理默认限制，适合定位本地服务是否异常膨胀。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.runtimeResources.kicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(formatBytes(memory.allocBytes || 0))} · ${escapeHtml(t("systemSettings.runtimeResources.goroutinesValue", { count: formatNumber(go.goroutines || 0) }))}</div>
+          <p>${escapeHtml(t("systemSettings.runtimeResources.description"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">刷新状态</button>
+          <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.runtimeResources.refresh"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatBytes(memory.sysBytes || 0))}</strong><span>系统内存</span></div>
-        <div><strong>${escapeHtml(formatNumber(go.goroutines || 0))}</strong><span>Goroutines</span></div>
-        <div><strong>${escapeHtml(formatNumber(memory.gcCycles || 0))}</strong><span>GC 次数</span></div>
+        <div><strong>${escapeHtml(formatBytes(memory.sysBytes || 0))}</strong><span>${escapeHtml(t("systemSettings.runtimeResources.sysMemory"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(go.goroutines || 0))}</strong><span>${escapeHtml(t("systemSettings.runtimeResources.goroutines"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(memory.gcCycles || 0))}</strong><span>${escapeHtml(t("systemSettings.runtimeResources.gcCycles"))}</span></div>
       </div>
       ${state.runtimeError ? `<div class="settings-inline-alert">${escapeHtml(state.runtimeError)}</div>` : ""}
-      ${summary ? renderRuntimeResourceSummary(summary) : `<div class="settings-empty-card">正在加载运行资源。如果长时间没有变化，请点击“刷新状态”。</div>`}
+      ${summary ? renderRuntimeResourceSummary(summary) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.runtimeResources.loading"))}</div>`}
     </div>
   `;
   }
@@ -122,31 +144,31 @@ export function createSystemSettingsController({
     const security = summary.security || {};
     return `
     <div class="usage-summary-grid">
-      ${renderUsageMetricCard("当前分配", formatBytes(memory.allocBytes || 0), "仍在使用的 Go 堆对象")}
-      ${renderUsageMetricCard("堆占用", formatBytes(memory.heapInuseBytes || 0), `HeapAlloc ${formatBytes(memory.heapAllocBytes || 0)}`)}
-      ${renderUsageMetricCard("栈占用", formatBytes(memory.stackInuseBytes || 0), "当前 goroutine 栈空间")}
-      ${renderUsageMetricCard("下次 GC", formatBytes(memory.nextGcBytes || 0), `${formatNumber(memory.gcCycles || 0)} 次 GC`)}
-      ${renderUsageMetricCard("Goroutines", go.goroutines || 0, `${formatNumber(go.cpus || 0)} CPU 可用`)}
-      ${renderUsageMetricCard("累计分配", formatBytes(memory.totalAllocBytes || 0), "进程启动以来累计")}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.currentAlloc"), formatBytes(memory.allocBytes || 0), t("systemSettings.runtimeResources.heapObjectsHint"))}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.heapInUse"), formatBytes(memory.heapInuseBytes || 0), t("systemSettings.runtimeResources.heapAllocHint", { size: formatBytes(memory.heapAllocBytes || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.stackInUse"), formatBytes(memory.stackInuseBytes || 0), t("systemSettings.runtimeResources.stackHint"))}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.nextGc"), formatBytes(memory.nextGcBytes || 0), t("systemSettings.runtimeResources.gcTimes", { count: formatNumber(memory.gcCycles || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.goroutines"), go.goroutines || 0, t("systemSettings.runtimeResources.cpusAvailable", { count: formatNumber(go.cpus || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.runtimeResources.totalAlloc"), formatBytes(memory.totalAllocBytes || 0), t("systemSettings.runtimeResources.sinceStart"))}
     </div>
     <div class="usage-detail-grid">
       <section class="settings-info-card">
-        <div class="settings-info-title">代理默认值</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.runtimeResources.agentDefaults"))}</div>
         <div class="runtime-kv-list">
-          ${renderRuntimeKeyValue("默认模型", agent.defaultModel || "未配置")}
-          ${renderRuntimeKeyValue("摘要模型", agent.summaryModel || "未配置")}
-          ${renderRuntimeKeyValue("默认权限", agent.defaultPermissionMode || "acceptEdits")}
-          ${renderRuntimeKeyValue("当前权限上限", security.maxPermissionMode || "bypassPermissions")}
-          ${renderRuntimeKeyValue("默认计划模式", agent.defaultStartInPlanMode ? "开启" : "关闭")}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.defaultModel"), agent.defaultModel || t("systemSettings.runtimeResources.notConfigured"))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.summaryModel"), agent.summaryModel || t("systemSettings.runtimeResources.notConfigured"))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.defaultPermission"), agent.defaultPermissionMode || "acceptEdits")}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.currentPermissionCap"), security.maxPermissionMode || "bypassPermissions")}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.defaultPlanMode"), agent.defaultStartInPlanMode ? t("systemSettings.runtimeResources.enabled") : t("systemSettings.runtimeResources.disabled"))}
         </div>
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">运行限制</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.runtimeResources.runLimits"))}</div>
         <div class="runtime-kv-list">
-          ${renderRuntimeKeyValue("最大轮次", formatNumber(agent.maxTurns || 0))}
-          ${renderRuntimeKeyValue("首 token 超时", formatDuration(agent.firstTokenTimeoutMs || 0))}
-          ${renderRuntimeKeyValue("瞬时重试", formatNumber(agent.maxTransientRetries || 0))}
-          ${renderRuntimeKeyValue("采样时间", formatTimestamp(summary.generatedAt))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.maxTurns"), formatNumber(agent.maxTurns || 0))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.firstTokenTimeout"), formatDuration(agent.firstTokenTimeoutMs || 0))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.transientRetries"), formatNumber(agent.maxTransientRetries || 0))}
+          ${renderRuntimeKeyValue(t("systemSettings.runtimeResources.sampleTime"), formatTimestamp(summary.generatedAt))}
         </div>
       </section>
     </div>
@@ -171,70 +193,131 @@ export function createSystemSettingsController({
 
   function formatUptime(seconds) {
     const value = Number(seconds || 0);
-    if (!Number.isFinite(value) || value <= 0) return "0 s";
-    if (value < 60) return `${Math.round(value)} s`;
-    if (value < 3600) return `${Math.floor(value / 60)} min ${Math.round(value % 60)} s`;
-    const hours = Math.floor(value / 3600);
-    const minutes = Math.floor((value % 3600) / 60);
-    return `${hours} h ${minutes} min`;
+    if (!Number.isFinite(value) || value <= 0) return t("systemSettings.serverSystem.uptimeSeconds", { seconds: 0 });
+    if (value < 60) return t("systemSettings.serverSystem.uptimeSeconds", { seconds: Math.round(value) });
+    if (value < 3600) return t("systemSettings.serverSystem.uptimeMinutes", {
+      minutes: Math.floor(value / 60),
+      seconds: Math.round(value % 60),
+    });
+    return t("systemSettings.serverSystem.uptimeHours", {
+      hours: Math.floor(value / 3600),
+      minutes: Math.floor((value % 3600) / 60),
+    });
   }
+  function aboutUpdatePresentation() {
+    const status = state.updateStatus;
+    const currentVersion = status?.currentVersion || state.settings?.version || "0.1.0-dev";
+    if (state.updateError) {
+      return { currentVersion, latestVersion: "—", label: t("systemSettings.about.checkFailed"), tone: "error" };
+    }
+    if (!status) {
+      return { currentVersion, latestVersion: "—", label: t("systemSettings.about.notChecked"), tone: "idle" };
+    }
+    if (status.status === "update_available") {
+      return { currentVersion, latestVersion: status.targetVersion || "—", label: t("systemSettings.about.updateAvailable"), tone: "available" };
+    }
+    if (status.status === "up_to_date") {
+      return { currentVersion, latestVersion: status.targetVersion || currentVersion, label: t("systemSettings.about.upToDate"), tone: "current" };
+    }
+    if (status.status === "development_build") {
+      return { currentVersion, latestVersion: "—", label: t("systemSettings.about.developmentBuild"), tone: "idle" };
+    }
+    return { currentVersion, latestVersion: status.targetVersion || "—", label: t("systemSettings.about.unavailable"), tone: "idle" };
+  }
+
   function renderAboutSettingsContent() {
     const summary = state.licenseSummary;
     const modules = Array.isArray(summary?.modules) ? summary.modules : [];
     const directCount = modules.filter((module) => module.relation === "direct").length;
     const unknownCount = modules.filter((module) => !module.license || module.license === "unknown").length;
+    const update = aboutUpdatePresentation();
     return `
-    <div class="settings-live-page about-page">
-      <section class="settings-hero-card">
-        <div>
-          <div class="settings-hero-kicker">关于 Autoto</div>
-          <div class="settings-hero-title">${escapeHtml(state.settings?.version || "0.1.0-dev")}</div>
-          <p>Autoto 是本地优先的 Go AI 编程 Agent 服务。这里展示构建时依赖和许可证，方便发布前做开源合规检查。</p>
+    <div class="settings-live-page about-page legacy-about-page">
+      <section class="legacy-about-overview" aria-labelledby="legacyAboutProductName">
+        <div class="legacy-about-brand">
+          <span class="legacy-about-logo" aria-hidden="true">
+            <svg viewBox="0 0 96 96" focusable="false">
+              <circle cx="48" cy="48" r="41"></circle>
+              <path d="M29 55c5 9 12 14 19 14s15-5 20-14"></path>
+            </svg>
+          </span>
+          <div>
+            <h2 id="legacyAboutProductName">AutoTo</h2>
+            <p>${escapeHtml(t("systemSettings.about.productTagline"))}</p>
+          </div>
         </div>
-        <div class="settings-action-row">
-          <button id="refreshLicensesBtn" class="settings-action-btn primary" type="button">刷新依赖</button>
+        <div class="legacy-about-version-table" aria-label="${escapeHtml(t("systemSettings.about.versionInfo"))}">
+          <div class="legacy-about-version-row">
+            <span>${escapeHtml(t("systemSettings.about.currentVersion"))}</span>
+            <strong>${escapeHtml(update.currentVersion)}</strong>
+          </div>
+          <div class="legacy-about-version-row">
+            <span>${escapeHtml(t("systemSettings.about.latestVersion"))}</span>
+            <strong>${escapeHtml(update.latestVersion)}</strong>
+          </div>
+          <div class="legacy-about-version-row">
+            <span>${escapeHtml(t("systemSettings.about.updateStatus"))}</span>
+            <strong class="legacy-about-update-state ${escapeHtml(update.tone)}">${escapeHtml(update.label)}</strong>
+          </div>
         </div>
+        <button id="checkForUpdatesBtn" class="legacy-about-update-button" type="button">${escapeHtml(t("systemSettings.about.checkUpdates"))}</button>
+        <p class="legacy-about-update-note">${escapeHtml(t("systemSettings.about.updateNote"))}</p>
+        ${state.updateError ? `<div class="settings-inline-alert legacy-about-update-error">${escapeHtml(state.updateError)}</div>` : ""}
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(modules.length))}</strong><span>依赖模块</span></div>
-        <div><strong>${escapeHtml(formatNumber(directCount))}</strong><span>直接依赖</span></div>
-        <div><strong>${escapeHtml(formatNumber(unknownCount))}</strong><span>未知许可证</span></div>
-      </div>
-      ${renderLocalPreferencesBackupSection()}
-      ${state.licenseError ? `<div class="settings-inline-alert">${escapeHtml(state.licenseError)}</div>` : ""}
-      ${summary ? renderLicenseSummary(summary) : `<div class="settings-empty-card">正在加载第三方依赖列表。如果长时间没有变化，请点击“刷新依赖”。</div>`}
+      <details class="legacy-about-more">
+        <summary>${escapeHtml(t("systemSettings.about.advanced"))}</summary>
+        <div class="legacy-about-more-content">
+          ${renderLocalPreferencesBackupSection()}
+          <section class="settings-provider-section legacy-about-license-section">
+            <div class="settings-provider-section-head">
+              <div>
+                <div class="settings-provider-title">${escapeHtml(t("systemSettings.license.openSourceTitle"))}</div>
+                <div class="settings-provider-meta">${escapeHtml(t("systemSettings.license.openSourceMeta"))}</div>
+              </div>
+              <button id="refreshLicensesBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.license.refresh"))}</button>
+            </div>
+            <div class="settings-status-strip">
+              <div><strong>${escapeHtml(formatNumber(modules.length))}</strong><span>${escapeHtml(t("systemSettings.license.modules"))}</span></div>
+              <div><strong>${escapeHtml(formatNumber(directCount))}</strong><span>${escapeHtml(t("systemSettings.license.direct"))}</span></div>
+              <div><strong>${escapeHtml(formatNumber(unknownCount))}</strong><span>${escapeHtml(t("systemSettings.license.unknownCount"))}</span></div>
+            </div>
+          </section>
+          ${state.licenseError ? `<div class="settings-inline-alert">${escapeHtml(state.licenseError)}</div>` : ""}
+          ${summary ? renderLicenseSummary(summary) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.license.loading"))}</div>`}
+        </div>
+      </details>
     </div>
   `;
   }
 
   function renderLocalPreferencesBackupSection() {
     const summary = localPreferencesBackupSummary();
-    const labels = summary.labels.length ? summary.labels : ["尚无本地偏好"];
+    const labels = summary.labels.length ? summary.labels : [t("systemSettings.localBackup.emptyLabels")];
     return `
     <section class="settings-provider-section settings-backup-section">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">本地设置备份</div>
-          <div class="settings-provider-meta">导出/导入浏览器 localStorage 中的 Autoto 白名单偏好，用于迁移主题、技能草案、聊天草稿、提示词历史、通知、搜索策略和最近目录。</div>
+          <div class="settings-provider-title">${escapeHtml(t("systemSettings.localBackup.title"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(t("systemSettings.localBackup.meta"))}</div>
         </div>
         <div class="settings-action-row compact-actions">
-          <button id="copyLocalPrefsBackupBtn" class="settings-action-btn subtle" type="button">复制备份</button>
-          <button id="downloadLocalPrefsBackupBtn" class="settings-action-btn primary" type="button">下载备份</button>
+          <button id="copyLocalPrefsBackupBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.localBackup.copy"))}</button>
+          <button id="downloadLocalPrefsBackupBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.localBackup.download"))}</button>
         </div>
       </div>
       <div class="settings-backup-stats">
-        <div><strong>${escapeHtml(formatNumber(summary.count))}</strong><span>已保存偏好</span></div>
-        <div><strong>${escapeHtml(formatBytes(summary.bytes))}</strong><span>估算大小</span></div>
-        <div><strong>${escapeHtml(String(localPreferenceBackupVersion))}</strong><span>备份格式</span></div>
+        <div><strong>${escapeHtml(formatNumber(summary.count))}</strong><span>${escapeHtml(t("systemSettings.localBackup.savedCount"))}</span></div>
+        <div><strong>${escapeHtml(formatBytes(summary.bytes))}</strong><span>${escapeHtml(t("systemSettings.localBackup.estimatedSize"))}</span></div>
+        <div><strong>${escapeHtml(String(localPreferenceBackupVersion))}</strong><span>${escapeHtml(t("systemSettings.localBackup.formatVersion"))}</span></div>
       </div>
       <div class="settings-backup-key-list">
         ${labels.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}
       </div>
-      <div class="settings-inline-success">备份不包含 API Key、数据库、项目文件、CLIProxyAPI 凭证文件或后端 registry；导入只会覆盖上述白名单 localStorage 偏好。</div>
-      <textarea id="localPrefsImportText" class="settings-token-input settings-backup-import" placeholder='粘贴 autoto.local-preferences JSON 后点击“导入备份”'></textarea>
+      <div class="settings-inline-success">${escapeHtml(t("systemSettings.localBackup.safetyNote"))}</div>
+      <textarea id="localPrefsImportText" class="settings-token-input settings-backup-import" placeholder="${escapeHtml(t("systemSettings.localBackup.importPlaceholder"))}"></textarea>
       <div class="settings-action-row settings-form-actions">
-        <button id="clearLocalPrefsImportBtn" class="settings-action-btn subtle" type="button">清空输入</button>
-        <button id="importLocalPrefsBackupBtn" class="settings-action-btn primary" type="button">导入备份</button>
+        <button id="clearLocalPrefsImportBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.localBackup.clearInput"))}</button>
+        <button id="importLocalPrefsBackupBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.localBackup.import"))}</button>
       </div>
     </section>
   `;
@@ -245,8 +328,8 @@ export function createSystemSettingsController({
     const grouped = groupLicenseModules(modules);
     return `
     <section class="settings-info-card">
-      <div class="settings-info-title">合规提示</div>
-      <div class="settings-info-text">${escapeHtml(summary.notice || "该列表仅作开发辅助，正式发布前请重新运行完整许可证扫描。")}</div>
+      <div class="settings-info-title">${escapeHtml(t("systemSettings.license.complianceTitle"))}</div>
+      <div class="settings-info-text">${escapeHtml(summary.notice || t("systemSettings.license.defaultNotice"))}</div>
     </section>
     <div class="license-group-grid">
       ${Object.entries(grouped).map(([license, items]) => `
@@ -261,12 +344,12 @@ export function createSystemSettingsController({
     <section class="settings-provider-section">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">第三方依赖</div>
-          <div class="settings-provider-meta">来自 Go build info；unknown 代表需要发布前人工确认。</div>
+          <div class="settings-provider-title">${escapeHtml(t("systemSettings.license.thirdPartyTitle"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(t("systemSettings.license.thirdPartyMeta"))}</div>
         </div>
       </div>
       <div class="license-module-list">
-        ${modules.length ? modules.map(renderLicenseModule).join("") : `<div class="settings-empty-card compact">暂无依赖数据。开发运行时可能缺少 build info。</div>`}
+        ${modules.length ? modules.map(renderLicenseModule).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("systemSettings.license.empty"))}</div>`}
       </div>
     </section>
   `;
@@ -286,8 +369,8 @@ export function createSystemSettingsController({
     return `
     <div class="license-module-row">
       <div>
-        <div class="license-module-name">${escapeHtml(module.path || "unknown")}</div>
-        <div class="license-module-meta">${escapeHtml(module.version || "版本未知")} · ${escapeHtml(module.relation || "indirect")}</div>
+        <div class="license-module-name">${escapeHtml(module.path || t("systemSettings.license.pathUnknown"))}</div>
+        <div class="license-module-meta">${escapeHtml(module.version || t("systemSettings.license.versionUnknown"))} · ${escapeHtml(module.relation || t("systemSettings.license.indirect"))}</div>
       </div>
       <span class="settings-status-pill ${license === "unknown" ? "warn" : "ok"}">${escapeHtml(license)}</span>
     </div>
@@ -305,30 +388,32 @@ export function createSystemSettingsController({
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast("本地设置备份已下载。", "success", { force: true });
-    notifyTerminal?.("[info] 本地设置备份已下载。\n");
+    showToast(t("systemSettings.localBackup.downloaded"), "success", { force: true });
+    notifyTerminal?.(`[info] ${t("systemSettings.localBackup.downloaded")}\n`);
   }
 
   async function importLocalPreferencesBackupFromPanel() {
     const textarea = $("localPrefsImportText");
     const button = $("importLocalPrefsBackupBtn");
     const text = textarea?.value.trim() || "";
-    if (!text) throw new Error("请先粘贴本地设置备份 JSON");
-    setButtonBusy(button, true, "导入中");
+    if (!text) throw new Error(t("systemSettings.localBackup.importRequired"));
+    setButtonBusy(button, true, t("systemSettings.localBackup.importing"));
     if (textarea) textarea.disabled = true;
     try {
       const imported = restoreLocalPreferencesBackup(text);
       if (textarea) textarea.value = "";
       refreshActiveSettingsPanel();
-      showToast(`已导入 ${imported} 项本地设置。`, "success", { force: true });
-      notifyTerminal?.(`[info] 已导入 ${imported} 项本地设置。\n`);
+      const message = t("systemSettings.localBackup.imported", { count: imported });
+      showToast(message, "success", { force: true });
+      notifyTerminal?.(`[info] ${message}\n`);
     } finally {
-      setButtonBusy(button, false, "导入中");
+      setButtonBusy(button, false, t("systemSettings.localBackup.importing"));
       if (textarea) textarea.disabled = false;
     }
   }
 
   function bindAboutSettingsActions() {
+    $("checkForUpdatesBtn")?.addEventListener("click", () => loadUpdateStatus({ notify: true }).catch(showError));
     $("refreshLicensesBtn")?.addEventListener("click", () => loadLicenseSummary({ notify: true }).catch(showError));
     $("copyLocalPrefsBackupBtn")?.addEventListener("click", () => copyText(localPreferencesBackupText()));
     $("downloadLocalPrefsBackupBtn")?.addEventListener("click", downloadLocalPreferencesBackup);
@@ -388,6 +473,7 @@ export function createSystemSettingsController({
         </form>
       `}
       ${status ? renderAuthStatusSummary(status) : `<div class="settings-empty-card">正在加载用户状态。</div>`}
+
     </div>
   `;
   }
@@ -397,35 +483,35 @@ export function createSystemSettingsController({
     const registrationOpen = Boolean(status.registrationOpen);
     return `
     <div class="usage-summary-grid">
-      ${renderUsageMetricCard("本地用户", hasUsers ? "已存在" : "暂无", hasUsers ? "数据库中已检测到用户记录" : "适合首次启动或纯本地使用")}
-      ${renderUsageMetricCard("注册状态", registrationOpen ? "开放" : "关闭", registrationOpen ? "允许初始化/注册流程继续" : "注册入口当前关闭")}
-      ${renderUsageMetricCard("认证模式", "本地 MVP", "当前 API 仅暴露状态，不回显敏感信息")}
-      ${renderUsageMetricCard("数据来源", "/api/auth/status", "只读状态接口")}
+      ${renderUsageMetricCard(t("systemSettings.users.localUsers"), hasUsers ? t("systemSettings.users.exists") : t("systemSettings.users.none"), hasUsers ? t("systemSettings.users.existsHint") : t("systemSettings.users.noneHint"))}
+      ${renderUsageMetricCard(t("systemSettings.users.registrationStatus"), registrationOpen ? t("systemSettings.users.open") : t("systemSettings.users.closed"), registrationOpen ? t("systemSettings.users.registrationOpenHint") : t("systemSettings.users.registrationClosedHint"))}
+      ${renderUsageMetricCard(t("systemSettings.users.authMode"), t("systemSettings.users.localMvp"), t("systemSettings.users.authModeHint"))}
+      ${renderUsageMetricCard(t("systemSettings.users.dataSource"), "/api/auth/status", t("systemSettings.users.dataSourceHint"))}
     </div>
     <section class="settings-provider-section highlighted">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">当前能力</div>
-          <div class="settings-provider-meta">Autoto 仍面向可信本地使用；用户管理页先提供清晰状态与安全边界。</div>
+          <div class="settings-provider-title">${escapeHtml(t("systemSettings.users.capabilities"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(t("systemSettings.users.capabilitiesMeta"))}</div>
         </div>
-        <span class="settings-status-pill ${registrationOpen ? "warn" : "ok"}">${escapeHtml(registrationOpen ? "注册开放" : "注册关闭")}</span>
+        <span class="settings-status-pill ${registrationOpen ? "warn" : "ok"}">${escapeHtml(registrationOpen ? t("systemSettings.users.registrationOpen") : t("systemSettings.users.registrationClosed"))}</span>
       </div>
       <div class="user-policy-grid">
-        ${renderUserPolicyCard("账号初始化", hasUsers ? "已完成" : "未初始化", hasUsers ? "已存在至少一个本地用户记录。" : "尚未检测到用户，可作为首次初始化提示。")}
-        ${renderUserPolicyCard("角色管理", "预留", "后续可接入角色、访问策略和审计日志。")}
-        ${renderUserPolicyCard("Secret 安全", "不回显", "该接口不会返回 JWT secret、API key 或用户凭据。")}
-        ${renderUserPolicyCard("部署边界", "本地可信", "公开网络部署前应补充完整认证、CSRF 和权限策略。")}
+        ${renderUserPolicyCard(t("systemSettings.users.accountInit"), hasUsers ? t("systemSettings.users.completed") : t("systemSettings.users.notInitialized"), hasUsers ? t("systemSettings.users.accountInitDone") : t("systemSettings.users.accountInitPending"))}
+        ${renderUserPolicyCard(t("systemSettings.users.roleManagement"), t("systemSettings.users.reserved"), t("systemSettings.users.roleManagementHint"))}
+        ${renderUserPolicyCard(t("systemSettings.users.secretSafety"), t("systemSettings.users.noEcho"), t("systemSettings.users.secretSafetyHint"))}
+        ${renderUserPolicyCard(t("systemSettings.users.deployBoundary"), t("systemSettings.users.localTrusted"), t("systemSettings.users.deployBoundaryHint"))}
       </div>
     </section>
     <section class="settings-provider-section">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">建议下一步</div>
-          <div class="settings-provider-meta">这里记录产品化路线，避免把 MVP 误认为多用户生产环境。</div>
+          <div class="settings-provider-title">${escapeHtml(t("systemSettings.users.nextSteps"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(t("systemSettings.users.nextStepsMeta"))}</div>
         </div>
       </div>
       <div class="settings-info-text">
-        当前页面是只读治理视图。后续如果需要正式多用户，可继续增加用户列表 API、登录会话、角色策略、访问审计和管理员操作确认。
+        ${escapeHtml(t("systemSettings.users.nextStepsBody"))}
       </div>
     </section>
   `;
@@ -488,26 +574,26 @@ export function createSystemSettingsController({
     const entries = Array.isArray(summary?.entries) ? summary.entries : [];
     const dbEntry = storageEntryByKey(entries, "database");
     const projectEntry = storageEntryByKey(entries, "projects");
-    const generatedAt = summary?.generatedAt ? formatTimestamp(summary.generatedAt) : "尚未扫描";
+    const generatedAt = summary?.generatedAt ? formatTimestamp(summary.generatedAt) : t("systemSettings.storage.notScanned");
     return `
     <div class="settings-live-page storage-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">储存空间</div>
-          <div class="settings-hero-title">本地路径与容量概览</div>
-          <p>检查 Autoto home、SQLite 数据库、配置文件和默认项目目录的存在状态、大小和扫描是否被上限截断。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.storage.kicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(t("systemSettings.storage.heroTitle"))}</div>
+          <p>${escapeHtml(t("systemSettings.storage.description"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshStorageSummaryBtn" class="settings-action-btn primary" type="button">刷新储存统计</button>
+          <button id="refreshStorageSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.storage.refresh"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatBytes(summary?.totalKnownBytes || 0))}</strong><span>已知占用</span></div>
-        <div><strong>${escapeHtml(formatBytes(dbEntry?.sizeBytes || 0))}</strong><span>数据库文件</span></div>
-        <div><strong>${escapeHtml(generatedAt)}</strong><span>扫描时间</span></div>
+        <div><strong>${escapeHtml(formatBytes(summary?.totalKnownBytes || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.knownUsage"))}</span></div>
+        <div><strong>${escapeHtml(formatBytes(dbEntry?.sizeBytes || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.databaseFile"))}</span></div>
+        <div><strong>${escapeHtml(generatedAt)}</strong><span>${escapeHtml(t("systemSettings.storage.scanTime"))}</span></div>
       </div>
       ${state.storageError ? `<div class="settings-inline-alert">${escapeHtml(state.storageError)}</div>` : ""}
-      ${summary ? renderStorageSummary(summary, projectEntry) : `<div class="settings-empty-card">正在加载储存空间统计。如果长时间没有变化，请点击“刷新储存统计”。</div>`}
+      ${summary ? renderStorageSummary(summary, projectEntry) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.storage.loading"))}</div>`}
     </div>
   `;
   }
@@ -516,10 +602,10 @@ export function createSystemSettingsController({
     const entries = Array.isArray(summary.entries) ? summary.entries : [];
     return `
     <div class="usage-summary-grid">
-      ${renderUsageMetricCard("扫描上限", summary.scanLimit || 0, "每个目录最多扫描的条目数")}
-      ${renderUsageMetricCard("项目目录文件", projectEntry?.fileCount || 0, `${formatBytes(projectEntry?.sizeBytes || 0)} · ${projectEntry?.truncated ? "已截断" : "完整扫描"}`)}
-      ${renderUsageMetricCard("目录数量", entries.reduce((sum, entry) => sum + Number(entry.directoryCount || 0), 0), "跨所有储存条目")}
-      ${renderUsageMetricCard("文件数量", entries.reduce((sum, entry) => sum + Number(entry.fileCount || 0), 0), "跨所有储存条目")}
+      ${renderUsageMetricCard(t("systemSettings.storage.scanLimit"), summary.scanLimit || 0, t("systemSettings.storage.scanLimitHint"))}
+      ${renderUsageMetricCard(t("systemSettings.storage.projectFiles"), projectEntry?.fileCount || 0, `${formatBytes(projectEntry?.sizeBytes || 0)} · ${projectEntry?.truncated ? t("systemSettings.storage.truncated") : t("systemSettings.storage.fullScan")}`)}
+      ${renderUsageMetricCard(t("systemSettings.storage.directoryCount"), entries.reduce((sum, entry) => sum + Number(entry.directoryCount || 0), 0), t("systemSettings.storage.acrossEntries"))}
+      ${renderUsageMetricCard(t("systemSettings.storage.fileCount"), entries.reduce((sum, entry) => sum + Number(entry.fileCount || 0), 0), t("systemSettings.storage.acrossEntries"))}
     </div>
     <div class="storage-entry-list">
       ${entries.map(renderStorageEntry).join("")}
@@ -528,21 +614,21 @@ export function createSystemSettingsController({
   }
 
   function renderStorageEntry(entry) {
-    const status = entry.error ? entry.error : (entry.exists ? (entry.truncated ? "已扫描部分内容" : "已扫描") : "路径不存在");
+    const status = entry.error ? entry.error : (entry.exists ? (entry.truncated ? t("systemSettings.storage.statusPartial") : t("systemSettings.storage.statusScanned")) : t("systemSettings.storage.statusMissing"));
     return `
     <section class="storage-entry-card">
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(storageEntryLabel(entry))}</div>
-          <div class="settings-provider-meta path">${escapeHtml(entry.path || "未配置")}</div>
+          <div class="settings-provider-meta path">${escapeHtml(entry.path || t("systemSettings.storage.notConfigured"))}</div>
         </div>
-        <span class="settings-status-pill ${entry.error ? "warn" : (entry.exists ? "ok" : "muted")}">${escapeHtml(entry.exists ? (entry.truncated ? "部分" : "存在") : "缺失")}</span>
+        <span class="settings-status-pill ${entry.error ? "warn" : (entry.exists ? "ok" : "muted")}">${escapeHtml(entry.exists ? (entry.truncated ? t("systemSettings.storage.pillPartial") : t("systemSettings.storage.pillExists")) : t("systemSettings.storage.pillMissing"))}</span>
       </div>
       <div class="storage-entry-grid">
-        <div><strong>${escapeHtml(formatBytes(entry.sizeBytes || 0))}</strong><span>大小</span></div>
-        <div><strong>${escapeHtml(formatNumber(entry.fileCount || 0))}</strong><span>文件</span></div>
-        <div><strong>${escapeHtml(formatNumber(entry.directoryCount || 0))}</strong><span>目录</span></div>
-        <div><strong>${escapeHtml(formatNumber(entry.entriesScanned || 0))}</strong><span>扫描条目</span></div>
+        <div><strong>${escapeHtml(formatBytes(entry.sizeBytes || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.size"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(entry.fileCount || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.files"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(entry.directoryCount || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.directories"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(entry.entriesScanned || 0))}</strong><span>${escapeHtml(t("systemSettings.storage.scannedEntries"))}</span></div>
       </div>
       <div class="settings-info-text">${escapeHtml(status)}</div>
     </section>
@@ -555,12 +641,12 @@ export function createSystemSettingsController({
 
   function storageEntryLabel(entry) {
     const labels = {
-      home: "Autoto home",
-      database: "SQLite 数据库",
-      config: "配置文件",
-      projects: "默认项目目录",
+      home: t("systemSettings.storage.labelHome"),
+      database: t("systemSettings.storage.labelDatabase"),
+      config: t("systemSettings.storage.labelConfig"),
+      projects: t("systemSettings.storage.labelProjects"),
     };
-    return entry.label || labels[entry.key] || entry.key || "储存条目";
+    return entry.label || labels[entry.key] || entry.key || t("systemSettings.storage.labelFallback");
   }
 
   function bindStorageSettingsActions() {
@@ -573,26 +659,26 @@ export function createSystemSettingsController({
   function renderUsageSettingsContent() {
     const summary = state.usageSummary;
     const counts = summary?.counts || {};
-    const generatedAt = summary?.generatedAt ? formatTimestamp(summary.generatedAt) : "尚未生成";
+    const generatedAt = summary?.generatedAt ? formatTimestamp(summary.generatedAt) : t("systemSettings.usage.notGenerated");
     return `
     <div class="settings-live-page usage-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">使用历史</div>
-          <div class="settings-hero-title">运行统计与活动概览</div>
-          <p>基于本地 SQLite 表统计项目、消息、工具调用和模型请求，帮助你判断产品使用情况和后续优化重点。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.usage.kicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(t("systemSettings.usage.heroTitle"))}</div>
+          <p>${escapeHtml(t("systemSettings.usage.description"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshUsageSummaryBtn" class="settings-action-btn primary" type="button">刷新统计</button>
+          <button id="refreshUsageSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.usage.refresh"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(counts.messages || 0))}</strong><span>消息</span></div>
-        <div><strong>${escapeHtml(formatNumber(counts.toolCalls || 0))}</strong><span>工具调用</span></div>
-        <div><strong>${escapeHtml(generatedAt)}</strong><span>统计时间</span></div>
+        <div><strong>${escapeHtml(formatNumber(counts.messages || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.messages"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(counts.toolCalls || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.toolCalls"))}</span></div>
+        <div><strong>${escapeHtml(generatedAt)}</strong><span>${escapeHtml(t("systemSettings.usage.generatedAt"))}</span></div>
       </div>
       ${state.usageError ? `<div class="settings-inline-alert">${escapeHtml(state.usageError)}</div>` : ""}
-      ${summary ? renderUsageSummary(summary) : `<div class="settings-empty-card">正在加载使用统计。如果长时间没有变化，请点击“刷新统计”。</div>`}
+      ${summary ? renderUsageSummary(summary) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.usage.loading"))}</div>`}
     </div>
   `;
   }
@@ -604,39 +690,43 @@ export function createSystemSettingsController({
     const backends = summary.backends || {};
     return `
     <div class="usage-summary-grid">
-      ${renderUsageMetricCard("项目", counts.projects, "本地项目工作区")}
-      ${renderUsageMetricCard("工作线", counts.worklines, "项目下的工作线")}
-      ${renderUsageMetricCard("Agent", counts.agents, "主代理与子代理")}
-      ${renderUsageMetricCard("消息", counts.messages, `最新：${formatTimestamp(summary.messages?.latestAt)}`)}
-      ${renderUsageMetricCard("工具调用", counts.toolCalls, `平均耗时：${formatDuration(toolCalls.averageDurationMs || 0)}`)}
-      ${renderUsageMetricCard("模型请求", counts.apiRequests, `成本：${formatMoney(api.totalCostUsd || 0)}`)}
-      ${renderUsageMetricCard("后端", counts.backends, `${formatNumber(backends.active || 0)} 个启用，${formatNumber(backends.apiKeyConfigured || 0)} 个有密钥`)}
+      ${renderUsageMetricCard(t("systemSettings.usage.projects"), counts.projects, t("systemSettings.usage.projectsHint"))}
+      ${renderUsageMetricCard(t("systemSettings.usage.worklines"), counts.worklines, t("systemSettings.usage.worklinesHint"))}
+      ${renderUsageMetricCard(t("systemSettings.usage.agents"), counts.agents, t("systemSettings.usage.agentsHint"))}
+      ${renderUsageMetricCard(t("systemSettings.usage.messages"), counts.messages, t("systemSettings.usage.latest", { timestamp: formatTimestamp(summary.messages?.latestAt) }))}
+      ${renderUsageMetricCard(t("systemSettings.usage.toolCalls"), counts.toolCalls, t("systemSettings.usage.avgDuration", { duration: formatDuration(toolCalls.averageDurationMs || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.usage.apiRequests"), counts.apiRequests, t("systemSettings.usage.cost", { amount: formatMoney(api.totalCostUsd || 0) }))}
+      ${renderUsageMetricCard(t("systemSettings.usage.backends"), counts.backends, t("systemSettings.usage.backendsDetail", { active: formatNumber(backends.active || 0), keys: formatNumber(backends.apiKeyConfigured || 0) }))}
     </div>
     <div class="usage-detail-grid">
       <section class="settings-info-card">
-        <div class="settings-info-title">消息角色</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.messageRoles"))}</div>
         ${renderUsageCountMap(summary.messages?.byRole)}
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">工具状态</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.toolStatus"))}</div>
         ${renderUsageCountMap(toolCalls.byStatus)}
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">热门工具</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.topTools"))}</div>
         ${renderUsageTopTools(toolCalls.topTools)}
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">模型请求</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.modelRequests"))}</div>
         <div class="usage-token-grid">
-          <div><strong>${escapeHtml(formatNumber(api.inputTokens || 0))}</strong><span>输入 token</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.outputTokens || 0))}</strong><span>输出 token</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.reasoningTokens || 0))}</strong><span>推理 token</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.cachedInputTokens || 0))}</strong><span>缓存输入</span></div>
+          <div><strong>${escapeHtml(formatNumber(api.inputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.inputTokens"))}</span></div>
+          <div><strong>${escapeHtml(formatNumber(api.outputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.outputTokens"))}</span></div>
+          <div><strong>${escapeHtml(formatNumber(api.reasoningTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.reasoningTokens"))}</span></div>
+          <div><strong>${escapeHtml(formatNumber(api.cachedInputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.cachedInput"))}</span></div>
         </div>
-        <div class="settings-info-text">平均耗时 ${escapeHtml(formatDuration(api.averageDurationMs || 0))} · 错误 ${escapeHtml(formatNumber(api.errors || 0))} · 最新 ${escapeHtml(formatTimestamp(api.latestAt))}</div>
+        <div class="settings-info-text">${escapeHtml(t("systemSettings.usage.apiSummary", {
+          duration: formatDuration(api.averageDurationMs || 0),
+          errors: formatNumber(api.errors || 0),
+          latest: formatTimestamp(api.latestAt),
+        }))}</div>
       </section>
       <section class="settings-info-card">
-        <div class="settings-info-title">请求 Provider</div>
+        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.requestProviders"))}</div>
         ${renderUsageCountMap(api.byProvider)}
       </section>
     </div>
@@ -662,12 +752,12 @@ export function createSystemSettingsController({
 
   function renderUsageCountMap(value) {
     const entries = Object.entries(value || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    if (!entries.length) return `<div class="settings-info-text">暂无数据</div>`;
+    if (!entries.length) return `<div class="settings-info-text">${escapeHtml(t("systemSettings.usage.noData"))}</div>`;
     return `<div class="usage-map-list">${entries.map(([name, count]) => `<div class="usage-map-row"><span>${escapeHtml(name)}</span><strong>${escapeHtml(formatNumber(count))}</strong></div>`).join("")}</div>`;
   }
 
   function renderUsageTopTools(tools) {
-    if (!Array.isArray(tools) || !tools.length) return `<div class="settings-info-text">暂无工具调用</div>`;
+    if (!Array.isArray(tools) || !tools.length) return `<div class="settings-info-text">${escapeHtml(t("systemSettings.usage.noToolCalls"))}</div>`;
     return `<div class="usage-map-list">${tools.map((tool) => `<div class="usage-map-row"><span>${escapeHtml(tool.name)}</span><strong>${escapeHtml(formatNumber(tool.count))}</strong></div>`).join("")}</div>`;
   }
 

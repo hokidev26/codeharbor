@@ -37,6 +37,8 @@ type modelProviderResponse struct {
 	Discovered     bool                        `json:"discovered"`
 	Configured     bool                        `json:"configured"`
 	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
+	Enabled        bool                        `json:"enabled"`
+	Origin         string                      `json:"origin"`
 	Capabilities   providers.Capabilities      `json:"capabilities"`
 	Management     *providerManagementResponse `json:"management,omitempty"`
 	ManagementURL  string                      `json:"managementUrl,omitempty"`
@@ -71,11 +73,18 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		MaxTokens:      provider.MaxTokens,
 		Models:         fallbackModels(provider.Model),
 		ModelsSource:   "configured-default",
-		Configured:     provider.Configured,
+		Configured:     s.providerConfigured(provider),
 		APIKeyOptional: provider.APIKeyOptional,
+		Enabled:        provider.Enabled,
+		Origin:         provider.Origin,
 		Capabilities:   metadata.Capabilities,
 		Management:     metadata.Management,
 		ManagementURL:  providerManagementURL(provider),
+	}
+	// Disabled providers remain visible for settings cards but must not perform
+	// upstream discovery or be resolved through the runtime registry.
+	if !provider.Enabled {
+		return response
 	}
 	if s.providers == nil {
 		response.ModelsSource = "fallback"
@@ -89,6 +98,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		return response
 	}
 	response.Capabilities = providers.CapabilitiesFor(registered)
+	response.Configured = providers.ConfiguredFor(registered, provider.Configured)
 	listCtx, cancel := context.WithTimeout(ctx, modelListTimeout)
 	defer cancel()
 	models, err := registered.ListModels(listCtx)
@@ -104,9 +114,22 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	return response
 }
 
+func (s *Server) providerConfigured(provider config.ProviderSummary) bool {
+	if s.providers == nil {
+		return provider.Configured
+	}
+	registered, ok := s.providers.Get(provider.Name)
+	if !ok {
+		return provider.Configured
+	}
+	return providers.ConfiguredFor(registered, provider.Configured)
+}
+
 func (s *Server) providerSettingsMetadata(provider config.ProviderSummary) providerSettingsMetadata {
 	metadata := providerSettingsMetadata{Profile: provider.Profile}
-	if provider.Profile == config.ProviderProfileCLIProxyAPI {
+	if provider.Type == config.ProviderTypeCodex {
+		metadata.Management = &providerManagementResponse{AuthFiles: true}
+	} else if provider.Profile == config.ProviderProfileCLIProxyAPI {
 		metadata.Management = &providerManagementResponse{
 			URL:       providerManagementURL(provider),
 			AuthFiles: true,
@@ -148,6 +171,17 @@ func normalizeModelNames(models []string, defaultModel string) []string {
 func friendlyModelListError(provider config.ProviderSummary, err error) string {
 	message := err.Error()
 	lower := strings.ToLower(message)
+	if provider.Type == config.ProviderTypeCodex {
+		switch {
+		case strings.Contains(lower, "尚未导入"), strings.Contains(lower, "没有可用"), strings.Contains(lower, "凭据库"):
+			return "尚未导入可用的 Codex OAuth 凭据。"
+		case strings.Contains(lower, "401"), strings.Contains(lower, "unauthorized"), strings.Contains(lower, "refresh_token"):
+			return "Codex OAuth 凭据已失效，请重新导入最新凭据。"
+		case strings.Contains(lower, "context deadline exceeded"):
+			return "连接 OpenAI Codex 超时，请稍后重试。"
+		}
+		return "无法直接从 OpenAI Codex 获取模型列表：" + message
+	}
 	if provider.Profile == config.ProviderProfileCLIProxyAPI {
 		switch {
 		case strings.Contains(lower, "connection refused"), strings.Contains(lower, "no such host"), strings.Contains(lower, "connect:"):

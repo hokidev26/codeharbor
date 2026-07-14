@@ -5,15 +5,16 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 21
+const CurrentDBVersion = 35
 
 type migration struct {
-	version            int
-	name               string
-	up                 func(context.Context, *sql.Tx) error
-	disableForeignKeys bool
+	version int
+	name    string
+	up      func(context.Context, *sql.Tx) error
 }
 
 var migrations = []migration{
@@ -32,12 +33,26 @@ var migrations = []migration{
 	{version: 13, name: "agent and workline naming", up: migrateV13AgentWorklineNaming},
 	{version: 14, name: "agent stream and permission generations", up: migrateV14AgentStreamGenerations},
 	{version: 15, name: "scoped skill revisions", up: migrateV15ScopedSkillRevisions},
-	{version: 16, name: "internal message provider state", up: migrateV16MessageProviderState},
-	{version: 17, name: "run and tool call lifecycle timestamps", up: migrateV17RunToolCallLifecycle, disableForeignKeys: true},
-	{version: 18, name: "user handles and auth sessions", up: migrateV18UserHandlesAndAuthSessions},
-	{version: 19, name: "per-user agent message drafts", up: migrateV19MessageDrafts},
-	{version: 20, name: "immutable message corrections", up: migrateV20MessageCorrections},
-	{version: 21, name: "project memberships", up: migrateV21ProjectMembers},
+	{version: 16, name: "automation audit events", up: migrateV16AutomationAuditEvents},
+	{version: 17, name: "integration connections", up: migrateV17IntegrationConnections},
+	{version: 18, name: "memories", up: migrateV18Memories},
+	{version: 19, name: "schedules and run sources", up: migrateV19Schedules},
+	{version: 20, name: "notification deliveries", up: migrateV20NotificationDeliveries},
+	{version: 21, name: "channel pairings events and cursors", up: migrateV21ChannelPersistence},
+	{version: 22, name: "device action requests", up: migrateV22DeviceActionRequests},
+	{version: 23, name: "execution generations and schedule modes", up: migrateV23ExecutionSchedule},
+	{version: 24, name: "durable spec boards and goals", up: migrateV24SpecBoards},
+	{version: 25, name: "model aggregates and runtime settings", up: migrateV25ModelClient},
+	{version: 26, name: "execution generation recovery", up: migrateV26GenerationRecovery},
+	{version: 27, name: "disabled remote execution scaffold", up: migrateV27RemoteExecutionScaffold},
+	{version: 28, name: "provider account statistics", up: migrateV28ProviderAccountStats},
+	{version: 29, name: "agent xhigh reasoning effort", up: migrateV29ReasoningEffortXHigh},
+	{version: 30, name: "internal message provider state", up: migrateV30MessageProviderState},
+	{version: 31, name: "run and tool call lifecycle timestamps", up: migrateV31RunToolCallLifecycle},
+	{version: 32, name: "user handles and auth sessions", up: migrateV32UserHandlesAndAuthSessions},
+	{version: 33, name: "per-user agent message drafts", up: migrateV33MessageDrafts},
+	{version: 34, name: "immutable message corrections", up: migrateV34MessageCorrections},
+	{version: 35, name: "project memberships", up: migrateV35ProjectMembers},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -80,42 +95,12 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 }
 
 func runMigration(ctx context.Context, db *sql.DB, m migration) error {
-	if !m.disableForeignKeys {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin migration %d %s: %w", m.version, m.name, err)
-		}
-		defer tx.Rollback()
-		if err := m.up(ctx, tx); err != nil {
-			return fmt.Errorf("run migration %d %s: %w", m.version, m.name, err)
-		}
-		if err := setUserVersion(ctx, tx, m.version); err != nil {
-			return fmt.Errorf("set database version %d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d %s: %w", m.version, m.name, err)
-		}
-		return nil
-	}
-
-	// SQLite cannot relax the old runs.started_at NOT NULL constraint in place.
-	// Rebuilding its referenced table is safe only while foreign keys are disabled
-	// on the same connection before the migration transaction begins.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire migration connection %d %s: %w", m.version, m.name, err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
-		return fmt.Errorf("disable foreign keys for migration %d %s: %w", m.version, m.name, err)
-	}
-	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
-
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %d %s: %w", m.version, m.name, err)
 	}
 	defer tx.Rollback()
+
 	if err := m.up(ctx, tx); err != nil {
 		return fmt.Errorf("run migration %d %s: %w", m.version, m.name, err)
 	}
@@ -429,7 +414,7 @@ func migrateV13AgentWorklineNaming(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 	}
-	columns := [][3]string{{"projects", "chapter_settings", "workline_settings"}, {"worklines", "parent_chapter_id", "parent_workline_id"}, {"worklines", "merged_into_chapter_id", "merged_into_workline_id"}, {"worklines", "review_source_chapter_id", "review_source_workline_id"}, {"agents", "chapter_id", "workline_id"}, {"agents", "parent_narrator_id", "parent_agent_id"}, {"runs", "narrator_id", "agent_id"}, {"agent_messages", "narrator_id", "agent_id"}, {"agent_message_attachments", "narrator_id", "agent_id"}, {"agent_tool_calls", "narrator_id", "agent_id"}, {"api_requests", "narrator_id", "agent_id"}}
+	columns := [][3]string{{"projects", "chapter_settings", "workline_settings"}, {"worklines", "parent_chapter_id", "parent_workline_id"}, {"worklines", "merged_into_chapter_id", "merged_into_workline_id"}, {"worklines", "review_source_chapter_id", "review_source_workline_id"}, {"agents", "chapter_id", "workline_id"}, {"agents", "parent_narrator_id", "parent_agent_id"}, {"runs", "narrator_id", "agent_id"}, {"agent_messages", "narrator_id", "agent_id"}, {"agent_message_attachments", "narrator_id", "agent_id"}, {"agent_tool_calls", "narrator_id", "agent_id"}, {"api_requests", "narrator_id", "agent_id"}, {"automation_audit_events", "narrator_id", "agent_id"}, {"memory_injections", "narrator_id", "agent_id"}}
 	for _, column := range columns {
 		if err := renameColumn(ctx, tx, column[0], column[1], column[2]); err != nil {
 			return err
@@ -621,59 +606,406 @@ CREATE INDEX idx_skill_audit_events_skill_created ON skill_audit_events(skill_id
 	return nil
 }
 
-func migrateV16MessageProviderState(ctx context.Context, tx *sql.Tx) error {
-	return ensureColumn(ctx, tx, "agent_messages", "provider_state_json", "TEXT")
+func migrateV16AutomationAuditEvents(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, automationAuditSchemaSQL)
+	return err
 }
 
-func migrateV17RunToolCallLifecycle(ctx context.Context, tx *sql.Tx) error {
-	for _, column := range []struct {
+func migrateV17IntegrationConnections(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, integrationConnectionsSchemaSQL)
+	return err
+}
+
+func migrateV18Memories(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, memorySchemaSQL)
+	return err
+}
+
+func migrateV19Schedules(ctx context.Context, tx *sql.Tx) error {
+	columns := []struct {
 		name       string
 		definition string
 	}{
-		{name: "started_at", definition: "TEXT"},
-		{name: "completed_at", definition: "TEXT"},
-		{name: "updated_at", definition: "TEXT"},
-	} {
-		if err := ensureColumn(ctx, tx, "agent_tool_calls", column.name, column.definition); err != nil {
+		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
+		{"source_id", "TEXT NOT NULL DEFAULT ''"},
+		{"permission_mode_cap", "TEXT NOT NULL DEFAULT '' CHECK (permission_mode_cap IN ('', 'readOnly', 'acceptEdits'))"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, "runs", column.name, column.definition); err != nil {
 			return err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, schedulesSchemaSQL); err != nil {
+		return err
+	}
+	return ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'")
+}
 
+func migrateV20NotificationDeliveries(ctx context.Context, tx *sql.Tx) error {
+	// Re-ensure timezone for development databases that reached v19 before the
+	// schedule timezone contract was finalized.
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, notificationDeliveriesSchemaSQL)
+	return err
+}
+
+func migrateV21ChannelPersistence(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, channelPersistenceSchemaSQL)
+	return err
+}
+
+func migrateV22DeviceActionRequests(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, deviceActionRequestsSchemaSQL)
+	return err
+}
+
+func migrateV23ExecutionSchedule(ctx context.Context, tx *sql.Tx) error {
+	columns := []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"agents", "execution_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "execution_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "dispatch_id", "TEXT"},
+		{"runs", "duration_ms", "INTEGER"},
+		{"runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"},
+		{"notification_deliveries", "execution_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"schedules", "environment_mode", "TEXT NOT NULL DEFAULT 'workline'"},
+		{"schedules", "narrator_mode", "TEXT NOT NULL DEFAULT 'reuse'"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
-CREATE TABLE runs_v17 (
-  id TEXT PRIMARY KEY,
-  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  trigger_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  started_at TEXT,
-  completed_at TEXT,
-  error_message TEXT,
-  base_head TEXT,
-  end_head TEXT,
-  checkpoint_repo_root TEXT,
-  git_snapshot_at TEXT,
-  checkpoint_state TEXT NOT NULL DEFAULT 'none',
-  checkpoint_error TEXT,
-  rolled_back_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-INSERT INTO runs_v17 (
-  id, agent_id, trigger_message_id, status, started_at, completed_at,
-  error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at,
-  checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at
+UPDATE runs
+SET execution_generation = (
+  SELECT COUNT(*)
+  FROM runs AS prior
+  WHERE prior.agent_id = runs.agent_id
+    AND (prior.started_at < runs.started_at OR (prior.started_at = runs.started_at AND prior.id <= runs.id))
 )
-SELECT
-  id, agent_id, trigger_message_id, status,
-  CASE WHEN status = 'pending' THEN NULL ELSE NULLIF(started_at, '') END,
-  completed_at, error_message, base_head, end_head, checkpoint_repo_root,
-  git_snapshot_at, COALESCE(NULLIF(checkpoint_state, ''), 'none'),
-  checkpoint_error, rolled_back_at, created_at, updated_at
-FROM runs;
-DROP TABLE runs;
-ALTER TABLE runs_v17 RENAME TO runs;
-CREATE INDEX idx_runs_agent_started ON runs(agent_id, started_at DESC);
-CREATE INDEX idx_runs_status ON runs(status);
+WHERE COALESCE(execution_generation, 0) <= 0;
+UPDATE runs
+SET trigger_type = CASE COALESCE(source, 'manual')
+  WHEN 'schedule' THEN 'scheduled'
+  WHEN 'scheduled' THEN 'scheduled'
+  WHEN 'goal' THEN 'goal'
+  WHEN 'internal' THEN 'internal'
+  ELSE 'manual'
+END
+WHERE trigger_type IS NULL OR trigger_type NOT IN ('manual', 'scheduled', 'goal', 'internal') OR (trigger_type = 'manual' AND source IN ('schedule', 'scheduled', 'goal', 'internal'));
+UPDATE runs
+SET duration_ms = MAX(0, CAST(ROUND((julianday(completed_at) - julianday(started_at)) * 86400000.0) AS INTEGER))
+WHERE duration_ms IS NULL AND completed_at IS NOT NULL AND julianday(completed_at) IS NOT NULL AND julianday(started_at) IS NOT NULL;
+UPDATE agents
+SET execution_generation = MAX(
+  COALESCE(execution_generation, 0),
+  COALESCE((SELECT MAX(r.execution_generation) FROM runs r WHERE r.agent_id = agents.id), 0)
+);
+UPDATE notification_deliveries
+SET execution_generation = COALESCE((SELECT r.execution_generation FROM runs r WHERE r.id = notification_deliveries.run_id), 0)
+WHERE COALESCE(execution_generation, 0) <= 0;
+UPDATE schedules SET environment_mode = 'workline' WHERE environment_mode IS NULL OR environment_mode NOT IN ('workline', 'standalone');
+UPDATE schedules SET narrator_mode = 'reuse' WHERE narrator_mode IS NULL OR narrator_mode NOT IN ('reuse', 'new');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_agent_execution_generation ON runs(agent_id, execution_generation) WHERE execution_generation > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_id ON runs(dispatch_id) WHERE dispatch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_agent_execution_after ON runs(agent_id, execution_generation, id);
+DROP TRIGGER IF EXISTS runs_v23_validate_insert;
+DROP TRIGGER IF EXISTS runs_v23_validate_update;
+CREATE TRIGGER runs_v23_validate_insert BEFORE INSERT ON runs
+WHEN NEW.execution_generation < 0 OR NEW.duration_ms < 0 OR NEW.trigger_type NOT IN ('manual', 'scheduled', 'goal', 'internal') OR (NEW.dispatch_id IS NOT NULL AND (length(CAST(NEW.dispatch_id AS BLOB)) < 1 OR length(CAST(NEW.dispatch_id AS BLOB)) > 256))
+BEGIN SELECT RAISE(ABORT, 'invalid execution run metadata'); END;
+CREATE TRIGGER runs_v23_validate_update BEFORE UPDATE OF execution_generation, dispatch_id, duration_ms, trigger_type ON runs
+WHEN NEW.execution_generation < 0 OR NEW.duration_ms < 0 OR NEW.trigger_type NOT IN ('manual', 'scheduled', 'goal', 'internal') OR (NEW.dispatch_id IS NOT NULL AND (length(CAST(NEW.dispatch_id AS BLOB)) < 1 OR length(CAST(NEW.dispatch_id AS BLOB)) > 256))
+BEGIN SELECT RAISE(ABORT, 'invalid execution run metadata'); END;
+DROP TRIGGER IF EXISTS schedules_v23_validate_insert;
+DROP TRIGGER IF EXISTS schedules_v23_validate_update;
+CREATE TRIGGER schedules_v23_validate_insert BEFORE INSERT ON schedules
+WHEN NEW.environment_mode NOT IN ('workline', 'standalone') OR NEW.narrator_mode NOT IN ('reuse', 'new')
+BEGIN SELECT RAISE(ABORT, 'invalid schedule execution mode'); END;
+CREATE TRIGGER schedules_v23_validate_update BEFORE UPDATE OF environment_mode, narrator_mode ON schedules
+WHEN NEW.environment_mode NOT IN ('workline', 'standalone') OR NEW.narrator_mode NOT IN ('reuse', 'new')
+BEGIN SELECT RAISE(ABORT, 'invalid schedule execution mode'); END;
+DROP TRIGGER IF EXISTS notification_deliveries_v23_validate_insert;
+DROP TRIGGER IF EXISTS notification_deliveries_v23_validate_update;
+CREATE TRIGGER notification_deliveries_v23_validate_insert BEFORE INSERT ON notification_deliveries
+WHEN NEW.execution_generation < 0
+BEGIN SELECT RAISE(ABORT, 'invalid notification execution generation'); END;
+CREATE TRIGGER notification_deliveries_v23_validate_update BEFORE UPDATE OF execution_generation ON notification_deliveries
+WHEN NEW.execution_generation < 0
+BEGIN SELECT RAISE(ABORT, 'invalid notification execution generation'); END;
+`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateV24SpecBoards(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, specSchemaSQL)
+	return err
+}
+
+func migrateV25ModelClient(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "agents", "reasoning_effort", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, modelClientSchemaSQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+-- Early development builds stored reasoning as a boolean toggle in this TEXT
+-- column. The toggle meant "use high reasoning" when enabled and "automatic"
+-- when disabled. SQLite may retain that representation as INTEGER 0/1 or as
+-- the text literals true/false, so normalize it before installing the enum
+-- guard rather than silently clearing those existing user choices.
+UPDATE agents
+SET reasoning_effort = CASE
+  WHEN reasoning_effort IS NULL THEN NULL
+  WHEN lower(trim(CAST(reasoning_effort AS TEXT))) IN ('auto', 'low', 'medium', 'high')
+    THEN lower(trim(CAST(reasoning_effort AS TEXT)))
+  WHEN (typeof(reasoning_effort) = 'integer' AND reasoning_effort = 1)
+    OR lower(trim(CAST(reasoning_effort AS TEXT))) IN ('true', '1')
+    THEN 'high'
+  WHEN (typeof(reasoning_effort) = 'integer' AND reasoning_effort = 0)
+    OR lower(trim(CAST(reasoning_effort AS TEXT))) IN ('false', '0')
+    THEN 'auto'
+  -- Invalid legacy data must not be discarded into NULL (which inherits a
+  -- potentially non-auto default); preserve a safe explicit fallback instead.
+  ELSE 'auto'
+END;
+DROP TRIGGER IF EXISTS agents_reasoning_effort_insert;
+DROP TRIGGER IF EXISTS agents_reasoning_effort_update;
+CREATE TRIGGER agents_reasoning_effort_insert BEFORE INSERT ON agents
+WHEN NEW.reasoning_effort IS NOT NULL AND NEW.reasoning_effort NOT IN ('auto', 'low', 'medium', 'high')
+BEGIN SELECT RAISE(ABORT, 'invalid agent reasoning effort'); END;
+CREATE TRIGGER agents_reasoning_effort_update BEFORE UPDATE OF reasoning_effort ON agents
+WHEN NEW.reasoning_effort IS NOT NULL AND NEW.reasoning_effort NOT IN ('auto', 'low', 'medium', 'high')
+BEGIN SELECT RAISE(ABORT, 'invalid agent reasoning effort'); END;
+`); err != nil {
+		return err
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_settings WHERE id = 'default'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		now := Now()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_settings (id, installation_id, default_reasoning_effort, subscription_tier, account_email, revision, updated_at) VALUES ('default', ?, 'auto', 'free', NULL, 1, ?)`, uuid.NewString(), now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV26GenerationRecovery(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "notification_deliveries", "execution_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE notification_deliveries
+SET execution_generation = COALESCE((SELECT r.execution_generation FROM runs r WHERE r.id = notification_deliveries.run_id), 0)
+WHERE COALESCE(execution_generation, 0) <= 0;
+CREATE INDEX IF NOT EXISTS idx_runs_agent_execution_after ON runs(agent_id, execution_generation, id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_generation ON notification_deliveries(agent_id, execution_generation, created_at, id);
+`)
+	return err
+}
+
+func migrateV28ProviderAccountStats(ctx context.Context, tx *sql.Tx) error {
+	exists, err := tableExists(ctx, tx, "provider_account_stats")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		_, err = tx.ExecContext(ctx, providerAccountStatsSchemaSQL)
+		return err
+	}
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{"success_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"failure_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_attempt_at", "TEXT"},
+		{"last_use_at", "TEXT"},
+		{"last_success_at", "TEXT"},
+		{"last_failure_at", "TEXT"},
+		{"last_http_status", "INTEGER"},
+		{"last_status_code", "TEXT"},
+		{"last_error_code", "TEXT"},
+		{"quota_snapshot_json", "TEXT"},
+		{"quota_fetched_at", "TEXT"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, "provider_account_stats", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_provider_account_stats_last_use ON provider_account_stats(provider, last_use_at DESC, account_id)`)
+	return err
+}
+
+func migrateV29ReasoningEffortXHigh(ctx context.Context, tx *sql.Tx) error {
+	exists, err := tableExists(ctx, tx, "agents")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := extendAgentsReasoningEffortCheck(ctx, tx); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+DROP TRIGGER IF EXISTS agents_reasoning_effort_insert;
+DROP TRIGGER IF EXISTS agents_reasoning_effort_update;
+CREATE TRIGGER agents_reasoning_effort_insert BEFORE INSERT ON agents
+WHEN NEW.reasoning_effort IS NOT NULL AND NEW.reasoning_effort NOT IN ('auto', 'low', 'medium', 'high', 'xhigh')
+BEGIN SELECT RAISE(ABORT, 'invalid agent reasoning effort'); END;
+CREATE TRIGGER agents_reasoning_effort_update BEFORE UPDATE OF reasoning_effort ON agents
+WHEN NEW.reasoning_effort IS NOT NULL AND NEW.reasoning_effort NOT IN ('auto', 'low', 'medium', 'high', 'xhigh')
+BEGIN SELECT RAISE(ABORT, 'invalid agent reasoning effort'); END;
+`)
+	return err
+}
+
+// Older fresh databases embed the allowed effort list in the agents table
+// CHECK constraint, which SQLite cannot alter directly. Update only that exact
+// constraint in sqlite_schema, then advance the schema cookie so SQLite reloads
+// the validated DDL without rebuilding a table referenced by many child tables.
+func extendAgentsReasoningEffortCheck(ctx context.Context, tx *sql.Tx) error {
+	const oldCheck = "CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('auto', 'low', 'medium', 'high'))"
+	const newCheck = "CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('auto', 'low', 'medium', 'high', 'xhigh'))"
+
+	var definition sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'agents'`).Scan(&definition); err != nil {
+		return err
+	}
+	if !definition.Valid || !strings.Contains(definition.String, oldCheck) {
+		return nil
+	}
+	updated := strings.Replace(definition.String, oldCheck, newCheck, 1)
+	var schemaVersion int
+	if err := tx.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA writable_schema = ON`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sqlite_schema SET sql = ? WHERE type = 'table' AND name = 'agents'`, updated); err != nil {
+		_, _ = tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA schema_version = %d`, schemaVersion+1)); err != nil {
+		_, _ = tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateV27RemoteExecutionScaffold(ctx context.Context, tx *sql.Tx) error {
+	columns := []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"agents", "execution_device_id", "TEXT NOT NULL DEFAULT 'local'"},
+		{"runs", "execution_device_id", "TEXT NOT NULL DEFAULT 'local'"},
+		{"agent_tool_calls", "execution_device_id", "TEXT NOT NULL DEFAULT 'local'"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, remoteExecutionSchemaSQL); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE agents SET execution_device_id = 'local' WHERE execution_device_id IS NULL OR TRIM(execution_device_id) = '';
+UPDATE runs SET execution_device_id = 'local' WHERE execution_device_id IS NULL OR TRIM(execution_device_id) = '';
+UPDATE agent_tool_calls SET execution_device_id = 'local' WHERE execution_device_id IS NULL OR TRIM(execution_device_id) = '';
+CREATE INDEX IF NOT EXISTS idx_agents_execution_device ON agents(execution_device_id, id);
+CREATE INDEX IF NOT EXISTS idx_runs_execution_device ON runs(execution_device_id, execution_generation, id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_execution_device ON agent_tool_calls(execution_device_id, created_at, id);
+DROP TRIGGER IF EXISTS agents_execution_device_insert;
+DROP TRIGGER IF EXISTS agents_execution_device_update;
+DROP TRIGGER IF EXISTS runs_execution_device_insert;
+DROP TRIGGER IF EXISTS runs_execution_device_update;
+DROP TRIGGER IF EXISTS tool_calls_execution_device_insert;
+DROP TRIGGER IF EXISTS tool_calls_execution_device_update;
+CREATE TRIGGER agents_execution_device_insert BEFORE INSERT ON agents
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid agent execution device'); END;
+CREATE TRIGGER agents_execution_device_update BEFORE UPDATE OF execution_device_id ON agents
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid agent execution device'); END;
+CREATE TRIGGER runs_execution_device_insert BEFORE INSERT ON runs
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid run execution device'); END;
+CREATE TRIGGER runs_execution_device_update BEFORE UPDATE OF execution_device_id ON runs
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid run execution device'); END;
+CREATE TRIGGER tool_calls_execution_device_insert BEFORE INSERT ON agent_tool_calls
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid tool call execution device'); END;
+CREATE TRIGGER tool_calls_execution_device_update BEFORE UPDATE OF execution_device_id ON agent_tool_calls
+WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
+BEGIN SELECT RAISE(ABORT, 'invalid tool call execution device'); END;
+`)
+	return err
+}
+
+func migrateV30MessageProviderState(ctx context.Context, tx *sql.Tx) error {
+	return ensureColumn(ctx, tx, "agent_messages", "provider_state_json", "TEXT")
+}
+
+func migrateV31RunToolCallLifecycle(ctx context.Context, tx *sql.Tx) error {
+	runsExist, err := tableExists(ctx, tx, "runs")
+	if err != nil {
+		return err
+	}
+	toolCallsExist, err := tableExists(ctx, tx, "agent_tool_calls")
+	if err != nil {
+		return err
+	}
+	if runsExist {
+		if err := relaxRunsStartedAtConstraint(ctx, tx); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{table: "runs", name: "started_at", definition: "TEXT"},
+		{table: "runs", name: "completed_at", definition: "TEXT"},
+		{table: "runs", name: "updated_at", definition: "TEXT"},
+		{table: "agent_tool_calls", name: "started_at", definition: "TEXT"},
+		{table: "agent_tool_calls", name: "completed_at", definition: "TEXT"},
+		{table: "agent_tool_calls", name: "updated_at", definition: "TEXT"},
+	} {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if toolCallsExist {
+		if _, err := tx.ExecContext(ctx, `
 UPDATE agent_tool_calls
 SET started_at = CASE
       WHEN status IN ('running', 'completed', 'error', 'succeeded', 'failed') THEN COALESCE(NULLIF(started_at, ''), created_at)
@@ -686,19 +1018,54 @@ SET started_at = CASE
     updated_at = COALESCE(NULLIF(updated_at, ''), created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_run_updated ON agent_tool_calls(run_id, updated_at DESC);
 `); err != nil {
-		return err
+			return err
+		}
 	}
-	return nil
+	if runsExist {
+		_, err = tx.ExecContext(ctx, `UPDATE runs SET started_at = CASE WHEN status = 'pending' THEN NULL ELSE started_at END, updated_at = COALESCE(NULLIF(updated_at, ''), created_at)`)
+	}
+	return err
 }
 
-func migrateV18UserHandlesAndAuthSessions(ctx context.Context, tx *sql.Tx) error {
+func relaxRunsStartedAtConstraint(ctx context.Context, tx *sql.Tx) error {
+	var definition sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'runs'`).Scan(&definition); err != nil {
+		return err
+	}
+	if !definition.Valid || !strings.Contains(definition.String, "started_at TEXT NOT NULL") {
+		return nil
+	}
+	updated := strings.Replace(definition.String, "started_at TEXT NOT NULL", "started_at TEXT", 1)
+	var schemaVersion int
+	if err := tx.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA writable_schema = ON`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sqlite_schema SET sql = ? WHERE type = 'table' AND name = 'runs'`, updated); err != nil {
+		_, _ = tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA schema_version = %d`, schemaVersion+1)); err != nil {
+		_, _ = tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `PRAGMA writable_schema = OFF`)
+	return err
+}
+
+func migrateV32UserHandlesAndAuthSessions(ctx context.Context, tx *sql.Tx) error {
+	usersExist, err := tableExists(ctx, tx, "users")
+	if err != nil || !usersExist {
+		return err
+	}
 	if err := ensureColumn(ctx, tx, "users", "handle", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "users", "handle_key", "TEXT"); err != nil {
 		return err
 	}
-
 	rows, err := tx.QueryContext(ctx, `SELECT id, username, COALESCE(handle, '') FROM users`)
 	if err != nil {
 		return err
@@ -738,8 +1105,16 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 	return err
 }
 
-func migrateV19MessageDrafts(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `
+func migrateV33MessageDrafts(ctx context.Context, tx *sql.Tx) error {
+	usersExist, err := tableExists(ctx, tx, "users")
+	if err != nil || !usersExist {
+		return err
+	}
+	agentsExist, err := tableExists(ctx, tx, "agents")
+	if err != nil || !agentsExist {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS message_drafts (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -753,11 +1128,19 @@ CREATE INDEX IF NOT EXISTS idx_message_drafts_agent ON message_drafts(agent_id);
 	return err
 }
 
-func migrateV20MessageCorrections(ctx context.Context, tx *sql.Tx) error {
+func migrateV34MessageCorrections(ctx context.Context, tx *sql.Tx) error {
 	return ensureColumn(ctx, tx, "agent_messages", "correction_of_message_id", "TEXT REFERENCES agent_messages(id) ON DELETE RESTRICT")
 }
 
-func migrateV21ProjectMembers(ctx context.Context, tx *sql.Tx) error {
+func migrateV35ProjectMembers(ctx context.Context, tx *sql.Tx) error {
+	projectsExist, err := tableExists(ctx, tx, "projects")
+	if err != nil || !projectsExist {
+		return err
+	}
+	usersExist, err := tableExists(ctx, tx, "users")
+	if err != nil || !usersExist {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS project_members (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -771,24 +1154,14 @@ CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, 
 `); err != nil {
 		return err
 	}
-
-	// An upgraded database may already contain projects but no membership data.
-	// Give every unassigned project to the oldest usable account, while keeping
-	// retries and duplicate memberships harmless.
-	_, err := tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
 SELECT p.id, u.id, 'owner', p.created_at
 FROM projects p
 JOIN (
-  SELECT id
-  FROM users
-  WHERE TRIM(id) <> ''
-  ORDER BY created_at ASC, id ASC
-  LIMIT 1
+  SELECT id FROM users WHERE TRIM(id) <> '' ORDER BY created_at ASC, id ASC LIMIT 1
 ) u
-WHERE NOT EXISTS (
-  SELECT 1 FROM project_members pm WHERE pm.project_id = p.id
-)`)
+WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id)`)
 	return err
 }
 
@@ -825,6 +1198,9 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 }
 
 func legacyNamingSchemaSQL() string {
+	// P2-P3 tables were introduced after the agent/workline naming migration and
+	// must be created by their own migrations with modern column names.
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",
@@ -839,7 +1215,7 @@ func legacyNamingSchemaSQL() string {
 		"CREATE TABLE IF NOT EXISTS agents (", "CREATE TABLE IF NOT EXISTS narrators (",
 		" ON agents(", " ON narrators(",
 		"workline", "chapter",
-	).Replace(schemaSQL)
+	).Replace(legacySchema)
 }
 
 func execSchemaStatements(ctx context.Context, tx *sql.Tx, schema string, include func(string) bool) error {

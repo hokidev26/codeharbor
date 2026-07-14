@@ -40,7 +40,7 @@ func NewGeminiInteractions(cfg config.ProviderConfig) *GeminiInteractions {
 func (p *GeminiInteractions) Name() string { return p.cfg.Name }
 
 func (p *GeminiInteractions) Capabilities() Capabilities {
-	return Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: true}
+	return Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: true, ReasoningEffort: true, ReasoningEfforts: []string{"low", "medium", "high"}}
 }
 
 // The Interactions endpoint does not expose a portable model-list resource for
@@ -83,7 +83,7 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 	if tools := geminiInteractionTools(req.Tools); len(tools) > 0 {
 		payload["tools"] = tools
 	}
-	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+	if effort := normalizeGeminiReasoningEffort(req.ReasoningEffort); effort != "" {
 		payload["generation_config"] = map[string]string{"thinking_level": effort}
 	}
 	encoded, err := json.Marshal(payload)
@@ -130,7 +130,7 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 	return out, nil
 }
 
-func normalizeReasoningEffort(effort string) string {
+func normalizeGeminiReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "low", "medium", "high":
 		return strings.ToLower(strings.TrimSpace(effort))

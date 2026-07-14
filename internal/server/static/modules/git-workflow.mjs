@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { api } from "./runtime.mjs";
+import { gitExtraT as t } from "./messages-git-extra.mjs";
 
 export function createGitWorkflowController({
   state,
@@ -25,11 +26,20 @@ export function createGitWorkflowController({
     const button = $("gitWorkflowBtn");
     if (!button) return;
     const enabled = Boolean(state.agent?.id);
-    button.disabled = !enabled;
     const dirty = Boolean(state.gitStatus && state.gitStatus.clean === false);
-    button.classList.toggle("active", dirty || state.gitOpen);
     const count = Array.isArray(state.gitStatus?.files) ? state.gitStatus.files.length : 0;
-    button.title = dirty ? `查看 Git 变更（${count} 个文件）` : "查看 Git 变更";
+    const hasError = Boolean(state.gitError);
+    button.disabled = !enabled;
+    button.classList.toggle("active", Boolean(state.gitOpen));
+    button.classList.toggle("has-changes", dirty && !state.gitOpen);
+    button.classList.toggle("tool-error", hasError);
+    button.setAttribute("aria-expanded", state.gitOpen ? "true" : "false");
+    button.title = !enabled ? t("selectAgent") : hasError ? t("statusUnavailable", { message: state.gitError }) : dirty ? t("changesCount", { count }) : t("clean");
+    const badge = button.querySelector("[data-git-tool-badge]");
+    if (badge) {
+      badge.textContent = count > 99 ? "99+" : String(count);
+      badge.classList.toggle("hidden", !dirty || count === 0);
+    }
   }
 
   async function loadGitStatus(options = {}) {
@@ -93,7 +103,7 @@ export function createGitWorkflowController({
     const files = Array.isArray(status.files) ? status.files : [];
     if (!state.gitSelectedPath && files.length) state.gitSelectedPath = files[0].path || "";
     await Promise.allSettled([loadGitDiff(), loadGitLog()]);
-    if (options.notify) showToast("Git 状态已刷新。", "success");
+    if (options.notify) showToast(t("refreshed"), "success");
   }
 
   function pruneGitCommitSelection(files) {
@@ -127,7 +137,7 @@ export function createGitWorkflowController({
     if (input) state.gitCommitMessage = input.value;
     const selectedCount = selectedGitCommitPaths().length;
     const count = $("gitCommitSelectedCount");
-    if (count) count.textContent = `${formatNumber(selectedCount)} 个已选择`;
+    if (count) count.textContent = t("selectedCount", { count: formatNumber(selectedCount) });
     const button = $("gitCommitBtn");
     if (button) button.disabled = state.gitCommitBusy || !selectedCount || !String(state.gitCommitMessage || "").trim();
   }
@@ -142,11 +152,11 @@ export function createGitWorkflowController({
     const message = String(state.gitCommitMessage || "").trim();
     const paths = selectedGitCommitPaths();
     if (!message) {
-      showToast("请输入 commit message。", "warn", { force: true });
+      showToast(t("commitMessageRequired"), "warn", { force: true });
       return;
     }
     if (!paths.length) {
-      showToast("请先选择要提交的文件。", "warn", { force: true });
+      showToast(t("filesRequired"), "warn", { force: true });
       return;
     }
     state.gitCommitBusy = true;
@@ -161,7 +171,7 @@ export function createGitWorkflowController({
       state.gitCommitMessage = "";
       state.gitCommitSelected = {};
       const shortHash = result?.commit?.shortHash ? ` ${result.commit.shortHash}` : "";
-      showToast(`已创建提交${shortHash}。`, "success", { force: true });
+      showToast(t("commitCreated", { hash: shortHash }), "success", { force: true });
       await refreshGitWorkflow({ silent: true });
     } catch (err) {
       if (state.agent?.id !== agentId) return;
@@ -203,38 +213,38 @@ export function createGitWorkflowController({
     const selectedPath = state.gitSelectedPath || "";
     const selectedCommitPaths = selectedGitCommitPaths(files);
     if ($("gitModalPath")) {
-      $("gitModalPath").textContent = status?.repoRoot || state.agent?.cwd || state.project?.gitPath || "查看并提交当前 Agent 工作目录的 Git 变更。";
+      $("gitModalPath").textContent = status?.repoRoot || state.agent?.cwd || state.project?.gitPath || t("pathHint");
     }
     body.innerHTML = `
       <div class="git-toolbar">
         <div class="git-summary">
-          <strong>${escapeHtml(status?.branch || status?.head || "Git")}</strong>
-          <span>${escapeHtml(status?.clean === false ? `${files.length} 个文件有变更` : (status ? "工作区干净" : "尚未加载"))}</span>
-          ${status?.upstream ? `<span>${escapeHtml(status.upstream)}${status.ahead || status.behind ? ` · ahead ${escapeHtml(formatNumber(status.ahead || 0))} / behind ${escapeHtml(formatNumber(status.behind || 0))}` : ""}</span>` : ""}
+          <strong>${escapeHtml(status?.branch || status?.head || t("fallbackBranch"))}</strong>
+          <span>${escapeHtml(status?.clean === false ? t("filesChanged", { count: formatNumber(files.length) }) : (status ? t("workspaceClean") : t("notLoaded")))}</span>
+          ${status?.upstream ? `<span>${escapeHtml(status.upstream)}${status.ahead || status.behind ? ` ${escapeHtml(t("aheadBehind", { ahead: formatNumber(status.ahead || 0), behind: formatNumber(status.behind || 0) }))}` : ""}</span>` : ""}
         </div>
         <div class="git-actions">
-          <select id="gitScopeSelect" class="select git-scope-select" aria-label="Diff 范围">
-            <option value="all" ${state.gitScope === "all" ? "selected" : ""}>全部</option>
-            <option value="unstaged" ${state.gitScope === "unstaged" ? "selected" : ""}>未暂存</option>
-            <option value="staged" ${state.gitScope === "staged" ? "selected" : ""}>已暂存</option>
+          <select id="gitScopeSelect" class="select git-scope-select" aria-label="${escapeAttr(t("diffScope"))}">
+            <option value="all" ${state.gitScope === "all" ? "selected" : ""}>${escapeHtml(t("all"))}</option>
+            <option value="unstaged" ${state.gitScope === "unstaged" ? "selected" : ""}>${escapeHtml(t("unstaged"))}</option>
+            <option value="staged" ${state.gitScope === "staged" ? "selected" : ""}>${escapeHtml(t("staged"))}</option>
           </select>
-          <button id="refreshGitBtn" class="ghost-btn mini" type="button">刷新</button>
+          <button id="refreshGitBtn" class="ghost-btn mini" type="button">${escapeHtml(t("refresh"))}</button>
         </div>
       </div>
       ${state.gitError ? `<div class="settings-inline-alert">${escapeHtml(state.gitError)}</div>` : ""}
       ${renderGitCommitPanel(files, selectedCommitPaths)}
       <div class="git-layout">
         <aside class="git-file-list">
-          <div class="git-panel-title">变更文件</div>
+          <div class="git-panel-title">${escapeHtml(t("changedFiles"))}</div>
           ${renderGitFileList(files, selectedPath)}
         </aside>
         <section class="git-diff-panel">
-          <div class="git-panel-title">Diff ${selectedPath ? `<span>${escapeHtml(selectedPath)}</span>` : ""}</div>
-          ${diff?.truncated ? `<div class="settings-inline-alert">Diff 输出已截断，只显示前半部分。</div>` : ""}
+          <div class="git-panel-title">${escapeHtml(t("diff"))} ${selectedPath ? `<span>${escapeHtml(selectedPath)}</span>` : ""}</div>
+          ${diff?.truncated ? `<div class="settings-inline-alert">${escapeHtml(t("diffTruncated"))}</div>` : ""}
           ${renderUnifiedDiff(diff?.patch || "")}
         </section>
         <aside class="git-log-panel">
-          <div class="git-panel-title">最近提交</div>
+          <div class="git-panel-title">${escapeHtml(t("recentCommits"))}</div>
           ${renderGitLog(log?.commits || [])}
         </aside>
       </div>
@@ -249,30 +259,30 @@ export function createGitWorkflowController({
       <form id="gitCommitForm" class="git-commit-panel">
         <div class="git-commit-head">
           <div>
-            <strong>提交所选变更</strong>
-            <span>只会 add/commit 下方勾选的路径；不会 push、amend、reset 或 clean。</span>
+            <strong>${escapeHtml(t("commitSelected"))}</strong>
+            <span>${escapeHtml(t("commitSafety"))}</span>
           </div>
-          <span id="gitCommitSelectedCount" class="git-commit-count">${escapeHtml(formatNumber(selectedCount))} 个已选择</span>
+          <span id="gitCommitSelectedCount" class="git-commit-count">${escapeHtml(t("selectedCount", { count: formatNumber(selectedCount) }))}</span>
         </div>
-        <textarea id="gitCommitMessageInput" class="git-commit-message" rows="2" maxlength="10000" placeholder="输入 commit message">${escapeHtml(state.gitCommitMessage || "")}</textarea>
+        <textarea id="gitCommitMessageInput" class="git-commit-message" rows="2" maxlength="10000" placeholder="${escapeAttr(t("commitPlaceholder"))}">${escapeHtml(state.gitCommitMessage || "")}</textarea>
         <div class="git-commit-actions">
-          <button id="selectAllGitFilesBtn" class="ghost-btn mini git-mini-btn" type="button" ${files.length && !state.gitCommitBusy ? "" : "disabled"}>全选变更</button>
-          <button id="clearGitFilesBtn" class="ghost-btn mini git-mini-btn" type="button" ${selectedCount && !state.gitCommitBusy ? "" : "disabled"}>清空选择</button>
-          <button id="gitCommitBtn" class="send-btn git-commit-submit" type="submit" ${disabled ? "disabled" : ""}>${state.gitCommitBusy ? "提交中…" : "提交所选文件"}</button>
+          <button id="selectAllGitFilesBtn" class="ghost-btn mini git-mini-btn" type="button" ${files.length && !state.gitCommitBusy ? "" : "disabled"}>${escapeHtml(t("selectAll"))}</button>
+          <button id="clearGitFilesBtn" class="ghost-btn mini git-mini-btn" type="button" ${selectedCount && !state.gitCommitBusy ? "" : "disabled"}>${escapeHtml(t("clearSelection"))}</button>
+          <button id="gitCommitBtn" class="send-btn git-commit-submit" type="submit" ${disabled ? "disabled" : ""}>${escapeHtml(state.gitCommitBusy ? t("committing") : t("commitFiles"))}</button>
         </div>
       </form>
     `;
   }
 
   function renderGitFileList(files, selectedPath) {
-    if (!files.length) return `<div class="settings-empty-card compact">暂无工作区变更。</div>`;
+    if (!files.length) return `<div class="settings-empty-card compact">${escapeHtml(t("noChanges"))}</div>`;
     const selected = state.gitCommitSelected || {};
     return files.map((file) => {
       const path = file.path || "";
       const checked = Boolean(selected[path]);
       return `
         <div class="git-file-row ${path === selectedPath ? "active" : ""}">
-          <input class="git-file-checkbox" type="checkbox" data-git-select="${escapeAttr(path)}" aria-label="选择 ${escapeAttr(path)} 提交" ${checked ? "checked" : ""} ${state.gitCommitBusy ? "disabled" : ""} />
+          <input class="git-file-checkbox" type="checkbox" data-git-select="${escapeAttr(path)}" aria-label="${escapeAttr(t("selectFile", { path }))}" ${checked ? "checked" : ""} ${state.gitCommitBusy ? "disabled" : ""} />
           <button class="git-file-open" type="button" data-git-file="${escapeAttr(path)}">
             <span class="git-file-status ${gitFileBadgeClass(file)}">${escapeHtml(gitStatusLabel(file))}</span>
             <span class="git-file-path">${escapeHtml(path)}</span>
@@ -283,7 +293,7 @@ export function createGitWorkflowController({
   }
 
   function renderUnifiedDiff(patch) {
-    if (!patch) return `<pre class="git-diff-view empty">暂无 diff。未跟踪文件当前只在状态列表中展示。</pre>`;
+    if (!patch) return `<pre class="git-diff-view empty">${escapeHtml(t("noDiff"))}</pre>`;
     const lines = String(patch).split("\n");
     return `<pre class="git-diff-view">${lines.map((line) => `<div class="diff-line ${diffLineClass(line)}">${escapeHtml(line || " ")}</div>`).join("")}</pre>`;
   }
@@ -297,7 +307,7 @@ export function createGitWorkflowController({
   }
 
   function renderGitLog(commits) {
-    if (!Array.isArray(commits) || !commits.length) return `<div class="settings-empty-card compact">暂无提交记录。</div>`;
+    if (!Array.isArray(commits) || !commits.length) return `<div class="settings-empty-card compact">${escapeHtml(t("noHistory"))}</div>`;
     return `<div class="git-log-list">${commits.map((commit) => `
       <div class="git-log-row">
         <strong>${escapeHtml(commit.shortHash || "")}</strong>

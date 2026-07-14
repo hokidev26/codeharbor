@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"autoto/internal/compat"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -35,12 +37,12 @@ func TestDefaultConfig(t *testing.T) {
 	if gemini == nil || gemini.Type != "gemini-interactions" || gemini.BaseURL != "https://generativelanguage.googleapis.com/v1beta/interactions" || gemini.Model != "gemini-2.5-pro" {
 		t.Fatalf("unexpected Gemini provider preset: %+v", gemini)
 	}
-	provider := providerByName(cfg, "cliproxyapi")
+	provider := providerByName(cfg, "codex")
 	if provider == nil {
-		t.Fatal("expected CLIProxyAPI provider preset")
+		t.Fatal("expected native Codex provider preset")
 	}
-	if provider.Type != "openai-compatible" || provider.BaseURL != "http://127.0.0.1:8317/v1" || provider.Model != "gpt-5.5" || !provider.APIKeyOptional {
-		t.Fatalf("unexpected CLIProxyAPI provider preset: %+v", *provider)
+	if provider.Type != ProviderTypeCodex || provider.BaseURL != "https://chatgpt.com/backend-api/codex" || provider.Model != "gpt-5.5" || provider.APIKeyOptional {
+		t.Fatalf("unexpected native Codex provider preset: %+v", *provider)
 	}
 }
 
@@ -176,9 +178,12 @@ func TestLoadMigratesLegacyConfigToCanonicalPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(canonicalPath)
+	cfg, report, err := LoadWithReport(canonicalPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected copied legacy config report, got %+v", report.Usages)
 	}
 	if cfg.Server.Port != 9091 || cfg.Paths.DatabasePath != legacyDatabasePath {
 		t.Fatalf("expected migrated legacy values and database path, got %+v", cfg)
@@ -315,6 +320,79 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	}
 }
 
+func TestProviderDisabledStateIsBackwardCompatibleAndSummaryIsServerDerived(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":{"instances":[{"name":"openai","type":"openai","model":"gpt-test"},{"name":"relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:8080/v1","model":"relay-test","disabled":true}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openAI := providerByName(cfg, "openai")
+	relay := providerByName(cfg, "relay")
+	if openAI == nil || openAI.Disabled {
+		t.Fatalf("legacy provider without disabled must remain enabled: %+v", openAI)
+	}
+	if relay == nil || !relay.Disabled {
+		t.Fatalf("expected disabled provider state to load: %+v", relay)
+	}
+	if got := openAI.Summary(); !got.Enabled || got.Origin != ProviderOriginBuiltin {
+		t.Fatalf("unexpected built-in summary: %+v", got)
+	}
+	if got := relay.Summary(); got.Enabled || got.Origin != ProviderOriginCustom {
+		t.Fatalf("unexpected custom summary: %+v", got)
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"disabled": true`) {
+		t.Fatalf("disabled state was not persisted: %s", data)
+	}
+	if strings.Contains(string(data), `"origin"`) {
+		t.Fatalf("provider origin must be server-derived, not persisted: %s", data)
+	}
+}
+
+func TestProviderRuntimeIdentityIsNotSerialized(t *testing.T) {
+	provider := ProviderConfig{
+		Name:           "openai",
+		Type:           "openai",
+		Model:          "gpt-5",
+		ClientVersion:  "1.2.3",
+		InstallationID: "123e4567-e89b-42d3-a456-426614174000",
+	}
+	encoded, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, forbidden := range []string{"clientVersion", "installationId", "1.2.3", provider.InstallationID} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("runtime identity leaked into provider JSON: %s", text)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Config{SchemaVersion: CurrentConfigVersion, Providers: ProvidersConfig{Instances: []ProviderConfig{provider}}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"clientVersion", "installationId", "1.2.3", provider.InstallationID} {
+		if strings.Contains(string(persisted), forbidden) {
+			t.Fatalf("runtime identity leaked into saved config: %s", persisted)
+		}
+	}
+}
+
 func TestNormalizeProvidersDerivesLegacyCLIProxyProfile(t *testing.T) {
 	providers := normalizeProviders(ProvidersConfig{Instances: []ProviderConfig{{
 		Name: "cliproxyapi",
@@ -334,6 +412,141 @@ func TestNormalizeProvidersPreservesExplicitProfile(t *testing.T) {
 	if len(providers.Instances) != 1 || providers.Instances[0].Profile != ProviderProfileCLIProxyAPI {
 		t.Fatalf("expected explicit profile to remain intact, got %+v", providers.Instances)
 	}
+}
+
+func TestDefaultWithReportTracksOnlyEffectiveLegacyFallbacks(t *testing.T) {
+	for _, name := range []string{
+		"AUTOTO_DEFAULT_MODEL",
+		"CODEHARBOR_DEFAULT_MODEL",
+		"AUTOTO_SUMMARY_MODEL",
+		"CODEHARBOR_SUMMARY_MODEL",
+	} {
+		t.Setenv(name, "")
+	}
+	const secretValue = "legacy-secret-model"
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", secretValue)
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != secretValue || cfg.Agent.SummaryModel != secretValue {
+		t.Fatalf("expected effective legacy fallback, got %+v", cfg.Agent)
+	}
+	if len(report.Usages) != 1 || report.Usages[0].Legacy != "CODEHARBOR_DEFAULT_MODEL" || report.Usages[0].Replacement != "AUTOTO_DEFAULT_MODEL" {
+		t.Fatalf("unexpected legacy report: %+v", report.Usages)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secretValue) {
+		t.Fatalf("legacy report leaked fallback value: %s", encoded)
+	}
+}
+
+func TestDefaultWithReportCanonicalEnvSuppressesLegacyReport(t *testing.T) {
+	t.Setenv("AUTOTO_DEFAULT_MODEL", "canonical-model")
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy-secret-model")
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "canonical-model" {
+		t.Fatalf("expected canonical value, got %q", cfg.Agent.DefaultModel)
+	}
+	if reportHasLegacy(report, "CODEHARBOR_DEFAULT_MODEL") {
+		t.Fatalf("canonical env must suppress legacy report: %+v", report.Usages)
+	}
+}
+
+func TestDefaultWithReportInvalidLegacyEnvIsNotReported(t *testing.T) {
+	t.Setenv("AUTOTO_EXPOSED", "")
+	t.Setenv("CODEHARBOR_EXPOSED", "not-a-bool")
+
+	cfg, report, err := DefaultWithReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.Exposed {
+		t.Fatal("invalid legacy bool must not become effective")
+	}
+	if reportHasLegacy(report, "CODEHARBOR_EXPOSED") {
+		t.Fatalf("invalid legacy env must not be reported: %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportFiltersConfigOverriddenLegacyDefaults(t *testing.T) {
+	t.Setenv("AUTOTO_DEFAULT_MODEL", "")
+	t.Setenv("CODEHARBOR_DEFAULT_MODEL", "legacy-secret-model")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"agent":{"defaultModel":"canonical:file","summaryModel":"canonical:summary"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, report, err := LoadWithReport(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "canonical:file" || cfg.Agent.SummaryModel != "canonical:summary" {
+		t.Fatalf("expected config values, got %+v", cfg.Agent)
+	}
+	if reportHasLegacy(report, "CODEHARBOR_DEFAULT_MODEL") {
+		t.Fatalf("config-overridden fallback must not be reported: %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportTracksExplicitLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyPath := filepath.Join(home, ".codeharbor", "config.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"server":{"port":9092}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, report, err := LoadWithReport(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 9092 {
+		t.Fatalf("expected explicitly loaded legacy config, got port %d", cfg.Server.Port)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected explicit legacy config report, got %+v", report.Usages)
+	}
+}
+
+func TestLoadWithReportTracksNewConfigCreatedAtExplicitLegacyPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyPath := filepath.Join(home, ".codeharbor", "config.json")
+
+	cfg, report, err := LoadWithReport(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Port != 7788 {
+		t.Fatalf("expected default config at explicit legacy path, got port %d", cfg.Server.Port)
+	}
+	if !reportHasLegacy(report, "~/.codeharbor/config.json") {
+		t.Fatalf("expected explicit legacy path usage report, got %+v", report.Usages)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("expected config to be written at explicit legacy path: %v", err)
+	}
+}
+
+func reportHasLegacy(report compat.Report, legacy string) bool {
+	for _, usage := range report.Usages {
+		if usage.Legacy == legacy {
+			return true
+		}
+	}
+	return false
 }
 
 func providerByName(cfg Config, name string) *ProviderConfig {

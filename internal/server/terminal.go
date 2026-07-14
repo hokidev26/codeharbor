@@ -41,6 +41,10 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
+	if err := requireLocalExecutionAgent(agent); err != nil {
+		writeExecutionGuardError(w, err)
+		return
+	}
 	if !s.validateWebSocketRequest(w, r) {
 		return
 	}

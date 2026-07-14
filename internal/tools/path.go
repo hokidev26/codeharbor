@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"autoto/internal/workspacefs"
 )
 
 // resolveInCWD resolves the nearest existing ancestor before checking containment.
@@ -19,9 +21,9 @@ func resolveInCWD(cwd, inputPath string) (string, error) {
 	}
 	base, err := filepath.Abs(cwd)
 	if err != nil {
-		return "", err
+		return "", errors.New("cannot resolve working directory")
 	}
-	base, err = filepath.EvalSymlinks(base)
+	realBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		return "", err
 	}
@@ -31,16 +33,25 @@ func resolveInCWD(cwd, inputPath string) (string, error) {
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return "", errors.New("cannot resolve path")
+	}
+	if !pathIsWithin(base, abs) {
+		return "", errors.New("path escapes working directory")
+	}
+	if sensitiveToolPath(base, abs) {
+		return "", errors.New("sensitive path is not accessible")
 	}
 	resolved, err := resolvePhysicalPath(abs)
 	if err != nil {
-		return "", err
+		return "", errors.New("cannot resolve path")
 	}
-	if !pathWithin(base, resolved) {
+	if !pathWithin(realBase, resolved) {
 		return "", errors.New("path escapes working directory")
 	}
-	return resolved, nil
+	if sensitiveToolPath(realBase, resolved) {
+		return "", errors.New("sensitive path is not accessible")
+	}
+	return abs, nil
 }
 
 func resolvePhysicalPath(path string) (string, error) {
@@ -69,6 +80,40 @@ func resolvePhysicalPath(path string) (string, error) {
 func pathWithin(base, path string) bool {
 	rel, err := filepath.Rel(base, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func pathIsWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func sensitiveToolPath(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil || filepath.IsAbs(rel) {
+		return true
+	}
+	rel = filepath.ToSlash(rel)
+	if workspacefs.IsSensitivePath(rel) {
+		return true
+	}
+	for _, component := range strings.Split(strings.ToLower(rel), "/") {
+		if component == ".git" {
+			return true
+		}
+	}
+	return false
+}
+
+func heavyToolDirectory(name string) bool {
+	switch strings.ToLower(name) {
+	case ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "target", ".next", ".nuxt", "coverage", "out":
+		return true
+	default:
+		return false
+	}
 }
 
 func truncate(s string, max int) (string, bool) {

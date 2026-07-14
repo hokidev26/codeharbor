@@ -10,6 +10,7 @@ import (
 type PermissionGenerations struct {
 	Entity     int64 `json:"entity"`
 	Permission int64 `json:"permission"`
+	Execution  int64 `json:"execution"`
 	Policy     int64 `json:"policy"`
 }
 
@@ -30,7 +31,7 @@ func (s *Store) GetPermissionGenerations(ctx context.Context, agentID string) (P
 	}
 	defer tx.Rollback()
 	generations := PermissionGenerations{Policy: 1}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(entity_generation,1), COALESCE(permission_generation,1) FROM agents WHERE id = ?`, agentID).Scan(&generations.Entity, &generations.Permission); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0) FROM agents WHERE id = ?`, agentID).Scan(&generations.Entity, &generations.Permission, &generations.Execution); err != nil {
 		return PermissionGenerations{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(policy_generation,1) FROM workflow_preferences WHERE id = 'default'`).Scan(&generations.Policy); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -50,17 +51,14 @@ func (s *Store) ReadAgentLiveSnapshot(ctx context.Context, agentID string) (Agen
 	defer tx.Rollback()
 
 	var snapshot AgentLiveSnapshot
-	var planMode int
-	if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(reasoning_effort,''), COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE id = ?`, agentID).Scan(
-		&snapshot.Agent.ID, &snapshot.Agent.WorklineID, &snapshot.Agent.Type, &snapshot.Agent.SubagentType, &snapshot.Agent.Title, &snapshot.Agent.Model,
-		&snapshot.Agent.SystemPrompt, &snapshot.Agent.PermissionMode, &snapshot.Agent.ReasoningEffort, &snapshot.Agent.EntityGeneration, &snapshot.Agent.PermissionGeneration,
-		&snapshot.Agent.Status, &planMode, &snapshot.Agent.CWD, &snapshot.Agent.MessageCount, &snapshot.Agent.ContextSummary,
-		&snapshot.Agent.PruneBoundaryMessageID, &snapshot.Agent.PrunedPercent, &snapshot.Agent.CreatedAt, &snapshot.Agent.UpdatedAt,
-	); err != nil {
+	agent, err := scanAgent(func(dest ...any) error {
+		return tx.QueryRowContext(ctx, agentSelectSQL+` WHERE id = ?`, agentID).Scan(dest...)
+	})
+	if err != nil {
 		return AgentLiveSnapshot{}, err
 	}
-	snapshot.Agent.PlanMode = planMode != 0
-	snapshot.Generations = PermissionGenerations{Entity: snapshot.Agent.EntityGeneration, Permission: snapshot.Agent.PermissionGeneration, Policy: 1}
+	snapshot.Agent = agent
+	snapshot.Generations = PermissionGenerations{Entity: snapshot.Agent.EntityGeneration, Permission: snapshot.Agent.PermissionGeneration, Execution: snapshot.Agent.ExecutionGeneration, Policy: 1}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(policy_generation,1) FROM workflow_preferences WHERE id = 'default'`).Scan(&snapshot.Generations.Policy); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AgentLiveSnapshot{}, err
 	}
@@ -126,14 +124,14 @@ func (s *Store) ReadAgentLiveSnapshot(ctx context.Context, agentID string) (Agen
 		}
 	}
 
-	callRows, err := tx.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND status = 'pending_approval' ORDER BY created_at ASC`, agentID)
+	callRows, err := tx.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(execution_device_id,'local'), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND status = 'pending_approval' ORDER BY created_at ASC`, agentID)
 	if err != nil {
 		return AgentLiveSnapshot{}, err
 	}
 	for callRows.Next() {
 		var call ToolCall
 		var input, output string
-		if err := callRows.Scan(&call.ID, &call.AgentID, &call.RunID, &call.MessageID, &call.ToolUseID, &call.ToolName, &input, &output, &call.Status, &call.DurationMS, &call.ErrorMessage, &call.PermissionDecidedBy, &call.PermissionDecidedAt, &call.PermissionDenyMessage, &call.PermissionDecisionReason, &call.PermissionSuggestions, &call.PermissionGeneration, &call.PolicyGeneration, &call.StartedAt, &call.CompletedAt, &call.CreatedAt, &call.UpdatedAt); err != nil {
+		if err := callRows.Scan(&call.ID, &call.AgentID, &call.RunID, &call.MessageID, &call.ToolUseID, &call.ToolName, &input, &output, &call.Status, &call.DurationMS, &call.ErrorMessage, &call.PermissionDecidedBy, &call.PermissionDecidedAt, &call.PermissionDenyMessage, &call.PermissionDecisionReason, &call.PermissionSuggestions, &call.PermissionGeneration, &call.PolicyGeneration, &call.ExecutionDeviceID, &call.StartedAt, &call.CompletedAt, &call.CreatedAt, &call.UpdatedAt); err != nil {
 			callRows.Close()
 			return AgentLiveSnapshot{}, err
 		}
@@ -153,11 +151,10 @@ func (s *Store) ReadAgentLiveSnapshot(ctx context.Context, agentID string) (Agen
 		return AgentLiveSnapshot{}, err
 	}
 
-	var run Run
-	if err := tx.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1`, agentID).Scan(
-		&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead,
-		&run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt,
-	); err == nil {
+	run, err := scanRun(func(dest ...any) error {
+		return tx.QueryRowContext(ctx, runSelectSQL+` WHERE agent_id = ? ORDER BY execution_generation DESC, id DESC LIMIT 1`, agentID).Scan(dest...)
+	})
+	if err == nil {
 		snapshot.LatestRun = &run
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return AgentLiveSnapshot{}, err

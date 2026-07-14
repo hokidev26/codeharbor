@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -204,15 +205,24 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
-	notifier := s.notifier
-	if notifier == nil {
-		notifier = NewWebhookNotifier(s.store)
+	if s.automation == nil {
+		if s.notifier == nil {
+			writeError(w, http.StatusServiceUnavailable, "automation manager is unavailable")
+			return
+		}
+		if err := s.notifier.SendTest(r.Context()); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentAt": db.Now()})
+		return
 	}
-	if err := notifier.SendTest(r.Context()); err != nil {
+	delivery, err := s.automation.EnqueueTest(r.Context())
+	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentAt": db.Now()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentAt": db.Now(), "deliveryId": delivery.ID})
 }
 
 func validateWebhookURL(raw string, required bool) error {
@@ -229,6 +239,16 @@ func validateWebhookURL(raw string, required bool) error {
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return errors.New("webhookUrl must use http or https")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("webhookUrl must not contain credentials, query parameters, or fragments")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "metadata.google.internal" || strings.HasSuffix(host, ".metadata.google.internal") {
+		return errors.New("webhookUrl targets a forbidden metadata host")
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return errors.New("webhookUrl targets a forbidden network address")
 	}
 	return nil
 }

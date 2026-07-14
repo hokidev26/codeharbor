@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -281,5 +282,148 @@ func TestOpenAICompatibleSerializesToolHistory(t *testing.T) {
 	toolResult, _ := messages[1].(map[string]any)
 	if toolResult["role"] != "tool" || toolResult["tool_call_id"] != "call_1" || toolResult["content"] != "file contents" {
 		t.Fatalf("unexpected tool result message: %+v", toolResult)
+	}
+}
+
+func TestOpenAICompatibleCLIProxySendsReasoningAndAutotoIdentity(t *testing.T) {
+	const installationID = "123e4567-e89b-42d3-a456-426614174000"
+	var requestBody map[string]any
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if got := r.Header.Get("X-Autoto-Client"); got != "autoto/1.2.3" {
+			t.Fatalf("unexpected Autoto client header %q", got)
+		}
+		if got := r.Header.Get("X-Autoto-Installation-ID"); got != installationID {
+			t.Fatalf("unexpected installation header %q", got)
+		}
+		if strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "codex") || strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "chatgpt") {
+			t.Fatalf("client must not impersonate Codex or ChatGPT: %q", r.Header.Get("User-Agent"))
+		}
+		switch r.URL.Path {
+		case "/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "gpt-5"}}})
+		case "/chat/completions":
+			if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatible(config.ProviderConfig{
+		Name:           "cliproxyapi",
+		Type:           "openai-compatible",
+		Profile:        config.ProviderProfileCLIProxyAPI,
+		BaseURL:        server.URL,
+		Model:          "gpt-5",
+		APIKeyOptional: true,
+		ClientVersion:  "1.2.3",
+		InstallationID: installationID,
+	})
+	if !CapabilitiesFor(provider).ReasoningEffort {
+		t.Fatal("CLIProxyAPI profile must declare reasoning effort support")
+	}
+	if _, err := provider.ListModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events, err := provider.Generate(context.Background(), GenerateRequest{
+		Messages:        []Message{{Role: "user", Content: "think"}},
+		ReasoningEffort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error event: %s", event.Text)
+		}
+	}
+	if len(paths) != 2 || paths[0] != "/models" || paths[1] != "/chat/completions" {
+		t.Fatalf("unexpected request paths: %+v", paths)
+	}
+	if requestBody["reasoning_effort"] != "medium" {
+		t.Fatalf("unexpected compatible reasoning payload: %+v", requestBody)
+	}
+}
+
+func TestOpenAICompatibleCLIProxyRejectsXHigh(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	provider := NewOpenAICompatible(config.ProviderConfig{
+		Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI,
+		BaseURL: server.URL, Model: "gpt-5", APIKeyOptional: true,
+	})
+	if got := CapabilitiesFor(provider); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high" {
+		t.Fatalf("unexpected CLIProxyAPI reasoning capabilities: %+v", got)
+	}
+	events, err := provider.Generate(context.Background(), GenerateRequest{ReasoningEffort: "xhigh"})
+	if err == nil || !errors.Is(err, ErrReasoningEffortUnsupported) || !strings.Contains(err.Error(), "xhigh") {
+		t.Fatalf("expected xhigh to be rejected before dispatch, events=%v err=%v", events, err)
+	}
+	if requests != 0 {
+		t.Fatalf("unsupported xhigh reached upstream %d times", requests)
+	}
+}
+
+func TestOpenAICompatibleAutoOmitsReasoning(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}}})
+	}))
+	defer server.Close()
+	provider := NewOpenAICompatible(config.ProviderConfig{
+		Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI,
+		BaseURL: server.URL, Model: "gpt-5", APIKeyOptional: true,
+	})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "think"}}, ReasoningEffort: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if _, exists := requestBody["reasoning_effort"]; exists {
+		t.Fatalf("auto reasoning must be omitted: %+v", requestBody)
+	}
+}
+
+func TestOpenAICompatibleRejectsReasoningWithoutCLIProxyProfile(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	provider := NewOpenAICompatible(config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: server.URL, APIKeyOptional: true})
+	if CapabilitiesFor(provider).ReasoningEffort {
+		t.Fatal("ordinary compatible provider must not declare reasoning effort support")
+	}
+	events, err := provider.Generate(context.Background(), GenerateRequest{ReasoningEffort: "high"})
+	if err == nil || !errors.Is(err, ErrReasoningEffortUnsupported) || !strings.Contains(err.Error(), "relay") {
+		t.Fatalf("expected explicit unsupported reasoning error, events=%v err=%v", events, err)
+	}
+	if requests != 0 {
+		t.Fatalf("unsupported reasoning request reached upstream %d times", requests)
+	}
+}
+
+func TestOpenAICompatibleWithoutAPIKeyReturnsUnavailableError(t *testing.T) {
+	provider := NewOpenAICompatible(config.ProviderConfig{Name: "relay", Type: "openai-compatible", Model: "model"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err == nil || !errors.Is(err, ErrProviderUnavailable) || !strings.Contains(strings.ToLower(err.Error()), "unavailable") {
+		t.Fatalf("expected explicit unavailable error, events=%v err=%v", events, err)
+	}
+	if events != nil {
+		t.Fatal("unconfigured provider must not return a successful event stream")
 	}
 }

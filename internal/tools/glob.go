@@ -41,17 +41,17 @@ func (GlobTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	safeMatches := matches[:0]
+	filtered := matches[:0]
 	for _, match := range matches {
 		resolved, err := resolveInCWD(env.CWD, match)
-		if err != nil {
+		if err != nil || sensitiveToolPath(root, resolved) {
 			continue
 		}
 		if rel, err := filepath.Rel(root, resolved); err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			safeMatches = append(safeMatches, rel)
+			filtered = append(filtered, rel)
 		}
 	}
-	matches = safeMatches
+	matches = filtered
 	out := strings.Join(matches, "\n")
 	if out == "" {
 		out = "No matches found"

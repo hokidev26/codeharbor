@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { mergeEffectiveOwnerCommands, mergeSlashCommands, normalizeSlashCommandName, slashCommandInsertion, visibleMessageText } from "./skills-commands.mjs";
+import { mergeAuthoritativeEffectiveCommands, mergeEffectiveOwnerCommands, mergeSlashCommands, normalizeSlashCommandName, slashCommandInsertion, visibleMessageText } from "./skills-commands.mjs";
 import { applyServerSkillsLoadResult, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback } from "./skills-bootstrap.mjs";
 
 test("mergeSlashCommands keeps enabled server skills before local fallbacks", () => {
@@ -126,6 +126,35 @@ test("effective owners reserve command names before browser-local fallbacks", ()
   ]);
   assert.deepEqual(commands, [
     { id: "server-global-owner", name: "/summarize", description: "", prompt: "", source: "server" },
+    { id: "local-local-other", name: "/other", description: "", prompt: "local other", source: "local" },
+  ]);
+});
+
+test("authoritative effective policy fails closed initially and permits stale last-known policy", () => {
+  const local = [{ id: "local", name: "/local", prompt: "local prompt", enabled: true }];
+  assert.deepEqual(mergeAuthoritativeEffectiveCommands({
+    items: [], status: "error", hasAuthoritativeData: false,
+  }, local), []);
+  assert.deepEqual(mergeAuthoritativeEffectiveCommands({
+    items: [], status: "stale", hasAuthoritativeData: true,
+  }, local), [
+    { id: "local-local", name: "/local", description: "", prompt: "local prompt", source: "local" },
+  ]);
+});
+
+test("disabled project and workspace owners explicitly shadow enabled lower layers and local templates", () => {
+  const commands = mergeAuthoritativeEffectiveCommands({
+    hasAuthoritativeData: true,
+    items: [
+      { id: "project-owner", command: "/project-shadow", scope: "project", enabled: false, scanVerdict: "safe" },
+      { id: "workspace-owner", command: "/workspace-shadow", scope: "workspace", enabled: false, scanVerdict: "safe" },
+    ],
+  }, [
+    { id: "local-project", name: "/project-shadow", prompt: "local project", enabled: true },
+    { id: "local-workspace", name: "/workspace-shadow", prompt: "local workspace", enabled: true },
+    { id: "local-other", name: "/other", prompt: "local other", enabled: true },
+  ]);
+  assert.deepEqual(commands, [
     { id: "local-local-other", name: "/other", description: "", prompt: "local other", source: "local" },
   ]);
 });

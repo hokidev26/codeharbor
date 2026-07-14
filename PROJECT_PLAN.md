@@ -18,42 +18,93 @@
 - 简单内嵌 Web UI
 - 公开仓库入口文档、MIT License、CI 与安全说明
 
-长期目标是逐步扩展到：
+### 1.1 Legacy compatibility lifecycle（唯一事实源）
 
-- 多模型 Provider
-- MCP
-- 子代理
-- Git worktree / fork / merge / review
-- 终端 PTY
-- 浏览器工具
-- 权限审批 UI
-- 前端 Web UI
-- 存储清理与运行时管理
+本节是 legacy 兼容面的**唯一生命周期事实源**；README、CHANGELOG、SECURITY 与历史计划只能引用，不得另设不同移除日期或窗口。
+
+**规范名称（canonical names）**：
+
+- 产品、CLI、module、release asset：Autoto / `autoto`
+- 本地状态与配置：`~/.autoto`、`AUTOTO_*`
+- HTTP/WebSocket header 与浏览器偏好：`X-Autoto-*`、`autoto.*`
+- 领域与路由：Agent / Workline、`/api/agents`、`/api/worklines`、`/ws/agent`
+
+**当前兼容面**：
+
+- `cmd/codeharbor` / `codeharbor` legacy CLI shim；
+- `~/.codeharbor/config.json` 到 canonical home 的一次性配置迁移读取；
+- `CODEHARBOR_*` 环境变量 fallback；
+- `X-CodeHarbor-*` header、`codeharbor_remote_access` cookie 与 `codeharbor.*` localStorage key；
+- `window.CODEHARBOR_LOCAL_TOKEN` legacy JS global：服务端仍将 canonical `window.AUTOTO_LOCAL_TOKEN` 的同值注入该 global，`runtime.mjs` 仅将其作为 fallback 读取；
+- Narrator / Chapter API 与 `/ws/narrator` 路由别名；
+- migration、测试夹具与 CHANGELOG 历史中的旧名。
+
+**优先级与写入规则**：canonical 值存在时必须优先；legacy alias 在移除前只做兼容读取、迁移或路由转发。新代码、文档、配置保存、响应 payload 与客户端写入不得产生新的 legacy 名称依赖。明确例外：服务端当前仍把 canonical `window.AUTOTO_LOCAL_TOKEN` 的同值写入 `window.CODEHARBOR_LOCAL_TOKEN`，供旧 UI 兼容；first-party `runtime.mjs` 只把 legacy global 作为 fallback，不得优先于 canonical global。
+
+**最早移除版本与迁移窗口**：任何 runtime legacy surface **最早只能在 v0.4.0 移除**，并且从首次发布明确 deprecation warning / release note 起，必须至少跨越 **两个 tagged release** 的迁移窗口。历史 CHANGELOG、migration 名称和解释旧数据所必需的测试记录不因 runtime alias 移除而改写。
+
+**删除门槛（全部满足才可移除）**：
+
+1. canonical 替代项已稳定发布并覆盖同等使用场景；
+2. legacy 实际使用会每进程或每兼容面 warn once，且日志只记录 alias 类型，不记录 token、password、cookie 或其他 secret 值；
+3. 至少两个 tagged release 的 CHANGELOG / release note 已持续给出迁移指引；
+4. 仓库自身、示例、CI 与生成配置已不再写入 legacy 名称；
+5. migration 与兼容测试证明 canonical 优先、旧安装可迁移，并为删除后的错误行为提供测试；
+6. 删除项清单经过逐项审查，不把历史文本或数据库迁移事实误删。
+
+`window.CODEHARBOR_LOCAL_TOKEN` 的 canonical 替代是 `window.AUTOTO_LOCAL_TOKEN`，最早移除版本同样为 **v0.4.0**；除上述通用门槛外，必须等到 first-party runtime 不再读取 legacy global，且旧 UI 迁移窗口完成后，才能停止兼容响应写入并删除该 fallback。
+
+MVP 已逐步扩展出：
+
+- 多模型 Provider、流式/tool calling 与最小 capability contract
+- MCP registry、stdio discovery/execution
+- Git worktree / fork / merge-check / merge、run summary 与显式路径 commit
+- 终端 PTY、WebSearch/WebFetch、权限审批与内嵌 Web UI
+- 服务端 Skills 的 global/project/workspace CRUD、effective 解析、revision/restore 与 cursor 分页；设置页 scoped 面板已支持按作用域浏览、详情、分页和修订恢复，写操作 UI 仍限 global scope
+- Agent stream protocol 2 的有界内存 replay 与 snapshot resync
+- P2–P3 自动化持久层：V19 schedules/run source，V20 durable notification deliveries，V21 channel pairing/events/cursor，V22 device action requests
+- 仅 Telegram 的 long polling 控制面：私聊 `/pair`、`/status`、`/approve <toolCallId>`（固定一次性 `allow_once`）与 `/deny`；无 `/task`、无自由聊天、无 webhook 入站、无 Slack/Discord
+- Webhook/Telegram 通知历史、去重、lease、指数退避、`dead` 状态与显式 retry
+- 仅本机/私网 Home Assistant endpoint、只读状态摘要、固定动作 allowlist、本地双确认与 direct-loopback 批准；critical/未知动作硬阻断，IM 不得控制设备
+- 本地监控聚合与 runtime Supervisor 对 channels / automation / HTTP 生命周期的统一管理
+- `Read` / `Write` / `Edit` / `Glob` / `Grep` 对敏感路径的硬阻断或过滤
+
+后续长期能力仍包括 review workline / AI conflict resolve、子代理、显式任务队列与 runtime cleanup。Slack/Discord、IM `/task`、通用 IoT、摄像头动作、门锁解锁与云监控均未实现，不得写成现有能力。
 
 ---
 
 ## 2. 当前 MVP 范围
 
-当前 MVP 的重点是建立后端核心闭环：
+当前 MVP 的核心闭环是：
 
 ```txt
-用户输入
-  -> agent_messages 入库
-  -> agent loop
-  -> provider 生成回复
-  -> assistant message 入库
-  -> WebSocket 推送事件
+Task / 用户消息
+  -> message + run 持久化
+  -> background agent loop
+  -> provider streaming / tool call
+  -> permission rule 或显式 approval
+  -> tool result 回灌 provider
+  -> run summary + Git diff review
+  -> explicit-path local commit
 ```
 
-并补充手动工具执行闭环：
+Agent WebSocket protocol 2 推送运行事件并支持当前进程内的有界 replay；无法 replay 时由 live snapshot 恢复。手动 tool-call API 仍保留，但不再是唯一工具闭环。
+
+P2–P3 另增加两个受限闭环：
 
 ```txt
-POST /api/agents/{id}/tool-calls
-  -> permission 判断
-  -> 执行工具
-  -> agent_tool_calls 入库
-  -> 返回工具结果
+schedule 到点/手动触发
+  -> 仅 readOnly / acceptEdits permission cap
+  -> Agent busy 时记录 skipped，不取消人工 run
+  -> 结果进入 durable Webhook/Telegram delivery history
+
+Telegram private chat long polling
+  -> 一次性配对码绑定 connection/chat/user/Agent/token revision
+  -> /status 或 /approve（allow_once）/deny 已存在的 pending tool call
+  -> 未配对、错误配对与非私聊不回 Telegram
 ```
+
+这不是通用远程助理：Telegram 不接收 `/task` 或自由聊天，也不能切换权限、打开终端或控制 Home Assistant 设备。
 
 ---
 
@@ -175,6 +226,15 @@ CLIPROXYAPI_CONFIG
 
 首次生成默认 `config.json` 时，运行时仍会读取环境变量中的 API key，但写入磁盘的默认配置会清空 provider/backend API key，避免把 shell 环境里的 secret 持久化。
 
+P2–P3 integration connection 的 bot/access token 不接受明文，只保存 `env:VARIABLE_NAME` 引用，例如：
+
+```txt
+Telegram botToken     -> env:AUTOTO_TELEGRAM_BOT_TOKEN
+Home Assistant token -> env:AUTOTO_HOME_ASSISTANT_TOKEN
+```
+
+公开 API 只返回对应 logical secret 是否已配置，不返回引用目标或解析后的值。Telegram bot token 轮换会改变 credential revision 并撤销旧配对；怀疑泄漏时还应从本地 UI/API 显式撤销配对并重新配对。Home Assistant 不使用 channel pairing，token 轮换后应重启/重测或禁用连接。
+
 ---
 
 ### 3.3 SQLite 数据库
@@ -199,6 +259,13 @@ agent_message_attachments
 agent_tool_calls
 api_requests
 agent_backends
+schedules
+notification_deliveries
+integration_connections
+channel_pairings
+channel_events
+channel_cursors
+device_action_requests
 ```
 
 这些表的命名与字段风格尽量贴近 AI 编程工作台数据模型，方便后续迁移或扩展。
@@ -228,6 +295,35 @@ GET  /api/licenses
 GET  /api/runtime/summary
 GET  /api/storage/summary
 GET  /api/usage/summary
+GET  /api/monitoring/snapshot
+
+GET  /api/notifications/settings
+PUT  /api/notifications/settings
+POST /api/notifications/test
+GET  /api/notifications/deliveries
+POST /api/notifications/deliveries/{id}/retry
+
+GET    /api/schedules
+POST   /api/schedules
+PATCH  /api/schedules/{id}
+DELETE /api/schedules/{id}
+POST   /api/schedules/{id}/run
+
+GET    /api/integrations/connections
+POST   /api/integrations/connections
+PATCH  /api/integrations/connections/{id}
+DELETE /api/integrations/connections/{id}
+POST   /api/integrations/connections/{id}/test
+
+POST /api/channels/pairing-codes
+GET  /api/channels/pairings
+POST /api/channels/pairings/{id}/revoke
+GET  /api/audit/events
+
+GET  /api/devices?connectionId=...
+POST /api/device-actions
+POST /api/device-actions/{id}/approve
+POST /api/device-actions/{id}/deny
 
 PUT  /api/providers/{name}/config
 
@@ -346,6 +442,8 @@ tool.started
 tool.finished
 ```
 
+Agent stream 已使用 protocol 2 envelope（`protocol`、`streamSession`、`sequence`）：同一进程内由有界 ring buffer 提供有限 replay，并在 cursor 过期、replay 超限、订阅者溢出、stream 淘汰、session 不匹配或前端检测到序列缺口时要求读取 authoritative live snapshot 后 resync。该机制不持久化事件，服务重启或跨进程后不能 replay，不能称为 durable event log。
+
 ---
 
 ### 3.7 Provider 抽象
@@ -377,7 +475,7 @@ openai-compatible:gpt-4.1-mini
 cliproxyapi:gpt-5.5
 ```
 
-如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。当前 Anthropic 官方 Messages API 与 OpenAI 官方 Responses API provider 已支持流式文本输出；Anthropic Messages API 已支持 tool calling 自动循环与 tool result 回灌。OpenAI 官方 Responses API tool calling、OpenAI-compatible streaming/tool calling 保留为后续增强。
+如果没有设置对应 API key，provider 会返回配置提示，不会真正请求外部模型；CLIProxyAPI 本地预置例外，它默认允许无客户端 API key 连接 `http://127.0.0.1:8317/v1`，如 CLIProxyAPI 启用了 `api-keys` 再通过 `CLIPROXYAPI_API_KEY` 注入。内建 OpenAI official、Anthropic official 与 OpenAI-compatible Provider 均已接入流式输出、tool calling 与 tool result 回灌，并通过统一最小能力契约声明 `Tools`、`Streaming`、`ImageInput`。未知或未实现 capability 接口的 Provider 按不支持可选能力处理，Agent loop 按能力降级，不在业务层按 Provider 名称特判。
 
 环境变量：
 
@@ -424,6 +522,9 @@ Bash
 Glob
 Grep
 WebFetch
+WebSearch
+MCPListTools
+MCPCallTool
 ```
 
 工具接口：
@@ -471,6 +572,8 @@ rm
 rmdir
 shred
 ```
+
+P2–P3 进一步把敏感路径阻断下沉到文件路径工具：`Read`、`Write`、`Edit` 直接拒绝，`Glob`、`Grep` 遍历时过滤 `.env*`、credentials/secret、常见私钥文件及 `.git`；同时继续拒绝 symlink 逃逸。此边界不覆盖 Bash/stdio MCP，二者仍是强本地执行能力，不能把敏感路径过滤描述成完整 sandbox。
 
 ---
 
@@ -611,12 +714,14 @@ GET /ui/app.js
 
 - 设置 → 个人资料页内完成浏览器本地显示名、头像缩写、身份标签、工作台标签和 Git 身份辅助
 - 设置 → 网络搜索页内完成浏览器本地搜索提供商、结果数、安全/确认开关、GitHub 优先和域名规则策略；Agent 工具层已提供 `WebSearch` 公网搜索结果工具和 `WebFetch` 公网 HTTP(S) 文档抓取工具
-- 设置 → IM 网关页内完成浏览器本地 Webhook/Discord/Slack/Telegram/Lark/企业微信预设、入站确认、签名、脱敏和事件路由策略
-- 设置 → 技能页内完成浏览器本地斜杠命令模板、MCP server 草案、工具权限策略和 JSON 导出；已接入后端 MCP registry，可创建/启停/删除 server 并运行 tools/list discovery；后端已提供 stdio MCP discovery/execution core tools（exec-risk 审批）
+- 设置 → P2–P3 管理控制台已接入服务端 schedules、durable deliveries、integration connections、Telegram pairing/revoke、Home Assistant 只读实体/本地动作审批、monitoring snapshot 与 audit events。旧 `localStorage` IM 草稿只作为“已停用”的迁移提示，不会启动服务或计入运行状态
+- Telegram 当前只通过 long polling 接收私聊 `/pair`、`/status`、`/approve`（固定一次性 `allow_once`）与 `/deny`；无 `/task`、无自由聊天、无 Telegram webhook、无 Slack/Discord。未配对与错误配对保持静默
+- Home Assistant 只允许本机/私网 endpoint；状态列表只读，动作仅限固定 allowlist，创建和批准均要求本地 UI 双确认，最终执行批准还要求 direct loopback。critical/未知动作硬阻断，IM 不得控制设备
+- 设置 → 技能页已接入服务端 Skills：后端支持 global/project/workspace CRUD、effective Skills、revision 历史/restore 与 snapshot-stable cursor 分页；scoped 面板支持按作用域浏览、详情、分页、修订历史与恢复，但创建、SKILL.md 导入、启停、编辑、删除 UI 仍只操作 global scope。MCP registry 仍可创建/启停/删除 server、运行 tools/list，并通过 exec-risk 审批调用 stdio MCP tools
 - 设置 → 工作线与容器页内完成当前项目工作线、当前工作线 Agent、worktree/branch/容器隔离边界概览和快速切换
 - 设置 → AI 代理页内完成默认 Agent 策略概览、当前 agent 状态、模型/权限/workdir 快速调整和 ID 复制
 - 设置 → 用户管理页内完成本地 auth status 只读视图、注册状态、安全边界和后续多用户路线提示
-- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好，并接入服务端 Webhook 任务通知配置/测试发送
+- 设置 → 通知页内完成浏览器本地 toast 类型、显示时长和 UI 终端提示偏好；服务端 Webhook/Telegram 通知改为持久 delivery history，具去重、lease、指数退避、最大尝试次数、delivered/dead 状态和显式 retry
 - 设置 → 外观与界面页内完成浏览器本地主题、布局密度、终端默认展开和 Agent 事件日志显示偏好
 - 设置 → 关于页内完成浏览器本地偏好备份、下载、复制和导入恢复，便于跨浏览器或跨机器迁移工作台设置
 - 设置 → 模型/提供商页内完成模型刷新、Codex Token/JSON 凭证导入、账号列表刷新、中转站 API Key/Base URL/协议/默认模型保存、模型选择和首选模型保存
@@ -699,7 +804,7 @@ docs/ARCHITECTURE.md
 - `docs/ARCHITECTURE.md` 面向贡献者说明请求如何流过 server、agent、provider、tools、WebSocket 和 SQLite。
 - `THIRD_PARTY_NOTICES.md` 是直接依赖初版说明，不是法律意见；正式发布前仍应生成完整 transitive notice。
 - CI 会检查 Go 格式、测试、vet、构建、内嵌 JavaScript 语法，并通过 `golangci-lint` 增加 static analysis。
-- `v*` tag 会触发 GoReleaser release workflow，构建 macOS/Linux/Windows archives；README 顶部已有轻量 `docs/demo.gif` 工作流预览；后续仍可替换为真实产品录屏。
+- `v*` tag 会触发 GoReleaser release workflow，构建 macOS/Linux/Windows archives；README 保留轻量 `docs/demo.svg` 工作流预览，后续如有真实录屏可再替换。
 
 ---
 
@@ -722,6 +827,16 @@ internal/server/interrupt_test.go
 internal/server/mcp_servers_test.go
 internal/server/security_test.go
 internal/tools/tools_test.go
+internal/runtime/supervisor_test.go
+internal/app/run_test.go
+internal/automation/manager_test.go
+internal/channels/telegram_test.go
+internal/devices/action_test.go
+internal/devices/client_test.go
+internal/schedules/expression_test.go
+internal/db/automation_p2p3_test.go
+internal/server/automation_api_test.go
+internal/server/static/modules/automation-control.test.mjs
 ```
 
 覆盖：
@@ -742,6 +857,13 @@ internal/tools/tools_test.go
 - Git commit API 的显式 paths 提交、安全路径拒绝、空仓库 diff 降级
 - 全链路 E2E：真实 httptest server、WebSocket agent stream、HTTP message submit、假 provider tool call、审批 route、Bash 工具执行、tool result 回灌模型、消息/tool_call/api_requests 落库
 - Workline workflow：fork API 创建 Git worktree/child workline/agent，fork agent Git API 边界可用，merge-check 能报告冲突文件，merge API 能成功合并 clean 分支并在冲突时 abort
+- V19–V22 migration 与 schedules/deliveries/integration/channel/device action 持久状态、CAS/lease、统计和敏感 payload 拒绝
+- Schedule cron/`@every`/timezone、busy skip、不替换人工 run，以及 run permission cap 不放宽 Agent 权限
+- Webhook/Telegram delivery retry/backoff、`dead`、历史与 Agent-scoped Telegram 路由/脱敏
+- Telegram 私聊配对、失败锁定与静默、event/cursor 幂等、`/status`、一次性 `/approve`、`/deny`、danger 拒绝、审计 fail-closed 与限流
+- Home Assistant 私网 endpoint、只读属性过滤、固定动作 catalog、canonical seal、本地 direct-loopback 二次批准，以及 unlock/camera/script 等 critical/未知动作硬阻断
+- monitoring snapshot 聚合、runtime Supervisor 启停/回滚顺序、Settings P2–P3 控制台的有界 DOM 与 secret 不回显
+- 文件路径工具对 `.env*`、credentials/secrets、私钥与 `.git` 的硬阻断/过滤
 
 当前验证命令已收敛为统一入口：
 
@@ -769,9 +891,11 @@ make check
 
 ---
 
-## 5. 短期路线图
+## 5. 工程工作流状态（历史 Phase 1–6）
 
-### Phase 1：当前 MVP 完善
+本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指 IM 控制面**；当前只完成受限 Telegram 配对/状态/一次性审批/拒绝，不包含 `/task`、自由聊天或其他渠道。不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
+
+### Engineering Phase 1：当前 MVP 完善
 
 目标：让后端更适合手工/CLI 调试。
 
@@ -790,7 +914,7 @@ make check
 
 ---
 
-### Phase 2：工具系统增强
+### Engineering Phase 2：工具系统增强
 
 目标：让工具更接近可用编码 Agent。
 
@@ -808,7 +932,7 @@ make check
 
 ---
 
-### Phase 3：Provider 增强
+### Engineering Phase 3：Provider 增强
 
 目标：支持真实模型流式与 tool calling。
 
@@ -829,7 +953,7 @@ make check
 
 ---
 
-### Phase 4：Git / Workline 工作流
+### Engineering Phase 4：Git / Workline 工作流
 
 目标：实现多分支、多工作线能力。
 
@@ -848,7 +972,7 @@ make check
 
 ---
 
-### Phase 5：MCP / Terminal / Runtime
+### Engineering Phase 5：MCP / Terminal / Runtime
 
 目标：补齐高级能力。
 
@@ -861,14 +985,21 @@ make check
 - [x] MCP tool execution（`MCPCallTool` 通过 stdio initialize + tools/call，支持 `serverId`，exec-risk 审批）
 - [x] PTY terminal
 - [x] `/ws/terminal`
-- [x] Webhook run notifications（审批、完成、错误/中断事件异步 POST 到用户配置端点）
-- [ ] background tasks
+- [x] V19 schedules + run source/permission cap（仅 `readOnly` / `acceptEdits`，busy skip，不取消人工 run）
+- [x] V20 durable Webhook/Telegram deliveries（历史、去重、lease、指数退避、`dead`、retry）
+- [x] V21 Telegram pairing/events/cursor（long polling，`/pair` `/status` `/approve`-once `/deny`，未配对静默）
+- [x] V22 Home Assistant device action requests（本机/私网、只读状态、固定 allowlist、本地双确认、critical hard block、IM 禁止）
+- [x] monitoring snapshot 聚合与 runtime Supervisor 管理 channels / automation / HTTP
+- [ ] Slack/Discord channel adapter
+- [ ] IM `/task` 与自由聊天（当前明确不提供）
+- [ ] 通用 IoT、摄像头动作、门锁解锁、云监控
+- [ ] 显式通用 background task queue（schedule 已实现，但不等于通用任务队列）
 - [ ] process list
 - [ ] runtime cleanup
 
 ---
 
-### Phase 6：前端
+### Engineering Phase 6：前端
 
 目标：提供本地 Web UI。
 
@@ -881,7 +1012,7 @@ make check
 - [ ] Tool calls panel
 - [x] File browser
 - [x] Settings
-- [ ] License report
+- [x] License report
 
 可选技术：
 
@@ -958,29 +1089,31 @@ license
 
 当前 MVP 仍有这些限制：
 
-- 前端 UI 已开始无构建 ES module 拆分（bootstrap + app-main + 多个 feature controller/helper），但仍有大量业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现
-- 没有真实权限审批流程
-- Agent loop 暂未支持所有 provider 的完整模型 tool calling（Anthropic 路径已具备自动工具循环基础）
-- OpenAI-compatible provider 暂未流式输出；官方 OpenAI/Anthropic provider 已支持 SDK streaming
-- Bash 工具默认在 `acceptEdits` 下不可执行
-- `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制
-- Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址
-- Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；后续 AI conflict resolve 需要延续同一边界
-- license API 只确认了部分依赖协议
-- 已有后端 Git worktree/fork/merge-check/merge；尚未实现 AI resolve conflict 和前端完整操作面板
-- 已有 stdio MCP discovery/execution core tools、后端 MCP server registry，以及 Settings 创建/启停/删除/发现工具接入；尚未实现 MCP 长连接复用和完整编辑/update UI
+- Telegram 是唯一入站渠道且只使用 long polling；命令仅 `/pair`、`/status`、`/approve <toolCallId>`（一次性）和 `/deny`。没有 `/task`、自由聊天、Telegram webhook、Slack 或 Discord。
+- Telegram durable event/cursor 与 notification delivery history 不等于 Agent durable event log。Agent stream protocol 2 的 replay 仍只位于当前进程的有界内存；没有持久 retention、服务重启后或跨进程 replay。
+- Home Assistant 是唯一设备适配器，且只允许本机/私网 endpoint。没有通用 IoT、摄像头动作、门锁解锁或云监控；本地 monitoring snapshot 只是聚合状态。
+- Home Assistant 状态读取只返回过滤后的实体/属性；动作仅限固定 allowlist，并要求本地双确认和 direct-loopback 最终批准。IM 永远不能控制设备。
+- Schedule 已实现，但不是通用任务队列：只允许 `readOnly` / `acceptEdits`，Agent busy 时跳过并记录，不排队，也不取消人工 run。
+- 文件路径工具已硬阻断敏感路径，但 Bash 与 stdio MCP 仍能执行强本地操作，不能视为 sandbox。
+- 前端 UI 已按 ES module 拆分，但仍有较多业务逻辑留在 `app-main.mjs`，不是完整 React/shadcn 实现。
+- `/api/fs` 当前以 default project dir 为边界，尚未按 agent cwd 动态限制。
+- Browser-originated API / WebSocket 已有本地 token 与 Origin/Sec-Fetch-Site 防护，但仍应只绑定可信本地地址。
+- Git API 与 workline merge API 已限制 repo root 位于项目路径、default project dir 或 Autoto 创建的 `.autoto-worktrees` workline worktree 内；尚未实现 AI conflict resolve 与完整 review workline。
+- license API 只确认了部分依赖协议。
+- 已有 stdio MCP discovery/execution 与 registry；尚未实现 MCP 长连接会话池。
+- 显式通用任务队列、进程列表与 runtime cleanup 尚未实现。
 
 ---
 
 ## 8. 下一步建议
 
-建议下一轮优先做：
+产品 Phase A 的 Provider capability、Agent stream 与 Skills 基础已经收口；P2–P3 已把 schedules、durable deliveries、Telegram pairing/status/一次性 approval/deny、Home Assistant 受限适配、监控聚合和 Supervisor 生命周期接通。下一轮应先稳定现有边界，而不是扩张渠道或设备矩阵：
 
-1. OpenAI Responses API tool calling 与 tool result 回灌
-2. OpenAI-compatible streaming/tool calling
-3. 将 provider streaming 事件更细粒度地接入 agent loop / WebSocket（首 token、usage、tool delta、done）
-4. retry/backoff 与 first-token timeout 策略落地
-5. 权限审批 UI 与 whitelist/blacklist 规则
-6. Codex 凭证导入、账号额度和 provider 中转配置继续增强
+1. 为真实 Telegram bot + Home Assistant 环境补一份可重复的本地 dogfood/重启恢复记录，尤其验证 token 轮换撤销配对、delivery 重试和 busy schedule skip；
+2. 保持 Telegram 命令面只含 `/pair`、`/status`、一次性 `/approve` 与 `/deny`，除非完成独立威胁模型与默认关闭设计，否则不加入 `/task`；
+3. 保持 IM 与设备控制隔离，不允许 Telegram 创建或批准 Home Assistant action；
+4. 补齐通知历史、channel events、device actions 的 retention/清理策略与更细监控，但不要称为云监控；
+5. Slack/Discord、通用 IoT、摄像头动作和门锁解锁继续保持未完成，只有真实需求与安全审查后再立项；
+6. 继续推进 review workline / AI conflict resolve、通用队列、process list 与 runtime cleanup。
 
-这样可以从“可交互 MVP”继续推进到“能自动执行工具的本地 Agent”。
+所有文档与 UI 必须持续明确：当前有受限 Telegram 入站控制，但没有 `/task` 或通用 IM 聊天；当前有受限 Home Assistant 动作，但没有通用 IoT、摄像头动作、门锁解锁或云监控。

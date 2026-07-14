@@ -11,7 +11,20 @@ import (
 
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/tools"
 )
+
+type workflowTestTool struct {
+	name string
+}
+
+func (tool workflowTestTool) Name() string               { return tool.name }
+func (workflowTestTool) Description() string             { return "test tool" }
+func (workflowTestTool) Schema() any                     { return map[string]any{} }
+func (workflowTestTool) Risk(json.RawMessage) tools.Risk { return tools.RiskRead }
+func (workflowTestTool) Execute(context.Context, tools.Call, tools.Env) (tools.Result, error) {
+	return tools.Result{}, nil
+}
 
 func TestWorkflowPreferencesAPI(t *testing.T) {
 	ctx := context.Background()
@@ -136,6 +149,51 @@ func TestToolPermissionRulesAPI(t *testing.T) {
 	}
 	if len(rules) != 0 {
 		t.Fatalf("expected no rules after delete, got %+v", rules)
+	}
+}
+
+func TestToolPermissionRulesAPIUsesConfiguredRegistry(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	registry := tools.NewRegistry()
+	tools.RegisterCore(registry)
+	app := New(config.Config{}, store, nil, nil)
+	app.SetToolRegistry(registry)
+	routes := app.Routes()
+
+	registry.Register(workflowTestTool{name: "DynamicTool"})
+	recorder := httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"DynamicTool","risk":"read","decision":"ask"}`)))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected dynamic tool rule create 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var created db.ToolPermissionRule
+	if err := json.NewDecoder(recorder.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"UnknownTool","risk":"read","decision":"ask"}`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown tool create rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"UnknownTool"}`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown tool update rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	registry.Register(workflowTestTool{name: "DynamicToolV2"})
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"DynamicToolV2"}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected dynamically registered tool update 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

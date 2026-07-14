@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
+import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 
 export function createBackendRegistryController({
@@ -12,7 +13,7 @@ export function createBackendRegistryController({
   async function loadBackends({ checkHealth = true } = {}) {
     const seq = ++state.backendLoadSeq;
     const button = $("refreshAgentBackendsBtn");
-    setButtonBusy(button, true, "刷新中");
+    setButtonBusy(button, true, t("backend.refreshing"));
     try {
       const backends = await api("/api/backends");
       if (seq !== state.backendLoadSeq) return;
@@ -25,7 +26,7 @@ export function createBackendRegistryController({
     } catch (err) {
       if (seq === state.backendLoadSeq) throw err;
     } finally {
-      if (seq === state.backendLoadSeq) setButtonBusy(button, false, "刷新中");
+      if (seq === state.backendLoadSeq) setButtonBusy(button, false, t("backend.refreshing"));
     }
   }
 
@@ -36,9 +37,9 @@ export function createBackendRegistryController({
   function renderBackendPanel() {
     const backend = activeBackend();
     const name = $("activeBackendName");
-    if (name) name.textContent = backend ? `${backend.name} · ${backend.baseUrl}` : "未配置后端";
+    if (name) name.textContent = backend ? `${backend.name} · ${backend.baseUrl}` : t("backend.notConfigured");
     updateSidebarAccountSummary?.();
-    if (!backend) setBackendHealthBadge(false, "未配置");
+    if (!backend) setBackendHealthBadge(false, t("backend.notConfigured"));
   }
 
   function setBackendHealthBadge(ok, text) {
@@ -60,17 +61,17 @@ export function createBackendRegistryController({
     const backend = activeBackend();
     if (!backend) return;
     const seq = ++state.backendHealthSeq;
-    setBackendHealthBadge(false, "checking");
+    setBackendHealthBadge(false, t("backend.checking"));
     try {
       const health = await api(`/api/backends/${backend.id}/health`);
       if (seq !== state.backendHealthSeq || activeBackend()?.id !== backend.id) return;
       state.backendHealth = health;
-      setBackendHealthBadge(health.ok, health.status || (health.ok ? "online" : "offline"));
+      setBackendHealthBadge(health.ok, health.status || t(health.ok ? "backend.online" : "backend.offline"));
       renderBackendsList();
     } catch (err) {
       if (seq !== state.backendHealthSeq || activeBackend()?.id !== backend.id) return;
-      state.backendHealth = { backendId: backend.id, ok: false, status: "error", error: err.message };
-      setBackendHealthBadge(false, "error");
+      state.backendHealth = { backendId: backend.id, ok: false, status: t("backend.error"), error: err.message };
+      setBackendHealthBadge(false, t("backend.error"));
       renderBackendsList();
     }
   }
@@ -117,24 +118,24 @@ export function createBackendRegistryController({
     const el = $("backendsList");
     if (!el) return;
     if (!state.backends.length) {
-      el.innerHTML = `<div class="empty-list">还没有后端。添加一个 OpenHands Agent Server URL 后即可检测连通性。</div>`;
+      el.innerHTML = `<div class="empty-list">${escapeHtml(t("backend.emptyList"))}</div>`;
       return;
     }
     el.innerHTML = state.backends.map((backend) => {
       const health = state.backendHealth?.backendId === backend.id ? state.backendHealth : null;
-      const healthText = health ? (health.status || (health.ok ? "online" : "offline")) : "未检测";
+      const healthText = health ? (health.status || t(health.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
       const pendingDelete = state.backendDeleteConfirmId === backend.id;
       return `
       <div class="backend-card ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
         <div class="backend-card-main">
-          <div class="backend-card-title">${escapeHtml(backend.name)} ${backend.active ? "<span class='mini-tag'>active</span>" : ""}</div>
+          <div class="backend-card-title">${escapeHtml(backend.name)} ${backend.active ? `<span class='mini-tag'>${escapeHtml(t("backend.active"))}</span>` : ""}</div>
           <div class="backend-card-url">${escapeHtml(backend.baseUrl)}</div>
-          <div class="backend-card-meta">${escapeHtml(backend.kind)} · ${backend.apiKeyConfigured ? "API key 已配置" : "无 API key"} · ${escapeHtml(healthText)}</div>
+          <div class="backend-card-meta">${escapeHtml(backend.kind)} · ${escapeHtml(t(backend.apiKeyConfigured ? "backend.apiKeyConfigured" : "backend.noApiKey"))} · ${escapeHtml(healthText)}</div>
         </div>
         <div class="backend-card-actions">
-          ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "backend-test", label: "检测", busyLabel: "检测中", className: "ghost-btn mini" })}
-          ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "backend-activate", label: "设为当前", busyLabel: "切换中", className: "ghost-btn mini" })}
-          ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "backend-delete", label: pendingDelete ? "确认删除" : "删除", busyLabel: "删除中", className: `ghost-btn mini danger ${pendingDelete ? "confirm" : ""}` })}
+          ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "backend-test", label: t("backend.test"), busyLabel: t("backend.testing"), className: "ghost-btn mini" })}
+          ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "backend-activate", label: t("backend.setCurrent"), busyLabel: t("backend.switching"), className: "ghost-btn mini" })}
+          ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "backend-delete", label: t(pendingDelete ? "backend.confirmDelete" : "backend.delete"), busyLabel: t("backend.deleting"), className: `ghost-btn mini danger ${pendingDelete ? "confirm" : ""}` })}
         </div>
       </div>
     `;
@@ -155,12 +156,12 @@ export function createBackendRegistryController({
     if (!button) return;
     if (submitting) {
       if (!button.dataset.originalLabel) button.dataset.originalLabel = button.textContent;
-      button.textContent = "添加中";
+      button.textContent = t("backend.adding");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       return;
     }
-    button.textContent = button.dataset.originalLabel || "添加后端";
+    button.textContent = button.dataset.originalLabel || t("backend.add");
     button.disabled = false;
     button.removeAttribute("aria-busy");
     delete button.dataset.originalLabel;
@@ -185,13 +186,13 @@ export function createBackendRegistryController({
       apiKey: $("backendApiKey").value.trim(),
       active: state.backends.length === 0,
     };
-    if (!payload.baseUrl) throw new Error("请填写后端 URL");
+    if (!payload.baseUrl) throw new Error(t("backend.urlRequired"));
     setBackendFormSubmitting(form, true);
     try {
       await api("/api/backends", { method: "POST", body: JSON.stringify(payload) });
       state.backendDeleteConfirmId = "";
       resetBackendForm();
-      showToast?.("后端已添加。", "success");
+      showToast?.(t("backend.added"), "success");
       await loadBackends();
     } finally {
       setBackendFormSubmitting(form, false);
@@ -205,7 +206,7 @@ export function createBackendRegistryController({
       state.backendHealthSeq++;
       await api(`/api/backends/${id}/activate`, { method: "POST", body: JSON.stringify({}) });
       state.backendDeleteConfirmId = "";
-      showToast?.("当前后端已切换。", "success");
+      showToast?.(t("backend.activated"), "success");
       await loadBackends();
     } finally {
       setBackendActionBusy(id, "activate", false);
@@ -218,7 +219,7 @@ export function createBackendRegistryController({
       state.backendDeleteConfirmId = id;
       renderBackendsList();
       if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
-      showToast?.("再点击一次“确认删除”即可移除此后端。", "warn");
+      showToast?.(t("backend.deleteConfirmHint"), "warn");
       return;
     }
     await deleteBackend(id);
@@ -232,7 +233,7 @@ export function createBackendRegistryController({
       await api(`/api/backends/${id}`, { method: "DELETE" });
       state.backendDeleteConfirmId = "";
       if (state.backendHealth?.backendId === id) state.backendHealth = null;
-      showToast?.("后端已删除。", "success");
+      showToast?.(t("backend.deleted"), "success");
       await loadBackends();
     } finally {
       setBackendActionBusy(id, "delete", false);
@@ -247,7 +248,7 @@ export function createBackendRegistryController({
       const health = await api(`/api/backends/${id}/health`);
       if (seq !== state.backendHealthSeq) return;
       state.backendHealth = health;
-      if (activeBackend()?.id === id) setBackendHealthBadge(health.ok, health.status || (health.ok ? "online" : "offline"));
+      if (activeBackend()?.id === id) setBackendHealthBadge(health.ok, health.status || t(health.ok ? "backend.online" : "backend.offline"));
       renderBackendsList();
       if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
     } finally {
@@ -260,53 +261,53 @@ export function createBackendRegistryController({
     const active = activeBackend();
     const keyedCount = backends.filter((backend) => backend.apiKeyConfigured).length;
     const activeHealth = active && state.backendHealth?.backendId === active.id ? state.backendHealth : null;
-    const activeHealthText = activeHealth ? (activeHealth.status || (activeHealth.ok ? "online" : "offline")) : "未检测";
+    const activeHealthText = activeHealth ? (activeHealth.status || t(activeHealth.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
     return `
     <div class="settings-live-page agent-admin-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">代理管理</div>
-          <div class="settings-hero-title">${escapeHtml(active?.name || "未配置 Agent Server")}</div>
-          <p>集中管理兼容 OpenHands Agent Server 的后端，支持检测 /alive、/ready、/server_info，切换当前后端或新增备用端点。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("backend.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(active?.name || t("backend.noAgentServer"))}</div>
+          <p>${escapeHtml(t("backend.heroDescription"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshAgentBackendsBtn" class="settings-action-btn primary" type="button">刷新后端</button>
-          <button id="openBackendModalFromSettingsBtn" class="settings-action-btn subtle" type="button">弹窗管理</button>
+          <button id="refreshAgentBackendsBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("backend.refreshBackends"))}</button>
+          <button id="openBackendModalFromSettingsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.manageInModal"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(backends.length))}</strong><span>后端数量</span></div>
-        <div><strong>${escapeHtml(activeHealthText)}</strong><span>当前健康</span></div>
-        <div><strong>${escapeHtml(formatNumber(keyedCount))}</strong><span>已配置密钥</span></div>
+        <div><strong>${escapeHtml(formatNumber(backends.length))}</strong><span>${escapeHtml(t("backend.count"))}</span></div>
+        <div><strong>${escapeHtml(activeHealthText)}</strong><span>${escapeHtml(t("backend.currentHealth"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(keyedCount))}</strong><span>${escapeHtml(t("backend.configuredKeys"))}</span></div>
       </div>
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">Agent Server 后端</div>
-            <div class="settings-provider-meta">API key 只显示是否配置；不会从 API 回显明文。</div>
+            <div class="settings-provider-title">${escapeHtml(t("backend.agentServerBackends"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("backend.apiKeyDescription"))}</div>
           </div>
         </div>
         <div class="settings-backend-list">
-          ${backends.length ? backends.map(renderSettingsBackendCard).join("") : `<div class="settings-empty-card compact">还没有后端。添加本地 OpenHands Agent Server URL 后即可检测连通性。</div>`}
+          ${backends.length ? backends.map(renderSettingsBackendCard).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("backend.emptySettingsList"))}</div>`}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">新增后端</div>
-            <div class="settings-provider-meta">本地后端常用 http://127.0.0.1:8000；cloud 类型使用 Bearer token。</div>
+            <div class="settings-provider-title">${escapeHtml(t("backend.addTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("backend.addDescription"))}</div>
           </div>
         </div>
         <form id="settingsBackendForm" class="settings-backend-form">
           <div class="settings-provider-form-grid">
-            <label>名称<input id="settingsBackendName" class="settings-field" placeholder="Local Agent Server" /></label>
-            <label>类型<select id="settingsBackendKind" class="settings-field"><option value="local">local</option><option value="cloud">cloud</option></select></label>
-            <label class="settings-form-span-2">URL<input id="settingsBackendBaseUrl" class="settings-field" placeholder="http://127.0.0.1:8000" /></label>
-            <label class="settings-form-span-2">API Key<input id="settingsBackendApiKey" class="settings-field" type="password" placeholder="可选；本地使用 X-Session-API-Key" /></label>
+            <label>${escapeHtml(t("backend.nameLabel"))}<input id="settingsBackendName" class="settings-field" placeholder="${escapeAttr(t("backend.namePlaceholder"))}" /></label>
+            <label>${escapeHtml(t("backend.kindLabel"))}<select id="settingsBackendKind" class="settings-field"><option value="local">local</option><option value="cloud">cloud</option></select></label>
+            <label class="settings-form-span-2">${escapeHtml(t("backend.urlLabel"))}<input id="settingsBackendBaseUrl" class="settings-field" placeholder="http://127.0.0.1:8000" /></label>
+            <label class="settings-form-span-2">${escapeHtml(t("backend.apiKeyLabel"))}<input id="settingsBackendApiKey" class="settings-field" type="password" placeholder="${escapeAttr(t("backend.apiKeyPlaceholder"))}" /></label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button id="resetSettingsBackendFormBtn" class="settings-action-btn subtle" type="button">清空</button>
-            <button class="settings-action-btn primary" type="submit" data-backend-submit>添加后端</button>
+            <button id="resetSettingsBackendFormBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.clear"))}</button>
+            <button class="settings-action-btn primary" type="submit" data-backend-submit>${escapeHtml(t("backend.add"))}</button>
           </div>
         </form>
       </section>
@@ -316,25 +317,25 @@ export function createBackendRegistryController({
 
   function renderSettingsBackendCard(backend) {
     const health = state.backendHealth?.backendId === backend.id ? state.backendHealth : null;
-    const healthText = health ? (health.status || (health.ok ? "online" : "offline")) : "未检测";
+    const healthText = health ? (health.status || t(health.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
     const pendingDelete = state.backendDeleteConfirmId === backend.id;
     return `
     <div class="settings-backend-card ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
       <div class="settings-backend-main">
         <div class="settings-backend-title">
-          ${escapeHtml(backend.name || "Agent Server")}
-          ${backend.active ? "<span class='settings-status-pill ok'>active</span>" : ""}
+          ${escapeHtml(backend.name || t("backend.agentServer"))}
+          ${backend.active ? `<span class='settings-status-pill ok'>${escapeHtml(t("backend.active"))}</span>` : ""}
           <span class="settings-status-pill ${backendHealthPillClass(health)}">${escapeHtml(healthText)}</span>
         </div>
-        <div class="settings-provider-meta path">${escapeHtml(backend.baseUrl || "未配置 URL")}</div>
-        <div class="settings-backend-meta">${escapeHtml(backend.kind || "local")} · ${backend.apiKeyConfigured ? "API key 已配置" : "无 API key"} · 更新于 ${escapeHtml(formatTimestamp(backend.updatedAt))}</div>
+        <div class="settings-provider-meta path">${escapeHtml(backend.baseUrl || t("backend.urlNotConfigured"))}</div>
+        <div class="settings-backend-meta">${escapeHtml(backend.kind || "local")} · ${escapeHtml(t(backend.apiKeyConfigured ? "backend.apiKeyConfigured" : "backend.noApiKey"))} · ${escapeHtml(t("backend.updatedAt", { timestamp: formatTimestamp(backend.updatedAt) }))}</div>
         ${health?.error ? `<div class="settings-inline-alert compact">${escapeHtml(health.error)}</div>` : ""}
         ${health?.checks?.length ? renderBackendHealthChecks(health.checks) : ""}
       </div>
       <div class="settings-backend-actions">
-        ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "settings-backend-test", label: "检测", busyLabel: "检测中", className: "settings-action-btn subtle" })}
-        ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "settings-backend-activate", label: "设为当前", busyLabel: "切换中", className: "settings-action-btn subtle" })}
-        ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "settings-backend-delete", label: pendingDelete ? "确认删除" : "删除", busyLabel: "删除中", className: `settings-action-btn danger ${pendingDelete ? "confirm" : ""}` })}
+        ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "settings-backend-test", label: t("backend.test"), busyLabel: t("backend.testing"), className: "settings-action-btn subtle" })}
+        ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "settings-backend-activate", label: t("backend.setCurrent"), busyLabel: t("backend.switching"), className: "settings-action-btn subtle" })}
+        ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "settings-backend-delete", label: t(pendingDelete ? "backend.confirmDelete" : "backend.delete"), busyLabel: t("backend.deleting"), className: `settings-action-btn danger ${pendingDelete ? "confirm" : ""}` })}
       </div>
     </div>
   `;
@@ -352,8 +353,8 @@ export function createBackendRegistryController({
     <div class="settings-backend-checks">
       ${checks.map((check) => `
         <div class="settings-backend-check ${check.ok ? "ok" : "warn"}">
-          <span>${escapeHtml(check.name || "check")}</span>
-          <strong>${escapeHtml(check.statusCode ? String(check.statusCode) : (check.error || "—"))}</strong>
+          <span>${escapeHtml(check.name || t("backend.check"))}</span>
+          <strong>${escapeHtml(check.statusCode ? String(check.statusCode) : (check.error || t("backend.notAvailable")))}</strong>
         </div>
       `).join("")}
     </div>
@@ -388,13 +389,13 @@ export function createBackendRegistryController({
       apiKey: $("settingsBackendApiKey").value.trim(),
       active: state.backends.length === 0,
     };
-    if (!payload.baseUrl) throw new Error("请填写后端 URL");
+    if (!payload.baseUrl) throw new Error(t("backend.urlRequired"));
     setBackendFormSubmitting(form, true);
     try {
       await api("/api/backends", { method: "POST", body: JSON.stringify(payload) });
       state.backendDeleteConfirmId = "";
       resetSettingsBackendForm();
-      showToast?.("后端已添加。", "success");
+      showToast?.(t("backend.added"), "success");
       await loadBackends();
     } finally {
       setBackendFormSubmitting(form, false);

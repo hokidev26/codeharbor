@@ -1,0 +1,364 @@
+import { $, escapeAttr, escapeHtml } from "./dom.mjs";
+import { t } from "./i18n.mjs";
+
+export function parseMemoryKeywords(value) {
+  const values = Array.isArray(value) ? value : String(value ?? "").split(/[,\n\r]+/);
+  const seen = new Set();
+  return values.flatMap((entry) => String(entry ?? "").split(/[,\n\r]+/))
+    .map((entry) => entry.trim())
+    .filter((entry) => {
+      if (!entry || seen.has(entry)) return false;
+      seen.add(entry);
+      return true;
+    });
+}
+
+export function normalizeMemoryPayload(input = {}, { partial = false } = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const payload = {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
+  if (!partial || has("content")) payload.content = String(source.content ?? "").trim();
+  if (!partial || has("keywords")) payload.keywords = parseMemoryKeywords(source.keywords);
+  if (!partial || has("pinned")) payload.pinned = Boolean(source.pinned);
+  if (partial && has("archived")) payload.archived = Boolean(source.archived);
+  return payload;
+}
+
+export function normalizeMemoryItem(item = {}) {
+  const source = item && typeof item === "object" ? item : {};
+  return {
+    id: String(source.id ?? ""),
+    content: String(source.content ?? ""),
+    keywords: parseMemoryKeywords(source.keywords),
+    pinned: Boolean(source.pinned),
+    archived: Boolean(source.archived ?? source.archivedAt),
+    createdAt: String(source.createdAt ?? ""),
+    updatedAt: String(source.updatedAt ?? ""),
+  };
+}
+
+function memoryKeywordsText(keywords) {
+  return parseMemoryKeywords(keywords).join(", ");
+}
+
+function renderMemoryStatus(item) {
+  const badges = [];
+  if (item.pinned) badges.push(`<span class="settings-status-pill ok">${escapeHtml(t("memory.status.pinned"))}</span>`);
+  if (item.archived) badges.push(`<span class="settings-status-pill muted">${escapeHtml(t("memory.status.archived"))}</span>`);
+  if (!badges.length) badges.push(`<span class="settings-status-pill">${escapeHtml(t("memory.status.normal"))}</span>`);
+  return badges.join(" ");
+}
+
+export function renderMemoryItem(value, { saving = false } = {}) {
+  const item = normalizeMemoryItem(value);
+  const disabled = saving ? " disabled" : "";
+  const timestamp = item.updatedAt || item.createdAt;
+  return `
+    <section class="settings-provider-section${item.archived ? " collapsed" : ""}" data-memory-card="${escapeAttr(item.id)}">
+      <div class="settings-provider-section-head">
+        <div>
+          <div class="settings-provider-title">${escapeHtml(item.content || t("memory.emptyItem"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(timestamp ? t("memory.updatedAt", { timestamp }) : t("memory.itemId", { id: item.id || t("memory.unknownId") }))}</div>
+        </div>
+        <div class="settings-action-row">${renderMemoryStatus(item)}</div>
+      </div>
+      <form class="settings-provider-config-form" data-memory-edit-form="${escapeAttr(item.id)}">
+        <div class="settings-provider-form-grid">
+          <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
+            <textarea class="settings-field settings-textarea" rows="3" data-memory-content required${disabled}>${escapeHtml(item.content)}</textarea>
+          </label>
+          <label class="settings-form-span-2">${escapeHtml(t("memory.keywordsLabel"))}
+            <textarea class="settings-field settings-textarea" rows="2" data-memory-keywords placeholder="${escapeAttr(t("memory.keywordsPlaceholder"))}"${disabled}>${escapeHtml(memoryKeywordsText(item.keywords))}</textarea>
+          </label>
+        </div>
+        <div class="settings-action-row settings-form-actions">
+          <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("memory.saveChanges"))}</button>
+          <button class="settings-action-btn subtle" type="button" data-memory-pin="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.pinned ? "memory.unpin" : "memory.pin"))}</button>
+          <button class="settings-action-btn subtle" type="button" data-memory-archive="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.archived ? "memory.restore" : "memory.archive"))}</button>
+          <button class="settings-action-btn danger" type="button" data-memory-delete="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t("memory.delete"))}</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+export function renderMemorySettingsContent(value = {}) {
+  const state = {
+    loading: Boolean(value.loading),
+    error: String(value.error ?? ""),
+    items: Array.isArray(value.items) ? value.items.map(normalizeMemoryItem) : [],
+    query: String(value.query ?? ""),
+    includeArchived: Boolean(value.includeArchived),
+    saving: Boolean(value.saving),
+  };
+  const pinnedCount = state.items.filter((item) => item.pinned).length;
+  const archivedCount = state.items.filter((item) => item.archived).length;
+  const disabled = state.saving ? " disabled" : "";
+  let list = "";
+  if (state.loading) {
+    list = `<div class="settings-empty-card">${escapeHtml(t("memory.loading"))}</div>`;
+  } else if (!state.items.length) {
+    list = `<div class="settings-empty-card">${escapeHtml(state.query ? t("memory.noMatches", { query: state.query }) : t("memory.emptyList"))}</div>`;
+  } else {
+    list = state.items.map((item) => renderMemoryItem(item, { saving: state.saving })).join("");
+  }
+
+  return `
+    <div class="settings-live-page memory-settings-page">
+      <section class="settings-hero-card">
+        <div>
+          <div class="settings-hero-kicker">${escapeHtml(t("memory.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(t("memory.heroTitle"))}</div>
+          <p>${escapeHtml(t("memory.heroDescription"))}</p>
+        </div>
+        <div class="settings-action-row">
+          <button id="refreshMemoriesBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("common.refresh"))}</button>
+        </div>
+      </section>
+      <div class="settings-status-strip">
+        <div><strong>${escapeHtml(String(state.items.length))}</strong><span>${escapeHtml(t("memory.currentResults"))}</span></div>
+        <div><strong>${escapeHtml(String(pinnedCount))}</strong><span>${escapeHtml(t("memory.status.pinned"))}</span></div>
+        <div><strong>${escapeHtml(String(archivedCount))}</strong><span>${escapeHtml(t("memory.status.archived"))}</span></div>
+      </div>
+      ${state.error ? `<div class="settings-inline-alert">${escapeHtml(state.error)}</div>` : ""}
+      <section class="settings-provider-section highlighted">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">${escapeHtml(t("memory.searchTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("memory.searchDescription"))}</div>
+          </div>
+        </div>
+        <form id="memorySearchForm" class="settings-provider-config-form">
+          <div class="settings-provider-form-grid">
+            <label>${escapeHtml(t("memory.searchLabel"))}
+              <input id="memorySearchInput" class="settings-field" value="${escapeAttr(state.query)}" placeholder="${escapeAttr(t("memory.searchPlaceholder"))}"${disabled} />
+            </label>
+            <label class="settings-checkbox-field">
+              <input id="memoryIncludeArchived" type="checkbox" ${state.includeArchived ? "checked" : ""}${disabled} />
+              <span>${escapeHtml(t("memory.includeArchived"))}</span>
+            </label>
+          </div>
+          <div class="settings-action-row settings-form-actions">
+            <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("common.search"))}</button>
+            <button id="clearMemorySearchBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("memory.clearSearch"))}</button>
+          </div>
+        </form>
+      </section>
+      <section class="settings-provider-section">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">${escapeHtml(t("memory.createTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("memory.createDescription"))}</div>
+          </div>
+        </div>
+        <form id="createMemoryForm" class="settings-provider-config-form">
+          <div class="settings-provider-form-grid">
+            <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
+              <textarea id="newMemoryContent" class="settings-field settings-textarea" rows="3" required placeholder="${escapeAttr(t("memory.contentPlaceholder"))}"${disabled}></textarea>
+            </label>
+            <label>${escapeHtml(t("memory.keywordsLabel"))}
+              <textarea id="newMemoryKeywords" class="settings-field settings-textarea" rows="2" placeholder="${escapeAttr(t("memory.newKeywordsPlaceholder"))}"${disabled}></textarea>
+            </label>
+            <label class="settings-checkbox-field">
+              <input id="newMemoryPinned" type="checkbox"${disabled} />
+              <span>${escapeHtml(t("memory.pinAfterCreate"))}</span>
+            </label>
+          </div>
+          <div class="settings-action-row settings-form-actions">
+            <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t(state.saving ? "memory.saving" : "memory.create"))}</button>
+          </div>
+        </form>
+      </section>
+      <div class="settings-provider-cards">${list}</div>
+    </div>
+  `;
+}
+
+export function createMemorySettingsController({
+  request,
+  onChange,
+  showError,
+  showToast,
+  confirmDelete,
+} = {}) {
+  if (typeof request !== "function") throw new TypeError("Memory settings request must be a function");
+  const state = {
+    loading: false,
+    error: "",
+    items: [],
+    query: "",
+    includeArchived: false,
+    saving: false,
+    requestSeq: 0,
+  };
+  let loaded = false;
+
+  function emit() {
+    onChange?.(getState());
+  }
+
+  function getState() {
+    return {
+      loading: state.loading,
+      error: state.error,
+      items: state.items.map((item) => ({ ...item, keywords: [...item.keywords] })),
+      query: state.query,
+      includeArchived: state.includeArchived,
+      saving: state.saving,
+      requestSeq: state.requestSeq,
+    };
+  }
+
+  function setError(error) {
+    state.error = error?.message || String(error || t("memory.requestFailed"));
+    showError?.(error instanceof Error ? error : new Error(state.error));
+  }
+
+  async function load({ query = state.query, includeArchived = state.includeArchived } = {}) {
+    state.query = String(query ?? "").slice(0, 200);
+    state.includeArchived = Boolean(includeArchived);
+    const seq = ++state.requestSeq;
+    state.loading = true;
+    state.error = "";
+    emit();
+    const params = new URLSearchParams({
+      q: state.query,
+      includeArchived: String(state.includeArchived),
+    });
+    try {
+      const result = await request(`/api/memories?${params.toString()}`);
+      if (seq !== state.requestSeq) return false;
+      state.items = Array.isArray(result) ? result.map(normalizeMemoryItem) : [];
+      state.error = "";
+      loaded = true;
+      return true;
+    } catch (error) {
+      if (seq !== state.requestSeq) return false;
+      state.items = [];
+      loaded = true;
+      setError(error);
+      return false;
+    } finally {
+      if (seq === state.requestSeq) {
+        state.loading = false;
+        emit();
+      }
+    }
+  }
+
+  async function runMutation(path, options, successMessage) {
+    if (state.saving) return false;
+    state.saving = true;
+    state.error = "";
+    state.requestSeq += 1;
+    emit();
+    try {
+      await request(path, options);
+      showToast?.(successMessage, "success");
+      await load();
+      return true;
+    } catch (error) {
+      setError(error);
+      return false;
+    } finally {
+      state.saving = false;
+      emit();
+    }
+  }
+
+  async function create(input) {
+    const payload = normalizeMemoryPayload(input);
+    if (!payload.content) {
+      const error = new Error(t("memory.contentRequired"));
+      setError(error);
+      emit();
+      return false;
+    }
+    return runMutation("/api/memories", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }, t("memory.created"));
+  }
+
+  async function update(id, input) {
+    const memoryID = String(id ?? "");
+    const payload = normalizeMemoryPayload(input, { partial: true });
+    if (Object.prototype.hasOwnProperty.call(payload, "content") && !payload.content) {
+      const error = new Error(t("memory.contentRequired"));
+      setError(error);
+      emit();
+      return false;
+    }
+    return runMutation(`/api/memories/${encodeURIComponent(memoryID)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }, t("memory.updated"));
+  }
+
+  async function remove(id) {
+    const memoryID = String(id ?? "");
+    const confirm = confirmDelete || ((message) => typeof window === "undefined" || window.confirm(message));
+    if (!confirm(t("memory.deleteConfirm"))) return false;
+    return runMutation(`/api/memories/${encodeURIComponent(memoryID)}`, {
+      method: "DELETE",
+    }, t("memory.deleted"));
+  }
+
+  function itemByID(id) {
+    const memoryID = String(id ?? "");
+    return state.items.find((item) => item.id === memoryID);
+  }
+
+  function bind() {
+    $("memorySearchForm")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      load({ query: $("memorySearchInput")?.value || "" });
+    });
+    $("clearMemorySearchBtn")?.addEventListener("click", () => load({ query: "" }));
+    $("memoryIncludeArchived")?.addEventListener("change", (event) => load({ includeArchived: event.currentTarget.checked }));
+    $("refreshMemoriesBtn")?.addEventListener("click", () => load());
+    $("createMemoryForm")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      create({
+        content: $("newMemoryContent")?.value || "",
+        keywords: $("newMemoryKeywords")?.value || "",
+        pinned: Boolean($("newMemoryPinned")?.checked),
+      });
+    });
+    document.querySelectorAll("[data-memory-edit-form]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        update(form.dataset.memoryEditForm, {
+          content: form.querySelector("[data-memory-content]")?.value || "",
+          keywords: form.querySelector("[data-memory-keywords]")?.value || "",
+        });
+      });
+    });
+    document.querySelectorAll("[data-memory-pin]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const item = itemByID(button.dataset.memoryPin);
+        if (item) update(item.id, { pinned: !item.pinned });
+      });
+    });
+    document.querySelectorAll("[data-memory-archive]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const item = itemByID(button.dataset.memoryArchive);
+        if (item) update(item.id, { archived: !item.archived });
+      });
+    });
+    document.querySelectorAll("[data-memory-delete]").forEach((button) => {
+      button.addEventListener("click", () => remove(button.dataset.memoryDelete));
+    });
+    if (!loaded && !state.loading) load();
+  }
+
+  return {
+    bind,
+    create,
+    getState,
+    load,
+    remove,
+    render: () => renderMemorySettingsContent(state),
+    update,
+  };
+}

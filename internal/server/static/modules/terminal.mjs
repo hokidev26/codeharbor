@@ -1,6 +1,8 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { defaultTerminalPrefs, terminalPrefsKey } from "./preferences-data.mjs";
 import { webSocketURL } from "./runtime.mjs";
+import { t } from "./i18n.mjs";
+import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 
 export function createTerminalController({
   state,
@@ -40,7 +42,7 @@ export function createTerminalController({
     } catch {}
     trimTerminalOutput();
     if (state.activeSettingsPanel === "terminals") refreshActiveSettingsPanel();
-    if (notify) showToast("终端偏好已保存。", "success", { force: true });
+    if (notify) showToast(t("workspace.terminal.preferencesSaved"), "success", { force: true });
   }
 
   function setTerminalPreference(field, value) {
@@ -65,21 +67,21 @@ export function createTerminalController({
   function clearTerminalOutput({ notify = true } = {}) {
     const output = $("terminalOutput");
     if (!output) return;
-    output.textContent = "Terminal cleared.\n";
-    if (notify) showToast("终端输出已清空。", "success");
+    output.textContent = `${sx("terminalExtras.clearedOutput")}\n`;
+    if (notify) showToast(t("workspace.terminal.cleared"), "success");
     if (state.activeSettingsPanel === "terminals") refreshActiveSettingsPanel();
   }
 
   async function copyTerminalOutput() {
     const text = terminalOutputText();
-    if (!text.trim()) throw new Error("当前终端没有可复制内容");
+    if (!text.trim()) throw new Error(t("workspace.terminal.noCopy"));
     if (await copyToClipboard(text)) {
-      showToast("终端输出已复制。", "success");
-      notifyTerminal("[info] 已复制终端输出。\n");
+      showToast(t("workspace.terminal.copied"), "success");
+      notifyTerminal(`[info] ${sx("terminalExtras.copiedOutputNotice")}\n`);
       return;
     }
-    showToast("复制终端输出失败，请手动选择文本复制。", "warn");
-    notifyTerminal("[warn] 复制终端输出失败。\n");
+    showToast(t("workspace.terminal.copyFailed"), "warn");
+    notifyTerminal(`[warn] ${sx("terminalExtras.copyFailedOutputNotice")}\n`);
   }
 
   function remoteTerminalLocked() {
@@ -88,7 +90,7 @@ export function createTerminalController({
   }
 
   function remoteTerminalLockedMessage() {
-    return "远程收紧模式已禁用交互式终端；如确需远程 shell，请在可信边缘认证后显式设置 AUTOTO_REMOTE_TERMINAL=true。";
+    return t("workspace.terminal.remoteLocked");
   }
 
   function focusTerminalPanel() {
@@ -104,7 +106,7 @@ export function createTerminalController({
 
   function reconnectTerminalFromSettings() {
     if (!state.agent) {
-      showToast("请先选择一个 AI 代理再连接终端。", "warn");
+      showToast(t("workspace.terminal.selectAgent"), "warn");
       return;
     }
     if (remoteTerminalLocked()) {
@@ -131,63 +133,63 @@ export function createTerminalController({
     const stats = terminalOutputStats();
     const collapsed = $("appShell")?.classList.contains("terminal-collapsed") || false;
     const wsLabel = terminalConnectionLabel();
-    const cwd = state.agent?.cwd || state.project?.gitPath || "未选择代理";
+    const cwd = state.agent?.cwd || state.project?.gitPath || t("workspace.terminal.agentNotSelected");
     const locked = remoteTerminalLocked();
     return `
       <div class="settings-live-page terminal-settings-page">
         <section class="settings-hero-card terminal-hero-card">
           <div>
-            <div class="settings-hero-kicker">终端管理</div>
-            <div class="settings-hero-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? "面板已收起" : "面板已展开")}</div>
-            <p>${escapeHtml(locked ? remoteTerminalLockedMessage() : "管理当前 AI 代理的交互式 PTY 终端，支持重连、清空、复制输出和控制本地输出保留策略。")}</p>
+            <div class="settings-hero-kicker">${escapeHtml(t("workspace.terminal.management"))}</div>
+            <div class="settings-hero-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? t("workspace.terminal.collapsed") : t("workspace.terminal.expanded"))}</div>
+            <p>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.description"))}</p>
           </div>
           <div class="settings-action-row">
-            <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button" ${locked ? "disabled" : ""}>重连终端</button>
-            <button id="terminalFocusSettingsBtn" class="settings-action-btn subtle" type="button" ${locked ? "disabled" : ""}>聚焦终端</button>
+            <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button" ${locked ? "disabled" : ""}>${escapeHtml(t("workspace.terminal.reconnect"))}</button>
+            <button id="terminalFocusSettingsBtn" class="settings-action-btn subtle" type="button" ${locked ? "disabled" : ""}>${escapeHtml(t("workspace.terminal.focus"))}</button>
           </div>
         </section>
         <div class="settings-status-strip">
-          <div><strong>${escapeHtml(wsLabel)}</strong><span>连接状态</span></div>
-          <div><strong>${escapeHtml(locked ? "远程禁用" : "可用")}</strong><span>终端策略</span></div>
-          <div><strong>${escapeHtml(formatNumber(stats.lines))}</strong><span>输出行数</span></div>
-          <div><strong>${escapeHtml(formatNumber(stats.chars))}</strong><span>字符数</span></div>
+          <div><strong>${escapeHtml(wsLabel)}</strong><span>${escapeHtml(t("workspace.terminal.connection"))}</span></div>
+          <div><strong>${escapeHtml(locked ? t("workspace.terminal.remoteDisabled") : t("workspace.terminal.available"))}</strong><span>${escapeHtml(sx("terminal.terminalPolicy"))}</span></div>
+          <div><strong>${escapeHtml(formatNumber(stats.lines))}</strong><span>${escapeHtml(sx("terminal.outputLines"))}</span></div>
+          <div><strong>${escapeHtml(formatNumber(stats.chars))}</strong><span>${escapeHtml(sx("terminal.characters"))}</span></div>
         </div>
         <section class="settings-provider-section highlighted">
           <div class="settings-provider-section-head">
             <div>
-              <div class="settings-provider-title">当前会话</div>
+              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.currentSession"))}</div>
               <div class="settings-provider-meta path">${escapeHtml(cwd)}</div>
             </div>
-            <span class="settings-status-pill ${state.agent ? "ok" : "warn"}">${escapeHtml(state.agent ? "已选择代理" : "未选择代理")}</span>
+            <span class="settings-status-pill ${state.agent ? "ok" : "warn"}">${escapeHtml(state.agent ? t("workspace.terminal.agentSelected") : t("workspace.terminal.agentNotSelected"))}</span>
           </div>
           <div class="terminal-control-grid">
             <button class="terminal-control-card" type="button" data-terminal-action="reconnect" ${locked ? "disabled" : ""}>
-              <span>重连</span><small>${escapeHtml(locked ? "远程收紧下默认关闭 PTY。" : "重新建立 `/ws/terminal` 连接。")}</small>
+              <span>${escapeHtml(t("workspace.terminal.reconnect"))}</span><small>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.reconnectDescription"))}</small>
             </button>
             <button class="terminal-control-card" type="button" data-terminal-action="toggle" ${locked ? "disabled" : ""}>
-              <span>${escapeHtml(collapsed ? "展开" : "收起")}</span><small>${escapeHtml(locked ? "终端面板已被远程策略锁定。" : "切换右侧终端面板显示状态。")}</small>
+              <span>${escapeHtml(collapsed ? t("chat.expandTerminal") : t("terminal.collapse"))}</span><small>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.toggleDescription"))}</small>
             </button>
             <button class="terminal-control-card" type="button" data-terminal-action="clear">
-              <span>清空</span><small>清空当前浏览器中的终端输出。</small>
+              <span>${escapeHtml(t("workspace.terminal.clear"))}</span><small>${escapeHtml(sx("terminal.clearDescription"))}</small>
             </button>
             <button class="terminal-control-card" type="button" data-terminal-action="copy">
-              <span>复制</span><small>复制当前终端输出到剪贴板。</small>
+              <span>${escapeHtml(t("workspace.terminal.copy"))}</span><small>${escapeHtml(sx("terminal.copyDescription"))}</small>
             </button>
           </div>
         </section>
         <section class="settings-provider-section">
           <div class="settings-provider-section-head">
             <div>
-              <div class="settings-provider-title">本地终端偏好</div>
-              <div class="settings-provider-meta">只保存在当前浏览器，不影响后端 PTY 会话和项目配置。</div>
+              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.localPreferences"))}</div>
+              <div class="settings-provider-meta">${escapeHtml(sx("terminal.localPrefsDescription"))}</div>
             </div>
           </div>
           <div class="appearance-toggle-list">
-            ${renderTerminalToggle("clearOnReconnect", "重连时清空输出", "保持当前默认行为；关闭后重连会追加状态提示并保留旧输出。", prefs.clearOnReconnect)}
-            ${renderTerminalToggle("focusOnConnect", "连接后自动聚焦", "终端连接成功后自动聚焦输出区，方便直接输入命令。", prefs.focusOnConnect)}
+            ${renderTerminalToggle("clearOnReconnect", sx("terminal.clearOnReconnect"), sx("terminal.clearOnReconnectDescription"), prefs.clearOnReconnect)}
+            ${renderTerminalToggle("focusOnConnect", sx("terminal.focusOnConnect"), sx("terminal.focusOnConnectDescription"), prefs.focusOnConnect)}
           </div>
           <div class="terminal-retention-block">
-            <div class="settings-provider-title small">输出保留行数</div>
+            <div class="settings-provider-title small">${escapeHtml(sx("terminal.outputRetention"))}</div>
             <div class="appearance-choice-grid terminal-retention-grid">
               ${[1000, 3000, 5000, 10000].map((value) => renderTerminalMaxLineChoice(value, prefs.maxLines)).join("")}
             </div>
@@ -196,17 +198,17 @@ export function createTerminalController({
         <section class="settings-provider-section">
           <div class="settings-provider-section-head">
             <div>
-              <div class="settings-provider-title">快捷键提示</div>
-              <div class="settings-provider-meta">终端输出区聚焦后会把按键直接发送到 PTY。</div>
+              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.keyboardShortcuts"))}</div>
+              <div class="settings-provider-meta">${escapeHtml(sx("terminal.shortcutsDescription"))}</div>
             </div>
           </div>
           <div class="terminal-shortcut-grid">
-            ${renderTerminalShortcut("Enter", "发送回车")}
-            ${renderTerminalShortcut("Ctrl + C", "中断当前命令")}
-            ${renderTerminalShortcut("Tab", "补全")}
-            ${renderTerminalShortcut("方向键", "历史/光标移动")}
-            ${renderTerminalShortcut("粘贴", "发送剪贴板文本")}
-            ${renderTerminalShortcut("重连", "重新同步窗口大小")}
+            ${renderTerminalShortcut("Enter", sx("terminalExtras.shortcuts.sendReturn"))}
+            ${renderTerminalShortcut("Ctrl + C", sx("terminalExtras.shortcuts.interrupt"))}
+            ${renderTerminalShortcut("Tab", sx("terminalExtras.shortcuts.complete"))}
+            ${renderTerminalShortcut("Arrow keys", sx("terminalExtras.shortcuts.historyAndCursor"))}
+            ${renderTerminalShortcut("Paste", sx("terminalExtras.shortcuts.paste"))}
+            ${renderTerminalShortcut(t("workspace.terminal.reconnect"), sx("terminalExtras.shortcuts.synchronizeSize"))}
           </div>
         </section>
       </div>
@@ -214,11 +216,17 @@ export function createTerminalController({
   }
 
   function terminalConnectionLabel() {
-    if (!state.terminalWS) return state.agent ? "未连接" : "未选择代理";
-    if (state.terminalWS.readyState === WebSocket.OPEN) return "connected";
-    if (state.terminalWS.readyState === WebSocket.CONNECTING) return "connecting";
-    if (state.terminalWS.readyState === WebSocket.CLOSING) return "closing";
-    return state.terminalStatus || "closed";
+    if (!state.terminalWS) return state.agent ? sx("terminalExtras.status.disconnected") : t("workspace.terminal.agentNotSelected");
+    if (state.terminalWS.readyState === WebSocket.OPEN) return sx("terminalExtras.status.connected");
+    if (state.terminalWS.readyState === WebSocket.CONNECTING) return sx("terminalExtras.status.connecting");
+    if (state.terminalWS.readyState === WebSocket.CLOSING) return sx("terminalExtras.status.closing");
+    return terminalStatusLabel(state.terminalStatus || "closed");
+  }
+
+  function terminalStatusLabel(status) {
+    const key = String(status || "closed").replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    const message = sx(`terminalExtras.status.${key}`);
+    return message === `terminalExtras.status.${key}` ? String(status || "closed") : message;
   }
 
   function renderTerminalToggle(field, title, description, checked) {
@@ -237,7 +245,7 @@ export function createTerminalController({
     return `
       <button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-terminal-max-lines="${escapeAttr(value)}">
         <span>${escapeHtml(formatNumber(value))}</span>
-        <small>最多保留 ${escapeHtml(formatNumber(value))} 行终端输出。</small>
+        <small>${escapeHtml(sx("terminal.maxOutputLines", { count: formatNumber(value) }))}</small>
       </button>
     `;
   }
@@ -279,8 +287,8 @@ export function createTerminalController({
     if (state.terminalWS) state.terminalWS.close();
     const agentId = state.agent.id;
     const output = $("terminalOutput");
-    if (currentTerminalPreferences().clearOnReconnect) output.textContent = "Connecting terminal...\n";
-    else appendTerminal("\n[terminal] reconnecting...\n");
+    if (currentTerminalPreferences().clearOnReconnect) output.textContent = `${sx("terminalExtras.connectingOutput")}\n`;
+    else appendTerminal(`\n[terminal] ${sx("terminalExtras.reconnectingOutput")}\n`);
     setTerminalStatus("connecting");
     const socket = new WebSocket(webSocketURL(`/ws/terminal?agentId=${encodeURIComponent(agentId)}`));
     state.terminalWS = socket;
@@ -304,7 +312,7 @@ export function createTerminalController({
       try {
         const event = JSON.parse(message.data);
         if (event.type === "output") appendTerminal(cleanTerminalOutput(event.data || ""));
-        if (event.type === "error") appendTerminal(`\n[terminal error] ${event.data || "unknown error"}\n`);
+        if (event.type === "error") appendTerminal(`\n[terminal error] ${event.data || sx("terminalExtras.unknownError")}\n`);
       } catch {
         appendTerminal(message.data);
       }
@@ -314,14 +322,24 @@ export function createTerminalController({
   function setTerminalStatus(text) {
     state.terminalStatus = text;
     const status = $("terminalStatus");
-    if (status) status.textContent = `terminal ${text}`;
+    if (status) status.textContent = sx("terminalExtras.statusText", { status: terminalStatusLabel(text) });
+    const connected = text === "connected";
+    const commandInput = $("terminalCommandInput");
+    const commandButton = $("terminalCommandRunBtn");
+    if (commandInput) {
+      commandInput.disabled = !connected;
+      commandInput.placeholder = connected ? t("workspace.terminal.commandPlaceholder") : state.agent ? t("workspace.terminal.connecting") : t("workspace.terminal.selectAgent");
+    }
+    if (commandButton) commandButton.disabled = !connected;
+    renderTerminalButtonState();
     if (state.activeSettingsPanel === "terminals") refreshActiveSettingsPanel();
   }
 
   function sendTerminalInput(data) {
-    if (remoteTerminalLocked()) return;
-    if (!state.agent || !state.terminalWS || state.terminalWS.readyState !== WebSocket.OPEN) return;
+    if (remoteTerminalLocked()) return false;
+    if (!state.agent || !state.terminalWS || state.terminalWS.readyState !== WebSocket.OPEN) return false;
     state.terminalWS.send(JSON.stringify({ type: "input", data }));
+    return true;
   }
 
   function resizeTerminal(socket = state.terminalWS) {
@@ -383,18 +401,36 @@ export function createTerminalController({
       .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "");
   }
 
+  function renderTerminalButtonState() {
+    const collapsed = $("appShell")?.classList.contains("terminal-collapsed") ?? true;
+    const locked = remoteTerminalLocked();
+    const button = $("toggleTerminalBtn");
+    if (button) {
+      button.classList.toggle("active", !collapsed && !locked);
+      button.setAttribute("aria-pressed", !collapsed && !locked ? "true" : "false");
+      button.setAttribute("aria-expanded", !collapsed && !locked ? "true" : "false");
+      if (!locked) button.title = collapsed ? t("chat.expandTerminal") : t("terminal.collapse");
+      button.setAttribute("aria-label", locked ? t("workspace.terminal.remoteLocked") : collapsed ? t("chat.expandTerminal") : t("terminal.collapse"));
+    }
+    const composerButton = $("composerTerminalBtn");
+    composerButton?.classList.toggle("active", !collapsed && !locked);
+    $("expandTerminalBtn")?.classList.toggle("hidden", !collapsed || locked);
+  }
+
   function toggleTerminal(collapsed) {
     if (remoteTerminalLocked() && collapsed === false) {
       showToast(remoteTerminalLockedMessage(), "warn", { force: true });
       appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
       setTerminalStatus("remote-locked");
-      return;
+      renderTerminalButtonState();
+      return false;
     }
     const shouldCollapse = collapsed ?? !$("appShell").classList.contains("terminal-collapsed");
     $("appShell").classList.toggle("terminal-collapsed", shouldCollapse);
-    $("expandTerminalBtn").classList.toggle("hidden", !shouldCollapse);
-    $("toggleTerminalBtn")?.classList.toggle("active", !shouldCollapse);
     if (shouldCollapse) document.body.classList.remove("mobile-terminal-open");
+    renderTerminalButtonState();
+    if (!shouldCollapse) globalThis.requestAnimationFrame?.(() => resizeTerminal());
+    return true;
   }
 
   return {
@@ -409,6 +445,7 @@ export function createTerminalController({
     loadTerminalPreferences,
     normalizeTerminalPreferences,
     reconnectTerminalFromSettings,
+    renderTerminalButtonState,
     renderTerminalSettingsContent,
     resizeTerminal,
     saveTerminalPreferences,

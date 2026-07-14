@@ -12,12 +12,18 @@
 
 ## 0. 最新結論
 
-原始報告列出的近期高收益項目已基本收口：
+原始報告列出的近期高收益項目已收口：
 
-- **4.1 至 4.6 全部完成。**
-- **4.7 WebSocket 單調序列與 catch-up 按設計延後到 IM Gateway Phase B。**
-- 原始報告中的 P1/P2 程式碼缺口已沒有未完成項。
-- 完整 Provider capability matrix、Skills scope、revision 回復與分頁仍明確不做；它們是需求觸發項，不是目前欠債。
+- **4.1 至 4.7 全部完成目前定義的範圍。**
+- Agent WebSocket 已使用 protocol 2：每個進程內提供單調序列、stream session、有界記憶體 replay，以及 cursor 過期、序列缺口、慢訂閱者或 session 不匹配時的 authoritative snapshot resync。
+- 這不是 durable event log：事件仍未持久化，服務重啟或跨進程後不能 replay；若 IM Gateway 將跨進程補發變成正確性要求，仍需另立持久事件設計。
+- Provider 已有 `Tools`、`Streaming`、`ImageInput` 最小 capability contract；未知或未宣告能力的 Provider 按不支援處理，業務層不需按名稱特判。
+- Skills 已完成 global/project/workspace scope、revision 歷史與 restore，以及 snapshot-stable cursor 分頁；原先「目前不做」的描述已失效。
+- P2–P3 已新增 V19 schedules/run source、V20 durable notification deliveries、V21 Telegram pairing/events/cursor、V22 device action requests，並由 runtime Supervisor 管理 channels / automation / HTTP 生命周期。
+- Telegram 現況是 long polling + 私聊 `/pair`、`/status`、`/approve`（固定一次性 `allow_once`）與 `/deny`；未配對/錯誤配對靜默。沒有 `/task`、自由聊天、Telegram webhook、Slack 或 Discord。
+- Home Assistant 僅允許本機/私網 endpoint；狀態摘要只讀，動作固定 allowlist 且要求本地雙確認/direct-loopback 批准；critical/未知動作硬阻斷，IM 不得控制設備。
+- 通知已具持久歷史、去重、退避、`dead` 與 retry；monitoring snapshot 只做本地聚合，不是雲監控。
+- `Read` / `Write` / `Edit` / `Glob` / `Grep` 已對敏感路徑硬阻斷或過濾；Bash/stdio MCP 仍不屬於此 filename boundary。
 - 四條工程規範與快取七問已正式寫入 `CONTRIBUTING.md`，架構摘要已寫入 `docs/ARCHITECTURE.md`。
 
 ## 1. 八項原則最新狀態
@@ -25,8 +31,8 @@
 | # | 原則 | 最新狀態 | 落地結果 |
 | --- | --- | --- | --- |
 | 1.1 | 派生資料由可信後端重算 | ✅ 完成 | Skill hash、scanner verdict、風險確認與正規化均由服務端產生；SQLite CHECK 約束提供最深層 fail-closed 防線。 |
-| 1.2 | 兼容性能力契約 | ⏸ 需求觸發 | 目前只有少量 Provider，尚無真實能力分歧需要矩陣。現行規範禁止在業務層按 Provider 名稱特判；第一次出現真實分歧時再加入最小 capability。 |
-| 1.3 | 異步操作的代次、取消、超時、回退 | ✅ 當前範圍完成 | Skills 前端已有 `serverSkillsLoadSeq` 與陳舊結果丟棄；Provider first-token timeout、retry/backoff 已有測試。WebSocket catch-up 另列 Phase B。 |
+| 1.2 | 兼容性能力契約 | ✅ 最小契約完成 | Provider 可宣告 `Tools`、`Streaming`、`ImageInput`；模型與設定 API 暴露同一能力資料，Agent loop 依能力降級或拒絕不一致輸出，不按 Provider 名稱特判。完整矩陣仍只在真實差異出現時擴充。 |
+| 1.3 | 異步操作的代次、取消、超時、回退 | ✅ 當前範圍完成 | Skills 前端使用 request sequence 丟棄陳舊結果；Provider first-token timeout、retry/backoff 已有測試；Agent stream protocol 2 以有界 replay 與 snapshot resync 處理斷線、缺口與慢訂閱者。 |
 | 1.4 | 事務原子性與 CAS | ✅ 完成 | Run 啟動、終態與中斷轉換使用前置狀態條件及 `RowsAffected`；Skill 更新使用 `updated_at` 樂觀鎖並回傳 409。 |
 | 1.5 | 快取邊界、版本與失效 | ✅ 完成目前所需 | Skills 已加入 `scanner_version`，啟動只重掃版本或安全中繼資料不一致的候選；損壞列 fail-closed。快取審查清單已文件化。 |
 | 1.6 | 摘要列表與詳情懶加載 | ✅ 完成 | `GET /api/skills` 回傳摘要，不含 prompt/findings 全文；`GET /api/skills/{id}` 回傳完整詳情，前端按需補載。 |
@@ -126,40 +132,41 @@
 | 4.4 | Skills 輕量 audit log | P2 | ✅ 完成 |
 | 4.5 | Skill `updated_at` 樂觀鎖與 409 | P2 | ✅ 完成 |
 | 4.6 | Skills 列表瘦身與詳情 endpoint | P3 | ✅ 完成 |
-| 4.7 | WebSocket 單調序列與 catch-up | P3 / Phase B | ⏸ 按設計延後 |
+| 4.7 | WebSocket 單調序列與 catch-up | P3 | ✅ protocol 2 + 有界記憶體 replay + snapshot resync；durable/跨進程 replay 未完成 |
 
-## 5. 明確延後或排除的項目
+## 5. 已完成能力與仍保留的邊界
 
-### 5.1 WebSocket sequence + catch-up
+### 5.1 Agent stream protocol 2
 
-目前 Agent WebSocket 是即時傳輸，不是 durable event log。Agent 事件持久化、cursor 與 replay 已明確移除，避免在需求尚未成立時維護第二套消息模型。
+目前 Agent WebSocket 已不是只能「斷線即丟」的即時流：protocol 2 為事件加上 `streamSession` 與單調 `sequence`，Hub 以固定 ring、replay 上限、subscriber buffer、最大 stream 數與 idle timeout 控制記憶體；重連可在同一進程與同一 stream session 內從 `after` cursor replay。
 
-只有在 IM Gateway 或其他外部任務／審批通道上線前，以下條件成立時才啟動此項：
+遇到 cursor 過期、replay 超限、慢訂閱者溢位、stream 淘汰、session 不匹配或前端觀察到序列缺口時，不做部分補發，而是要求讀取 authoritative live snapshot，再以 snapshot watermark 恢復連線。
 
-- 瀏覽器外也能發起任務或批准工具；
-- 斷線重連可能造成審批錯對象或遺失關鍵終態；
-- 已先定義 event retention、entity version、權限失效與重放上限。
+仍未完成且不得混稱為已完成的是：
 
-屆時應另立設計，不直接恢復已刪除的早期 `agent_events` 草稿。
+- durable event log；
+- Agent 事件持久化與 retention policy；
+- 服務重啟後或跨進程 replay；
+- 多實例間一致的 stream session / sequence。
+
+若產品 Phase B 的 IM Gateway 需要跨進程補發，再基於保留期、權限失效、entity generation 與重放上限另立持久事件設計；不直接把目前記憶體 ring 描述成 durable queue。
 
 ### 5.2 Provider capability contract
 
-目前不建立完整八欄矩陣。觸發條件是：
+最小契約已完成，欄位為 `Tools`、`Streaming`、`ImageInput`。內建 Provider 明確宣告能力，未知 Provider 預設為全部不支援；Agent loop、模型 API 與設定 metadata 使用同一契約。
 
-- 第四個以上 Provider 帶來真實能力分歧；
-- 業務層第一次需要 Provider 名稱特判；
-- Agent backend 的 streaming/tool/image/reasoning 能力開始不一致。
+未預建 reasoning、audio、batch 等完整矩陣。後續只在真實 Provider 差異出現時擴充欄位，維持「能力驅動，不按 Provider 名稱特判」。
 
-觸發後只加入真實需要的最小欄位，例如 `SupportsTools`、`SupportsStreaming`。
+### 5.3 Skills 收口
 
-### 5.3 其他排除項
+Skills 已完成：
 
-以下仍不是當前待辦：
+- global / project / workspace scope 與有效技能覆蓋順序；
+- revision 快照、歷史列表、詳情與安全重掃記錄；
+- 帶 optimistic-lock 的舊版本 restore；
+- scope 列表、revision 列表與 effective Skills 的 snapshot-stable cursor 分頁。
 
-- Skills global/project/workspace scope；
-- 完整 revision 與舊版本恢復；
-- Skills 分頁或 cursor；
-- 為尚不存在的 Provider 差異預建能力矩陣。
+因此，舊報告中把 scope、revision、restore 或 cursor 列為「目前不做」的說法已刪除。
 
 ## 6. 驗收證據
 
@@ -174,6 +181,6 @@
 
 ## 7. 最終判斷
 
-這份報告的高收益程式碼建議已完成；剩餘項目不是遺漏，而是有明確觸發條件的延後設計。
+這份報告的高收益程式碼建議已完成：Agent stream protocol 2、有界記憶體 replay、snapshot resync、Provider 最小能力契約，以及 scoped/revisioned Skills 與 snapshot cursor 都已落地。其後的 P2–P3 也已完成受限 schedules、durable deliveries、Telegram pairing/status/一次性 approval/deny、Home Assistant 受限動作與本地監控聚合。
 
-後續如果 Phase B 啟動，應優先重新評估 WebSocket durable sequence/catch-up；如果 Provider 開始出現真實能力分歧，再加入最小 capability contract。除此之外，不應因為原則清單看起來完整，就提前增加 scope、revision 或分頁複雜度。
+必須繼續區分不同的「durable」：notification deliveries 與 Telegram channel events/cursors 已持久化，但 Agent WebSocket event stream 仍是進程內 ring，服務重啟或跨進程不能 replay。產品邊界同樣不可外推：`/task`、自由聊天、Slack/Discord、通用 IoT、攝像頭動作、門鎖解鎖與雲監控仍未實現。Provider 契約只按真實差異增量擴充。

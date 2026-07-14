@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -17,6 +18,13 @@ import (
 const webFetchMaxBytes = 1 << 20
 const webFetchDefaultLimit = 20000
 const webFetchMaxLimit = 100000
+const webFetchMaxRedirects = 10
+
+type webFetchResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type webFetchDialContext func(context.Context, string, string) (net.Conn, error)
 
 type WebFetchTool struct{}
 
@@ -54,7 +62,7 @@ func (WebFetchTool) Execute(ctx context.Context, call Call, env Env) (Result, er
 	}
 	req.Header.Set("User-Agent", "Autoto-WebFetch/0.1")
 	req.Header.Set("Accept", "text/html,text/plain,application/xhtml+xml,application/json;q=0.8,*/*;q=0.1")
-	client := &http.Client{Timeout: timeout}
+	client := newWebFetchHTTPClient(timeout, net.DefaultResolver, nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
@@ -84,6 +92,10 @@ func (WebFetchTool) Execute(ctx context.Context, call Call, env Env) (Result, er
 }
 
 func validatePublicFetchURL(ctx context.Context, raw string) (*url.URL, error) {
+	return validatePublicFetchURLWithResolver(ctx, raw, net.DefaultResolver)
+}
+
+func validatePublicFetchURLWithResolver(ctx context.Context, raw string, resolver webFetchResolver) (*url.URL, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return nil, fmt.Errorf("url is required")
@@ -99,39 +111,146 @@ func validatePublicFetchURL(ctx context.Context, raw string) (*url.URL, error) {
 	if host == "" {
 		return nil, fmt.Errorf("url host is required")
 	}
-	if isLocalHostname(host) {
+	if _, err := resolvePublicFetchHost(ctx, resolver, host); err != nil {
+		return nil, err
+	}
+	return parsed, nil
+}
+
+func newWebFetchHTTPClient(timeout time.Duration, resolver webFetchResolver, dial webFetchDialContext) *http.Client {
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	if dial == nil {
+		netDialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+		dial = netDialer.DialContext
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = newPublicFetchDialContext(resolver, dial)
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     transport,
+		CheckRedirect: webFetchRedirectPolicy(resolver),
+	}
+}
+
+func webFetchRedirectPolicy(resolver webFetchResolver) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= webFetchMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", webFetchMaxRedirects)
+		}
+		if _, err := validatePublicFetchURLWithResolver(req.Context(), req.URL.String(), resolver); err != nil {
+			return fmt.Errorf("redirect target rejected: %w", err)
+		}
+		return nil
+	}
+}
+
+func newPublicFetchDialContext(resolver webFetchResolver, dial webFetchDialContext) webFetchDialContext {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dial address: %w", err)
+		}
+		ips, err := resolvePublicFetchHost(ctx, resolver, host)
+		if err != nil {
+			return nil, err
+		}
+
+		var lastErr error
+		for _, ip := range ips {
+			if network == "tcp4" && ip.To4() == nil {
+				continue
+			}
+			if network == "tcp6" && ip.To4() != nil {
+				continue
+			}
+			// Dial the validated literal IP so DNS cannot change between validation and connect.
+			// The request URL is unchanged, so net/http keeps the original Host header and TLS SNI.
+			conn, dialErr := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no public IP addresses available for %s", host)
+	}
+}
+
+func resolvePublicFetchHost(ctx context.Context, resolver webFetchResolver, host string) ([]net.IP, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, fmt.Errorf("url host is required")
+	}
+	if isLocalHostname(host) || strings.Contains(host, "%") {
 		return nil, fmt.Errorf("local/private hosts are not allowed")
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if isPrivateOrLocalIP(ip) {
 			return nil, fmt.Errorf("local/private hosts are not allowed")
 		}
-		return parsed, nil
+		return []net.IP{ip}, nil
+	}
+	if resolver == nil {
+		resolver = net.DefaultResolver
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	addrs, err := resolver.LookupIPAddr(lookupCtx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve host: %w", err)
 	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("resolve host: no IP addresses")
+	}
+	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
 		if isPrivateOrLocalIP(addr.IP) {
 			return nil, fmt.Errorf("local/private hosts are not allowed")
 		}
+		ips = append(ips, addr.IP)
 	}
-	return parsed, nil
+	return ips, nil
 }
 
 func isLocalHostname(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "0.0.0.0"
+	host = strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
+}
+
+var webFetchBlockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 func isPrivateOrLocalIP(ip net.IP) bool {
-	if ip == nil {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
 		return true
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range webFetchBlockedPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func simplifyFetchedContent(contentType, body string) string {

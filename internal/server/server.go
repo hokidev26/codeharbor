@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -11,26 +14,55 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	agentpkg "autoto/internal/agent"
+	"autoto/internal/audit"
+	"autoto/internal/automation"
+	"autoto/internal/codexauth"
+	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/devices"
+	"autoto/internal/integrations"
+	"autoto/internal/preview"
 	"autoto/internal/providers"
+	"autoto/internal/tools"
 )
 
+type agentMutationLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type Server struct {
-	cfg                 config.Config
-	cfgMu               sync.RWMutex
-	configPath          string
-	startedAt           time.Time
-	clock               func() time.Time
-	localToken          string
-	remoteAccessToken   string
-	remoteAccessFailure map[string]remoteAccessFailure
-	remoteAccessMu      sync.Mutex
-	store               *db.Store
-	runner              *agentpkg.Runner
-	hub                 *agentpkg.Hub
-	providers           *providers.Registry
-	notifier            *WebhookNotifier
+	cfg   config.Config
+	cfgMu sync.RWMutex
+	// providerMutationMu serializes config persistence with runtime registry
+	// changes so concurrent PUT/PATCH/DELETE operations cannot lose updates.
+	providerMutationMu   sync.Mutex
+	providerMutationHook func()
+	configPath           string
+	startedAt            time.Time
+	clock                func() time.Time
+	localToken           string
+	remoteAccessToken    string
+	remoteAccessFailure  map[string]remoteAccessFailure
+	remoteAccessMu       sync.Mutex
+	agentMutationLocksMu sync.Mutex
+	agentMutationLocks   map[string]*agentMutationLock
+	legacyWarnings       *compat.Registry
+	store                *db.Store
+	runner               *agentpkg.Runner
+	hub                  *agentpkg.Hub
+	providers            *providers.Registry
+	codexCredentials     *codexauth.Store
+	toolRegistry         *tools.Registry
+	toolRegistryMu       sync.RWMutex
+	previewManager       *preview.Manager
+	notifier             *WebhookNotifier
+	automation           *automation.Manager
+	connections          *integrations.ConnectionService
+	audit                audit.Recorder
+	integrationClient    *http.Client
+	deviceAdapterFactory func(context.Context, string) (devices.Adapter, error)
 }
 
 func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agentpkg.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -45,11 +77,84 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		localToken:          newLocalToken(),
 		remoteAccessToken:   newLocalToken(),
 		remoteAccessFailure: make(map[string]remoteAccessFailure),
-		store:               store,
-		runner:              runner,
-		hub:                 hub,
-		providers:           providerRegistry,
+		agentMutationLocks:  make(map[string]*agentMutationLock),
+		legacyWarnings: compat.NewRegistry(func(usage compat.Usage) {
+			slog.Warn(
+				"legacy compatibility used",
+				"legacy", usage.Legacy,
+				"replacement", usage.Replacement,
+				"removalVersion", compat.RemovalVersion,
+			)
+		}),
+		store:            store,
+		runner:           runner,
+		hub:              hub,
+		providers:        providerRegistry,
+		codexCredentials: codexauth.NewStore(codexauth.DefaultStoreDir(cfg.Paths.HomeDir)),
+		toolRegistry:     newCoreToolRegistry(),
 	}
+}
+
+// lockAgentMutation serializes model and reasoning mutations for one agent.
+// The lock entry is reference-counted so independent agents remain concurrent
+// and completed agents do not accumulate entries indefinitely.
+func (s *Server) lockAgentMutation(agentID string) func() {
+	s.agentMutationLocksMu.Lock()
+	if s.agentMutationLocks == nil {
+		s.agentMutationLocks = make(map[string]*agentMutationLock)
+	}
+	lock := s.agentMutationLocks[agentID]
+	if lock == nil {
+		lock = &agentMutationLock{}
+		s.agentMutationLocks[agentID] = lock
+	}
+	lock.refs++
+	s.agentMutationLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.agentMutationLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(s.agentMutationLocks, agentID)
+		}
+		s.agentMutationLocksMu.Unlock()
+	}
+}
+
+func newCoreToolRegistry() *tools.Registry {
+	registry := tools.NewRegistry()
+	tools.RegisterCore(registry)
+	return registry
+}
+
+func (s *Server) SetToolRegistry(registry *tools.Registry) {
+	if registry == nil {
+		registry = newCoreToolRegistry()
+	}
+	s.toolRegistryMu.Lock()
+	defer s.toolRegistryMu.Unlock()
+	s.toolRegistry = registry
+}
+
+func (s *Server) toolRegistrySnapshot() *tools.Registry {
+	s.toolRegistryMu.RLock()
+	registry := s.toolRegistry
+	s.toolRegistryMu.RUnlock()
+	if registry != nil {
+		return registry
+	}
+
+	registry = newCoreToolRegistry()
+	s.toolRegistryMu.Lock()
+	if s.toolRegistry == nil {
+		s.toolRegistry = registry
+	} else {
+		registry = s.toolRegistry
+	}
+	s.toolRegistryMu.Unlock()
+	return registry
 }
 
 func (s *Server) SetConfigPath(path string) {
@@ -60,6 +165,42 @@ func (s *Server) SetConfigPath(path string) {
 
 func (s *Server) SetWebhookNotifier(notifier *WebhookNotifier) {
 	s.notifier = notifier
+}
+
+func (s *Server) SetAutomationManager(manager *automation.Manager) {
+	s.automation = manager
+}
+
+func (s *Server) SetConnectionService(service *integrations.ConnectionService) {
+	s.connections = service
+}
+
+func (s *Server) SetAuditRecorder(recorder audit.Recorder) {
+	s.audit = recorder
+}
+
+func (s *Server) SetIntegrationHTTPClient(client *http.Client) {
+	s.integrationClient = client
+}
+
+func (s *Server) SetDeviceAdapterFactory(factory func(context.Context, string) (devices.Adapter, error)) {
+	s.deviceAdapterFactory = factory
+}
+
+func (s *Server) SetPreviewManager(manager *preview.Manager) {
+	s.previewManager = manager
+}
+
+func (s *Server) warnLegacy(key, legacy, replacement, kind string) {
+	if s.legacyWarnings == nil {
+		return
+	}
+	s.legacyWarnings.Warn(compat.Usage{
+		Key:         key,
+		Legacy:      legacy,
+		Replacement: replacement,
+		Kind:        kind,
+	})
 }
 
 func (s *Server) configSnapshot() config.Config {
@@ -90,9 +231,22 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/runtime/summary", s.runtimeSummary)
 	r.Get("/api/storage/summary", s.storageSummary)
 	r.Get("/api/usage/summary", s.usageSummary)
-	r.Put("/api/providers/{name}/config", s.updateProviderConfig)
-	r.Get("/api/providers/{name}/auth-files", s.listProviderAuthFiles)
-	r.Post("/api/providers/{name}/auth-files/import", s.importProviderAuthFile)
+	r.Get("/api/navigation", s.navigation)
+	r.Group(func(r chi.Router) {
+		r.Use(s.sensitiveLocalTokenGuard)
+		r.Post("/api/providers/test", s.testProviderConfigDraft)
+		r.Put("/api/providers/{name}/config", s.updateProviderConfig)
+		r.Patch("/api/providers/{name}", s.patchProviderConfig)
+		r.Delete("/api/providers/{name}", s.deleteProviderConfig)
+		r.Post("/api/providers/{name}/test", s.testProviderConfig)
+		r.Get("/api/providers/oauth/codex/accounts", s.listCodexOAuthAccounts)
+		r.Patch("/api/providers/oauth/codex/accounts/{id}", s.patchCodexOAuthAccount)
+		r.Post("/api/providers/oauth/codex/accounts/{id}/refresh", s.refreshCodexOAuthAccount)
+		r.Delete("/api/providers/oauth/codex/accounts/{id}", s.deleteCodexOAuthAccount)
+		r.Post("/api/providers/oauth/codex/import", s.importCodexOAuthCredentials)
+		r.Get("/api/providers/{name}/auth-files", s.listProviderAuthFiles)
+		r.Post("/api/providers/{name}/auth-files/import", s.importProviderAuthFile)
+	})
 	r.Route("/api/backends", func(r chi.Router) {
 		r.Get("/", s.listBackends)
 		r.Post("/", s.createBackend)
@@ -101,6 +255,13 @@ func (s *Server) Routes() http.Handler {
 		r.Delete("/{id}", s.deleteBackend)
 		r.Post("/{id}/activate", s.activateBackend)
 		r.Get("/{id}/health", s.backendHealth)
+	})
+	r.Route("/api/memories", func(r chi.Router) {
+		r.Get("/", s.listMemories)
+		r.Post("/", s.createMemory)
+		r.Get("/{id}", s.getMemory)
+		r.Patch("/{id}", s.updateMemory)
+		r.Delete("/{id}", s.deleteMemory)
 	})
 	r.Route("/api/skills", func(r chi.Router) {
 		r.Get("/", s.listSkills)
@@ -136,7 +297,32 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/settings", s.getNotificationSettings)
 		r.Put("/settings", s.updateNotificationSettings)
 		r.Post("/test", s.testNotification)
+		r.Get("/deliveries", s.listNotificationDeliveries)
+		r.Post("/deliveries/{id}/retry", s.retryNotificationDelivery)
 	})
+	r.Route("/api/schedules", func(r chi.Router) {
+		r.Get("/", s.listSchedules)
+		r.Post("/", s.createSchedule)
+		r.Patch("/{id}", s.updateSchedule)
+		r.Delete("/{id}", s.deleteSchedule)
+		r.Post("/{id}/run", s.runSchedule)
+	})
+	r.Route("/api/integrations/connections", func(r chi.Router) {
+		r.Get("/", s.listIntegrationConnections)
+		r.Post("/", s.createIntegrationConnection)
+		r.Patch("/{id}", s.updateIntegrationConnection)
+		r.Delete("/{id}", s.deleteIntegrationConnection)
+		r.Post("/{id}/test", s.testIntegrationConnection)
+	})
+	r.Post("/api/channels/pairing-codes", s.createChannelPairingCode)
+	r.Get("/api/channels/pairings", s.listChannelPairings)
+	r.Post("/api/channels/pairings/{id}/revoke", s.revokeChannelPairing)
+	r.Get("/api/audit/events", s.listAuditEvents)
+	r.Get("/api/devices", s.listDevices)
+	r.Post("/api/device-actions", s.createDeviceAction)
+	r.Post("/api/device-actions/{id}/approve", s.approveDeviceAction)
+	r.Post("/api/device-actions/{id}/deny", s.denyDeviceAction)
+	r.Get("/api/monitoring/snapshot", s.monitoringSnapshot)
 
 	r.Route("/api/workflow", func(r chi.Router) {
 		r.Get("/preferences", s.getWorkflowPreferences)
@@ -202,10 +388,40 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/{id}/git/diff", s.gitDiff)
 		r.Get("/{id}/git/log", s.gitLog)
 		r.Post("/{id}/git/commit", s.gitCommit)
+		r.Get("/{id}/workspace/tree", s.workspaceTree)
+		r.Get("/{id}/workspace/file", s.workspaceFile)
+		r.Put("/{id}/workspace/file", s.updateWorkspaceFile)
+		r.Get("/{id}/preview/detect", s.detectPreview)
+		r.Post("/{id}/preview/start", s.startPreview)
+		r.Post("/{id}/preview/stop", s.stopPreview)
+		r.Get("/{id}/preview/status", s.previewStatus)
+		r.Get("/{id}/preview/logs", s.previewLogs)
 	}
 	r.Route("/api/agents", agentRoutes)
 	r.Route("/api/narrators", agentRoutes)
+	s.mountLearnedFeatureRoutes(r)
+	s.MountUpdateRoutes(r)
+	r.Get("/api/model-aggregates", s.listModelAggregates)
+	r.Get("/api/model-aggregates/{name}", s.getModelAggregate)
+	r.Put("/api/model-aggregates/{name}", s.putModelAggregate)
+	r.Delete("/api/model-aggregates/{name}", s.deleteModelAggregate)
+	r.Patch("/api/runtime/model-settings", s.updateRuntimeModelSettings)
+	r.Patch("/api/agents/{id}/reasoning-effort", s.updateAgentReasoningEffort)
+	r.Get("/api/client/identity", s.clientIdentity)
+	r.Post("/api/client/identity/rotate", s.rotateClientIdentity)
+	r.Get("/api/execution/devices", s.listExecutionDevices)
+	r.Post("/api/execution/devices", s.registerRemoteExecutionDevice)
+	r.Post("/api/execution/devices/{deviceId}/enable", s.enableExecutionDevice)
+	r.Post("/api/execution/devices/{deviceId}/disable", s.disableExecutionDevice)
+	r.Put("/api/projects/{projectId}/execution-devices/{deviceId}", s.setProjectExecutionDeviceGrant)
+	r.Patch("/api/agents/{id}/execution-device", s.setAgentExecutionDevice)
+	r.Get("/api/execution/tasks", s.listRemoteExecutionTasks)
+	r.Post("/api/execution/tasks", s.createRemoteExecutionTask)
+	r.Get("/api/execution/tasks/{taskId}", s.getRemoteExecutionTask)
+	r.Get("/api/network/diagnostics", s.getNetworkDiagnostics)
+	r.Post("/api/network/diagnostics/probe", s.runNetworkDiagnostic)
 	r.Get("/api/v2/agents/{id}/live-snapshot", s.getAgentLiveSnapshot)
+	r.Get("/api/v2/agents/{id}/stream-state", s.getAgentStreamState)
 	r.Get("/api/v2/agents/{id}/skills/effective", s.listEffectiveSkillsV2)
 	r.Get("/ws/agent", s.agentWS)
 	r.Get("/ws/narrator", s.agentWS)
@@ -225,9 +441,19 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func decodeJSON(r *http.Request, dst any) error {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func statusFromError(err error) int {

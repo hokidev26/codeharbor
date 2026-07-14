@@ -5,18 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"autoto/internal/config"
 )
 
 type OpenAIOfficial struct {
-	cfg    config.ProviderConfig
-	client openai.Client
+	cfg       config.ProviderConfig
+	client    openai.Client
+	configErr error
 }
 
 func NewOpenAIOfficial(cfg config.ProviderConfig) *OpenAIOfficial {
@@ -26,23 +29,46 @@ func NewOpenAIOfficial(cfg config.ProviderConfig) *OpenAIOfficial {
 	if cfg.Model == "" {
 		cfg.Model = "gpt-4.1-mini"
 	}
-	opts := make([]option.RequestOption, 0, 2)
+	configErr := validateProviderRuntimeConfig(cfg)
+	opts := make([]option.RequestOption, 0, 5)
+	opts = append(opts, option.WithHTTPClient(providerHTTPClient(90*time.Second)))
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return &OpenAIOfficial{cfg: cfg, client: openai.NewClient(opts...)}
+	if configErr == nil {
+		if client := autotoClientHeaderValue(cfg); client != "" {
+			opts = append(opts, option.WithHeader("X-Autoto-Client", client))
+		}
+		if cfg.InstallationID != "" {
+			opts = append(opts, option.WithHeader("X-Autoto-Installation-ID", cfg.InstallationID))
+		}
+	}
+	return &OpenAIOfficial{cfg: cfg, client: openai.NewClient(opts...), configErr: configErr}
 }
 
 func (p *OpenAIOfficial) Name() string { return p.cfg.Name }
 
+func (p *OpenAIOfficial) Configured() bool {
+	return p != nil && p.configErr == nil && strings.TrimSpace(p.cfg.APIKey) != ""
+}
+
 func (p *OpenAIOfficial) Capabilities() Capabilities {
-	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
+	return Capabilities{
+		Tools:            true,
+		Streaming:        true,
+		ImageInput:       true,
+		ReasoningEffort:  true,
+		ReasoningEfforts: []string{"low", "medium", "high"},
+	}
 }
 
 func (p *OpenAIOfficial) ListModels(ctx context.Context) ([]string, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
 	if p.cfg.APIKey == "" {
 		return []string{p.cfg.Model}, nil
 	}
@@ -63,19 +89,27 @@ func (p *OpenAIOfficial) ListModels(ctx context.Context) ([]string, error) {
 }
 
 func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
+	reasoningEffort, err := normalizeReasoningEffortForCapabilities(req.ReasoningEffort, p.Capabilities(), p.cfg.Name)
+	if err != nil {
+		return nil, err
+	}
+	if p.cfg.APIKey == "" {
+		return nil, providerUnavailableError(p.cfg.Name, "API key is not configured")
+	}
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-		if p.cfg.APIKey == "" {
-			out <- Event{Type: "text", Text: "OpenAI official provider is not configured. Set OPENAI_API_KEY to enable Responses API calls."}
-			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
-			return
-		}
 		model := req.Model
 		if model == "" {
 			model = p.cfg.Model
 		}
 		params := responses.ResponseNewParams{Model: model}
+		if reasoningEffort != "" {
+			params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(reasoningEffort)}
+		}
 		if req.SystemPrompt != "" {
 			params.Instructions = param.NewOpt(req.SystemPrompt)
 		}

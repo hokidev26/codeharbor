@@ -104,6 +104,58 @@ func TestListProjectsReturnsEmptySlice(t *testing.T) {
 	}
 }
 
+func TestListNavigationConversationsJoinsAndSortsSafely(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	_, err = store.DB().ExecContext(ctx, `
+INSERT INTO projects (id, name, status, flow_mode, git_path, created_at, updated_at) VALUES
+  ('project-a', 'Alpha', 'active', 'workspace', '/repos/alpha', '2026-01-01T00:00:00Z', '2026-01-05T00:00:00Z'),
+  ('project-b', 'Empty', 'active', 'workspace', '/repos/empty', '2026-01-01T00:00:00Z', '2026-01-04T00:00:00Z'),
+  ('project-c', 'Deleted', 'deleted', 'workspace', '/repos/deleted', '2026-01-01T00:00:00Z', '2026-01-03T00:00:00Z'),
+  ('project-d', 'Delta', 'active', 'workspace', '/repos/delta', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+INSERT INTO worklines (id, project_id, title, status, role, branch, is_root, created_at, updated_at) VALUES
+  ('workline-a', 'project-a', 'main', 'active', 'root', NULL, 1, '2026-01-01T00:00:00Z', '2026-01-05T01:00:00Z'),
+  ('workline-b', 'project-a', 'feature', 'active', 'worktree', 'feature/nav', 0, '2026-01-01T00:00:00Z', '2026-01-05T02:00:00Z'),
+  ('workline-c', 'project-c', 'deleted-main', 'active', 'root', NULL, 1, '2026-01-01T00:00:00Z', '2026-01-03T01:00:00Z'),
+  ('workline-d', 'project-d', 'main', 'active', 'root', NULL, 1, '2026-01-01T00:00:00Z', '2026-01-02T01:00:00Z');
+INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permission_mode, status, cwd, message_count, last_message_at, context_summary, error_message, created_at, updated_at) VALUES
+  ('agent-z', 'workline-a', 'primary', 'Newest', 'model-z', 'SYSTEM_SECRET', 'acceptEdits', 'running', '/repos/alpha', 9, '2026-02-03T00:00:00Z', 'CONTEXT_SECRET', 'ERROR_SECRET', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+  ('agent-a', 'workline-a', 'subagent', 'Fallback', 'model-a', 'SYSTEM_SECRET', 'plan', 'idle', '/repos/alpha/pkg', 4, NULL, 'CONTEXT_SECRET', 'ERROR_SECRET', '2026-01-01T00:00:00Z', '2026-02-02T00:00:00Z'),
+  ('agent-b', 'workline-b', 'primary', 'Feature', 'model-b', 'SYSTEM_SECRET', 'acceptEdits', 'idle', '/repos/alpha-feature', 2, '2026-02-02T00:00:00Z', 'CONTEXT_SECRET', 'ERROR_SECRET', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+  ('agent-c', 'workline-c', 'primary', 'Deleted', 'model-c', 'SYSTEM_SECRET', 'acceptEdits', 'idle', '/repos/deleted', 1, '2026-02-04T00:00:00Z', 'CONTEXT_SECRET', 'ERROR_SECRET', '2026-01-01T00:00:00Z', '2026-02-04T00:00:00Z'),
+  ('agent-d', 'workline-d', 'primary', 'Delta', 'model-d', 'SYSTEM_SECRET', 'default', 'idle', '/repos/delta', 3, '2026-02-02T00:00:00Z', 'CONTEXT_SECRET', 'ERROR_SECRET', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conversations, err := store.ListNavigationConversations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{"agent-z", "agent-a", "agent-b", "agent-d"}
+	if len(conversations) != len(wantOrder) {
+		t.Fatalf("expected %d active-project conversations, got %+v", len(wantOrder), conversations)
+	}
+	for index, agentID := range wantOrder {
+		if conversations[index].AgentID != agentID {
+			t.Fatalf("unexpected conversation order at %d: want %s, got %+v", index, agentID, conversations)
+		}
+	}
+	fallback := conversations[1]
+	if fallback.LastActivityAt != "2026-02-02T00:00:00Z" {
+		t.Fatalf("expected updated_at fallback for missing last_message_at, got %+v", fallback)
+	}
+	feature := conversations[2]
+	if feature.ProjectID != "project-a" || feature.ProjectName != "Alpha" || feature.ProjectPath != "/repos/alpha" || feature.ProjectUpdatedAt != "2026-01-05T00:00:00Z" || feature.WorklineID != "workline-b" || feature.WorklineTitle != "feature" || feature.WorklineRole != "worktree" || feature.WorklineBranch != "feature/nav" || feature.WorklineUpdatedAt != "2026-01-05T02:00:00Z" || feature.AgentTitle != "Feature" || feature.AgentType != "primary" || feature.AgentStatus != "idle" || feature.Model != "model-b" || feature.PermissionMode != "acceptEdits" || feature.CWD != "/repos/alpha-feature" || feature.MessageCount != 2 {
+		t.Fatalf("unexpected flattened navigation DTO: %+v", feature)
+	}
+}
+
 func TestAddAPIRequestPersistsUsage(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -1286,6 +1338,7 @@ VALUES ('agent-1', 'chapter-1', 'primary', 'Legacy', 'openai:test', 'acceptEdits
 		{"agents", "prune_enabled"},
 		{"agents", "parent_agent_id"},
 		{"api_requests", "ttft_ms"},
+		{"memory_injections", "agent_id"},
 	} {
 		if !testColumnExists(t, ctx, store.DB(), column.table, column.column) {
 			t.Fatalf("expected column %s.%s to exist after migration", column.table, column.column)
@@ -1955,6 +2008,754 @@ func TestSkillAuditAndOptimisticUpdate(t *testing.T) {
 			t.Fatalf("missing audit action %q: %+v", action, events)
 		}
 	}
+}
+
+func TestIntegrationConnectionCRUDValidationAndConflicts(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	created, err := store.CreateIntegrationConnection(ctx, IntegrationConnection{
+		Kind: " github ", Name: " primary ", Enabled: true, Endpoint: " https://api.example.test ",
+		SettingsJSON: json.RawMessage(`{"region":"us","retry":{"count":2},"labels":["one"]}`),
+		SecretRefs:   map[string]string{"apiKey": "env:GITHUB_API_KEY"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Kind != "github" || created.Name != "primary" || created.Endpoint != "https://api.example.test" || !created.SecretConfigured["apiKey"] {
+		t.Fatalf("unexpected created integration connection: %+v", created)
+	}
+	if string(created.SettingsJSON) != `{"labels":["one"],"region":"us","retry":{"count":2}}` {
+		t.Fatalf("expected canonical settings JSON, got %s", created.SettingsJSON)
+	}
+
+	got, err := store.GetIntegrationConnection(ctx, " "+created.ID+" ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SecretRefs["apiKey"] != "env:GITHUB_API_KEY" || !got.SecretConfigured["apiKey"] {
+		t.Fatalf("unexpected stored references: %+v", got)
+	}
+	listed, err := store.ListIntegrationConnections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("unexpected integration list: %+v", listed)
+	}
+
+	if _, err := store.CreateIntegrationConnection(ctx, IntegrationConnection{Kind: "github", Name: "primary"}); !IsConflict(err) {
+		t.Fatalf("expected kind/name uniqueness conflict, got %v", err)
+	}
+	created.Name = "secondary"
+	created.Enabled = false
+	created.SecretRefs = map[string]string{"token": "env:GITHUB_TOKEN"}
+	updated, err := store.UpdateIntegrationConnection(ctx, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "secondary" || updated.Enabled || updated.SecretRefs["token"] != "env:GITHUB_TOKEN" || updated.CreatedAt != created.CreatedAt {
+		t.Fatalf("unexpected updated integration: %+v", updated)
+	}
+	if _, err := store.UpdateIntegrationConnection(ctx, IntegrationConnection{ID: "missing", Kind: "github", Name: "missing"}); !IsNotFound(err) {
+		t.Fatalf("expected missing update to be not found, got %v", err)
+	}
+	if err := store.DeleteIntegrationConnection(ctx, updated.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteIntegrationConnection(ctx, updated.ID); !IsNotFound(err) {
+		t.Fatalf("expected missing delete to be not found, got %v", err)
+	}
+}
+
+func TestIntegrationConnectionRejectsSensitiveSettingsAndInvalidRefs(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	invalidSettings := []json.RawMessage{
+		json.RawMessage(`[]`),
+		json.RawMessage(`null`),
+		json.RawMessage(`{"broken":`),
+		json.RawMessage(`{"password":"raw"}`),
+		json.RawMessage(`{"nested":{"apiKey":"raw"}}`),
+		json.RawMessage(`{"items":[{"access_token":"raw"}]}`),
+		json.RawMessage(`{"credentialFile":"raw"}`),
+		json.RawMessage(`{"note":"` + strings.Repeat("x", IntegrationSettingsMaxBytes) + `"}`),
+	}
+	for index, settings := range invalidSettings {
+		_, err := store.CreateIntegrationConnection(ctx, IntegrationConnection{Kind: "test", Name: fmt.Sprintf("settings-%d", index), SettingsJSON: settings})
+		if err == nil {
+			t.Fatalf("expected invalid settings to fail: %s", settings)
+		}
+	}
+
+	invalidRefs := []string{
+		"raw-secret-value",
+		"file:/tmp/secret",
+		"env:",
+		"env:9INVALID",
+		"env:HAS-DASH",
+		"env:HAS SPACE",
+		"env:HAS\nNEWLINE",
+		" env:LEADING_SPACE",
+	}
+	for index, ref := range invalidRefs {
+		_, err := store.CreateIntegrationConnection(ctx, IntegrationConnection{Kind: "test", Name: fmt.Sprintf("ref-%d", index), SecretRefs: map[string]string{"token": ref}})
+		if err == nil {
+			t.Fatalf("expected invalid secret reference %q to fail", ref)
+		}
+	}
+	if _, err := store.CreateIntegrationConnection(ctx, IntegrationConnection{Kind: "test", Name: "bad-logical", SecretRefs: map[string]string{"bad key": "env:VALID"}}); err == nil {
+		t.Fatal("expected invalid logical secret name to fail")
+	}
+}
+
+func TestIntegrationConnectionFreshSchemaAndV16MigrationMatch(t *testing.T) {
+	ctx := context.Background()
+	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected fresh database version %d, got %d", CurrentDBVersion, version)
+	}
+	freshSchema := integrationConnectionSchemaSnapshot(t, ctx, fresh.DB())
+	for _, name := range []string{"integration_connections", "idx_integration_connections_enabled", "idx_integration_connections_kind"} {
+		if !strings.Contains(freshSchema, name) {
+			t.Fatalf("fresh integration schema missing %s: %s", name, freshSchema)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "v16.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE integration_connections; PRAGMA user_version = 16`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if version := readUserVersion(t, ctx, migrated.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated database version %d, got %d", CurrentDBVersion, version)
+	}
+	migratedSchema := integrationConnectionSchemaSnapshot(t, ctx, migrated.DB())
+	if migratedSchema != freshSchema {
+		t.Fatalf("fresh and migrated integration schemas differ\nfresh:\n%s\nmigrated:\n%s", freshSchema, migratedSchema)
+	}
+}
+
+func integrationConnectionSchemaSnapshot(t *testing.T, ctx context.Context, database *sql.DB) string {
+	t.Helper()
+	rows, err := database.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'integration_connections' AND type IN ('table', 'index') AND sql IS NOT NULL ORDER BY type, name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var snapshot strings.Builder
+	for rows.Next() {
+		var objectType, name, definition string
+		if err := rows.Scan(&objectType, &name, &definition); err != nil {
+			t.Fatal(err)
+		}
+		snapshot.WriteString(objectType)
+		snapshot.WriteByte(':')
+		snapshot.WriteString(name)
+		snapshot.WriteByte('=')
+		snapshot.WriteString(definition)
+		snapshot.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.String()
+}
+
+func TestAutomationAuditFreshSchemaAndV15MigrationMatch(t *testing.T) {
+	ctx := context.Background()
+	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected fresh database version %d, got %d", CurrentDBVersion, version)
+	}
+	freshSchema := automationAuditSchemaSnapshot(t, ctx, fresh.DB())
+	for _, name := range []string{"automation_audit_events", "idx_automation_audit_created", "idx_automation_audit_category_action", "idx_automation_audit_agent", "idx_automation_audit_run"} {
+		if !strings.Contains(freshSchema, name) {
+			t.Fatalf("fresh automation audit schema missing %s: %s", name, freshSchema)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "v15.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE automation_audit_events; PRAGMA user_version = 15`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if version := readUserVersion(t, ctx, migrated.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated database version %d, got %d", CurrentDBVersion, version)
+	}
+	migratedSchema := automationAuditSchemaSnapshot(t, ctx, migrated.DB())
+	if migratedSchema != freshSchema {
+		t.Fatalf("fresh and migrated automation audit schemas differ\nfresh:\n%s\nmigrated:\n%s", freshSchema, migratedSchema)
+	}
+}
+
+func TestAutomationAuditWriteValidationAndPagination(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Audit", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, Run{AgentID: agent.ID, Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := AutomationAuditEvent{
+		Category: " automation ", Action: " run.started ", Actor: " system ", AgentID: agent.ID, RunID: run.ID,
+		SubjectType: "run", SubjectID: run.ID, Outcome: "success", Risk: "low", DetailsJSON: json.RawMessage(`{"source":"scheduler","counts":{"attempt":1}}`),
+	}
+	createdTimes := []string{"2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z", "2026-01-01T00:00:03Z"}
+	created := make([]AutomationAuditEvent, 0, len(createdTimes))
+	for index, createdAt := range createdTimes {
+		event := base
+		event.ID = "audit-" + string(rune('a'+index))
+		event.CreatedAt = createdAt
+		stored, err := store.AddAutomationAuditEvent(ctx, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, stored)
+	}
+	if created[0].Category != "automation" || created[0].Action != "run.started" || created[0].Actor != "system" {
+		t.Fatalf("expected trimmed audit fields, got %+v", created[0])
+	}
+	firstPage, err := store.ListAutomationAuditEvents(ctx, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage) != 2 || firstPage[0].ID != "audit-c" || firstPage[1].ID != "audit-b" {
+		t.Fatalf("unexpected first audit page: %+v", firstPage)
+	}
+	secondPage, err := store.ListAutomationAuditEvents(ctx, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage) != 1 || secondPage[0].ID != "audit-a" {
+		t.Fatalf("unexpected second audit page: %+v", secondPage)
+	}
+	if _, err := store.ListAutomationAuditEvents(ctx, AutomationAuditMaxListLimit+1, 0); err == nil {
+		t.Fatal("expected excessive audit list limit to fail")
+	}
+	if _, err := store.ListAutomationAuditEvents(ctx, 10, -1); err == nil {
+		t.Fatal("expected negative audit offset to fail")
+	}
+
+	invalidDetails := []json.RawMessage{
+		json.RawMessage(`{"broken":`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`null`),
+		json.RawMessage(`{"password":"hidden"}`),
+		json.RawMessage(`{"metadata":{"password_hash":"hidden"}}`),
+		json.RawMessage(`{"nested":[{"apiKey":"hidden"}]}`),
+		json.RawMessage(`{"metadata":{"authToken":"hidden"}}`),
+		json.RawMessage(`{"tool":{"rawToolInput":{"command":"rm"}}}`),
+		json.RawMessage(`{"note":"` + strings.Repeat("x", AutomationAuditDetailsMaxBytes) + `"}`),
+	}
+	for _, details := range invalidDetails {
+		event := base
+		event.ID = ""
+		event.CreatedAt = ""
+		event.DetailsJSON = details
+		if _, err := store.AddAutomationAuditEvent(ctx, event); err == nil {
+			t.Fatalf("expected invalid automation audit details to fail: %s", details)
+		}
+	}
+	invalidEnum := base
+	invalidEnum.Outcome = "ok"
+	if _, err := store.AddAutomationAuditEvent(ctx, invalidEnum); err == nil {
+		t.Fatal("expected invalid audit outcome to fail")
+	}
+	invalidEnum = base
+	invalidEnum.Risk = "dangerous"
+	if _, err := store.AddAutomationAuditEvent(ctx, invalidEnum); err == nil {
+		t.Fatal("expected invalid audit risk to fail")
+	}
+}
+
+func TestAutomationAuditForeignKeysSetNull(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Audit FK", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, Run{AgentID: agent.ID, Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeEvent := func(id, runID string) AutomationAuditEvent {
+		return AutomationAuditEvent{ID: id, Category: "automation", Action: "lifecycle", Actor: "test", AgentID: agent.ID, RunID: runID, Outcome: "success", Risk: "none", DetailsJSON: json.RawMessage(`{}`)}
+	}
+	if _, err := store.AddAutomationAuditEvent(ctx, makeEvent("audit-run-fk", run.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddAutomationAuditEvent(ctx, makeEvent("audit-agent-fk", "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `DELETE FROM runs WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	var agentID, runID string
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(agent_id,''), COALESCE(run_id,'') FROM automation_audit_events WHERE id = 'audit-run-fk'`).Scan(&agentID, &runID); err != nil {
+		t.Fatal(err)
+	}
+	if agentID != agent.ID || runID != "" {
+		t.Fatalf("deleting run should only clear run_id, got agent=%q run=%q", agentID, runID)
+	}
+	if _, err := store.DB().ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(agent_id,'') FROM automation_audit_events WHERE id = 'audit-agent-fk'`).Scan(&agentID); err != nil {
+		t.Fatal(err)
+	}
+	if agentID != "" {
+		t.Fatalf("deleting agent should clear agent_id, got %q", agentID)
+	}
+}
+
+func automationAuditSchemaSnapshot(t *testing.T, ctx context.Context, database *sql.DB) string {
+	t.Helper()
+	rows, err := database.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'automation_audit_events' AND type IN ('table', 'index') AND sql IS NOT NULL ORDER BY type, name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var snapshot strings.Builder
+	for rows.Next() {
+		var objectType, name, definition string
+		if err := rows.Scan(&objectType, &name, &definition); err != nil {
+			t.Fatal(err)
+		}
+		snapshot.WriteString(objectType)
+		snapshot.WriteByte(':')
+		snapshot.WriteString(name)
+		snapshot.WriteByte('=')
+		snapshot.WriteString(definition)
+		snapshot.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.String()
+}
+
+func TestMemoryCRUDSearchArchivePinAndValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	created, err := store.CreateMemory(ctx, Memory{
+		Content:  "Remember Café deployments",
+		Keywords: []string{" Go ", "gO", " 项目 ", "ÜBER"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.CreatedAt == "" || created.UpdatedAt == "" {
+		t.Fatalf("unexpected memory metadata: %+v", created)
+	}
+	wantKeywords := []string{"go", "项目", "über"}
+	if len(created.Keywords) != len(wantKeywords) {
+		t.Fatalf("unexpected normalized keywords: %+v", created.Keywords)
+	}
+	for index, keyword := range wantKeywords {
+		if created.Keywords[index] != keyword {
+			t.Fatalf("unexpected keyword %d: want %q got %q", index, keyword, created.Keywords[index])
+		}
+	}
+	got, err := store.GetMemory(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != created.Content || strings.Join(got.Keywords, ",") != strings.Join(wantKeywords, ",") {
+		t.Fatalf("unexpected memory round trip: %+v", got)
+	}
+
+	other, err := store.CreateMemory(ctx, Memory{Content: "Other note", Keywords: []string{"other"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := store.PinMemory(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned.Pinned || pinned.UpdatedAt == created.UpdatedAt {
+		t.Fatalf("expected pin to update memory: before=%+v after=%+v", created, pinned)
+	}
+	listed, err := store.ListMemories(ctx, "CAFÉ", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("unexpected Unicode content search: %+v", listed)
+	}
+	listed, err = store.ListMemories(ctx, MemoryListOptions{Query: "项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("unexpected keyword search: %+v", listed)
+	}
+	listed, err = store.ListMemories(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].ID != created.ID || listed[1].ID != other.ID {
+		t.Fatalf("expected pinned memory first, got %+v", listed)
+	}
+
+	created.Content = "Updated content"
+	created.Keywords = []string{" Updated "}
+	created.Pinned = false
+	updated, err := store.UpdateMemory(ctx, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Content != "Updated content" || len(updated.Keywords) != 1 || updated.Keywords[0] != "updated" || updated.Pinned || updated.CreatedAt != created.CreatedAt {
+		t.Fatalf("unexpected updated memory: %+v", updated)
+	}
+	archived, err := store.ArchiveMemory(ctx, updated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.ArchivedAt == "" {
+		t.Fatalf("expected archived timestamp: %+v", archived)
+	}
+	listed, err = store.ListMemories(ctx, "updated", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("archived memories must be hidden by default: %+v", listed)
+	}
+	listed, err = store.ListMemories(ctx, "updated", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != updated.ID {
+		t.Fatalf("includeArchived must include archived memory: %+v", listed)
+	}
+	unarchived, err := store.UnarchiveMemory(ctx, updated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unarchived.ArchivedAt != "" {
+		t.Fatalf("expected unarchived memory: %+v", unarchived)
+	}
+
+	invalid := []Memory{
+		{Content: "   "},
+		{Content: strings.Repeat("x", MemoryContentMaxBytes+1)},
+		{Content: "content", Keywords: []string{" "}},
+		{Content: "content", Keywords: []string{strings.Repeat("界", MemoryKeywordMaxRunes+1)}},
+	}
+	tooManyKeywords := Memory{Content: "content"}
+	for index := 0; index < MemoryMaxKeywords+1; index++ {
+		tooManyKeywords.Keywords = append(tooManyKeywords.Keywords, fmt.Sprintf("keyword-%d", index))
+	}
+	invalid = append(invalid, tooManyKeywords)
+	for _, memory := range invalid {
+		if _, err := store.CreateMemory(ctx, memory); err == nil {
+			t.Fatalf("expected invalid memory to fail: %+v", memory)
+		}
+	}
+	if _, err := store.CreateMemory(ctx, Memory{Content: strings.Repeat("x", MemoryContentMaxBytes)}); err != nil {
+		t.Fatalf("expected exactly 16KiB content to succeed: %v", err)
+	}
+	manyDuplicates := make([]string, MemoryMaxKeywords+1)
+	for index := range manyDuplicates {
+		manyDuplicates[index] = " Duplicate "
+	}
+	deduplicated, err := store.CreateMemory(ctx, Memory{Content: "duplicates normalize before limit", Keywords: manyDuplicates})
+	if err != nil {
+		t.Fatalf("expected duplicate keywords to normalize before enforcing limit: %v", err)
+	}
+	if len(deduplicated.Keywords) != 1 || deduplicated.Keywords[0] != "duplicate" {
+		t.Fatalf("unexpected deduplicated keywords: %+v", deduplicated.Keywords)
+	}
+	if err := store.DeleteMemory(ctx, updated.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetMemory(ctx, updated.ID); !IsNotFound(err) {
+		t.Fatalf("expected deleted memory to be missing, got %v", err)
+	}
+	if err := store.DeleteMemory(ctx, updated.ID); !IsNotFound(err) {
+		t.Fatalf("expected repeated delete to be not found, got %v", err)
+	}
+}
+
+func TestMemoryMatchingInjectionOrderingAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, firstAgent, err := store.CreateProject(ctx, "First", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, secondAgent, err := store.CreateProject(ctx, "Second", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manual, err := store.CreateMemory(ctx, Memory{Content: "manual memory without keywords"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	older, err := store.CreateMemory(ctx, Memory{Content: "older Go memory", Keywords: []string{"GO"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := store.CreateMemory(ctx, Memory{Content: "newer Go memory", Keywords: []string{"go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := store.CreateMemory(ctx, Memory{Content: "pinned project memory", Keywords: []string{"项目"}, Pinned: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := store.CreateMemory(ctx, Memory{Content: "archived Go memory", Keywords: []string{"go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ArchiveMemory(ctx, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`, "2026-01-01T00:00:01Z", older.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`, "2026-01-01T00:00:02Z", newer.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := store.ListMatchingUninjectedMemories(ctx, firstAgent.ID, "正在处理项目，也在写 Go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{pinned.ID, newer.ID, older.ID}
+	if len(matches) != len(want) {
+		t.Fatalf("unexpected initial matches: %+v", matches)
+	}
+	for index, id := range want {
+		if matches[index].ID != id {
+			t.Fatalf("unexpected match order at %d: want %s got %+v", index, id, matches)
+		}
+	}
+	for _, excludedID := range []string{manual.ID, archived.ID} {
+		for _, match := range matches {
+			if match.ID == excludedID {
+				t.Fatalf("memory %s must not be passively injected", excludedID)
+			}
+		}
+	}
+
+	if err := store.MarkMemoriesInjected(ctx, firstAgent.ID, []string{pinned.ID, newer.ID, pinned.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var originalInjectedAt string
+	if err := store.DB().QueryRowContext(ctx, `SELECT injected_at FROM memory_injections WHERE memory_id = ? AND agent_id = ?`, pinned.ID, firstAgent.ID).Scan(&originalInjectedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkMemoriesInjected(ctx, firstAgent.ID, []string{pinned.ID, newer.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var injectedAt string
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), MIN(injected_at) FROM memory_injections WHERE agent_id = ?`, firstAgent.ID).Scan(&count, &injectedAt); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || injectedAt != originalInjectedAt {
+		t.Fatalf("expected idempotent ledger writes, count=%d original=%q current=%q", count, originalInjectedAt, injectedAt)
+	}
+	matches, err = store.ListMatchingUninjectedMemories(ctx, firstAgent.ID, "项目 go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].ID != older.ID {
+		t.Fatalf("expected only uninjected memory for first agent, got %+v", matches)
+	}
+	matches, err = store.ListMatchingUninjectedMemories(ctx, secondAgent.ID, "项目 GO", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 || matches[0].ID != pinned.ID || matches[1].ID != newer.ID {
+		t.Fatalf("injections must be scoped per agent and honor limit: %+v", matches)
+	}
+}
+
+func TestMemoryInjectionValidationTransactionAndCascades(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Cascade", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.CreateMemory(ctx, Memory{Content: "first", Keywords: []string{"first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateMemory(ctx, Memory{Content: "second", Keywords: []string{"second"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkMemoriesInjected(ctx, "missing-agent", []string{first.ID}); !IsNotFound(err) {
+		t.Fatalf("expected missing agent validation, got %v", err)
+	}
+	if err := store.MarkMemoriesInjected(ctx, agent.ID, []string{first.ID, "missing-memory"}); !IsNotFound(err) {
+		t.Fatalf("expected missing memory validation, got %v", err)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_injections`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("validation failure must roll back all ledger writes, got %d", count)
+	}
+	if err := store.MarkMemoriesInjected(ctx, agent.ID, []string{first.ID, second.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteMemory(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_injections`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("deleting memory must cascade its ledger rows, got %d", count)
+	}
+	if _, err := store.DB().ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_injections`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("deleting agent must cascade its ledger rows, got %d", count)
+	}
+}
+
+func TestMemoryFreshSchemaAndV17MigrationMatch(t *testing.T) {
+	ctx := context.Background()
+	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected fresh database version %d, got %d", CurrentDBVersion, version)
+	}
+	freshSchema := memorySchemaSnapshot(t, ctx, fresh.DB())
+	for _, name := range []string{"memories", "memory_injections", "idx_memories_pinned_updated", "idx_memories_archived", "idx_memory_injections_agent"} {
+		if !strings.Contains(freshSchema, name) {
+			t.Fatalf("fresh memory schema missing %s: %s", name, freshSchema)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "v17.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE memory_injections; DROP TABLE memories; PRAGMA user_version = 17`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if version := readUserVersion(t, ctx, migrated.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated database version %d, got %d", CurrentDBVersion, version)
+	}
+	migratedSchema := memorySchemaSnapshot(t, ctx, migrated.DB())
+	if migratedSchema != freshSchema {
+		t.Fatalf("fresh and migrated memory schemas differ\nfresh:\n%s\nmigrated:\n%s", freshSchema, migratedSchema)
+	}
+}
+
+func memorySchemaSnapshot(t *testing.T, ctx context.Context, database *sql.DB) string {
+	t.Helper()
+	rows, err := database.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_master WHERE tbl_name IN ('memories', 'memory_injections') AND type IN ('table', 'index') AND sql IS NOT NULL ORDER BY type, name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var snapshot strings.Builder
+	for rows.Next() {
+		var objectType, name, definition string
+		if err := rows.Scan(&objectType, &name, &definition); err != nil {
+			t.Fatal(err)
+		}
+		snapshot.WriteString(objectType)
+		snapshot.WriteByte(':')
+		snapshot.WriteString(name)
+		snapshot.WriteByte('=')
+		snapshot.WriteString(definition)
+		snapshot.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.String()
 }
 
 func testSkillRecord(command string) Skill {

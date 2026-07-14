@@ -1,32 +1,40 @@
 # Autoto
 
+Autoto is a local-first coding-agent server that turns a task into a background run with approval-gated tools, a run summary, diff review, and an explicit-path local commit.
+
+**Task → background run → approval → run summary → diff → explicit-path commit**
+
 ![Autoto local agent workflow demo](docs/demo.svg)
 
-Autoto is a local-first Go MVP for an AI coding-agent server. It ships as a single Go service with SQLite persistence, provider abstractions, core coding tools, WebSocket events, a PTY terminal bridge, Agent Server and MCP server registries, and a simple embedded web UI.
+Autoto is an experimental local-development MVP, not an untrusted multi-user or production service. Its current remote control surface is deliberately narrow: Telegram uses Bot API long polling for private-chat pairing, minimal status, one-time tool approval, and denial. It is not a general IM assistant: there is no `/task`, free-form chat, Telegram webhook receiver, Slack, or Discord channel.
 
-The project is currently an experimental MVP. It is intended for local development and iteration, not for untrusted multi-user or production deployments.
+## Quick start
 
-> **Real local dogfood:** the current code has been run end-to-end against temporary local projects. The latest tracked-file smoke created a project through the HTTP API, edited a tracked file with the `Write` tool, reviewed the resulting Git diff, and committed only the selected path. See [Dogfood demo](#dogfood-demo-historical-evidence).
+Requires Go 1.26 or newer:
 
-## Naming and migration
+```bash
+go run ./cmd/autoto
+```
 
-Use these canonical names for new documentation, automation, and integrations:
+Then open:
 
-- **Product:** Autoto
-- **CLI, binary, release assets, and module namespace:** `autoto`
-- **Default home:** `~/.autoto`; default config: `~/.autoto/config.json`; default database: `~/.autoto/autoto.db`
-- **Environment variables:** `AUTOTO_*`
-- **Browser request headers:** `X-Autoto-*`
-- **Browser-local preference keys:** `autoto.*`
-- **Domain entities and canonical routes:** `Agent` / `Workline`, `/api/agents`, `/api/worklines`, and `/ws/agent`
+```text
+http://localhost:7788
+```
 
-Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-CodeHarbor-*` headers, and `codeharbor.*` browser-local preference keys are read for migration compatibility. New scripts and clients must write the Autoto names above. The legacy Narrator/Chapter routes are also compatibility aliases; they invoke the canonical Agent/Workline handlers and return the canonical payload shape.
+Default local state:
+
+```text
+Config:   ~/.autoto/config.json
+Database: ~/.autoto/autoto.db
+Projects: ~/projects
+```
 
 ## Features
 
 - Local HTTP server with embedded HTML/CSS/JS UI, using a no-build ES module seam for frontend bootstrap/runtime helpers and extracted Settings local-preference panels
 - SQLite persistence for projects, worklines, agents, messages, tool calls, backend registry entries, and stdio MCP server registry entries
-- Provider abstraction for:
+- Provider abstraction with a minimal `Tools` / `Streaming` / `ImageInput` capability contract for:
   - OpenAI official Responses API with SDK streaming text deltas and usage capture
   - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, usage capture, and automatic 5m prompt-cache breakpoints for sufficiently large requests
   - OpenAI-compatible Chat Completions APIs
@@ -43,8 +51,16 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
   - WebSearch
   - MCPListTools
   - MCPCallTool
+- Sensitive-path hard blocking for the file path tools: `Read`, `Write`, and `Edit` reject protected files, while `Glob` and `Grep` omit them. The blocked set includes `.env*`, credential/secret files, common private-key material, and `.git` contents
 - Git workspace APIs and UI for status, diff, log, and explicit-path commits without automatic push, amend, reset, clean, force, or `git add -A`
-- WebSocket Agent event stream: `/ws/agent`, with current-Agent controls for model, permission mode, and working directory
+- Agent WebSocket protocol 2 on `/ws/agent`, with per-process monotonic sequence, bounded in-memory replay, and authoritative live-snapshot resync; it is not a durable or cross-process event log
+- SQLite migrations V19–V22 and server APIs for schedules, durable notification deliveries, integration connections, channel pairings/events/cursors, and device-action requests
+- Schedule worker with cron/`@every` expressions and IANA time zones. Schedule permission is limited to `readOnly` or `acceptEdits`, persists as a run permission cap, and skips a busy Agent without interrupting or replacing its manual run
+- Durable Webhook/Telegram notification delivery history with deduplication, leases, exponential backoff, bounded attempts, delivered/dead states, aggregate metrics, and explicit retry
+- Telegram Bot API long polling with private-chat `/pair`, `/status`, `/approve <toolCallId>` (always one-time `allow_once`), and `/deny <toolCallId> [reason]`; unauthenticated commands and failed pairing attempts are silent, and processed updates are protected by persisted event IDs and cursors
+- Home Assistant integration restricted to local/private endpoints: read-only state/entity summaries, a fixed action allowlist, short-lived action requests, two local UI confirmations, and direct-loopback approval. Unknown/critical actions such as door unlock and camera snapshot are hard-blocked, and IM cannot control devices
+- Local monitoring aggregation for active runs, pending approvals, schedules, delivery states, channels, device actions, and automation-worker health
+- Runtime Supervisor lifecycle for preview, Telegram channel services, automation workers, and HTTP serving
 - Workline and container settings backed by project Workline/Agent APIs, with backend workline-fork support that creates Git worktrees, merge-check preflight, and clean-worktree merge APIs
 - Interactive PTY terminal WebSocket: `/ws/terminal`, with terminal-management controls and browser-local retention/focus preferences
 - Filesystem browse/preview/mkdir APIs
@@ -58,9 +74,9 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
 - Chat-composer slash command palette backed by enabled local Skills command templates
 - Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
 - Browser-local Settings → Network Search policy preferences for provider presets, result limits, confirmation, and domain rules, plus `WebSearch` and `WebFetch` core tools for public web/documentation lookup
-- Browser-local Settings → IM Gateway integration policy preferences for webhook/bot presets, confirmation, signatures, redaction, and event routing
-- Browser-local Settings → Skills workbench for slash command templates, MCP server drafts, tool policy notes, and JSON export; it can create/enable/delete persisted stdio MCP registry entries, run `tools/list` discovery, and let core tools list/call registered MCP servers with explicit exec-risk approval
-- Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices
+- Settings → P2–P3 automation control backed by server APIs for schedules, notification history/retry, Telegram and Home Assistant connection metadata, pairing/revocation, monitoring, device state, local device-action confirmation, and audit events. A detected legacy browser-local IM draft is shown only as a disabled migration hint and never starts a channel
+- Server-backed Skills with global/project/workspace CRUD, effective-skill resolution, revision history/restore, and snapshot-stable cursor pagination. The Settings scoped panel can browse by scope, inspect details, paginate, and view/restore revisions; create, SKILL.md import, enable/disable, edit, and delete UI actions still operate only on global scope. MCP registry actions remain available with explicit exec-risk approval
+- Browser-local Settings → Notifications preferences for toast categories, display duration, and UI terminal notices, plus server-backed durable Webhook/Telegram delivery history and retry
 - Browser-local Settings → Appearance preferences for theme, density, terminal default visibility, and Agent event-log display
 - Runtime summary endpoint and Settings → Servers/System + Runtime panels for process, Go runtime, paths, and Agent limits
 - Settings → Users read-only auth status panel backed by `/api/auth/status`
@@ -75,7 +91,7 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
 - SQLite is provided through the pure-Go `modernc.org/sqlite` driver
 - Node.js is optional and only used for `node --check` and `node --test` on embedded frontend scripts during validation
 
-## Install
+## Installation details
 
 Tagged releases publish Autoto release assets for macOS, Linux, and Windows, named like `autoto_<version>_<os>_<arch>`. Download the matching asset from GitHub Releases, unpack it, then run the `autoto` binary.
 
@@ -167,6 +183,40 @@ CLIPROXYAPI_BIN
 CLIPROXYAPI_CONFIG
 ```
 
+### Automation integrations and secret references
+
+Telegram and Home Assistant connections are stored as non-secret metadata plus logical secret references. The current reference format is only `env:VARIABLE_NAME`; plaintext bot/access tokens are rejected by the connection APIs and UI, and public responses expose only whether each required secret is configured.
+
+For example, set the secret values in the Autoto process environment:
+
+```sh
+export AUTOTO_TELEGRAM_BOT_TOKEN='replace-with-current-bot-token'
+export AUTOTO_HOME_ASSISTANT_TOKEN='replace-with-current-ha-token'
+```
+
+Then configure the connection with references such as:
+
+```json
+{
+  "kind": "telegram",
+  "name": "Personal Telegram",
+  "secretRefs": { "botToken": "env:AUTOTO_TELEGRAM_BOT_TOKEN" }
+}
+```
+
+```json
+{
+  "kind": "home-assistant",
+  "name": "Home Assistant",
+  "endpoint": "http://homeassistant.local:8123",
+  "secretRefs": { "accessToken": "env:AUTOTO_HOME_ASSISTANT_TOKEN" }
+}
+```
+
+Telegram is fixed to the official API endpoint and receives updates only through long polling. Generate a short-lived pairing code in the local UI/API, then send `/pair <code>` from a private chat. The accepted command set is `/status`, `/approve <toolCallId>` (one-time approval only), and `/deny <toolCallId> [reason]`. There is no `/task` or free-form assistant chat. Rotate the bot token if it may have leaked; the token revision changes and stale pairings are revoked, after which you must pair again. You can also revoke a pairing explicitly from the local UI/API.
+
+Home Assistant endpoints must use loopback, `.local`, link-local, or private-network hosts. Rotate the Home Assistant token in the referenced environment variable if it may have leaked. Home Assistant has no channel pairing to revoke; disable/delete the connection and restart/retest it after rotation as appropriate.
+
 ### CLIProxyAPI preset
 
 Autoto includes a built-in `cliproxyapi` provider profile for local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instances:
@@ -195,7 +245,9 @@ AGENT_SERVER_API_KEY
 
 If a backend URL is configured, Autoto seeds the backend registry on first startup. Local backends use `X-Session-API-Key`; cloud backends use `Authorization: Bearer ...`.
 
-### Migration compatibility
+### Naming and migration compatibility
+
+Canonical names for all new documentation, automation, and integrations are **Autoto**, `autoto`, `~/.autoto`, `AUTOTO_*`, `X-Autoto-*`, `autoto.*`, **Agent / Workline**, `/api/agents`, `/api/worklines`, and `/ws/agent`.
 
 For a non-disruptive upgrade, Autoto continues to read the following legacy inputs:
 
@@ -203,8 +255,10 @@ For a non-disruptive upgrade, Autoto continues to read the following legacy inpu
 - `CODEHARBOR_*` environment variables as fallbacks for their `AUTOTO_*` counterparts
 - `X-CodeHarbor-Token` and `X-CodeHarbor-Access` request headers alongside `X-Autoto-Token` and `X-Autoto-Access`
 - `codeharbor.*` browser `localStorage` preference keys alongside canonical `autoto.*` keys
+- legacy CodeHarbor CLI and Narrator/Chapter route aliases
+- `window.CODEHARBOR_LOCAL_TOKEN`, which is still injected with the same value as canonical `window.AUTOTO_LOCAL_TOKEN` and read by `runtime.mjs` only as a fallback
 
-Do not introduce new dependencies on the legacy names. They exist solely to preserve existing local installations during the rename.
+Canonical values take precedence when both forms are present. Do not introduce new writes or dependencies on legacy names. The local-token JS global is an explicit compatibility-response-write exception until first-party runtime no longer reads it and the old-UI migration window is complete. The compatibility lifecycle and removal gates are defined only in `PROJECT_PLAN.md`; no legacy surface may be removed before v0.4.0 or without at least two tagged releases of migration runway.
 
 ## API overview
 
@@ -219,6 +273,35 @@ GET  /api/licenses
 GET  /api/runtime/summary
 GET  /api/storage/summary
 GET  /api/usage/summary
+GET  /api/monitoring/snapshot
+
+GET  /api/notifications/settings
+PUT  /api/notifications/settings
+POST /api/notifications/test
+GET  /api/notifications/deliveries
+POST /api/notifications/deliveries/{id}/retry
+
+GET    /api/schedules
+POST   /api/schedules
+PATCH  /api/schedules/{id}
+DELETE /api/schedules/{id}
+POST   /api/schedules/{id}/run
+
+GET    /api/integrations/connections
+POST   /api/integrations/connections
+PATCH  /api/integrations/connections/{id}
+DELETE /api/integrations/connections/{id}
+POST   /api/integrations/connections/{id}/test
+
+POST /api/channels/pairing-codes
+GET  /api/channels/pairings
+POST /api/channels/pairings/{id}/revoke
+GET  /api/audit/events
+
+GET  /api/devices?connectionId=...
+POST /api/device-actions
+POST /api/device-actions/{id}/approve
+POST /api/device-actions/{id}/deny
 
 PUT  /api/providers/{name}/config
 
@@ -297,11 +380,15 @@ Autoto is a local development MVP.
 - Browser-originated API calls require a per-process local token injected into the UI, and WebSocket upgrades are restricted by Origin/Sec-Fetch-Site plus the same token.
 - Public tunnel usage must add authentication. Non-loopback hosts, forwarded tunnel headers, or explicit `AUTOTO_EXPOSED=true`, enter remote-hardening mode: the UI/API require `AUTOTO_ACCESS_PASSWORD`, `bypassPermissions` is disabled, and the interactive terminal is off unless `AUTOTO_REMOTE_TERMINAL=true` is set.
 - Git status/diff/log/commit APIs resolve the Agent repository and reject repositories outside the project path, configured default project directory, or the Agent Workline worktree path created by Autoto.
-- Tools can read and write local files within their configured working directories.
-- Bash and stdio MCP execution are intentionally restricted by permission mode, but both should still be treated as powerful local code execution.
+- Tools can read and write local files within their configured working directories. The file path tools hard-block sensitive names such as `.env*`, credentials/secrets, common private keys, and `.git`; this does not make Bash or stdio MCP safe, and both remain powerful local code execution.
+- Schedule runs cannot exceed their persisted `readOnly`/`acceptEdits` permission cap. A busy Agent causes a skipped schedule record rather than cancellation or replacement of the manual run.
+- Telegram uses outbound HTTPS plus long polling only. Pairing is private-chat and Agent-scoped; unauthenticated commands and failed pairing attempts are silent, approval is one-time, and `danger` tool uses cannot be approved from Telegram. Telegram cannot change permission mode, open a terminal, create `/task` runs, or control devices.
+- Telegram bot tokens and Home Assistant access tokens must be supplied through `env:` references. Public integration responses do not return either the reference target or secret value. Rotate suspected credentials immediately; rotating the Telegram bot token invalidates stale pairings, and pairings can also be revoked locally.
+- Home Assistant is restricted to local/private endpoints. State listing is read-only and attribute-filtered. Device changes use a fixed allowlist and require a short-lived request, two local UI confirmations, and direct-loopback approval; unknown or critical actions, including unlock and camera actions, are hard-blocked.
+- Durable notification delivery records may include redacted operational metadata and status/error classes. Delivery retries use bounded exponential backoff and end in `dead`; they do not block the Agent loop.
 - MCP server registry responses list environment variable names only; stored values are used for local process launch and are not returned by the public API.
 - Backend API keys are not returned by the public API; responses only include `apiKeyConfigured`.
-- Runtime and storage summary APIs intentionally expose local paths and process diagnostics, so keep the service bound to trusted local users.
+- Runtime, storage, and monitoring summary APIs intentionally expose local paths or operational diagnostics. The monitoring snapshot is local aggregation, not a cloud monitoring service, so keep the service bound to trusted local users.
 
 See `SECURITY.md` for reporting and operational guidance.
 

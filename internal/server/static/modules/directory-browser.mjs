@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { recentDirectoriesKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
+import { t } from "./i18n.mjs";
 
 export function normalizeRecentDirectories(value = []) {
   return (Array.isArray(value) ? value : [])
@@ -19,7 +20,7 @@ export function canonicalLocalPath(path) {
 
 export function shortPath(path) {
   const value = canonicalLocalPath(path);
-  if (!value) return "未设置目录";
+  if (!value) return t("workspace.directory.folderNotSet");
   const home = "/Users/aaa";
   if (value === home) return "~";
   if (value.startsWith(home + "/")) return `~/${value.slice(home.length + 1)}`;
@@ -28,7 +29,7 @@ export function shortPath(path) {
 
 export function projectPathLabel(path) {
   const value = canonicalLocalPath(path);
-  return value || "未设置路径";
+  return value || t("workspace.directory.pathNotSet");
 }
 
 export function normalizePath(path) {
@@ -66,8 +67,8 @@ export function createDirectoryBrowserController({
           return;
         }
       } catch (err) {
-        notifyTerminal?.(`[warn] 原生资料夹选择器不可用：${err.message || err}\n`);
-        showToast?.("原生选择器不可用，已切换到内置目录浏览器。", "warn", { force: true });
+        notifyTerminal?.(`[warn] ${t("workspace.directory.nativeUnavailable")} ${err.message || err}\n`);
+        showToast?.(t("workspace.directory.nativeUnavailable"), "warn", { force: true });
       }
     }
     await openDirectoryModal(defaultPath);
@@ -78,16 +79,16 @@ export function createDirectoryBrowserController({
     state.nativeDirectorySelecting = true;
     const label = trigger?.textContent || "";
     setButtonBusy(trigger, true, "…");
-    showToast?.("正在打开 macOS 资料夹选择器…", "info", { force: true });
+    showToast?.(t("workspace.directory.openingNative"), "info", { force: true });
     try {
       const query = path ? `?path=${encodeURIComponent(path)}` : "";
       const data = await api(`/api/fs/native-directory${query}`, { method: "POST", body: JSON.stringify({}) });
       if (data.canceled) {
-        showToast?.("已取消选择资料夹。", "info", { force: true });
+        showToast?.(t("workspace.directory.selectionCanceled"), "info", { force: true });
         return { canceled: true };
       }
       if (data.path) {
-        showToast?.(`已选择：${shortPath(data.path)}`, "success", { force: true });
+        showToast?.(t("workspace.directory.selected", { path: shortPath(data.path) }), "success", { force: true });
         return data;
       }
       return { canceled: true };
@@ -101,7 +102,7 @@ export function createDirectoryBrowserController({
     $("folderModal").classList.remove("hidden");
     hideNewFolderInline();
     renderRecentModalDirectories();
-    setDirectoryStatus("正在载入目录…", "busy");
+    setDirectoryStatus(t("workspace.directory.loading"), "busy");
     await browseDirectories(path);
   }
 
@@ -109,7 +110,7 @@ export function createDirectoryBrowserController({
     state.directoryBrowseSeq++;
     setDirectoryBrowserBusy(false);
     hideNewFolderInline();
-    setDirectoryStatus("选择当前目录后会创建或打开项目。", "");
+    setDirectoryStatus(t("workspace.directory.chooseHint"), "");
     $("folderModal").classList.add("hidden");
   }
 
@@ -125,7 +126,7 @@ export function createDirectoryBrowserController({
   function setDirectoryStatus(message, variant = "") {
     const el = $("directoryStatus");
     if (!el) return;
-    el.textContent = message || "选择当前目录后会创建或打开项目。";
+    el.textContent = message || t("workspace.directory.chooseHint");
     el.classList.toggle("busy", variant === "busy");
     el.classList.toggle("error", variant === "error");
     el.classList.toggle("success", variant === "success");
@@ -133,11 +134,11 @@ export function createDirectoryBrowserController({
 
   function updateDirectoryPathDisplay(path) {
     const value = String(path || "").trim();
-    const name = basename(value) || value || "选择目录";
-    if ($("directoryPath")) $("directoryPath").textContent = value || "Loading...";
+    const name = basename(value) || value || t("workspace.directory.currentPath");
+    if ($("directoryPath")) $("directoryPath").textContent = value || t("common.loading");
     if ($("manualDirectoryPath")) $("manualDirectoryPath").value = value;
     if ($("folderLocationName")) $("folderLocationName").textContent = name;
-    if ($("folderLocationPill")) $("folderLocationPill").title = value || "当前路径";
+    if ($("folderLocationPill")) $("folderLocationPill").title = value || t("workspace.directory.currentPath");
   }
 
   async function browseDirectories(path = "") {
@@ -152,12 +153,12 @@ export function createDirectoryBrowserController({
       state.directoryParent = data.parent || "";
       state.directoryShortcuts = data.shortcuts || [];
       updateDirectoryPathDisplay(data.path);
-      setDirectoryStatus("选择当前目录后会创建或打开项目。", "");
+    setDirectoryStatus(t("workspace.directory.chooseHint"), "");
       renderDirectoryShortcuts(state.directoryShortcuts);
       renderDirectoryList(data);
     } catch (err) {
       if (seq === state.directoryBrowseSeq && directoryElementVisible("folderModal")) {
-        setDirectoryStatus(`载入失败：${err.message || err}`, "error");
+        setDirectoryStatus(t("workspace.explorer.loadFailed", { message: err.message || err }), "error");
         throw err;
       }
     } finally {
@@ -191,12 +192,12 @@ export function createDirectoryBrowserController({
 
   function shortcutLabel(name) {
     return {
-      Home: "主目录",
-      Desktop: "桌面",
-      Downloads: "下载",
-      Documents: "文档",
-      Projects: "项目",
-      Root: "根目录",
+      Home: t("workspace.directory.home"),
+      Desktop: t("workspace.directory.desktop"),
+      Downloads: t("workspace.directory.downloads"),
+      Documents: t("workspace.directory.documents"),
+      Projects: t("workspace.directory.projects"),
+      Root: t("workspace.directory.root"),
     }[name] || name;
   }
 
@@ -229,7 +230,7 @@ export function createDirectoryBrowserController({
         <small>${escapeHtml(projectPathLabel(path))}</small>
       </button>
     `;
-    }).join("") : `<div class="empty-list">暂无最近目录</div>`;
+    }).join("") : `<div class="empty-list">${escapeHtml(t("workspace.directory.noRecent"))}</div>`;
     el.querySelectorAll("[data-path]").forEach((node) => {
       node.addEventListener("click", () => createProjectFromDirectory(node.dataset.path).catch(reportError));
     });
@@ -247,7 +248,7 @@ export function createDirectoryBrowserController({
         <span>${escapeHtml(basename(path) || path)}</span>
       </button>
     `;
-    }).join("") : `<div class="folder-empty-note">暂无收藏</div>`;
+    }).join("") : `<div class="folder-empty-note">${escapeHtml(t("workspace.directory.noFavorites"))}</div>`;
     el.querySelectorAll("[data-path]").forEach((node) => {
       node.addEventListener("click", () => browseDirectories(node.dataset.path).catch(reportError));
     });
@@ -258,7 +259,7 @@ export function createDirectoryBrowserController({
     if (data.parent) {
       rows.push(`
       <button class="directory-row parent-row" type="button" data-path="${escapeAttr(data.parent)}">
-        <span class="directory-row-main"><span class="directory-icon">↰</span><span>上一级</span></span>
+        <span class="directory-row-main"><span class="directory-icon">↰</span><span>${escapeHtml(t("workspace.directory.parent"))}</span></span>
         <span class="directory-meta">..</span>
       </button>
     `);
@@ -266,10 +267,10 @@ export function createDirectoryBrowserController({
     rows.push(...(data.entries || []).map((entry) => `
     <button class="directory-row" type="button" data-path="${escapeAttr(entry.path)}">
       <span class="directory-row-main"><span class="directory-icon">▱</span><span>${escapeHtml(entry.name)}</span></span>
-      <span class="directory-meta">文件夹</span>
+      <span class="directory-meta">${escapeHtml(t("workspace.directory.folder"))}</span>
     </button>
   `));
-    $("directoryList").innerHTML = rows.join("") || `<div class="folder-empty-state">此目录下没有可进入的文件夹。</div>`;
+    $("directoryList").innerHTML = rows.join("") || `<div class="folder-empty-state">${escapeHtml(t("workspace.directory.empty"))}</div>`;
     $("directoryList").querySelectorAll("[data-path]").forEach((node) => {
       node.addEventListener("click", () => browseDirectories(node.dataset.path).catch(reportError));
     });
@@ -314,28 +315,28 @@ export function createDirectoryBrowserController({
     if (button?.disabled) return;
     const trimmed = input?.value.trim() || "";
     if (!trimmed) {
-      showToast?.("请输入新文件夹名称。", "warn");
+      showToast?.(t("workspace.directory.nameRequired"), "warn");
       input?.focus();
       return;
     }
     if (trimmed === "." || trimmed === "..") {
-      showToast?.("文件夹名称不能是 . 或 ..。", "warn");
+      showToast?.(t("workspace.directory.nameDots"), "warn");
       input?.focus();
       return;
     }
     if (trimmed.length > 255) {
-      showToast?.("文件夹名称过长，请控制在 255 个字符以内。", "warn");
+      showToast?.(t("workspace.directory.nameTooLong"), "warn");
       input?.focus();
       return;
     }
     if (/[\\/\0]/.test(trimmed)) {
-      throw new Error("文件夹名称不能包含路径分隔符或空字符");
+      throw new Error(t("workspace.directory.nameInvalid"));
     }
     const base = normalizePath(state.directoryPath);
     const path = base === "/" ? `/${trimmed}` : `${base}/${trimmed}`;
-    const previousLabel = button?.textContent || "创建";
+    const previousLabel = button?.textContent || t("folder.create");
     if (button) {
-      button.textContent = button.classList.contains("composer-send-btn") ? "…" : "发送中";
+      button.textContent = button.classList.contains("composer-send-btn") ? "…" : t("workspace.chat.sending");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
     }
@@ -343,7 +344,7 @@ export function createDirectoryBrowserController({
     try {
       await api("/api/fs/mkdir", { method: "POST", body: JSON.stringify({ path }) });
       hideNewFolderInline();
-      showToast?.("文件夹已创建。", "success");
+      showToast?.(t("workspace.directory.created"), "success");
       await browseDirectories(path);
     } finally {
       if (button) {

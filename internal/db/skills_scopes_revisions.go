@@ -18,6 +18,21 @@ const (
 	SkillScopeWorkspace = "workspace"
 )
 
+type SkillRestoreReviewRequiredError struct {
+	ScanVerdict    string          `json:"scanVerdict"`
+	ScanFindings   json.RawMessage `json:"scanFindings"`
+	ContentHash    string          `json:"contentHash"`
+	ScannerVersion int             `json:"scannerVersion"`
+}
+
+func (e *SkillRestoreReviewRequiredError) Error() string {
+	return "conflict: restored review skill requires acknowledgeRisk and matching acknowledgedContentHash"
+}
+
+func (e *SkillRestoreReviewRequiredError) Unwrap() error {
+	return ErrConflict
+}
+
 type skillCursor struct {
 	Version          int    `json:"v"`
 	Kind             string `json:"kind"`
@@ -79,17 +94,17 @@ func normalizeSkillScopeTarget(target SkillScopeTarget) (SkillScopeTarget, error
 	return target, nil
 }
 
-func validateSkillScopeTx(ctx context.Context, tx *sql.Tx, skill Skill) error {
-	target, err := normalizeSkillScopeTarget(SkillScopeTarget{Scope: skill.Scope, ProjectID: skill.ProjectID, WorklineID: skill.WorklineID})
-	if err != nil {
-		return err
-	}
+type skillScopeQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func validateSkillScopeTargetContext(ctx context.Context, queryer skillScopeQueryer, target SkillScopeTarget) error {
 	switch target.Scope {
 	case SkillScopeGlobal:
 		return nil
 	case SkillScopeProject:
 		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, target.ProjectID).Scan(&exists); err != nil {
+		if err := queryer.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, target.ProjectID).Scan(&exists); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("%w: project not found", ErrConflict)
 			}
@@ -98,7 +113,7 @@ func validateSkillScopeTx(ctx context.Context, tx *sql.Tx, skill Skill) error {
 		return nil
 	case SkillScopeWorkspace:
 		var projectID string
-		if err := tx.QueryRowContext(ctx, `SELECT project_id FROM worklines WHERE id = ?`, target.WorklineID).Scan(&projectID); err != nil {
+		if err := queryer.QueryRowContext(ctx, `SELECT project_id FROM worklines WHERE id = ?`, target.WorklineID).Scan(&projectID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("%w: workspace workline not found", ErrConflict)
 			}
@@ -111,6 +126,14 @@ func validateSkillScopeTx(ctx context.Context, tx *sql.Tx, skill Skill) error {
 	default:
 		return errors.New("invalid skill scope")
 	}
+}
+
+func validateSkillScopeTx(ctx context.Context, tx *sql.Tx, skill Skill) error {
+	target, err := normalizeSkillScopeTarget(SkillScopeTarget{Scope: skill.Scope, ProjectID: skill.ProjectID, WorklineID: skill.WorklineID})
+	if err != nil {
+		return err
+	}
+	return validateSkillScopeTargetContext(ctx, tx, target)
 }
 
 func insertSkillRevision(ctx context.Context, tx *sql.Tx, skill Skill, operation, actor string, restoredFromRevisionNo int64) (int64, error) {
@@ -172,12 +195,66 @@ func (s *Store) getSkillIncludingDeleted(ctx context.Context, id string) (Skill,
 	})
 }
 
+func (s *Store) GetSkillIncludingDeleted(ctx context.Context, id string) (Skill, error) {
+	return s.getSkillIncludingDeleted(ctx, id)
+}
+
 func (s *Store) latestSkillRevisionSequence(ctx context.Context) (int64, error) {
 	var sequence int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM skill_revisions`).Scan(&sequence); err != nil {
 		return 0, err
 	}
 	return sequence, nil
+}
+
+func (s *Store) latestSkillRevisionSequenceForSkill(ctx context.Context, skillID string) (int64, error) {
+	var sequence int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM skill_revisions WHERE skill_id = ?`, skillID).Scan(&sequence); err != nil {
+		return 0, err
+	}
+	return sequence, nil
+}
+
+func validateSkillCursorSnapshot(cursor skillCursor, latestSequence int64) error {
+	if cursor.SnapshotSequence > latestSequence {
+		return errors.New("skill cursor snapshot is in the future")
+	}
+	return nil
+}
+
+type skillAgentContext struct {
+	ProjectID  string
+	WorklineID string
+}
+
+func (s *Store) skillAgentContext(ctx context.Context, agentID string) (skillAgentContext, error) {
+	var current skillAgentContext
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(w.project_id,''), COALESCE(a.workline_id,'') FROM agents a LEFT JOIN worklines w ON w.id = a.workline_id WHERE a.id = ?`, agentID).Scan(&current.ProjectID, &current.WorklineID)
+	return current, err
+}
+
+func (s *Store) ValidateEffectiveSkillContext(ctx context.Context, agentID string, target SkillScopeTarget) error {
+	target, err := normalizeSkillScopeTarget(target)
+	if err != nil {
+		return err
+	}
+	current, err := s.skillAgentContext(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	switch target.Scope {
+	case SkillScopeGlobal:
+		return nil
+	case SkillScopeProject:
+		if target.ProjectID != current.ProjectID {
+			return fmt.Errorf("%w: effective skill project context does not match agent", ErrConflict)
+		}
+	case SkillScopeWorkspace:
+		if target.ProjectID != current.ProjectID || target.WorklineID != current.WorklineID {
+			return fmt.Errorf("%w: effective skill workspace context does not match agent", ErrConflict)
+		}
+	}
+	return nil
 }
 
 func validateScopeCursor(cursor skillCursor, kind string, target SkillScopeTarget) error {
@@ -192,8 +269,15 @@ func (s *Store) ListSkillsPage(ctx context.Context, target SkillScopeTarget, lim
 	if err != nil {
 		return SkillPage{}, err
 	}
+	if err := validateSkillScopeTargetContext(ctx, s.db, target); err != nil {
+		return SkillPage{}, err
+	}
 	limit = normalizeSkillPageLimit(limit)
 	cursor, err := decodeSkillCursor(cursorValue)
+	if err != nil {
+		return SkillPage{}, err
+	}
+	latestSequence, err := s.latestSkillRevisionSequence(ctx)
 	if err != nil {
 		return SkillPage{}, err
 	}
@@ -201,12 +285,11 @@ func (s *Store) ListSkillsPage(ctx context.Context, target SkillScopeTarget, lim
 		if err := validateScopeCursor(cursor, "scope-skills", target); err != nil {
 			return SkillPage{}, err
 		}
-	} else {
-		cursor = skillCursor{Version: 1, Kind: "scope-skills", Scope: target.Scope, ProjectID: target.ProjectID, WorklineID: target.WorklineID}
-		cursor.SnapshotSequence, err = s.latestSkillRevisionSequence(ctx)
-		if err != nil {
+		if err := validateSkillCursorSnapshot(cursor, latestSequence); err != nil {
 			return SkillPage{}, err
 		}
+	} else {
+		cursor = skillCursor{Version: 1, Kind: "scope-skills", Scope: target.Scope, ProjectID: target.ProjectID, WorklineID: target.WorklineID, SnapshotSequence: latestSequence}
 	}
 
 	rows, err := s.db.QueryContext(ctx, `WITH latest AS (
@@ -268,15 +351,19 @@ func (s *Store) ListSkillRevisionsPage(ctx context.Context, skillID string, limi
 	if err != nil {
 		return SkillRevisionPage{}, err
 	}
+	latestSequence, err := s.latestSkillRevisionSequenceForSkill(ctx, skillID)
+	if err != nil {
+		return SkillRevisionPage{}, err
+	}
 	if cursor.Kind != "" {
 		if cursor.Kind != "skill-revisions" || cursor.SkillID != skillID || cursor.SnapshotSequence < 0 {
 			return SkillRevisionPage{}, errors.New("skill revision cursor does not match the requested skill")
 		}
-	} else {
-		cursor = skillCursor{Version: 1, Kind: "skill-revisions", SkillID: skillID}
-		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM skill_revisions WHERE skill_id = ?`, skillID).Scan(&cursor.SnapshotSequence); err != nil {
+		if err := validateSkillCursorSnapshot(cursor, latestSequence); err != nil {
 			return SkillRevisionPage{}, err
 		}
+	} else {
+		cursor = skillCursor{Version: 1, Kind: "skill-revisions", SkillID: skillID, SnapshotSequence: latestSequence}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence, skill_id, revision_no, operation, actor, COALESCE(restored_from_revision_no,0), content_hash, enabled, scan_verdict, CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END, created_at
 		FROM skill_revisions
@@ -339,16 +426,23 @@ func (s *Store) ListEffectiveSkillsPage(ctx context.Context, agentID string, lim
 	if err != nil {
 		return SkillPage{}, err
 	}
+	currentContext, err := s.skillAgentContext(ctx, agentID)
+	if err != nil {
+		return SkillPage{}, err
+	}
+	latestSequence, err := s.latestSkillRevisionSequence(ctx)
+	if err != nil {
+		return SkillPage{}, err
+	}
 	if cursor.Kind != "" {
-		if cursor.Kind != "effective-skills" || cursor.AgentID != agentID || cursor.SnapshotSequence < 0 {
+		if cursor.Kind != "effective-skills" || cursor.AgentID != agentID || cursor.ProjectID != currentContext.ProjectID || cursor.WorklineID != currentContext.WorklineID || cursor.SnapshotSequence < 0 {
 			return SkillPage{}, errors.New("effective skill cursor does not match the requested agent")
 		}
-	} else {
-		cursor = skillCursor{Version: 1, Kind: "effective-skills", AgentID: agentID}
-		cursor.SnapshotSequence, err = s.latestSkillRevisionSequence(ctx)
-		if err != nil {
+		if err := validateSkillCursorSnapshot(cursor, latestSequence); err != nil {
 			return SkillPage{}, err
 		}
+	} else {
+		cursor = skillCursor{Version: 1, Kind: "effective-skills", AgentID: agentID, ProjectID: currentContext.ProjectID, WorklineID: currentContext.WorklineID, SnapshotSequence: latestSequence}
 	}
 	rows, err := s.db.QueryContext(ctx, `WITH latest AS (
 		SELECT r.* FROM skill_revisions r
@@ -357,12 +451,12 @@ func (s *Store) ListEffectiveSkillsPage(ctx context.Context, agentID string, lim
 	), agent_context AS (
 		SELECT a.workline_id, w.project_id FROM agents a LEFT JOIN worklines w ON w.id = a.workline_id WHERE a.id = ?
 	), ranked AS (
-		SELECT latest.*, ROW_NUMBER() OVER (PARTITION BY LOWER(command) ORDER BY CASE scope WHEN 'workspace' THEN 3 WHEN 'project' THEN 2 ELSE 1 END DESC, skill_id ASC) AS owner_rank
+		SELECT latest.*, ROW_NUMBER() OVER (PARTITION BY LOWER(latest.command) ORDER BY CASE latest.scope WHEN 'workspace' THEN 3 WHEN 'project' THEN 2 ELSE 1 END DESC, latest.skill_id ASC) AS owner_rank
 		FROM latest, agent_context
-		WHERE deleted_at IS NULL AND (
-		  (scope = 'workspace' AND workline_id = agent_context.workline_id)
-		  OR (scope = 'project' AND project_id = agent_context.project_id)
-		  OR scope = 'global'
+		WHERE latest.deleted_at IS NULL AND (
+		  (latest.scope = 'workspace' AND latest.workline_id = agent_context.workline_id)
+		  OR (latest.scope = 'project' AND latest.project_id = agent_context.project_id)
+		  OR latest.scope = 'global'
 		)
 	)
 	SELECT skill_id, name, command, description, source, scope, COALESCE(project_id,''), COALESCE(workline_id,''), revision_no,
@@ -456,11 +550,12 @@ func (s *Store) DeleteSkillCAS(ctx context.Context, id, expectedUpdatedAt, actor
 	return deleted, nil
 }
 
-func (s *Store) RestoreSkillAs(ctx context.Context, id string, revisionNo int64, expectedUpdatedAt string, acknowledgeRisk bool, actor string) (Skill, error) {
+func (s *Store) RestoreSkillAs(ctx context.Context, id string, revisionNo int64, expectedUpdatedAt string, acknowledgeRisk bool, acknowledgedContentHash, actor string) (Skill, error) {
 	expectedUpdatedAt = strings.TrimSpace(expectedUpdatedAt)
 	if expectedUpdatedAt == "" {
 		return Skill{}, errors.New("expected skill updated_at is required")
 	}
+	acknowledgedContentHash = strings.TrimSpace(acknowledgedContentHash)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Skill{}, err
@@ -471,6 +566,9 @@ func (s *Store) RestoreSkillAs(ctx context.Context, id string, revisionNo int64,
 	})
 	if err != nil {
 		return Skill{}, err
+	}
+	if current.UpdatedAt != expectedUpdatedAt {
+		return Skill{}, fmt.Errorf("%w: skill was updated by another client", ErrConflict)
 	}
 	revision, err := scanSkillRevision(func(dest ...any) error {
 		return tx.QueryRowContext(ctx, `SELECT `+skillRevisionColumns+` FROM skill_revisions WHERE skill_id = ? AND revision_no = ?`, id, revisionNo).Scan(dest...)
@@ -495,8 +593,13 @@ func (s *Store) RestoreSkillAs(ctx context.Context, id string, revisionNo int64,
 		candidate.Enabled = true
 	}
 	if revision.Enabled && candidate.ScanVerdict == skills.VerdictReview {
-		if !acknowledgeRisk {
-			return Skill{}, fmt.Errorf("%w: restored review skill requires acknowledgeRisk", ErrConflict)
+		if !acknowledgeRisk || acknowledgedContentHash != candidate.ContentHash {
+			return Skill{}, &SkillRestoreReviewRequiredError{
+				ScanVerdict:    candidate.ScanVerdict,
+				ScanFindings:   append(json.RawMessage(nil), candidate.ScanFindings...),
+				ContentHash:    candidate.ContentHash,
+				ScannerVersion: candidate.ScannerVersion,
+			}
 		}
 		candidate.Enabled = true
 		candidate.RiskAcknowledgedAt = Now()

@@ -2,6 +2,25 @@ import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
+import { t as cr } from "./messages-chat-rendering-extra.mjs";
+
+const userMessageRoles = new Set(["user", "human"]);
+
+export function chatMessagePresentation(message = {}) {
+  const role = String(message.role || "message").trim() || "message";
+  const normalizedRole = role.toLowerCase();
+  const alignment = userMessageRoles.has(normalizedRole) ? "right" : "left";
+  const timestampValue = [message.createdAt, message.created_at, message.timestamp, message.sentAt, message.updatedAt]
+    .map((value) => String(value || "").trim())
+    .find((value) => value && !Number.isNaN(Date.parse(value))) || "";
+  return {
+    role,
+    normalizedRole,
+    roleClass: alignment === "right" ? "user" : "assistant",
+    alignment,
+    timestampValue,
+  };
+}
 
 const messagePageLimit = 100;
 
@@ -74,7 +93,7 @@ export function createChatRenderingController({
     const approvalCards = renderApprovalCardsHTML();
     if (!normalized.length && !liveAssistantCard && !liveToolCards && !runSummaryCard && !approvalCards) {
       el.classList.add("empty");
-      el.textContent = "还没有消息。输入你的需求开始对话。";
+      el.innerHTML = `<div class="empty-conversation-state">${escapeHtml(cr("message.empty"))}</div>`;
       return true;
     }
     el.classList.remove("empty");
@@ -85,18 +104,7 @@ export function createChatRenderingController({
         </button>
       </div>
     ` : "";
-    el.innerHTML = `${olderMessagesControl}${normalized.map((message, index) => `
-      <div class="message ${escapeAttr(message.role)}">
-        <div class="message-head">
-          <div class="message-role">${escapeHtml(message.role)}${message.correctionOfMessageId ? " · 更正" : ""}</div>
-          <div class="message-head-actions">
-            ${message.role === "user" ? `<button class="message-copy-btn" type="button" data-correct-message="${escapeAttr(message.id || "")}" title="更正并重新发送">更正</button>` : ""}
-            <button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="复制消息原文">复制</button>
-          </div>
-        </div>
-        ${state.editingMessageId === message.id ? renderCorrectionEditor(message) : `<div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>${renderMessageAttachments(message)}`}
-      </div>
-    `).join("")}${liveAssistantCard}${liveToolCards}${runSummaryCard}${approvalCards}`;
+    el.innerHTML = `${olderMessagesControl}${normalized.map(renderChatMessageHTML).join("")}${liveAssistantCard}${liveToolCards}${runSummaryCard}${approvalCards}`;
     bindMessageActionButtons(el);
     el.querySelector("[data-load-older-messages]")?.addEventListener("click", () => {
       loadOlderMessages(agentId).catch(showError);
@@ -118,6 +126,23 @@ export function createChatRenderingController({
           <span class="live-assistant-status">正在生成</span>
         </div>
         <div class="message-content">${renderMarkdown(text)}</div>
+      </div>
+    `;
+  }
+
+  function renderChatMessageHTML(message, index) {
+    const presentation = chatMessagePresentation(message);
+    const timeHTML = presentation.timestampValue
+      ? `<time class="message-time" datetime="${escapeAttr(presentation.timestampValue)}">${escapeHtml(formatTimestamp(presentation.timestampValue))}</time>`
+      : "";
+    const actions = `${message.role === "user" ? `<button class="message-copy-btn" type="button" data-correct-message="${escapeAttr(message.id || "")}" title="更正并重新发送">更正</button>` : ""}<button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="${escapeAttr(cr("message.copyTitle"))}">${escapeHtml(cr("message.copy"))}</button>`;
+    return `
+      <div class="message ${presentation.roleClass} chat-message chat-flow-item chat-flow-${presentation.alignment}" data-chat-alignment="${presentation.alignment}" data-message-role="${escapeAttr(presentation.normalizedRole)}">
+        <div class="message-head">
+          <div class="message-meta"><div class="message-role">${escapeHtml(presentation.role)}${message.correctionOfMessageId ? " · 更正" : ""}</div>${timeHTML}</div>
+          <div class="message-head-actions">${actions}</div>
+        </div>
+        ${message.id && state.editingMessageId === message.id ? renderCorrectionEditor(message) : `<div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>${renderMessageAttachments(message)}`}
       </div>
     `;
   }
@@ -251,7 +276,7 @@ export function createChatRenderingController({
         state.runSummaryError = err.message || String(err);
         renderRunSummaryCard();
       }
-      notifyTerminal?.(`[warn] 最近 Run 回顾加载失败：${err.message || err}\n`);
+      notifyTerminal?.(`[warn] ${cr("run.refreshFailed", { message: err.message || err })}\n`);
       return null;
     }
   }
@@ -273,7 +298,7 @@ export function createChatRenderingController({
       state.runSummaryLoading = false;
       state.runSummaryError = "";
       renderRunSummaryCard();
-      if (options.notify) showToast("Run 回顾已刷新。", "success");
+      if (options.notify) showToast(cr("run.refreshed"), "success");
       return summary;
     } catch (err) {
       if (seq !== state.runSummarySeq || state.agent?.id !== agentId) return null;
@@ -314,11 +339,11 @@ export function createChatRenderingController({
     const recentMessages = Array.isArray(summary?.recentMessages) ? summary.recentMessages : [];
     const tokenText = `${formatNumber(summary?.inputTokens || 0)} / ${formatNumber(summary?.outputTokens || 0)}`;
     return `
-      <section class="run-summary-card ${escapeAttr(runStatusClass(status))}" data-run-summary-card data-run-id="${escapeAttr(runId)}">
+      <section class="run-summary-card chat-flow-item chat-flow-left chat-report-card ${escapeAttr(runStatusClass(status))}" data-chat-alignment="left" data-chat-report="run-summary" data-run-summary-card data-run-id="${escapeAttr(runId)}">
         <div class="run-summary-head">
           <div>
-            <div class="run-summary-kicker">任务回顾</div>
-            <div class="run-summary-title">${escapeHtml(runStatusLabel(status))}${state.runSummaryLoading ? " · 正在刷新" : ""}</div>
+            <div class="run-summary-kicker">${escapeHtml(cr("run.review"))}</div>
+            <div class="run-summary-title">${escapeHtml(runStatusLabel(status))}${state.runSummaryLoading ? ` · ${escapeHtml(cr("run.refreshing"))}` : ""}</div>
             <div class="run-summary-meta">${escapeHtml(runTimeRange(run))}${runId ? ` · ${escapeHtml(shortRunId(runId))}` : ""}</div>
           </div>
           <span class="run-summary-status">${escapeHtml(status)}</span>
@@ -326,21 +351,21 @@ export function createChatRenderingController({
         ${state.runSummaryError ? `<div class="run-summary-alert">${escapeHtml(state.runSummaryError)}</div>` : ""}
         ${renderRunCheckpoint(run, checkpoint)}
         <div class="run-summary-metrics">
-          ${renderRunMetric("消息", summary?.messageCount)}
-          ${renderRunMetric("工具", summary?.toolCallCount)}
-          ${renderRunMetric("待审批", summary?.pendingApprovals, Number(summary?.pendingApprovals || 0) ? "warn" : "")}
-          ${renderRunMetric("拒绝 / 错误", `${formatNumber(summary?.deniedToolCalls || 0)} / ${formatNumber(summary?.errorToolCalls || 0)}`, Number(summary?.deniedToolCalls || 0) || Number(summary?.errorToolCalls || 0) ? "bad" : "")}
-          ${renderRunMetric("API", summary?.apiRequestCount)}
-          ${renderRunMetric("Tokens in / out", tokenText)}
-          ${renderRunMetric("成本", formatMoney(summary?.costUsd || 0))}
+          ${renderRunMetric(cr("run.metrics.messages"), summary?.messageCount)}
+          ${renderRunMetric(cr("run.metrics.tools"), summary?.toolCallCount)}
+          ${renderRunMetric(cr("run.metrics.pendingApprovals"), summary?.pendingApprovals, Number(summary?.pendingApprovals || 0) ? "warn" : "")}
+          ${renderRunMetric(cr("run.metrics.deniedErrors"), `${formatNumber(summary?.deniedToolCalls || 0)} / ${formatNumber(summary?.errorToolCalls || 0)}`, Number(summary?.deniedToolCalls || 0) || Number(summary?.errorToolCalls || 0) ? "bad" : "")}
+          ${renderRunMetric(cr("run.metrics.api"), summary?.apiRequestCount)}
+          ${renderRunMetric(cr("run.metrics.tokensInOut"), tokenText)}
+          ${renderRunMetric(cr("run.metrics.cost"), formatMoney(summary?.costUsd || 0))}
         </div>
         ${renderRunToolCalls(toolCalls)}
         ${renderRunMessagePreviews(recentMessages)}
         <div class="run-summary-actions">
-          <button class="ghost-btn mini" type="button" data-run-summary-open-git>查看 Git 变更</button>
-          <button class="ghost-btn mini danger" type="button" data-run-summary-rollback="${escapeAttr(runId)}" title="${escapeAttr(checkpoint.reason)}" ${checkpoint.available && runId && !state.runRollbackBusy ? "" : "disabled"}>${state.runRollbackBusy ? "回滚中…" : "回滚到开始前"}</button>
-          <button class="ghost-btn mini" type="button" data-run-summary-copy="${escapeAttr(runId)}" ${summary ? "" : "disabled"}>复制摘要</button>
-          <button class="ghost-btn mini" type="button" data-run-summary-refresh="${escapeAttr(runId)}" ${runId ? "" : "disabled"}>刷新回顾</button>
+          <button class="ghost-btn mini" type="button" data-run-summary-open-git>${escapeHtml(cr("run.gitChanges"))}</button>
+          <button class="ghost-btn mini danger" type="button" data-run-summary-rollback="${escapeAttr(runId)}" title="${escapeAttr(checkpoint.reason)}" ${checkpoint.available && runId && !state.runRollbackBusy ? "" : "disabled"}>${escapeHtml(state.runRollbackBusy ? cr("run.rollingBack") : cr("run.rollback"))}</button>
+          <button class="ghost-btn mini" type="button" data-run-summary-copy="${escapeAttr(runId)}" ${summary ? "" : "disabled"}>${escapeHtml(cr("run.copySummary"))}</button>
+          <button class="ghost-btn mini" type="button" data-run-summary-refresh="${escapeAttr(runId)}" ${runId ? "" : "disabled"}>${escapeHtml(cr("run.refreshReview"))}</button>
         </div>
       </section>
     `;
@@ -348,10 +373,10 @@ export function createChatRenderingController({
 
   function renderRunCheckpoint(run, checkpoint = runCheckpointState(run)) {
     if (!run) return "";
-    const head = run.baseHead ? shortGitHash(run.baseHead) : "未记录";
+    const head = run.baseHead ? shortGitHash(run.baseHead) : cr("run.checkpointNotRecorded");
     return `
       <div class="run-summary-checkpoint ${escapeAttr(checkpoint.tone)}">
-        <span>Git checkpoint</span>
+        <span>${escapeHtml(cr("run.checkpoint"))}</span>
         <strong>${escapeHtml(head)}</strong>
         <em>${escapeHtml(checkpoint.reason)}</em>
       </div>
@@ -361,36 +386,36 @@ export function createChatRenderingController({
   function runCheckpointState(run) {
     const state = String(run?.checkpointState || "").trim();
     if (state === "rolled_back") {
-      return { available: false, tone: "muted", reason: "此 Run 已回滚，不能重复执行。" };
+      return { available: false, tone: "muted", reason: cr("run.checkpointRolledBack") };
     }
     if (state === "rolling_back") {
-      return { available: false, tone: "warn", reason: "此 Run 正在回滚，等待状态更新后再操作。" };
+      return { available: false, tone: "warn", reason: cr("run.checkpointRollingBack") };
     }
     if (state === "invalid") {
-      return { available: false, tone: "warn", reason: run?.checkpointError || "本轮 checkpoint 校验失败，不能安全自动回滚。" };
+      return { available: false, tone: "warn", reason: run?.checkpointError || cr("run.checkpointInvalid") };
     }
     if (state === "capturing") {
-      return { available: false, tone: "warn", reason: "工具变更仍在采集，checkpoint 尚不可回滚。" };
+      return { available: false, tone: "warn", reason: cr("run.checkpointCapturing") };
     }
     if (state === "tracking") {
-      return { available: false, tone: "muted", reason: "本轮仍在跟踪工具变更，完成后才可回滚。" };
+      return { available: false, tone: "muted", reason: cr("run.checkpointTracking") };
     }
     if (!run?.baseHead) {
-      return { available: false, tone: "muted", reason: "本轮开始时工作区不干净或无法读取 Git HEAD，不能自动回滚。" };
+      return { available: false, tone: "muted", reason: cr("run.checkpointDirtyWorkspace") };
     }
     if (run.endHead && run.endHead !== run.baseHead) {
-      return { available: false, tone: "warn", reason: "本轮产生了提交，自动回滚不会跨 commit 执行。" };
+      return { available: false, tone: "warn", reason: cr("run.checkpointHasCommit") };
     }
     if (state === "none") {
-      return { available: false, tone: "muted", reason: "本轮未完成可验证的工具调用归属快照，不能安全自动回滚。" };
+      return { available: false, tone: "muted", reason: cr("run.checkpointNoSnapshot") };
     }
     if (state !== "ready") {
-      return { available: false, tone: "warn", reason: "checkpoint 状态未知，已禁用自动回滚。" };
+      return { available: false, tone: "warn", reason: cr("run.checkpointUnknown") };
     }
     if (!run.gitSnapshotAt || !run.checkpointRepoRoot) {
-      return { available: false, tone: "muted", reason: "本轮未完成可验证的工具调用归属快照，不能安全自动回滚。" };
+      return { available: false, tone: "muted", reason: cr("run.checkpointNoSnapshot") };
     }
-    return { available: true, tone: "ok", reason: `仅恢复可归属到本 Run 工具调用、且之后未变化的文件到 ${shortGitHash(run.baseHead)}；不会清理其他未跟踪文件。` };
+    return { available: true, tone: "ok", reason: cr("run.checkpointRestoreHint", { hash: shortGitHash(run.baseHead) }) };
   }
 
   function shortGitHash(hash) {
@@ -404,16 +429,16 @@ export function createChatRenderingController({
   }
 
   function renderRunToolCalls(toolCalls) {
-    if (!toolCalls.length) return `<div class="run-summary-empty">本轮没有工具调用。</div>`;
+    if (!toolCalls.length) return `<div class="run-summary-empty">${escapeHtml(cr("run.noToolCalls"))}</div>`;
     const visible = toolCalls.slice(0, 6);
-    const more = toolCalls.length > visible.length ? `<div class="run-summary-more">另有 ${escapeHtml(formatNumber(toolCalls.length - visible.length))} 个工具调用未显示。</div>` : "";
+    const more = toolCalls.length > visible.length ? `<div class="run-summary-more">${escapeHtml(cr("run.moreToolCalls", { count: formatNumber(toolCalls.length - visible.length) }))}</div>` : "";
     return `
       <div class="run-summary-section">
-        <div class="run-summary-section-title">工具调用</div>
+        <div class="run-summary-section-title">${escapeHtml(cr("run.toolCalls"))}</div>
         <div class="run-tool-list">
           ${visible.map((call) => `
             <div class="run-tool-row ${escapeAttr(toolStatusClass(call.status))}">
-              <span class="run-tool-name">${escapeHtml(call.toolName || "tool")}</span>
+              <span class="run-tool-name">${escapeHtml(call.toolName || cr("defaults.tool"))}</span>
               <span class="run-tool-status">${escapeHtml(toolStatusLabel(call.status))}</span>
               <span class="run-tool-preview">${escapeHtml(toolCallPreview(call))}</span>
             </div>
@@ -428,11 +453,11 @@ export function createChatRenderingController({
     if (!messages.length) return "";
     return `
       <div class="run-summary-section">
-        <div class="run-summary-section-title">最近消息</div>
+        <div class="run-summary-section-title">${escapeHtml(cr("run.recentMessages"))}</div>
         <div class="run-message-preview-list">
           ${messages.slice(-3).map((message) => `
             <div class="run-message-preview">
-              <span>${escapeHtml(message.role || "message")}</span>
+              <span>${escapeHtml(message.role || cr("defaults.message"))}</span>
               <strong>${escapeHtml(compactText(visibleMessageText(message), 120))}</strong>
             </div>
           `).join("")}
@@ -462,7 +487,7 @@ export function createChatRenderingController({
     root.querySelectorAll("[data-run-summary-open-git]").forEach((button) => {
       button.addEventListener("click", () => {
         if (typeof openGitModal === "function") openGitModal();
-        else showToast("Git 面板暂不可用。", "warn");
+        else showToast(cr("run.gitUnavailable"), "warn");
       });
     });
   }
@@ -472,13 +497,13 @@ export function createChatRenderingController({
     const run = state.activeRunSummary?.run;
     const checkpoint = runCheckpointState(run);
     if (!agentId || !runId || !checkpoint.available) {
-      showToast(checkpoint.reason || "当前 Run 没有可用 checkpoint。", "warn", { force: true });
+      showToast(checkpoint.reason || cr("run.noCheckpoint"), "warn", { force: true });
       return;
     }
     const preview = await api(`/api/agents/${agentId}/runs/${encodeURIComponent(runId)}/rollback`);
     if (state.agent?.id !== agentId) return;
     if (!preview?.available) {
-      const reason = preview?.reason || "当前 Run 没有可用 checkpoint。";
+      const reason = preview?.reason || cr("run.noCheckpoint");
       state.runSummaryError = reason;
       renderRunSummaryCard();
       showToast(reason, "warn", { force: true });
@@ -502,20 +527,20 @@ export function createChatRenderingController({
       try {
         await loadRunSummary(runId);
       } catch (err) {
-        notifyTerminal?.(`[warn] Run 回顾刷新失败：${err.message || err}\n`);
+        notifyTerminal?.(`[warn] ${cr("run.refreshFailed", { message: err.message || err })}\n`);
       }
       const rollbackWarning = String(result?.warning || "").trim();
       if (rollbackWarning) {
         notifyTerminal?.(`[warn] ${rollbackWarning}\n`);
-        showToast("已完成回滚，但 Git 状态刷新失败；请稍后手动刷新。", "warn", { force: true });
+        showToast(cr("run.rollbackRefreshFailed"), "warn", { force: true });
       } else {
-        showToast("已回滚到任务开始前 checkpoint。", "success", { force: true });
+        showToast(cr("run.rollbackComplete"), "success", { force: true });
       }
       if (typeof refreshGitWorkflow === "function") {
         try {
           await refreshGitWorkflow({ silent: true });
         } catch (err) {
-          notifyTerminal?.(`[warn] Git 状态刷新失败：${err.message || err}\n`);
+          notifyTerminal?.(`[warn] ${cr("run.gitRefreshFailed", { message: err.message || err })}\n`);
         }
       }
     } catch (err) {
@@ -535,54 +560,54 @@ export function createChatRenderingController({
     const restorePaths = Array.isArray(preview?.restorePaths) ? preview.restorePaths : [];
     const deletePaths = Array.isArray(preview?.deletePaths) ? preview.deletePaths : [];
     const lines = [
-      "确认回滚到本轮开始前的 Git checkpoint？",
+      cr("run.rollbackConfirm"),
       "",
-      `将恢复 ${Number(preview?.restoreCount || 0)} 个 tracked/staged 路径，并删除 ${Number(preview?.deleteCount || 0)} 个本 Run 新建未跟踪路径。`,
+      cr("run.rollbackSummary", { restoreCount: Number(preview?.restoreCount || 0), deleteCount: Number(preview?.deleteCount || 0) }),
     ];
-    if (restorePaths.length) lines.push("", "恢复路径：", ...restorePaths.map((path) => `- ${path}`));
-    if (deletePaths.length) lines.push("", "删除路径：", ...deletePaths.map((path) => `- ${path}`));
-    if (preview?.truncated) lines.push("", "仅显示部分路径；服务端会在执行前重新验证全部路径。");
-    lines.push("", "不会清理其他文件、不会 push，也不会跨 commit 回滚。");
+    if (restorePaths.length) lines.push("", cr("run.restorePaths"), ...restorePaths.map((path) => `- ${path}`));
+    if (deletePaths.length) lines.push("", cr("run.deletePaths"), ...deletePaths.map((path) => `- ${path}`));
+    if (preview?.truncated) lines.push("", cr("run.rollbackTruncated"));
+    lines.push("", cr("run.rollbackSafety"));
     return lines.join("\n");
   }
 
   async function copyActiveRunSummaryMarkdown(button) {
     const summary = state.activeRunSummary;
     if (!summary?.run || !copyToClipboard) {
-      showToast("当前没有可复制的 Run 回顾。", "warn");
+      showToast(cr("run.noSummary"), "warn");
       return;
     }
-    const original = button?.textContent || "复制摘要";
+    const original = button?.textContent || cr("run.copySummary");
     const ok = await copyToClipboard(runSummaryMarkdown(summary));
     if (button) {
-      button.textContent = ok ? "已复制" : "复制失败";
+      button.textContent = ok ? cr("message.copied") : cr("message.copyFailed");
       window.setTimeout(() => { button.textContent = original; }, 1200);
     }
-    showToast(ok ? "Run 回顾 Markdown 已复制。" : "复制 Run 回顾失败。", ok ? "success" : "warn");
+    showToast(ok ? cr("run.summaryCopied") : cr("run.summaryCopyFailed"), ok ? "success" : "warn");
   }
 
   function runSummaryMarkdown(summary) {
     const run = summary.run || {};
     const lines = [
-      `# Run 回顾 ${run.id || ""}`.trim(),
+      `# ${cr("run.markdown.title", { id: run.id || "" })}`.trim(),
       "",
-      `- 状态：${run.status || "unknown"}`,
-      `- 时间：${runTimeRange(run)}`,
-      `- 消息：${formatNumber(summary.messageCount || 0)}`,
-      `- 工具调用：${formatNumber(summary.toolCallCount || 0)}（待审批 ${formatNumber(summary.pendingApprovals || 0)}，拒绝 ${formatNumber(summary.deniedToolCalls || 0)}，错误 ${formatNumber(summary.errorToolCalls || 0)}）`,
-      `- API 请求：${formatNumber(summary.apiRequestCount || 0)}`,
-      `- Tokens：${formatNumber(summary.inputTokens || 0)} in / ${formatNumber(summary.outputTokens || 0)} out`,
-      `- 成本：${formatMoney(summary.costUsd || 0)}`,
+      `- ${cr("run.markdown.status", { status: run.status || "unknown" })}`,
+      `- ${cr("run.markdown.time", { time: runTimeRange(run) })}`,
+      `- ${cr("run.markdown.messages", { count: formatNumber(summary.messageCount || 0) })}`,
+      `- ${cr("run.markdown.toolCalls", { count: formatNumber(summary.toolCallCount || 0), pending: formatNumber(summary.pendingApprovals || 0), denied: formatNumber(summary.deniedToolCalls || 0), errors: formatNumber(summary.errorToolCalls || 0) })}`,
+      `- ${cr("run.markdown.apiRequests", { count: formatNumber(summary.apiRequestCount || 0) })}`,
+      `- ${cr("run.markdown.tokens", { input: formatNumber(summary.inputTokens || 0), output: formatNumber(summary.outputTokens || 0) })}`,
+      `- ${cr("run.markdown.cost", { cost: formatMoney(summary.costUsd || 0) })}`,
       "",
-      "## 工具调用",
+      `## ${cr("run.markdown.toolsHeading")}`,
     ];
     const toolCalls = Array.isArray(summary.toolCalls) ? summary.toolCalls : [];
-    if (!toolCalls.length) lines.push("- 无");
-    else toolCalls.forEach((call) => lines.push(`- ${call.toolName || "tool"}：${call.status || "unknown"}${call.errorMessage ? ` — ${call.errorMessage}` : ""}`));
+    if (!toolCalls.length) lines.push(`- ${cr("run.markdown.none")}`);
+    else toolCalls.forEach((call) => lines.push(`- ${call.toolName || cr("defaults.tool")}：${call.status || "unknown"}${call.errorMessage ? ` — ${call.errorMessage}` : ""}`));
     const messages = Array.isArray(summary.recentMessages) ? summary.recentMessages : [];
     if (messages.length) {
-      lines.push("", "## 最近消息");
-      messages.slice(-6).forEach((message) => lines.push(`- ${message.role || "message"}: ${compactText(visibleMessageText(message), 180)}`));
+      lines.push("", `## ${cr("run.markdown.recentMessagesHeading")}`);
+      messages.slice(-6).forEach((message) => lines.push(`- ${message.role || cr("defaults.message")}: ${compactText(visibleMessageText(message), 180)}`));
     }
     return lines.join("\n");
   }
@@ -593,14 +618,14 @@ export function createChatRenderingController({
 
   function runStatusLabel(status) {
     const value = String(status || "unknown");
-    if (value === "completed") return "任务已完成";
-    if (value === "error") return "任务失败";
-    if (value === "interrupted") return "任务已中断";
-    if (value === "superseded") return "任务已被新请求替换";
-    if (value === "running") return "任务运行中";
-    if (value === "pending") return "任务等待运行";
-    if (value === "loading") return "正在加载任务回顾";
-    return "任务状态未知";
+    if (value === "completed") return cr("run.status.completed");
+    if (value === "error") return cr("run.status.error");
+    if (value === "interrupted") return cr("run.status.interrupted");
+    if (value === "superseded") return cr("run.status.superseded");
+    if (value === "running") return cr("run.status.running");
+    if (value === "pending") return cr("run.status.pending");
+    if (value === "loading") return cr("run.status.loading");
+    return cr("run.status.unknown");
   }
 
   function runStatusClass(status) {
@@ -613,10 +638,10 @@ export function createChatRenderingController({
 
   function toolStatusLabel(status) {
     const value = String(status || "unknown");
-    if (value === "completed") return "完成";
-    if (value === "pending_approval") return "待审批";
-    if (value === "denied") return "拒绝";
-    if (value === "error") return "错误";
+    if (value === "completed") return cr("run.toolStatus.completed");
+    if (value === "pending_approval") return cr("run.toolStatus.pendingApproval");
+    if (value === "denied") return cr("run.toolStatus.denied");
+    if (value === "error") return cr("run.toolStatus.error");
     return value;
   }
 
@@ -629,9 +654,9 @@ export function createChatRenderingController({
   }
 
   function runTimeRange(run) {
-    if (!run) return "暂无时间";
+    if (!run) return cr("run.noTime");
     const start = formatTimestamp(run.startedAt || run.createdAt);
-    const end = run.completedAt ? formatTimestamp(run.completedAt) : "未完成";
+    const end = run.completedAt ? formatTimestamp(run.completedAt) : cr("run.unfinished");
     return `${start} → ${end}`;
   }
 
@@ -643,7 +668,7 @@ export function createChatRenderingController({
 
   function compactText(text, max = 140) {
     const value = String(text || "").replace(/\s+/g, " ").trim();
-    if (!value) return "（空）";
+    if (!value) return cr("defaults.empty");
     return value.length > max ? `${value.slice(0, max - 1)}…` : value;
   }
 
@@ -666,7 +691,7 @@ export function createChatRenderingController({
   function rememberToolStarted(event) {
     const data = event.data || {};
     const toolUseId = data.toolUseId || data.tool_use_id;
-    const toolName = data.toolName || "tool";
+    const toolName = data.toolName || cr("defaults.tool");
     if (!toolUseId || toolName !== "Bash") return;
     state.liveToolOutputs = {
       ...(state.liveToolOutputs || {}),
@@ -693,7 +718,7 @@ export function createChatRenderingController({
       agentId: event.agentId || state.agent?.id,
       runId: data.runId || "",
       toolUseId,
-      toolName: data.toolName || "Bash",
+      toolName: data.toolName || cr("defaults.bash"),
       risk: data.risk || "exec",
       status: "running",
       output: "",
@@ -705,7 +730,7 @@ export function createChatRenderingController({
       ...(state.liveToolOutputs || {}),
       [toolUseId]: {
         ...current,
-        toolName: data.toolName || current.toolName || "Bash",
+        toolName: data.toolName || current.toolName || cr("defaults.bash"),
         status: current.status || "running",
         output: nextOutput,
         truncated: Boolean(current.truncated || data.truncated),
@@ -750,7 +775,7 @@ export function createChatRenderingController({
     const outputs = currentLiveToolOutputList();
     if (!outputs.length) return "";
     return `
-      <div class="live-tool-output-stack" data-live-tool-output-stack>
+      <div class="live-tool-output-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-live-tool-output-stack>
         ${outputs.map(renderLiveToolOutputCard).join("")}
       </div>
     `;
@@ -758,18 +783,18 @@ export function createChatRenderingController({
 
   function renderLiveToolOutputCard(item) {
     const status = item.status || "running";
-    const output = item.output || "等待命令输出…";
+    const output = item.output || cr("liveOutput.waiting");
     return `
-      <section class="live-tool-output-card ${escapeAttr(toolStatusClass(status))}" data-live-tool-output-card="${escapeAttr(item.toolUseId || "")}">
+      <section class="live-tool-output-card chat-flow-item chat-flow-left chat-report-card ${escapeAttr(toolStatusClass(status))}" data-chat-alignment="left" data-chat-report="tool-output" data-live-tool-output-card="${escapeAttr(item.toolUseId || "")}">
         <div class="live-tool-output-head">
           <div>
-            <div class="live-tool-output-title">${escapeHtml(item.toolName || "Bash")} 实时输出</div>
+            <div class="live-tool-output-title">${escapeHtml(cr("liveOutput.title", { toolName: item.toolName || cr("defaults.bash") }))}</div>
             <div class="live-tool-output-meta">${escapeHtml(status)}${item.durationMs ? ` · ${escapeHtml(formatNumber(item.durationMs))} ms` : ""}${item.runId ? ` · ${escapeHtml(shortRunId(item.runId))}` : ""}</div>
           </div>
-          <span class="live-tool-output-dot">${status === "running" ? "运行中" : toolStatusLabel(status)}</span>
+          <span class="live-tool-output-dot">${status === "running" ? cr("liveOutput.running") : toolStatusLabel(status)}</span>
         </div>
         <pre class="live-tool-output-body">${escapeHtml(output)}</pre>
-        ${item.truncated ? `<div class="live-tool-output-note">实时输出过长，已截断；最终结果仍会保存为工具结果摘要。</div>` : ""}
+        ${item.truncated ? `<div class="live-tool-output-note">${escapeHtml(cr("liveOutput.truncated"))}</div>` : ""}
       </section>
     `;
   }
@@ -798,7 +823,7 @@ export function createChatRenderingController({
     const max = 40000;
     const value = String(text || "");
     if (value.length <= max) return value;
-    return `...[earlier output truncated]\n${value.slice(value.length - max)}`;
+    return `${cr("liveOutput.earlierTruncated")}\n${value.slice(value.length - max)}`;
   }
 
   function currentApprovalList() {
@@ -812,7 +837,7 @@ export function createChatRenderingController({
     const approvals = currentApprovalList();
     if (!approvals.length) return "";
     return `
-      <div class="approval-stack" data-approval-stack>
+      <div class="approval-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-approval-stack>
         ${approvals.map(renderApprovalCard).join("")}
       </div>
     `;
@@ -822,25 +847,25 @@ export function createChatRenderingController({
     const risk = approval.risk || "exec";
     const isDanger = risk === "danger";
     const command = approval.command || approval.input?.command || JSON.stringify(approval.input || {});
-    const title = isDanger ? "危险命令已被阻止" : "需要批准执行命令";
-    const warning = approval.warning || (isDanger ? "该命令被安全策略阻止。" : "请确认命令安全后再允许。");
+    const title = isDanger ? cr("approval.blockedTitle") : cr("approval.requiredTitle");
+    const warning = approval.warning || (isDanger ? cr("approval.blockedWarning") : cr("approval.warning"));
     return `
-      <section class="approval-card ${isDanger ? "danger" : ""}" data-approval-card="${escapeAttr(approval.toolUseId || "")}">
+      <section class="approval-card chat-flow-item chat-flow-left chat-report-card ${isDanger ? "danger" : ""}" data-chat-alignment="left" data-chat-report="tool-approval" data-approval-card="${escapeAttr(approval.toolUseId || "")}">
         <div class="approval-card-head">
           <div>
             <div class="approval-title">${escapeHtml(title)}</div>
-            <div class="approval-meta">${escapeHtml(approval.toolName || "tool")} · ${escapeHtml(risk)} · ${escapeHtml(shortPath(approval.cwd || state.agent?.cwd || ""))}</div>
+            <div class="approval-meta">${escapeHtml(approval.toolName || cr("defaults.tool"))} · ${escapeHtml(risk)} · ${escapeHtml(shortPath(approval.cwd || state.agent?.cwd || ""))}</div>
           </div>
           <span class="approval-risk">${escapeHtml(risk)}</span>
         </div>
         <pre class="approval-command">${escapeHtml(command)}</pre>
         <div class="approval-warning">${escapeHtml(warning)}</div>
-        ${approval.expiresAt ? `<div class="approval-meta">到期：${escapeHtml(formatTimestamp(approval.expiresAt))}</div>` : ""}
-        ${isDanger ? `<div class="approval-blocked-note">后端已硬阻断该命令，无法通过 UI 放行。</div>` : `
+        ${approval.expiresAt ? `<div class="approval-meta">${escapeHtml(cr("approval.expires", { time: formatTimestamp(approval.expiresAt) }))}</div>` : ""}
+        ${isDanger ? `<div class="approval-blocked-note">${escapeHtml(cr("approval.blockedNote"))}</div>` : `
           <div class="approval-actions">
-            <button class="ghost-btn mini" type="button" data-approval-decision="allow_once" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">允许一次</button>
-            <button class="ghost-btn mini" type="button" data-approval-decision="allow_session" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">本次会话都允许</button>
-            <button class="ghost-btn mini danger" type="button" data-approval-decision="deny" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">拒绝</button>
+            <button class="ghost-btn mini" type="button" data-approval-decision="allow_once" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">${escapeHtml(cr("approval.allowOnce"))}</button>
+            <button class="ghost-btn mini" type="button" data-approval-decision="allow_session" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">${escapeHtml(cr("approval.allowSession"))}</button>
+            <button class="ghost-btn mini danger" type="button" data-approval-decision="deny" data-tool-use-id="${escapeAttr(approval.toolUseId || "")}">${escapeHtml(cr("approval.deny"))}</button>
           </div>
         `}
       </section>
@@ -884,8 +909,8 @@ export function createChatRenderingController({
       delete next[toolUseId];
       state.pendingToolApprovals = next;
       renderApprovalCards();
-      showToast(decision === "deny" ? "已拒绝工具执行。" : "已批准工具执行。", decision === "deny" ? "warn" : "success");
-      notifyTerminal(`[tool] ${decision}: ${approval?.toolName || "tool"} ${toolUseId}\n`);
+      showToast(decision === "deny" ? cr("approval.deniedToast") : cr("approval.approvedToast"), decision === "deny" ? "warn" : "success");
+      notifyTerminal(`[tool] ${decision}: ${approval?.toolName || cr("defaults.tool")} ${toolUseId}\n`);
       scheduleMessageRefresh(120, state.agent.id);
     } catch (err) {
       buttons.forEach((node) => { node.disabled = false; });
@@ -903,7 +928,7 @@ export function createChatRenderingController({
       const toolUseId = call?.toolUseId || call?.tool_use_id;
       if (!toolUseId) continue;
       const input = call.inputJson && typeof call.inputJson === "object" ? call.inputJson : {};
-      const toolName = call.toolName || "tool";
+      const toolName = call.toolName || cr("defaults.tool");
       const lowerToolName = String(toolName).toLowerCase();
       next[toolUseId] = {
         ...call,
@@ -913,7 +938,7 @@ export function createChatRenderingController({
         command: input.command || input.file_path || input.path || JSON.stringify(input),
         cwd: input.cwd || state.agent?.cwd || "",
         risk: lowerToolName === "bash" ? "exec" : (["write", "edit"].includes(lowerToolName) ? "write" : "read"),
-        warning: call.permissionSuggestions || call.permissionDecisionReason || "此工具调用正在等待审批。",
+        warning: call.permissionSuggestions || call.permissionDecisionReason || cr("approval.awaiting"),
         createdAt: call.createdAt || new Date().toISOString(),
       };
     }
@@ -978,7 +1003,7 @@ export function createChatRenderingController({
       <a class="attachment-card" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">
         ${thumb}
         <div class="attachment-meta">
-          <div class="attachment-name" title="${escapeAttr(attachment.filename || "附件")}">${escapeHtml(attachment.filename || "附件")}</div>
+          <div class="attachment-name" title="${escapeAttr(attachment.filename || cr("attachment.attachment"))}">${escapeHtml(attachment.filename || cr("attachment.attachment"))}</div>
           <div class="attachment-subtitle">${escapeHtml(subtitle)}</div>
         </div>
       </a>
@@ -992,16 +1017,16 @@ export function createChatRenderingController({
   function messageAttachmentsMarkdown(message) {
     const attachments = Array.isArray(message.attachments) ? message.attachments : [];
     if (!attachments.length) return "";
-    const lines = attachments.map((attachment) => `- ${attachment.filename || "附件"}（${attachmentKindLabel(attachment.kind)}, ${formatBytes(attachment.sizeBytes || 0)}）`);
-    return `\n\n附件：\n${lines.join("\n")}`;
+    const lines = attachments.map((attachment) => `- ${cr("attachment.line", { filename: attachment.filename || cr("attachment.attachment"), kind: attachmentKindLabel(attachment.kind), size: formatBytes(attachment.sizeBytes || 0) })}`);
+    return `\n\n${cr("attachment.heading")}\n${lines.join("\n")}`;
   }
 
   function attachmentKindLabel(kind) {
-    if (kind === "image") return "图片";
-    if (kind === "pdf") return "PDF";
-    if (kind === "docx") return "Word";
-    if (kind === "text") return "文本";
-    return "文件";
+    if (kind === "image") return cr("attachment.images");
+    if (kind === "pdf") return cr("attachment.pdf");
+    if (kind === "docx") return cr("attachment.docx");
+    if (kind === "text") return cr("attachment.text");
+    return cr("attachment.file");
   }
 
   function updateConversationCopyButton() {
@@ -1009,25 +1034,25 @@ export function createChatRenderingController({
     if (!button) return;
     const count = Array.isArray(state.currentMessages) ? state.currentMessages.length : 0;
     button.disabled = count === 0;
-    button.title = count ? `复制当前 ${count} 条消息为 Markdown` : "当前没有可复制的对话";
+    button.title = count ? cr("conversation.copyTitle", { count }) : cr("conversation.noCopyTitle");
   }
 
   function conversationMarkdown() {
     const messages = Array.isArray(state.currentMessages) ? state.currentMessages : [];
     const title = state.project?.name || state.agent?.title || "Autoto Conversation";
     const meta = [
-      `# ${title} 对话导出`,
+      `# ${cr("conversation.exportTitle", { title })}`,
       "",
-      `- 导出时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
-      `- 项目：${state.project?.name || "未选择"}`,
-      `- 路径：${state.agent?.cwd || state.project?.gitPath || "未设置"}`,
-      `- 代理：${state.agent?.title || state.agent?.id || "未选择"}`,
-      `- 模型：${state.agent?.model || selectedModelValue() || "未选择"}`,
+      `- ${cr("conversation.exportedAt", { time: formatTimestamp(new Date()) })}`,
+      `- ${cr("conversation.project", { project: state.project?.name || cr("conversation.unselected") })}`,
+      `- ${cr("conversation.path", { path: state.agent?.cwd || state.project?.gitPath || cr("conversation.unset") })}`,
+      `- ${cr("conversation.agent", { agent: state.agent?.title || state.agent?.id || cr("conversation.unselected") })}`,
+      `- ${cr("conversation.model", { model: state.agent?.model || selectedModelValue() || cr("conversation.unselected") })}`,
       "",
     ];
     const body = messages.map((message, index) => {
-      const role = String(message.role || "message").toUpperCase();
-      const text = visibleMessageText(message).trim() || "（空消息）";
+      const role = String(message.role || cr("defaults.message")).toUpperCase();
+      const text = visibleMessageText(message).trim() || cr("conversation.emptyMessage");
       return `## ${index + 1}. ${role}\n\n${text}${messageAttachmentsMarkdown(message)}`;
     });
     return [...meta, ...body].join("\n");
@@ -1035,15 +1060,15 @@ export function createChatRenderingController({
 
   async function copyCurrentConversationMarkdown() {
     if (!state.currentMessages?.length) {
-      showToast("当前没有可复制的对话。", "warn");
+      showToast(cr("conversation.none"), "warn");
       return;
     }
     if (await copyToClipboard(conversationMarkdown())) {
-      showToast("当前对话 Markdown 已复制。", "success");
-      notifyTerminal("[info] 已复制当前对话 Markdown。\n");
+      showToast(cr("conversation.copied"), "success");
+      notifyTerminal(`[info] ${cr("conversation.copiedTerminal")}\n`);
       return;
     }
-    showToast("复制当前对话失败，请稍后重试。", "warn");
+    showToast(cr("conversation.copyFailed"), "warn");
   }
 
   function clearMessageRefreshTimer(agentId) {
@@ -1060,7 +1085,7 @@ export function createChatRenderingController({
     clearMessageRefreshTimer(agentId);
     const timer = window.setTimeout(() => {
       clearMessageRefreshTimer(agentId);
-      loadMessages(agentId).catch((err) => notifyTerminal(`[warn] 消息刷新失败：${err.message || err}\n`));
+      loadMessages(agentId).catch((err) => notifyTerminal(`[warn] ${cr("conversation.refreshFailed", { message: err.message || err })}\n`));
     }, Math.max(0, delay));
     state.messageRefreshTimersByAgent = { ...(state.messageRefreshTimersByAgent || {}), [agentId]: timer };
   }
@@ -1068,19 +1093,19 @@ export function createChatRenderingController({
   function friendlyMessageText(text) {
     const value = String(text || "");
     if (value.includes("OpenAI official provider is not configured")) {
-      return "当前 OpenAI 模型尚未配置 API Key。请在启动 Autoto 前设置 `OPENAI_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
+      return cr("provider.openAI");
     }
     if (value.includes("Anthropic provider is not configured")) {
-      return "当前 Anthropic 模型尚未配置 API Key。请在启动 Autoto 前设置 `ANTHROPIC_API_KEY`，然后重启服务；或在下方模型菜单选择已配置的模型。";
+      return cr("provider.anthropic");
     }
     if (value.includes("OpenAI-compatible provider is not configured")) {
-      return "当前 OpenAI-compatible 模型尚未配置 API Key。请设置 `OPENAI_COMPATIBLE_API_KEY` 或 `OPENAI_API_KEY`，并确认 Base URL 后重启服务。";
+      return cr("provider.compatible");
     }
     if (value.includes("cliproxyapi provider request failed") && value.includes("127.0.0.1:8317")) {
-      return "无法连接本地 CLIProxyAPI。请先启动 CLIProxyAPI，并确认它监听 `http://127.0.0.1:8317/v1`；如果你改过端口，请设置 `CLIPROXYAPI_BASE_URL` 后重启 Autoto。";
+      return cr("provider.cliProxyUnavailable");
     }
     if (value.includes("cliproxyapi model request failed: 401")) {
-      return "CLIProxyAPI 返回 401。请确认 CLIProxyAPI 的 `api-keys` 配置；如启用了客户端鉴权，请在启动 Autoto 前设置 `CLIPROXYAPI_API_KEY`。";
+      return cr("provider.cliProxyUnauthorized");
     }
     return value;
   }
@@ -1094,7 +1119,7 @@ export function createChatRenderingController({
       if (match.index > lastIndex) blocks.push(renderMarkdownText(text.slice(lastIndex, match.index)));
       const lang = (match[1] || "text").trim() || "text";
       const code = match[2] || "";
-      blocks.push(`<div class="code-block"><div class="code-head"><span>${escapeHtml(lang)}</span><button class="copy-code" type="button" data-code="${escapeAttr(code)}">复制</button></div><pre><code>${highlightCode(code, lang)}</code></pre></div>`);
+      blocks.push(`<div class="code-block"><div class="code-head"><span>${escapeHtml(lang)}</span><button class="copy-code" type="button" data-code="${escapeAttr(code)}">${escapeHtml(cr("code.copy"))}</button></div><pre><code>${highlightCode(code, lang)}</code></pre></div>`);
       lastIndex = pattern.lastIndex;
     }
     if (lastIndex < text.length) blocks.push(renderMarkdownText(text.slice(lastIndex)));
@@ -1173,12 +1198,12 @@ export function createChatRenderingController({
         const text = state.messageCopyTexts[index] || "";
         const original = button.textContent;
         if (text && await copyToClipboard(text)) {
-          button.textContent = "已复制";
-          showToast("消息原文已复制。", "success");
-          notifyTerminal("[info] 已复制消息原文。\n");
+          button.textContent = cr("message.copied");
+          showToast(cr("message.copiedToast"), "success");
+          notifyTerminal(`[info] ${cr("message.copiedToast")}\n`);
         } else {
-          button.textContent = "复制失败";
-          showToast("复制消息失败，请手动选择文本复制。", "warn");
+          button.textContent = cr("message.copyFailed");
+          showToast(cr("message.copyFailedToast"), "warn");
         }
         window.setTimeout(() => { button.textContent = original; }, 1200);
       });
@@ -1190,8 +1215,8 @@ export function createChatRenderingController({
       button.addEventListener("click", async () => {
         const ok = await copyToClipboard(button.dataset.code || "");
         const original = button.textContent;
-        button.textContent = ok ? "已复制" : "复制失败";
-        if (!ok) showToast("复制代码失败，请手动选择文本复制。", "warn");
+        button.textContent = ok ? cr("code.copied") : cr("code.copyFailed");
+        if (!ok) showToast(cr("code.copyFailedToast"), "warn");
         setTimeout(() => { button.textContent = original; }, 1200);
       });
     });

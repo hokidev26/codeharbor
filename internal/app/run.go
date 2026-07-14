@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,15 +12,35 @@ import (
 	"time"
 
 	"autoto/internal/agent"
+	"autoto/internal/audit"
+	"autoto/internal/automation"
+	"autoto/internal/channels"
+	"autoto/internal/codexauth"
+	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/integrations"
+	"autoto/internal/preview"
 	"autoto/internal/providers"
+	"autoto/internal/runtime"
+	"autoto/internal/secrets"
 	"autoto/internal/server"
 	"autoto/internal/tools"
 )
 
 type Options struct {
 	LegacyCommand bool
+}
+
+type channelApprovalAdapter struct {
+	runner *agent.Runner
+}
+
+func (a channelApprovalAdapter) ApproveToolCall(ctx context.Context, agentID, toolUseID string, decision channels.ApprovalDecision) (bool, error) {
+	return a.runner.ApproveToolCall(ctx, agentID, toolUseID, agent.ToolApprovalDecision{
+		Decision: decision.Decision, Reason: decision.Reason, DecidedBy: decision.DecidedBy,
+		PermissionGeneration: decision.PermissionGeneration, PolicyGeneration: decision.PolicyGeneration,
+	})
 }
 
 func Run(options Options) int {
@@ -34,7 +53,7 @@ func Run(options Options) int {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 	if options.LegacyCommand {
-		logger.Warn("codeharbor command is deprecated; use autoto")
+		logger.Warn("codeharbor command is deprecated; use autoto", "replacement", "autoto", "removalVersion", compat.RemovalVersion)
 	}
 
 	resolvedConfigPath, err := config.ResolvePath(*configPath)
@@ -42,10 +61,18 @@ func Run(options Options) int {
 		logger.Error("resolve config", "error", err)
 		return 1
 	}
-	cfg, err := config.Load(resolvedConfigPath)
+	cfg, legacyReport, err := config.LoadWithReport(resolvedConfigPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
 		return 1
+	}
+	if !legacyReport.Empty() {
+		logger.Warn(
+			"legacy compatibility used",
+			"legacy", legacyReport.LegacyNames(),
+			"replacement", legacyReport.Replacements(),
+			"removalVersion", compat.RemovalVersion,
+		)
 	}
 
 	store, err := db.Open(context.Background(), cfg.Paths.DatabasePath)
@@ -54,17 +81,34 @@ func Run(options Options) int {
 		return 1
 	}
 	defer store.Close()
+	runtimeSettings, err := store.GetRuntimeSettings(context.Background())
+	if err != nil {
+		logger.Error("load runtime settings", "error", err)
+		return 1
+	}
 	if err := store.SeedBackends(context.Background(), configuredBackends(cfg.Backends.Instances)); err != nil {
 		logger.Error("seed backends", "error", err)
 		return 1
 	}
 
 	providerRegistry := providers.NewRegistry()
+	providerRegistry.SetAggregateSource(aggregateSourceFromStore(store))
 	for _, providerCfg := range cfg.Providers.Instances {
+		if providerCfg.Disabled {
+			logger.Info("skip disabled provider", "name", providerCfg.Name, "type", providerCfg.Type)
+			continue
+		}
+		providerCfg = providerConfigForRuntime(providerCfg, runtimeSettings)
+		if providerCfg.Type == config.ProviderTypeCodex {
+			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
 		provider, err := providers.NewProvider(providerCfg)
 		if err != nil {
 			logger.Warn("skip unsupported provider", "name", providerCfg.Name, "type", providerCfg.Type, "error", err)
 			continue
+		}
+		if codexProvider, ok := provider.(*providers.CodexProvider); ok {
+			codexProvider.SetAccountTelemetry(store)
 		}
 		providerRegistry.Register(provider)
 	}
@@ -77,14 +121,33 @@ func Run(options Options) int {
 
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
+	runner.SetDefaultReasoningEffort(runtimeSettings.DefaultReasoningEffort)
 	if err := runner.RecoverInterruptedRuns(context.Background()); err != nil {
 		logger.Error("recover interrupted runs", "error", err)
 		return 1
 	}
-	notifier := server.NewWebhookNotifier(store)
-	runner.SetNotifier(notifier)
+	connectionService := integrations.NewConnectionService(store, secrets.EnvResolver{})
+	auditRecorder := audit.NewRecorder(store)
+	automationManager, err := automation.NewManager(automation.Config{Store: store, Runner: runner, Audit: auditRecorder})
+	if err != nil {
+		logger.Error("create automation manager", "error", err)
+		return 1
+	}
+	channelManager, err := channels.New(store, connectionService, channelApprovalAdapter{runner: runner}, toolRegistry)
+	if err != nil {
+		logger.Error("create channel manager", "error", err)
+		return 1
+	}
+	automationManager.SetTelegramSender(channelManager)
+	runner.SetNotifier(automationManager)
+
+	previewManager := preview.NewManager()
 	application := server.New(cfg, store, runner, hub, providerRegistry)
-	application.SetWebhookNotifier(notifier)
+	application.SetToolRegistry(toolRegistry)
+	application.SetAutomationManager(automationManager)
+	application.SetConnectionService(connectionService)
+	application.SetAuditRecorder(auditRecorder)
+	application.SetPreviewManager(previewManager)
 	application.SetConfigPath(resolvedConfigPath)
 
 	httpServer := &http.Server{
@@ -96,22 +159,59 @@ func Run(options Options) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("serve", "error", err)
-			stop()
-		}
-	}()
+	supervisor := runtime.NewSupervisor()
+	httpService := runtime.NewHTTPService(httpServer, func(err error) {
+		logger.Error("serve", "error", err)
+		stop()
+	})
+	if err := registerRuntimeServices(supervisor, previewManager, channelManager, automationManager, httpService); err != nil {
+		logger.Error("register service", "error", err)
+		return 1
+	}
+
+	logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
+	if err := supervisor.Start(ctx); err != nil {
+		logger.Error("start services", "error", err)
+		return 1
+	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+	if err := supervisor.Close(shutdownCtx); err != nil {
 		logger.Error("shutdown", "error", err)
 		return 1
 	}
 	return 0
+}
+
+func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime.Service) error {
+	for _, service := range services {
+		if err := supervisor.Register(service); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func providerConfigForRuntime(providerCfg config.ProviderConfig, settings db.RuntimeSettings) config.ProviderConfig {
+	providerCfg.ClientVersion = config.Version
+	providerCfg.InstallationID = settings.InstallationID
+	return providerCfg
+}
+
+func aggregateSourceFromStore(store *db.Store) providers.AggregateSource {
+	return providers.AggregateSourceFunc(func(ctx context.Context, name string) (providers.AggregateDefinition, error) {
+		aggregate, err := store.GetModelAggregate(ctx, name)
+		if err != nil {
+			return providers.AggregateDefinition{}, err
+		}
+		return providers.AggregateDefinition{
+			Name:    aggregate.Name,
+			Mode:    aggregate.Mode,
+			Members: append([]string(nil), aggregate.Members...),
+		}, nil
+	})
 }
 
 func configuredBackends(backends []config.BackendConfig) []db.Backend {

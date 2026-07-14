@@ -1,43 +1,105 @@
-export function formatNumber(value, locale = "zh-CN") {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number)) return "0";
-  try {
-    return new Intl.NumberFormat(locale || "zh-CN").format(number);
-  } catch {
-    return new Intl.NumberFormat("zh-CN").format(number);
-  }
+import { currentUILocale } from "./i18n.mjs";
+import { getDateTimeFormatter, getNumberFormatter } from "./locale-registry.mjs";
+import { preferencesMessage } from "./messages-preferences.mjs";
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value ?? fallback);
+  return Number.isFinite(number) ? number : fallback;
 }
 
-export function formatBytes(value) {
-  const bytes = Number(value || 0);
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+function normalizeFormatOptions(options = {}) {
+  return typeof options === "string" ? { locale: options } : (options || {});
+}
+
+function regionalOptions(options = {}) {
+  return { locale: options.locale, timezone: options.timezone ?? options.timeZone };
+}
+
+export function formatNumber(value, options = {}) {
+  options = normalizeFormatOptions(options);
+  const number = finiteNumber(value);
+  const formatter = getNumberFormatter({
+    minimumFractionDigits: options.minimumFractionDigits,
+    maximumFractionDigits: options.maximumFractionDigits,
+    notation: options.notation,
+    signDisplay: options.signDisplay,
+    useGrouping: options.useGrouping,
+  }, regionalOptions(options));
+  return formatter.format(number);
+}
+
+export function formatBytes(value, options = {}) {
+  const bytes = finiteNumber(value);
   const units = ["B", "KB", "MB", "GB", "TB"];
+  if (bytes <= 0) return `${formatNumber(0, { ...options, maximumFractionDigits: 0 })} B`;
   let size = bytes;
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) {
     size /= 1024;
-    unit++;
+    unit += 1;
   }
-  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+  const fractionDigits = unit === 0 || size >= 10 ? 0 : 1;
+  return `${formatNumber(size, {
+    ...options,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: fractionDigits,
+  })} ${units[unit]}`;
 }
 
-export function formatMoney(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number)) return "$0.0000";
-  return `$${number.toFixed(number >= 1 ? 2 : 4)}`;
+export function formatDuration(ms, options = {}) {
+  const number = finiteNumber(ms);
+  if (number <= 0) return `${formatNumber(0, { ...options, maximumFractionDigits: 0 })} ms`;
+  if (number < 1000) return `${formatNumber(Math.round(number), { ...options, maximumFractionDigits: 0 })} ms`;
+  if (number < 60000) {
+    return `${formatNumber(number / 1000, {
+      ...options,
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    })} s`;
+  }
+  return `${formatNumber(number / 60000, {
+    ...options,
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} min`;
 }
 
-export function formatDuration(ms) {
-  const number = Number(ms || 0);
-  if (!Number.isFinite(number) || number <= 0) return "0 ms";
-  if (number < 1000) return `${Math.round(number)} ms`;
-  if (number < 60000) return `${(number / 1000).toFixed(1)} s`;
-  return `${(number / 60000).toFixed(1)} min`;
+export function formatCurrency(value, options = {}) {
+  const number = finiteNumber(value);
+  const currency = /^[A-Z]{3}$/.test(String(options.currency || "USD").toUpperCase())
+    ? String(options.currency || "USD").toUpperCase()
+    : "USD";
+  const fractionDigits = Math.abs(number) >= 1 ? 2 : 4;
+  const currencyDisplay = ["symbol", "narrowSymbol", "code", "name"].includes(options.currencyDisplay)
+    ? options.currencyDisplay
+    : "narrowSymbol";
+  return getNumberFormatter({
+    style: "currency",
+    currency,
+    currencyDisplay,
+    minimumFractionDigits: options.minimumFractionDigits ?? fractionDigits,
+    maximumFractionDigits: options.maximumFractionDigits ?? fractionDigits,
+  }, regionalOptions(options)).format(number);
 }
 
-export function formatTimestamp(value) {
-  if (!value) return "暂无";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("zh-CN", { hour12: false });
+export function formatMoney(value, options = {}) {
+  return formatCurrency(value, options);
+}
+
+export function formatTimestamp(value, options = {}) {
+  const locale = options.locale ?? currentUILocale();
+  const emptyFallback = options.emptyFallback ?? options.fallback ?? preferencesMessage("formatters.emptyTimestamp", {}, locale);
+  const invalidFallback = options.invalidFallback ?? options.fallback ?? preferencesMessage("formatters.invalidTimestamp", {}, locale);
+  if (value === null || value === undefined || value === "") return emptyFallback;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return invalidFallback;
+  return getDateTimeFormatter({
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }, regionalOptions(options)).format(date);
 }

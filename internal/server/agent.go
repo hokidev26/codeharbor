@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 
 	agentpkg "autoto/internal/agent"
 	"autoto/internal/db"
+	"autoto/internal/providers"
 	"autoto/internal/tools"
 )
 
@@ -26,6 +28,11 @@ type agentLiveSnapshotResponse struct {
 	PendingApprovals     []db.ToolCall            `json:"pendingApprovals"`
 	LatestRun            *db.Run                  `json:"latestRun,omitempty"`
 	Generations          db.PermissionGenerations `json:"generations"`
+	ExecutionGeneration  int64                    `json:"executionGeneration"`
+	ExecutionsSince      []db.Run                 `json:"executionsSince,omitempty"`
+	ExecutionsTruncated  bool                     `json:"executionsTruncated,omitempty"`
+	Spec                 *db.SpecBoard            `json:"spec,omitempty"`
+	ChildAgents          []db.Agent               `json:"childAgents,omitempty"`
 	Stream               agentpkg.StreamWatermark `json:"stream"`
 }
 
@@ -34,9 +41,37 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "agent event hub is not initialized")
 		return
 	}
+	if err := rejectUnknownQuery(r, "afterExecutionGeneration"); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	agentID := chi.URLParam(r, "id")
 	watermark := s.hub.Watermark(agentID)
 	snapshot, err := s.store.ReadAgentLiveSnapshot(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	var executions []db.Run
+	var truncated bool
+	if raw := strings.TrimSpace(r.URL.Query().Get("afterExecutionGeneration")); raw != "" {
+		after, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || after < 0 {
+			writeError(w, http.StatusBadRequest, "invalid afterExecutionGeneration")
+			return
+		}
+		executions, truncated, err = s.store.ListRunsAfterExecutionGeneration(r.Context(), agentID, after, 20)
+		if err != nil {
+			writeError(w, statusFromError(err), err.Error())
+			return
+		}
+	}
+	spec, err := s.store.GetSpecBoard(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	children, err := s.store.ListChildAgents(r.Context(), agentID)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -50,6 +85,11 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		PendingApprovals:     snapshot.PendingApprovals,
 		LatestRun:            snapshot.LatestRun,
 		Generations:          snapshot.Generations,
+		ExecutionGeneration:  snapshot.Agent.ExecutionGeneration,
+		ExecutionsSince:      executions,
+		ExecutionsTruncated:  truncated,
+		Spec:                 &spec,
+		ChildAgents:          children,
 		Stream:               watermark,
 	})
 }
@@ -112,43 +152,75 @@ func (s *Server) updateAgentModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Model == "" {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
 		writeError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	agent, err := s.store.UpdateAgentModel(r.Context(), chi.URLParam(r, "id"), req.Model)
+	if s.store == nil {
+		writeError(w, http.StatusInternalServerError, "agent store is unavailable")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	unlock := s.lockAgentMutation(agentID)
+	defer unlock()
+
+	current, err := s.store.GetAgent(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	// Persist the model and compatible effort in one SQL UPDATE. A model switch
+	// must never leave an old concrete effort attached to a provider that rejects
+	// it; auto is the safe fallback when the target cannot support it.
+	effort := s.safeReasoningEffortForCapabilities(r.Context(), current.ReasoningEffort, s.capabilitiesForAgentModel(model))
+	agent, err := s.store.UpdateAgentModel(r.Context(), agentID, model, effort)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
+}
+
+func (s *Server) capabilitiesForAgentModel(model string) providers.Capabilities {
+	providerName, _ := providers.SplitModel(model)
+	if s == nil || s.providers == nil {
+		// Preserve the legacy Gemini reasoning route for lightweight/test servers
+		// that do not install a provider registry.
+		if providerName == "gemini" {
+			return providers.Capabilities{Reasoning: true}
+		}
+		return providers.Capabilities{}
+	}
+	provider, _, err := s.providers.Resolve(model)
+	if err != nil {
+		return providers.Capabilities{}
+	}
+	return providers.CapabilitiesFor(provider)
+}
+
+func (s *Server) safeReasoningEffortForCapabilities(ctx context.Context, effort string, capabilities providers.Capabilities) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	effectiveEffort := effort
+	if effectiveEffort == "" {
+		// An empty override inherits the runtime default. Preserve that inheritance
+		// only when the target can support its actual value; otherwise persist an
+		// explicit auto so a model switch cannot inherit an unsupported default.
+		effectiveEffort = "auto"
+		if s != nil && s.store != nil {
+			if settings, err := s.store.GetRuntimeSettings(ctx); err == nil {
+				effectiveEffort = strings.ToLower(strings.TrimSpace(settings.DefaultReasoningEffort))
+			}
+		}
+	}
+	if capabilities.SupportsReasoningEffort(effectiveEffort) {
+		return effort
+	}
+	return "auto"
 }
 
 type updatePermissionModeRequest struct {
 	PermissionMode string `json:"permissionMode"`
-}
-
-type updateReasoningEffortRequest struct {
-	ReasoningEffort string `json:"reasoningEffort"`
-}
-
-func (s *Server) updateAgentReasoningEffort(w http.ResponseWriter, r *http.Request) {
-	var req updateReasoningEffortRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
-	if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
-		writeError(w, http.StatusBadRequest, "reasoningEffort 必须为 low、medium、high 或空字符串")
-		return
-	}
-	agent, err := s.store.UpdateAgentReasoningEffort(r.Context(), chi.URLParam(r, "id"), effort)
-	if err != nil {
-		writeError(w, statusFromError(err), err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) updateAgentPermissionMode(w http.ResponseWriter, r *http.Request) {
@@ -283,15 +355,28 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req postMessageRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Text == "" {
-		writeError(w, http.StatusBadRequest, "text is required")
+	if err := validateAPIText("text", req.Text, 512<<10, true, true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
+	if err := validateAPIText("createdBy", req.CreatedBy, 200, false, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	agentID := chi.URLParam(r, "id")
+	if goal, ok := parseGoalCommand(req.Text); ok {
+		s.createGoalResponse(w, r, agentID, goal)
+		return
+	}
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
+		return
+	}
+	if err := s.enforceRemotePermissionCap(r, agentID); err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
@@ -301,7 +386,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		req.CreatedBy = user.ID
 	}
-	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), req.Text, req.CreatedBy)
+	msg, err := s.runner.SubmitUserMessage(r.Context(), agentID, req.Text, req.CreatedBy)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return

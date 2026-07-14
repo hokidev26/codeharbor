@@ -1,7 +1,12 @@
+import { currentUILocale } from "./i18n.mjs";
+import { defaultRegionalPreferences, normalizeRegionalPreferences } from "./locale-registry.mjs";
+import { preferencesMessage } from "./messages-preferences.mjs";
+
 const canonicalLocalPreferencePrefix = "autoto.";
 const legacyLocalPreferencePrefix = "codeharbor.";
 
 export const recentDirectoriesKey = "autoto.recentDirectories";
+export const recentConversationsKey = "autoto.recentConversations";
 export const preferredModelKey = "autoto.preferredModel";
 export const modelVisibilityPrefsKey = "autoto.modelVisibility";
 export const profilePrefsKey = "autoto.profile";
@@ -11,6 +16,7 @@ export const skillsPrefsKey = "autoto.skills";
 export const notificationPrefsKey = "autoto.notifications";
 export const appearancePrefsKey = "autoto.appearance";
 export const terminalPrefsKey = "autoto.terminal";
+export const regionalPrefsKey = "autoto.regional";
 export const chatDraftsKey = "autoto.chatDrafts";
 export const promptHistoryKey = "autoto.promptHistory";
 export const relayProtocolPrefsKey = "autoto.relayProtocol";
@@ -20,6 +26,7 @@ export const localPreferenceBackupVersion = 1;
 
 export const localPreferenceKeys = [
   recentDirectoriesKey,
+  recentConversationsKey,
   preferredModelKey,
   modelVisibilityPrefsKey,
   profilePrefsKey,
@@ -29,6 +36,7 @@ export const localPreferenceKeys = [
   notificationPrefsKey,
   appearancePrefsKey,
   terminalPrefsKey,
+  regionalPrefsKey,
   chatDraftsKey,
   promptHistoryKey,
   relayProtocolPrefsKey,
@@ -65,19 +73,25 @@ export function migrateLegacyLocalPreferences(storage = globalThis.localStorage)
 }
 
 export const localPreferenceBackupKeys = [
-  { key: profilePrefsKey, label: "个人资料", type: "json" },
-  { key: searchPrefsKey, label: "网络搜索", type: "json" },
-  { key: imGatewayPrefsKey, label: "IM 网关", type: "json" },
-  { key: skillsPrefsKey, label: "技能工作台", type: "json" },
-  { key: notificationPrefsKey, label: "通知", type: "json" },
-  { key: appearancePrefsKey, label: "外观", type: "json" },
-  { key: terminalPrefsKey, label: "终端", type: "json" },
-  { key: chatDraftsKey, label: "聊天草稿", type: "json" },
-  { key: promptHistoryKey, label: "提示词历史", type: "json" },
-  { key: recentDirectoriesKey, label: "最近目录", type: "json" },
-  { key: preferredModelKey, label: "首选模型", type: "string" },
-  { key: relayProtocolPrefsKey, label: "中转协议", type: "string" },
-];
+  { key: profilePrefsKey, labelKey: "profile", type: "json" },
+  { key: searchPrefsKey, labelKey: "search", type: "json" },
+  { key: imGatewayPrefsKey, labelKey: "imGateway", type: "json" },
+  { key: skillsPrefsKey, labelKey: "skills", type: "json" },
+  { key: notificationPrefsKey, labelKey: "notifications", type: "json" },
+  { key: appearancePrefsKey, labelKey: "appearance", type: "json" },
+  { key: terminalPrefsKey, labelKey: "terminal", type: "json" },
+  { key: regionalPrefsKey, labelKey: "regional", type: "json" },
+  { key: chatDraftsKey, labelKey: "chatDrafts", type: "json" },
+  { key: promptHistoryKey, labelKey: "promptHistory", type: "json" },
+  { key: recentDirectoriesKey, labelKey: "recentDirectories", type: "json" },
+  { key: recentConversationsKey, labelKey: "recentConversations", type: "json" },
+  { key: preferredModelKey, labelKey: "preferredModel", type: "string" },
+  { key: relayProtocolPrefsKey, labelKey: "relayProtocol", type: "string" },
+].map((entry) => ({ ...entry, label: localPreferenceBackupLabel(entry) }));
+
+export function localPreferenceBackupLabel(entry, locale = currentUILocale()) {
+  return preferencesMessage(`backupLabels.${entry?.labelKey || ""}`, {}, locale);
+}
 
 export const defaultProfilePrefs = {
   displayName: "",
@@ -152,8 +166,11 @@ export const defaultNotificationPrefs = {
   duration: "normal",
 };
 
+export const appearanceStyleVersion = 2;
+
 export const defaultAppearancePrefs = {
-  theme: "dark",
+  styleVersion: appearanceStyleVersion,
+  theme: "light",
   density: "comfortable",
   terminalDefaultOpen: false,
   showEventLog: true,
@@ -164,3 +181,11 @@ export const defaultTerminalPrefs = {
   focusOnConnect: true,
   maxLines: 5000,
 };
+
+export const defaultRegionalPrefs = defaultRegionalPreferences;
+export { normalizeRegionalPreferences };
+
+export function normalizeImportedRegionalPreferences(value = {}) {
+  const source = value?.regionalPreferences ?? value?.regional ?? value;
+  return normalizeRegionalPreferences(source);
+}

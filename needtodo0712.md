@@ -1,14 +1,16 @@
-# needtodo0712：CodeHarbor 合併後定位審查與詳細路線圖
+# needtodo0712：Autoto 合併後定位審查與產品路線圖
 
 > 本文件是 `needtodo0709` 的後繼版本，基於 2026-07-12 對倉庫的完整只讀審查（README、PROJECT_PLAN、needtodo0709、CHANGELOG、git 歷史、未提交 diff、前後端原始碼結構），以及對外部成熟專案 OpenClaw（🦞）現況的對照調研。
 >
 > 審查時倉庫狀態：main @ d2e8cf0（Add run review notifications and rollback checkpoints），working tree 有未提交變更（詳見 2.3）。
+>
+> **Phase 命名說明：**本文的 **Phase A / B / C 是產品路線**，不是 `PROJECT_PLAN.md` 中早期的工程工作流編號。產品 **Phase B 專指 IM 控制面**。截至本次事實同步，Phase A 已收口，Phase B 已落地受限 Telegram 子集：Bot API long polling、私聊 `/pair`、`/status`、`/approve <toolCallId>`（固定一次性 `allow_once`）與 `/deny`，以及 durable notification deliveries。**仍無 `/task`、自由聊天、Telegram webhook、Slack/Discord；IM 也不得控制 Home Assistant 設備。**
 
 ---
 
 ## 0. 一句話結論
 
-工程底子明顯優於一般 MVP（測試、CI、migration、安全邊界都是真的），needtodo0709 的 P0 幾乎全部落地，執行力沒有問題。**當前最大的風險不是技術，而是合併兩個專案之後的「產品定位分裂」與隨之而來的命名/文件/半成品債務。** 下一階段應該：先收尾、再定位、然後把「IM 派任務閉環」做成唯一的差異化主線。
+工程底子明顯優於一般 MVP（測試、CI、migration、安全邊界都是真的），Phase A 已收口，P2–P3 的 schedules、durable deliveries、Telegram 配對/狀態/一次性審批、Home Assistant 受限設備動作與監控聚合已落地。**必須準確描述邊界：Telegram 不是自由聊天或派任務入口；Slack/Discord、`/task`、通用 IoT、攝像頭動作、門鎖解鎖與雲監控仍未實現。**
 
 ---
 
@@ -16,7 +18,7 @@
 
 ### 1.1 現狀：雙重人格
 
-合併後的 CodeHarbor 同時具有兩種產品基因：
+合併後的專案（現名 Autoto）同時具有兩種產品基因：
 
 | 基因 | 來源 | 對應功能 |
 | --- | --- | --- |
@@ -35,18 +37,18 @@
 
 因此建議把定位收斂成一句話：
 
-> **CodeHarbor 是常駐在你自己機器上的編碼代理伺服器：你從瀏覽器或 IM 派任務，agent 在 Git worktree 裡後台執行；需要決策時主動找你審批；完成後給你變更回顧；你審查 diff 後一鍵提交。**
+> **Autoto 是常駐在你自己機器上的本地編碼代理伺服器：已打通 Task → background run → approval → run summary → diff → explicit-path commit，並把既有 run 的狀態查詢與一次性工具審批延伸到 Telegram；從 IM 建立 `/task` 仍未實現。**
 
 關鍵推論：
 
-1. **IM 是控制面，不是聊天產品。** 合併進來的龍蝦基因只保留「通知 + 審批 + 派任務 + 查狀態」四件事，不做通用聊天助理、不鋪渠道矩陣。
+1. **IM 是控制面，不是聊天產品。** 現有 Telegram 只保留通知、配對、查狀態、一次性審批與拒絕；`/task` 尚未實現，不做通用聊天助理，也不鋪渠道矩陣。
 2. **編碼工作流是本體。** chapter/worktree、run、審批、diff/commit 這條鏈是所有新功能的宿主，任何不掛在這條鏈上的功能先不做。
-3. **README 第一屏應該改寫成上面那句話**，而不是目前的功能羅列。定位句 + 一張「IM 審批 → diff 回顧 → 提交」的動圖，勝過 40 條 feature bullet。
+3. **README 第一屏應該先展示已實現閉環**，而不是功能羅列。保留現有 demo 資產；若新增 IM 動圖，只能展示已實現的 Telegram 配對/狀態/一次性審批，不得暗示 `/task`、自由聊天或其他渠道。
 
 ### 1.3 從 OpenClaw 應該借鑑的三課
 
-1. **渠道廣度是陷阱。** OpenClaw 鋪到 29 個渠道是因為它的本體就是渠道閘道，且有全職團隊。CodeHarbor 應該只做 1–2 個渠道但做到閉環完整（見 Phase B）。
-2. **技能生態的安全教訓。** OpenClaw 在技能市場出現隱藏指令等代理風險後，才補上 Skill Card 溯源與 SkillSpector 掃描。CodeHarbor 的 Skills 在服務端化與支援匯入時，第一天就要有「啟用前完整展示內容 + exec 風險標記 + 來源記錄」（見 5.3、7.7）。
+1. **渠道廣度是陷阱。** OpenClaw 鋪到 29 個渠道是因為它的本體就是渠道閘道，且有全職團隊。Autoto 應該只做 1–2 個渠道但做到閉環完整（見 Phase B）。
+2. **技能生態的安全教訓。** OpenClaw 在技能市場出現隱藏指令等代理風險後，才補上 Skill Card 溯源與 SkillSpector 掃描。Autoto 的 Skills 已將服務端信任邊界、安全掃描、來源與風險確認納入收口範圍。
 3. **入站控制 = 遠端執行代碼。** 一旦 IM 可以觸發 agent，威脅模型從「本機可信使用者」直接跳到「網際網路上任何拿到你 bot token 的人」。配對、簽名、白名單、審計必須先於功能上線（見 6.4）。
 
 ---
@@ -56,10 +58,18 @@
 ### 2.1 相比 0709 已完成的（值得肯定）
 
 - SQLite migration 框架（`PRAGMA user_version`）已建立。
-- Provider parity：OpenAI official / OpenAI-compatible 的 tools 與 streaming 方向已補齊，retry/backoff 與 first token timeout 有測試覆蓋。
-- runs / run_id / RunSummary 後端 + 前端回顧卡片已接通，形成「完成 → 回顧 → 看 Git 變更 → 提交」入口。
+- Provider parity 已補齊，並落地 `Tools` / `Streaming` / `ImageInput` 最小 capability contract；retry/backoff 與 first-token timeout 有測試覆蓋。
+- Agent WebSocket protocol 2 已提供進程內單調序列、有界記憶體 replay 與 authoritative snapshot resync；durable event log、服務重啟後與跨進程 replay 尚未實現。
+- runs / run_id / RunSummary 後端 + 前端回顧卡片已接通，形成「完成 → 回顧 → 看 Git 變更 → 顯式路徑提交」入口。
 - Bash 輸出流式事件 + 聊天區實時輸出卡片。
-- Webhook 任務通知 MVP（審批等待、完成、錯誤/中斷/被取代）+ 設定頁保存與測試發送。
+- V19 schedules/run source：cron/`@every` + timezone，權限僅 `readOnly` / `acceptEdits`，busy skip 且不取消人工 run，run 持久 permission cap。
+- V20 durable deliveries：Webhook/Telegram 歷史、去重、lease、指數退避、`dead` 與顯式 retry，失敗不阻塞 agent loop。
+- V21 Telegram pairing/events/cursor：long polling、私聊 `/pair` `/status` `/approve`（一次性）`/deny`、未配對/錯誤配對靜默、事件與 cursor 持久冪等、token revision 變更撤銷舊配對。
+- V22 Home Assistant：只允許本機/私網 endpoint，狀態只讀，固定 allowlist 動作，本地雙確認 + direct-loopback 最終批准；critical/未知動作硬阻斷，IM 不得控制設備。
+- 本地 monitoring snapshot 聚合 active runs、pending approvals、schedules、deliveries、channels、device actions 與 worker 狀態；不是雲監控。
+- runtime Supervisor 已管理 channels、automation 與 HTTP 的啟停/反向關閉。
+- 文件路徑工具已對 `.env*`、credentials/secrets、私鑰與 `.git` 硬阻斷或過濾。
+- Skills 已服務端化並完成 global/project/workspace scope、revision/restore、effective-skill resolution 與 snapshot-stable cursor 分頁。
 - `AGENTS.md` / `CLAUDE.md` 專案指令載入。
 - 統一檢查入口 `make check` / `scripts/check.sh`，CI 同源。
 
@@ -73,22 +83,13 @@
   - `internal/db/db.go` 1350 行
   - `internal/server/static/modules/model-provider-settings.mjs` 998 行
 
-### 2.3 未提交的半成品（P0，先收尾）
+### 2.3 原審查時半成品（後續已收口）
 
-Working tree 目前有：
+2026-07-12 審查時列出的服務端工作流偏好、工具權限規則、checkpoint/rollback、Skills 服務端化與命名重構，均屬當時工作樹快照，不再是現在的未提交待辦。後續 AI 不應依據本節重新建立同一批工作。
 
-- 新檔案 `internal/server/workflow.go` + `workflow_test.go`：服務端工作流偏好（exec/write 確認、預設唯讀）與工具權限規則表（mode/toolName/risk/decision/priority/enabled）的 CRUD。
-- 相應的 `db.go` / `migrations.go` / `schema.go` / `loop.go` / `server.go` / 前端 skills-workbench、app-main、styles 修改，共約 1137 行新增。
+本次同步後，入站 IM 不再是全空白：Telegram 已能 long polling 接收配對、狀態、一次性審批與拒絕命令。未完成的是 `/task`、自由聊天、Telegram webhook、Slack/Discord 與更廣渠道；Webhook 仍只是 durable delivery sink。
 
-這正是 0709 計畫裡「工具權限規則表與服務端化工作流偏好」項。**建議本週內完成收尾並提交**，收尾清單：
-
-- [ ] 規則匹配順序與衝突語意寫進代碼註釋與文件（priority 相同時誰贏、`*` 與精確匹配誰優先、deny 是否一票否決）。
-- [ ] loop.go 中權限判定路徑補上規則命中日誌（排查「為什麼這個工具被拒」必需）。
-- [ ] migration 補舊庫升級測試（規則表不存在 → 補建；重複 Open 冪等）。
-- [ ] 前端規則編輯 UI 至少支持啟停與刪除，暫不做拖拽排序。
-- [ ] `make check` 全綠後提交，commit message 建議 `Add server-side workflow preferences and tool permission rules`。
-
-### 2.4 倉庫衛生殘留
+### 2.4 原審查時的倉庫衛生建議（歷史快照）
 
 - 空目錄：`internal/auth`、`internal/narrator`、`internal/project` —— 三個月沒放內容就刪掉，需要時再建。
 - 空目錄 `.narrafork/`：舊專案殘留，確認無用後刪除並加入 `.gitignore`。
@@ -99,34 +100,11 @@ Working tree 目前有：
 
 ---
 
-## 3. 合併債務：命名重構（narrator / chapter）
+## 3. 合併債務：命名重構（已完成，legacy 進入遷移期）
 
-### 3.1 問題
+規範名稱已收斂為 **Autoto / Agent / Workline**，規範入口為 `autoto`、`AUTOTO_*`、`X-Autoto-*`、`/api/agents`、`/api/worklines` 與 `/ws/agent`。
 
-`narrator`（敘事者）、`chapter`（章節）、`.narrafork` 來自舊專案的敘事隱喻。對一個編碼代理工具：
-
-- 新使用者第一次看到 `POST /api/narrators/{id}/messages` 無法建立正確心智模型；
-- 貢獻者讀 `docs/ARCHITECTURE.md` 需要一張額外的名詞對照表；
-- 所有對外文件、UI 文案、API、DB 表名都在持續累積這個隱喻的沉沒成本。
-
-**現在是最後的低成本改名視窗**：尚無外部使用者、無公開 API 相容性包袱、migration 框架剛好已就緒。
-
-### 3.2 建議映射
-
-| 現名 | 建議新名 | 理由 |
-| --- | --- | --- |
-| narrator | **agent**（或 session） | 與 agent loop、AI Agents 設定頁自然對齊 |
-| chapter | **workline**（或 branch-session） | 專案裡已在用「工作線/workline」描述它；比 branch 多了「含 worktree 與衍生會話」的含義 |
-| project | project | 不變 |
-| run | run | 不變 |
-
-### 3.3 執行方式（建議一次到位，不做長期雙名）
-
-1. 一個獨立 PR 完成：DB migration（`ALTER TABLE ... RENAME TO`，`user_version` +1）→ Go 包/型別/欄位 → API 路由 → 前端模組與文案 → 文件。
-2. API 舊路由保留 302/別名**一個版本**即可（自己是唯一使用者的話甚至可以不留）。
-3. migration 測試：舊庫（narrators 表）打開後自動改名且資料完整；冪等。
-4. 估計工作量 1–2 天，大部分是機械替換 + 全量跑 `make check`。
-5. 若決定不改名，也要做一件事：在 README 與 ARCHITECTURE 開頭放置名詞對照表，把成本顯性化。
+舊 CodeHarbor、Narrator、Chapter 名稱只保留在兼容讀取、路由別名、舊 CLI shim、migration 與歷史記錄中。新的文件、設定、整合與客戶端不得再寫入舊名。兼容面的唯一移除規則以 `PROJECT_PLAN.md` 的 **Legacy compatibility lifecycle** 為準：最早 v0.4.0、至少兩個 tagged release 遷移窗口，且必須滿足刪除門檻。
 
 ---
 
@@ -136,54 +114,34 @@ Working tree 目前有：
 
 | 面板 | 現狀 | 處置建議 |
 | --- | --- | --- |
-| IM Gateway | 純 localStorage 偏好，無服務端能力 | Phase B 服務端化為真實渠道；在此之前面板頂部加「尚未生效，僅為策略草稿」標示 |
+| IM 控制面 | Telegram long polling + `/pair` `/status` `/approve`（一次性）`/deny`；durable Webhook/Telegram delivery；舊 localStorage 草稿停用 | 維持窄命令面；`/task`、自由聊天、Slack/Discord 與 webhook 入站保持未完成 |
 | Network Search 策略 | 偏好在瀏覽器，WebSearch/WebFetch 工具在服務端 | 把 provider 預設、result limit、domain 規則下沉到服務端配置並讓工具真正讀取 |
-| Skills | localStorage 草稿 + 後端 MCP registry 已接 | Phase A 服務端化（見 5.3） |
+| Skills | 已服務端化，具 global/project/workspace scope、revision/restore、snapshot cursor 與安全掃描 | 已收口；除缺陷修復外不再佔用產品主線 |
 | 通知偏好 | toast 類偏好在瀏覽器；Webhook 已服務端化 | 可接受，標註清楚哪部分是本地顯示偏好 |
 | Profile / Appearance | 純瀏覽器偏好 | 合理，保持 |
 
 ---
 
-## 5. Phase A（1–2 週）：收尾與地基
+## 5. Phase A：收尾與地基（已收口）
 
-目標：清空半成品與合併債務，讓後續兩個 Phase 站在乾淨的地基上。
+Phase A 是產品路線的地基階段，目前已完成：
 
-### 5.1 提交工具權限規則表（見 2.3，P0）
+- 服務端工作流偏好與工具權限規則；
+- run-scoped Git checkpoint / rollback；
+- Autoto / Agent / Workline 規範命名與 legacy compatibility；
+- Agent stream protocol 2、有界記憶體 replay、snapshot resync；
+- Provider `Tools` / `Streaming` / `ImageInput` 最小能力契約；
+- Skills 服務端化、安全掃描、global/project/workspace scope、revision/restore 與 snapshot cursor。
 
-### 5.2 Checkpoint / Rollback（0709 排定的下一項，P1）
-
-設計建議：
-
-- **記錄點**：每個 run 開始時記錄 `runs.base_head`（若尚未有此欄位則補 migration）。worktree 乾淨 → 只記 HEAD；worktree 髒 → 用 `git stash create`（不動 worktree）拿到 snapshot commit，把 object 存到 `refs/codeharbor/checkpoints/<runId>`，含 untracked（`git stash create` 不含 untracked，需要 `git add -A --intent-to-add` 前置或改用臨時 index 方案；MVP 可先明確聲明「僅回滾已跟蹤檔案」）。
-- **回滾 API**：`POST /api/runs/{id}/rollback`，語意 = 把 run 觸碰的已跟蹤檔案恢復到 base 狀態。實作用 `git restore --source=<checkpoint>` 於顯式檔案列表，**不用** `git reset --hard`，維持「不偷偷執行破壞性 Git 命令」原則。
-- **UI**：run summary 卡片上出現「回滾此輪變更」按鈕，點擊後彈確認框，明確列出將被恢復的檔案與「未提交的其他改動不受影響/會受影響」的準確描述。
-- **邊界**：跨 run 交錯修改同一檔案時，回滾提示衝突並拒絕，讓使用者走 Git modal 手動處理。第一版寧可保守拒絕，不做聰明合併。
-- **驗收**：e2e 覆蓋「run 寫入兩個檔案 → rollback → 檔案內容回到 base、其他檔案不動、`refs/codeharbor/*` 清理」。
-
-### 5.3 Skills 服務端化（P1）
-
-- 新表 `skills`：`id, name, description, kind(slash|prompt|mcp-draft), content, enabled, source(local|imported), created_at, updated_at`。
-- CRUD API + 前端從服務端讀寫；提供一次性「從 localStorage 匯入」遷移按鈕，保留 JSON 匯出。
-- **相容 SKILL.md 格式**：支援匯入 Anthropic 風格的 skill 目錄（frontmatter name/description + 正文），為未來生態相容鋪路。
-- **安全底線（OpenClaw 教訓）**：匯入的 skill 啟用前必須完整展示原文；掃描並標記含「執行命令、讀取憑證、外送資料」語意的段落（第一版用關鍵詞規則即可）；記錄來源。
-
-### 5.4 命名重構（見第 3 節，建議排在本 Phase，趁 DB 還小）
-
-### 5.5 文件收斂與 README 改寫（見 2.4、1.2）
-
-### 5.6 Phase A 驗收清單
-
-- [ ] working tree 乾淨，`make check` 綠。
-- [ ] 任一 run 可一鍵回滾且有測試。
-- [ ] skills 存在 SQLite，換瀏覽器不丟。
-- [ ] 全倉庫 `grep -ri narrator` 只剩 migration 歷史與 CHANGELOG。
-- [ ] README 第一屏是定位句，not 功能羅列。
+Skills 至此收口。後續除安全缺陷、資料一致性或真實使用問題外，不再把 Skills 擴展當成產品主線；主線回到產品 Phase B 的 IM foundation。
 
 ---
 
-## 6. Phase B（1–2 個月）：IM 派任務閉環——合併的真正價值所在
+## 6. Phase B（產品含義唯一）：受限 IM 控制面（部分完成）
 
-這是整個合併動作應該兌現的產品差異化。目標閉環：
+本文與後續產品文件中的 **Phase B 只表示 IM 控制面**，不包含 Skills、搜尋、Workline UI 或其他一般增強。Telegram 的安全子集已實現；`/task`、自由聊天與其他渠道仍是未完成目標。
+
+目標閉環：
 
 ```txt
 agent 在家裡的機器上跑
@@ -199,86 +157,62 @@ agent 在家裡的機器上跑
 
 | 候選 | 優點 | 缺點 | 建議 |
 | --- | --- | --- | --- |
-| **Telegram** | Bot API 最簡單免審核、長輪詢可不開公網入站、個人開發者摩擦最低 | 團隊場景弱 | **首選** |
-| Slack | 團隊場景強、Block Kit 審批按鈕體驗好 | 需要建 app/審批、事件回調要公網 URL | 第二個做 |
-| Discord | 社群強 | 個人助理場景不如 TG 自然 | 之後 |
+| **Telegram** | Bot API long polling 不開本機入站端口 | 團隊場景弱 | **已實現受限控制面** |
+| Slack | 團隊場景強 | 需要 app、簽名與事件回調 | **未實現** |
+| Discord | 社群強 | 個人控制面場景較弱 | **未實現** |
 | Lark / 企業微信 / LINE | 特定市場 | 各自的企業認證與回調要求高 | 有真實需求再做 |
 
-Telegram 用 long polling 的關鍵優勢：**本機不需要暴露任何入站端口**，與 CodeHarbor「本地優先」的安全模型天然一致。
+Telegram 用 long polling 的關鍵優勢：**本機不需要暴露任何入站端口**，與 Autoto「本地優先」的安全模型天然一致。
 
-### 6.2 架構：Channel Adapter 介面
+### 6.2 實際架構
 
-新增 `internal/channels/`：
+- `internal/channels` 目前是 Telegram 專用 Manager/Service，不宣稱已有通用多渠道介面。
+- Manager 週期性讀取 enabled Telegram integration connection，解析 `env:` bot token，為每個連線啟停 long-poll Service。
+- `channel_events` 與 `channel_cursors` 在同一交易內記錄 update ID 與前進 offset，重啟重放不重複執行。
+- `channel_pairings` 綁定 connection/chat/user/Agent/credential revision；bot token 變更時撤銷 stale pairing。
+- automation worker 把 run/tool 事件放入 durable Webhook/Telegram delivery queue；runtime Supervisor 統一管理 channels、automation 與 HTTP 生命周期。
 
-```go
-type Channel interface {
-    Name() string
-    Start(ctx context.Context, inbox chan<- InboundMessage) error
-    Send(ctx context.Context, msg OutboundMessage) error
-    Capabilities() ChannelCapabilities // buttons? markdown? threads?
-}
-```
-
-- 出站事件源：復用現有 Webhook 通知的觸發點（waiting_approval / completed / error / interrupted / superseded），channel 只是另一種 sink。
-- 入站命令進入統一的 command router，與渠道解耦。
-- 訊息模板集中管理（審批卡、summary 卡），渠道按 capabilities 降級渲染（有按鈕用按鈕，沒按鈕用 `/approve <id>` 文字指令）。
-
-### 6.3 入站命令文法（第一版就這六個，不做自由聊天）
+### 6.3 入站命令文法（實際）
 
 ```txt
-/status                 當前活躍 run 與等待審批數
-/runs [n]               最近 n 個 run 摘要
-/approve <toolCallId>   批准等待中的工具
+/pair <code>             私聊完成一次性配對
+/status                  Agent 狀態、最近 run 狀態、待審批數
+/approve <toolCallId>    固定 one-time / allow_once
 /deny <toolCallId> [原因]
-/task <專案名> <指令>    建立新 run（可先不做，見下）
-/diff <runId>           該 run 的檔案級 diff 統計
 ```
 
-- 第一版可以先只做 `/status` `/approve` `/deny` + 出站通知，即可閉環。
-- `/task`（從 IM 派新任務）安全影響最大，放在閉環驗證穩定之後，且預設關閉。
+- [x] 上述四個命令已實現；字面命令是 `/approve`，語義固定為 approve-once，沒有獨立 `/approve-once` 拼寫。
+- [x] 非命令文字或未知命令不會進入自由聊天/Agent prompt。
+- [ ] `/runs`、`/diff` 未實現。
+- [ ] `/task` 未實現，且在獨立威脅模型與預設關閉設計前保持未完成。
 
 ### 6.4 安全設計（先於功能，不可妥協）
 
-1. **顯式總開關**：`CODEHARBOR_IM_INBOUND=true` 才處理任何入站；預設只出站通知。
-2. **裝置配對**:本地 Web UI 生成一次性配對碼 → 使用者私聊發給 bot → 綁定該 chat_id 寫入 DB。未配對的 chat 一律忽略且不回覆（避免探測）。
-3. **帳號白名單**：配對之外再校驗 user id 白名單；群聊預設不響應。
-4. **權限天花板**：來自 IM 的審批不能批准 `danger` 風險；IM 永遠不能切換 permission mode、不能啟用 `bypassPermissions`、不能開終端。
-5. **Webhook 型渠道（Slack 等）**：HMAC 簽名 + 時間戳 + 5 分鐘重放窗口。
-6. **出站脫敏**：復用現有 redaction 偏好，通知內容不含 API key、完整命令輸出、絕對路徑細節；summary 用統計代替原文。
-7. **審計**：新表 `channel_events`（方向、渠道、chat/user、命令、結果、run/toolCall 關聯、時間），設定頁可查最近事件。
-8. **限流**：每 chat 每分鐘命令數上限；連續失敗配對嘗試鎖定。
-9. **威脅模型文件**：`SECURITY.md` 增補「IM 入站」一節，明確「bot token 洩漏 = 你的審批面被接管」的告知與輪換指引。
+1. [x] **裝置配對**：本地生成短期一次性碼，只存 hash；私聊綁定 chat/user/Agent/connection/token revision。未配對命令與錯誤配對靜默。
+2. [x] **私聊與身份**：群聊、bot sender、非文字與無效 update 不處理；配對同時校驗 chat ID 與 user ID。
+3. [x] **權限天花板**：IM 只可對既有 pending tool call 做 `allow_once`/deny，不能批准 `danger`，不能切 permission mode、啟用 `bypassPermissions`、開終端、建 `/task` 或控制設備。
+4. [x] **重放與審計**：持久 event ID/cursor、channel event、automation audit；必要審計失敗時審批 fail-closed。
+5. [x] **限流/鎖定**：paired chat 每分鐘限流；連續錯誤配對會鎖 pending pairing。
+6. [x] **出站脫敏**：通知 payload 有界，錯誤不帶完整路徑/token/原始輸出。
+7. [x] **secret 引用與輪換**：bot token 僅 `env:` 引用，API 不回顯；token revision 變更撤銷舊 pairing，並提供本地 revoke。
+8. [ ] **Webhook 型渠道簽名**：Slack/Discord/webhook inbound 均未實現，因此 HMAC/replay window 仍未落地。
 
-### 6.5 通知可靠性收尾（0709 遺留）
+### 6.5 通知可靠性收尾
 
-- 通知歷史表 + 設定頁最近 N 條與失敗原因。
-- 失敗重試隊列（指數退避、上限次數），失敗不阻塞 agent loop（現有原則保持）。
-- 每專案/每 agent 的通知路由規則（哪些事件 → 哪個渠道）。
+- [x] `notification_deliveries` 歷史、狀態、attempt、HTTP status、脫敏錯誤與設定頁最近記錄。
+- [x] 去重、lease、指數退避、上限次數、`delivered` / `dead` 與顯式 retry；失敗不阻塞 agent loop。
+- [x] Telegram delivery 按 active pairing 的 Agent scope 路由；Webhook 依既有事件偏好路由。
+- [ ] 更一般的每專案/每 Agent/每事件多 sink 規則編輯器尚未實現。
 
-### 6.6 成本預算與告警（P2 → 本 Phase 順手做）
+### 6.6 Phase B 驗收
 
-- `projects.budget_usd` + run 級成本累計（`api_requests` 已有 usage/cost 基礎）。
-- 80% 預算 → 通知警告；100% → 暫停 run 並要求顯式繼續（IM 上就能回覆繼續，正好吃到閉環紅利）。
-- 未知模型成本估 0 的現狀要在 UI 標註「估算不含未知模型」。
+成本預算、FTS5 會話搜尋與 Workline 可視化仍可作為一般產品 backlog，但**不屬於 Phase B**，不得用它們稀釋或替代 IM Gateway 驗收。
 
-### 6.7 會話全文搜尋（P2）
-
-- SQLite FTS5 虛表對 message content 建索引（migration + 觸發器同步）。
-- `GET /api/search?q=...` + 前端 Cmd+K 全局搜索，結果跳轉到對應 agent/message。
-- 長期使用後找回「上次那個 bug 是怎麼修的」，是常駐伺服器相對 CLI 的隱性優勢，值得早做。
-
-### 6.8 Chapters/Worklines 可視化面板（P2）
-
-- 側欄樹：workline 層級、分支名、worktree 乾淨度、ahead/behind、最近 run 狀態。
-- 行內操作：fork / merge-check / merge，複用現有 API。
-- 這是把「別人沒有的架構能力」變成「使用者看得見的功能」的關鍵一步。
-
-### 6.9 Phase B 驗收
-
-- [ ] 手機上收到審批通知 → 回 `/approve` → 電腦上工具繼續執行 → 收到 summary → 點連結回 UI 提交，全程不碰電腦鍵盤（提交除外）。
-- [ ] 未配對 chat 發任何命令：無響應、有審計記錄。
-- [ ] bot token 換新後舊配對失效流程可用。
-- [ ] 通知失敗可在設定頁看到原因並重試。
+- [ ] 真實 Telegram bot 的手機端完整 dogfood（收到審批 → `/approve` → 工具繼續 → 收到完成通知）尚未在本文件記錄可重現證據；程式與測試路徑已具備。
+- [x] 未配對 chat 發命令：無 Telegram 響應，channel event / audit 留痕。
+- [x] bot token 換新後舊配對因 credential revision 不符而撤銷，並可從本地 UI/API 手動 revoke。
+- [x] 通知失敗可在設定頁看到脫敏原因、退避/`dead` 狀態並顯式重試。
+- [x] `/task`、自由聊天、Slack/Discord 均保持未完成。
 
 ---
 
@@ -298,12 +232,13 @@ type Channel interface {
 - `merge` 遇衝突時（現在是 abort + 409），提供「讓 agent 嘗試解決」：在臨時 worktree 裡給 agent 衝突檔案 + 兩側意圖（各自 run summary 作為上下文），產出解決方案 → 人審 diff → 確認才真正 merge。
 - 邊界延續現有 Git 路徑限制；失敗就乾淨 abort，不留半合併狀態。
 
-### 7.3 排程背景任務（吃到「常駐」紅利）
+### 7.3 排程背景任務（已完成受限 MVP）
 
-- 新表 `schedules`：`cron_expr, project_id, prompt, permission_mode(限 readOnly/acceptEdits), enabled, last_run_id`。
-- 調度器 goroutine：到點建立 run，防重疊（上次未完成則跳過並通知）。
-- 典型場景：每晚跑測試並報告失敗、每週依賴升級草稿分支、每天 issue 分類。結果走 Phase B 的 IM 通知，兩個 Phase 在此匯合。
-- 護欄：排程任務永不 `bypassPermissions`；預算檢查照常生效。
+- [x] V19 `schedules` 與 run `source/source_id/permission_mode_cap`。
+- [x] cron/`@hourly`/`@daily`/`@weekly`/`@every`、IANA timezone、lease 防重複 claim。
+- [x] 權限只允許 `readOnly` / `acceptEdits`，且 cap 不會放寬 Agent 原權限。
+- [x] Agent 已有 pending/running 人工 run 時記錄 skipped，不取消、不取代，也不持久化排程 prompt 到該人工 run。
+- [ ] 這不是通用 queued background task 系統；排隊、取消 queued run 與成本預算仍未完成。
 
 ### 7.4 Branch push 與 PR 草稿
 
@@ -318,14 +253,14 @@ type Channel interface {
 
 - 明確 `plan` 權限模式：只允許 read 風險工具，system prompt 要求先產出計畫；UI「批准計畫並開始執行」按鈕原地切回 acceptEdits 繼續同一 run 上下文。
 
-### 7.7 技能生態與掃描
+### 7.7 Skills 維護邊界
 
-- SKILL.md 匯入（5.3）之上：技能啟用歷史、來源指紋、更新 diff 展示；掃描規則持續補充（對照 OpenClaw SkillSpector 的公開風險分類）。
+Skills 的 scope、revision、restore、snapshot cursor 與安全掃描已收口。Phase C 不再預設擴張技能市場；只有真實安全樣本、兼容缺陷或使用回饋才驅動後續調整。
 
 ### 7.8 其他中型項
 
 - **MCP 長連接會話池**：stdio session 保活 + idle TTL + 崩潰重啟，消除每次 initialize 開銷。
-- **Provider capability 標記浮出 UI**：模型下拉直接顯示 tools/streaming/vision 支援，避免「選了不支援 tools 的模型還以為 agent 壞了」。
+- **Provider capability metadata 浮出 UI**：復用既有 `Tools` / `Streaming` / `ImageInput` 契約，讓模型下拉顯示能力，避免把不支援能力誤判成 Agent 故障。
 - **首次啟動三步引導**：配 key → 驗證模型（真打一次請求）→ 建第一個專案。目前配置面複雜度已經需要這個了。
 - **子代理（sub-agent）**：agent 可 spawn 限定範圍的子 run 並回收摘要。與 workline 架構天然契合，但依賴佇列與成本護欄先就緒，放本 Phase 末。
 
@@ -335,20 +270,23 @@ type Channel interface {
 
 | 功能 | 優先級 | 難度 | Phase | 一句話 MVP |
 | --- | --- | --- | --- | --- |
-| 工具權限規則表收尾提交 | P0 | 低 | A | working tree 乾淨、測試綠 |
-| Checkpoint / Rollback | P1 | 中 | A | run summary 卡一鍵回滾已跟蹤檔案 |
-| Skills 服務端化 + SKILL.md 匯入 | P1 | 中 | A | skills 表 + 遷移按鈕 + 啟用前展示 |
-| narrator/chapter 改名 | P1 | 低中 | A | 一個 PR + migration + 測試 |
-| 文件收斂 + README 定位改寫 | P1 | 低 | A | 一份 roadmap、一句定位 |
-| Telegram 出站通知 + 審批閉環 | P1 | 中 | B | /status /approve /deny + 配對 |
-| 通知歷史 + 重試隊列 | P1 | 低中 | B | 失敗可見可重試 |
-| 成本預算與告警 | P2 | 低 | B | 專案預算 80%/100% 兩檔 |
-| FTS5 會話搜尋 | P2 | 低中 | B | Cmd+K 搜歷史訊息 |
-| Worklines 可視化面板 | P2 | 中 | B | 樹 + fork/merge-check/merge 入口 |
-| IM 派新任務 /task | P2 | 中 | B末 | 預設關閉的顯式開關 |
+| 工具權限規則表 | 完成 | — | A | 服務端偏好、規則與命中決策已落地 |
+| Checkpoint / Rollback | 完成 | — | A | run-scoped checkpoint 與保守 rollback 已落地 |
+| Skills scope/revision/restore/cursor | 完成 | — | A | scoped、revisioned、snapshot-stable Skills 已收口 |
+| Autoto / Agent / Workline 命名 | 完成 | — | A | 規範名落地，legacy 進入遷移 lifecycle |
+| 文件收斂 + README 定位改寫 | P1 | 低 | A 收尾 | 一份 roadmap、一句真實定位 |
+| Telegram/單一渠道入站審批閉環 | 完成（受限） | — | B | long polling + /pair /status /approve-once 語義 /deny；無自由聊天 |
+| 通知歷史 + 重試隊列 | 完成 | — | B | durable history + backoff + dead + retry |
+| IM 派新任務 /task | 未完成 | 中 | B 末 | 預設關閉的顯式開關 |
+| Slack / Discord | 未完成 | 中高 | B 後 | 尚無 adapter |
+| Home Assistant 受限整合 | 完成（受限） | — | P3 | 私網、只讀狀態、固定 allowlist、本地雙確認、IM 禁止 |
+| 通用 IoT / 攝像頭 / 門鎖解鎖 / 雲監控 | 未完成 | 高 | 不排期 | 不得由現有 HA/monitoring 能力外推 |
+| 成本預算與告警 | P2 | 低 | C/一般 backlog | 專案預算 80%/100% 兩檔 |
+| FTS5 會話搜尋 | P2 | 低中 | C/一般 backlog | Cmd+K 搜歷史訊息 |
+| Worklines 可視化面板 | P2 | 中 | C | 樹 + fork/merge-check/merge 入口 |
 | AI Review Workline | P1* | 中高 | C | 唯讀 reviewer agent + 結構化 findings |
 | AI 解 merge conflict | P2 | 高 | C | 臨時 worktree 內解衝突 + 人審 |
-| 排程背景任務 | P2 | 中 | C | cron + 防重疊 + IM 通知 |
+| 排程背景任務 | 完成（受限） | — | C/P2–P3 | cron + lease + busy skip + permission cap + durable 通知 |
 | Branch push + PR 草稿 | P2 | 中 | C | 顯式確認、summary 作 PR body |
 | 任務佇列 | P2 | 中 | C | queued run 順序執行 |
 | Plan Mode 閉環 | P2 | 低中 | C | plan 模式 + 批准後原地繼續 |
@@ -367,19 +305,17 @@ type Channel interface {
 5. 技能市場/分享平台——先做匯入相容與安全展示，市場是生態階段的事。
 6. 通用聊天助理化（讓 IM 端自由聊天）——會把定位重新拖回雙重人格。
 
-## 10. 建議執行順序（0712 起第一週）
+## 10. 接續執行順序
 
-1. 收尾並提交 workflow 權限規則（2.3 清單）。
-2. 刪空目錄、`.narrafork`，規劃文件移入 `docs/plans/`。
-3. 做出改名決定（建議：改），排一個獨立 PR。
-4. Checkpoint/Rollback 後端 + summary 卡按鈕。
-5. Skills 服務端化 migration 與 CRUD。
-6. README 第一屏改寫定位句。
-7. 有餘力：Telegram 出站通知 spike（long polling + 配對碼原型），為 Phase B 探路。
+1. 完成本輪文件事實同步，保持 P2–P3 邊界一致。
+2. 維持 Skills 收口狀態，不再追加無真實需求的 scope/revision 複雜度。
+3. 為 Telegram、delivery retry、schedule busy skip、token rotation 與 Home Assistant 本地雙確認補可重現 dogfood/重啟證據。
+4. 保持 IM 與設備控制隔離；不新增 `/task`、自由聊天、Slack/Discord 或高風險設備動作，除非另做威脅模型。
+5. 繼續 review workline、AI conflict resolve、通用 queue、process list 與 runtime cleanup。
 
 ## 11. 核心產品判斷（本文件唯一需要記住的話)
 
-> 0709 的判斷依然成立且因合併而更清晰：**「派任務 → 後台執行 → 主動提醒 → 審批 → 回顧 → 一鍵提交」是唯一主線。這次合併的全部意義，是讓「提醒與審批」離開瀏覽器、跟著你的手機走；龍蝦專案的其他部分（渠道矩陣、通用助理、技能市場）都不要跟。做深這一條線，CodeHarbor 就是市場上沒有的東西：OpenClaw 管不了代碼，Claude Code 離不開終端機，而你兩邊都在。**
+> **Autoto 已完成本地編碼閉環，並完成受限 Telegram 狀態/一次性審批控制、受限排程、durable 通知與受限 Home Assistant。它仍不是通用 IM/IoT 平台：`/task`、自由聊天、Slack/Discord、攝像頭動作、門鎖解鎖與雲監控都未實現。**
 
 ## 附錄：外部對照資料
 

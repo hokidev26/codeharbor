@@ -9,6 +9,8 @@ All notable changes to Autoto are tracked here. The project is still an experime
 - Renamed the current product to **Autoto**. The canonical Go module and CLI are `autoto` and `cmd/autoto` / `autoto`; `cmd/codeharbor` remains a legacy compatibility shim.
 - Moved default runtime state to `~/.autoto/config.json` and `~/.autoto/autoto.db`. When the canonical config is absent, a legacy `~/.codeharbor/config.json` is copied forward for compatibility.
 - Made `AUTOTO_*` environment variables and `X-Autoto-*` headers canonical. Corresponding `CODEHARBOR_*`, `X-CodeHarbor-*`, and legacy remote-access cookie names remain accepted only for migration compatibility.
+- Legacy compatibility actually used at runtime now warns once per process/compatibility key: the `codeharbor` CLI shim, effective `CODEHARBOR_*` or legacy-config fallback, successful legacy token/access header or cookie use, and the successful CLIProxyAPI legacy management-credential fallback report their canonical replacement. Canonical values suppress fallback warnings, invalid credentials do not warn, and logs never include token, password, cookie, API-key, or credential values.
+- Defined the legacy compatibility lifecycle in `PROJECT_PLAN.md`: canonical names win, legacy aliases are compatibility reads/forwards only, removal is no earlier than v0.4.0, and every runtime surface requires at least two tagged releases of migration runway plus the documented deletion gates. The explicit response-write exception is `window.CODEHARBOR_LOCAL_TOKEN`: the server still injects it with the same value as canonical `window.AUTOTO_LOCAL_TOKEN`, and `runtime.mjs` reads it only as a fallback until first-party runtime no longer depends on it and the old-UI migration window is complete.
 - Historical entries below intentionally retain pre-rename CodeHarbor terminology, endpoint names, commit messages, and other recorded facts; they are legacy history rather than current naming guidance.
 
 ### Added
@@ -19,14 +21,27 @@ All notable changes to Autoto are tracked here. The project is still an experime
 - Added persistent Run/ToolCall lifecycle timestamps, lightweight tool-call previews, and an active Run summary endpoint.
 - Added a frontend Run Summary card that loads completed/error/interrupted run summaries, shows tool/message/token/cost metrics, and links the review flow to the existing Git changes modal.
 - Added streaming Bash tool output over Agent WebSocket events, with a live output card in the chat UI while commands run.
-- Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block.
+- Added SQLite migrations V19–V22 for schedules and run-source metadata, durable notification deliveries, channel pairings/events/cursors, and device-action requests.
+- Added schedule CRUD and trigger APIs plus the automation worker. Schedules accept only `readOnly` or `acceptEdits`, persist a run permission cap, use leases to avoid duplicate claims, record busy executions as skipped, and do not cancel or replace an existing manual run.
+- Added persisted Webhook and Telegram delivery history with deduplication, leases, bounded attempts, exponential backoff, delivered/dead states, aggregate statistics, and an explicit retry API. Delivery failures remain outside the Agent loop.
+- Added server-backed integration connections whose Telegram bot token and Home Assistant access token must be `env:VARIABLE_NAME` references. Public API responses expose only configured-field booleans, not the reference target or resolved secret.
+- Added a Telegram control plane using Bot API long polling only. It persists update cursors and channel events, supports private-chat `/pair`, `/status`, `/approve <toolCallId>` with one-time `allow_once` semantics, and `/deny <toolCallId> [reason]`, rate-limits paired chats, and silently ignores unauthenticated commands and failed pairing attempts. There is no `/task`, free-form chat, Telegram webhook receiver, Slack, or Discord adapter.
+- Added bot-credential revision binding for Telegram pairings: changing the bot token revokes stale pairings, and the local API/UI can explicitly revoke a pairing.
+- Added a Home Assistant adapter restricted to loopback, `.local`, link-local, or private-network endpoints. State/entity listing is read-only and attribute-filtered; state changes use a fixed action allowlist, a short-lived persisted request, two local UI confirmations, and a direct-loopback approval. Critical or unknown actions—including door unlock, camera snapshot, scripts, automations, and shell commands—are hard-blocked, and IM cannot initiate or approve device actions.
+- Added a local monitoring snapshot that aggregates active runs, pending approvals, schedules, delivery states, channel pairings/events, device-action states, and automation-worker status.
+- Added hard blocking for sensitive workspace paths in the file path tools: `Read`, `Write`, `Edit`, `Glob`, and `Grep` reject or omit environment files, credential/secret files, private-key material, and `.git` contents.
+- Added Agent stream protocol 2 with per-process stream sessions and monotonic sequences, bounded in-memory replay, explicit resync reasons, and authoritative live-snapshot recovery. Durable Agent-event persistence and cross-process/restart replay remain unimplemented.
+- Added server-backed scoped and revisioned Skills with global/project/workspace CRUD, effective-skill resolution, revision history/detail, optimistic-lock restore, and snapshot-stable cursor pagination. The Settings scoped panel supports scope browsing, detail, pagination, revision history, and restore; create, SKILL.md import, enable/disable, edit, and delete UI actions remain global-only.
 
 ### Changed
 
 - Model discovery now reports whether models were remotely discovered or fallback-only, and the setup wizard accepts any registered provider with usable models.
 - Run summaries no longer load complete tool inputs/outputs; full details remain available from the tool-call detail APIs.
 - Browser-local drafts remain an unauthenticated compatibility fallback, while logged-in users use versioned private server drafts.
-- Updated the July 9 planning notes and project roadmap to reflect completed provider reliability, database migration, project instruction loading, and run tracking work.
+- Updated the July 9/12 planning notes and project roadmap to reflect completed provider reliability, database migration, project instruction loading, run tracking, schedules, durable delivery history, limited Telegram pairing/approval controls, monitoring aggregation, and the constrained Home Assistant adapter.
+- Added the Provider capability contract and exposed it through provider/model metadata; Agent execution now uses declared capabilities instead of provider-name branching.
+- Moved preview, Telegram channels, automation workers, and HTTP serving under the runtime Supervisor. Services start in registration order and close in reverse order, so HTTP stops before automation/channels during shutdown.
+- Clarified product Phase naming: the implemented IM scope is a narrow Telegram status/one-time-approval control plane, not a general inbound assistant. Skills closeout is limited to backend scope/effective/revision/pagination semantics and the current scoped browse/restore UI; future work is defect-only and does not imply that all scoped write operations have UI coverage.
 
 ### Security
 
@@ -69,6 +84,10 @@ All notable changes to Autoto are tracked here. The project is still an experime
 
 ### Known gaps
 
+- Slack and Discord channels are not implemented. Telegram is the only inbound channel and uses long polling; there is no inbound webhook receiver.
+- Telegram has no `/task` command and no free-form assistant chat. Its current command surface is pairing, minimal status, one-time tool approval, and denial only.
+- Home Assistant is the only device integration. There is no generic IoT layer, camera action support, door-unlock action, or cloud monitoring service; the monitoring snapshot is local aggregate state only.
+- Durable notification deliveries do not make Agent WebSocket events durable: Agent stream replay is still process-local and in-memory.
 - The Settings skills workbench can create, enable/disable, delete, and discover tools for persisted MCP registry servers; full update/edit forms and long-lived MCP sessions remain future work.
 - The embedded frontend has an ES module seam, but a large remaining portion of UI feature code still lives in `app-main.mjs` and should continue being split or migrated to a framework.
 - README includes a lightweight tracked GIF workflow preview; a recorded product GIF can replace it later.

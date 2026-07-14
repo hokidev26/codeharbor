@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 
+	"autoto/internal/secrets"
 	"autoto/internal/skills"
 )
 
@@ -109,15 +111,20 @@ type Workline struct {
 type Agent struct {
 	ID                     string `json:"id"`
 	WorklineID             string `json:"worklineId,omitempty"`
+	ParentAgentID          string `json:"parentAgentId,omitempty"`
+	ForkMessageID          string `json:"forkMessageId,omitempty"`
+	InheritMode            string `json:"inheritMode,omitempty"`
 	Type                   string `json:"type"`
 	SubagentType           string `json:"subagentType,omitempty"`
 	Title                  string `json:"title"`
 	Model                  string `json:"model"`
 	SystemPrompt           string `json:"systemPrompt,omitempty"`
 	PermissionMode         string `json:"permissionMode"`
-	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
 	EntityGeneration       int64  `json:"entityGeneration"`
 	PermissionGeneration   int64  `json:"permissionGeneration"`
+	ExecutionGeneration    int64  `json:"executionGeneration"`
+	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
+	ExecutionDeviceID      string `json:"executionDeviceId"`
 	Status                 string `json:"status"`
 	PlanMode               bool   `json:"planMode"`
 	CWD                    string `json:"cwd,omitempty"`
@@ -127,6 +134,27 @@ type Agent struct {
 	PrunedPercent          int    `json:"-"`
 	CreatedAt              string `json:"createdAt"`
 	UpdatedAt              string `json:"updatedAt"`
+}
+
+type NavigationConversation struct {
+	ProjectID         string `json:"projectId"`
+	ProjectName       string `json:"projectName"`
+	ProjectPath       string `json:"projectPath"`
+	ProjectUpdatedAt  string `json:"projectUpdatedAt"`
+	WorklineID        string `json:"worklineId"`
+	WorklineTitle     string `json:"worklineTitle"`
+	WorklineRole      string `json:"worklineRole"`
+	WorklineBranch    string `json:"worklineBranch"`
+	WorklineUpdatedAt string `json:"worklineUpdatedAt"`
+	AgentID           string `json:"agentId"`
+	AgentTitle        string `json:"agentTitle"`
+	AgentType         string `json:"agentType"`
+	AgentStatus       string `json:"agentStatus"`
+	Model             string `json:"model"`
+	PermissionMode    string `json:"permissionMode"`
+	CWD               string `json:"cwd"`
+	MessageCount      int    `json:"messageCount"`
+	LastActivityAt    string `json:"lastActivityAt"`
 }
 
 type Message struct {
@@ -152,22 +180,30 @@ type MessagePage struct {
 }
 
 type Run struct {
-	ID                 string `json:"id"`
-	AgentID            string `json:"agentId"`
-	TriggerMessageID   string `json:"triggerMessageId,omitempty"`
-	Status             string `json:"status"`
-	StartedAt          string `json:"startedAt,omitempty"`
-	CompletedAt        string `json:"completedAt,omitempty"`
-	ErrorMessage       string `json:"errorMessage,omitempty"`
-	BaseHead           string `json:"baseHead,omitempty"`
-	EndHead            string `json:"endHead,omitempty"`
-	CheckpointRepoRoot string `json:"checkpointRepoRoot,omitempty"`
-	GitSnapshotAt      string `json:"gitSnapshotAt,omitempty"`
-	CheckpointState    string `json:"checkpointState"`
-	CheckpointError    string `json:"checkpointError,omitempty"`
-	RolledBackAt       string `json:"rolledBackAt,omitempty"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                  string `json:"id"`
+	AgentID             string `json:"agentId"`
+	TriggerMessageID    string `json:"triggerMessageId,omitempty"`
+	Status              string `json:"status"`
+	StartedAt           string `json:"startedAt,omitempty"`
+	CompletedAt         string `json:"completedAt,omitempty"`
+	ErrorMessage        string `json:"errorMessage,omitempty"`
+	BaseHead            string `json:"baseHead,omitempty"`
+	EndHead             string `json:"endHead,omitempty"`
+	CheckpointRepoRoot  string `json:"checkpointRepoRoot,omitempty"`
+	GitSnapshotAt       string `json:"gitSnapshotAt,omitempty"`
+	CheckpointState     string `json:"checkpointState"`
+	CheckpointError     string `json:"checkpointError,omitempty"`
+	RolledBackAt        string `json:"rolledBackAt,omitempty"`
+	Source              string `json:"source"`
+	SourceID            string `json:"sourceId,omitempty"`
+	PermissionModeCap   string `json:"permissionModeCap,omitempty"`
+	ExecutionGeneration int64  `json:"executionGeneration"`
+	DispatchID          string `json:"dispatchId,omitempty"`
+	DurationMS          int64  `json:"durationMs,omitempty"`
+	TriggerType         string `json:"triggerType"`
+	ExecutionDeviceID   string `json:"executionDeviceId"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 const (
@@ -271,6 +307,7 @@ type ToolCall struct {
 	PermissionSuggestions    string          `json:"permissionSuggestions,omitempty"`
 	PermissionGeneration     int64           `json:"permissionGeneration"`
 	PolicyGeneration         int64           `json:"policyGeneration"`
+	ExecutionDeviceID        string          `json:"executionDeviceId"`
 	StartedAt                string          `json:"startedAt,omitempty"`
 	CompletedAt              string          `json:"completedAt,omitempty"`
 	CreatedAt                string          `json:"createdAt"`
@@ -445,6 +482,70 @@ type SkillAuditEvent struct {
 	CreatedAt          string          `json:"createdAt"`
 }
 
+const (
+	AutomationAuditDetailsMaxBytes = 16 * 1024
+	AutomationAuditMaxListLimit    = 100
+)
+
+// AutomationAuditEvent contains structured security metadata. DetailsJSON is
+// deliberately limited to a small JSON object and must not contain secrets or
+// raw tool input.
+type AutomationAuditEvent struct {
+	ID          string          `json:"id"`
+	Category    string          `json:"category"`
+	Action      string          `json:"action"`
+	Actor       string          `json:"actor"`
+	AgentID     string          `json:"agentId,omitempty"`
+	RunID       string          `json:"runId,omitempty"`
+	SubjectType string          `json:"subjectType,omitempty"`
+	SubjectID   string          `json:"subjectId,omitempty"`
+	Outcome     string          `json:"outcome"`
+	Risk        string          `json:"risk"`
+	DetailsJSON json.RawMessage `json:"details"`
+	CreatedAt   string          `json:"createdAt"`
+}
+
+const (
+	IntegrationSettingsMaxBytes   = 16 * 1024
+	IntegrationSecretRefsMaxBytes = 8 * 1024
+)
+
+// IntegrationConnection stores configuration and secret references only. Secret
+// values are resolved outside the database package and are never serialized.
+type IntegrationConnection struct {
+	ID               string            `json:"id"`
+	Kind             string            `json:"kind"`
+	Name             string            `json:"name"`
+	Enabled          bool              `json:"enabled"`
+	Endpoint         string            `json:"endpoint,omitempty"`
+	SettingsJSON     json.RawMessage   `json:"settings"`
+	SecretRefs       map[string]string `json:"-"`
+	SecretConfigured map[string]bool   `json:"secretConfigured"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
+}
+
+const (
+	MemoryContentMaxBytes = 16 * 1024
+	MemoryMaxKeywords     = 20
+	MemoryKeywordMaxRunes = 64
+)
+
+type Memory struct {
+	ID         string   `json:"id"`
+	Content    string   `json:"content"`
+	Keywords   []string `json:"keywords"`
+	Pinned     bool     `json:"pinned"`
+	ArchivedAt string   `json:"archivedAt,omitempty"`
+	CreatedAt  string   `json:"createdAt"`
+	UpdatedAt  string   `json:"updatedAt"`
+}
+
+type MemoryListOptions struct {
+	Query           string `json:"query"`
+	IncludeArchived bool   `json:"includeArchived"`
+}
+
 type NotificationSettings struct {
 	ID               string `json:"id"`
 	Enabled          bool   `json:"enabled"`
@@ -490,6 +591,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
 	if err := store.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := store.ensureRuntimeSettings(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -736,7 +841,22 @@ func storedSkillFindingsVerdict(raw json.RawMessage) (string, bool) {
 	return verdict, true
 }
 
-func Now() string   { return time.Now().UTC().Format(time.RFC3339Nano) }
+var (
+	nowMu   sync.Mutex
+	lastNow time.Time
+)
+
+func Now() string {
+	nowMu.Lock()
+	defer nowMu.Unlock()
+	now := time.Now().UTC()
+	if !now.After(lastNow) {
+		now = lastNow.Add(time.Nanosecond)
+	}
+	lastNow = now
+	return now.Format(time.RFC3339Nano)
+}
+
 func NewID() string { return uuid.NewString() }
 
 func (s *Store) HasUsers(ctx context.Context) (bool, error) {
@@ -1174,12 +1294,19 @@ func validStoredToolPermissionMode(mode string) bool {
 }
 
 func validStoredToolPermissionToolName(name string) bool {
-	switch name {
-	case "*", "Bash", "Edit", "Glob", "Grep", "MCPCallTool", "MCPListTools", "Read", "WebFetch", "WebSearch", "Write":
+	if name == "*" {
 		return true
-	default:
+	}
+	if len(name) == 0 || len(name) > 128 {
 		return false
 	}
+	for i, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') || (i > 0 && strings.ContainsRune("_.:-", r)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validStoredToolPermissionRisk(risk string) bool {
@@ -1306,6 +1433,15 @@ func (s *Store) DeleteToolPermissionRule(ctx context.Context, id string) error {
 }
 
 func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
+	run.ID = strings.TrimSpace(run.ID)
+	run.AgentID = strings.TrimSpace(run.AgentID)
+	run.TriggerMessageID = strings.TrimSpace(run.TriggerMessageID)
+	run.DispatchID = strings.TrimSpace(run.DispatchID)
+	run.Source = strings.TrimSpace(run.Source)
+	run.SourceID = strings.TrimSpace(run.SourceID)
+	run.PermissionModeCap = strings.TrimSpace(run.PermissionModeCap)
+	run.TriggerType = strings.TrimSpace(run.TriggerType)
+	run.ExecutionDeviceID = strings.TrimSpace(run.ExecutionDeviceID)
 	if run.ID == "" {
 		run.ID = NewID()
 	}
@@ -1329,7 +1465,7 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 			run.StartedAt = now
 		}
 		run.CompletedAt = ""
-	case "completed", "error", "interrupted", "superseded":
+	case "completed", "error", "interrupted", "superseded", "skipped":
 		if run.StartedAt == "" {
 			run.StartedAt = run.CreatedAt
 		}
@@ -1342,11 +1478,119 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if run.CheckpointState == "" {
 		run.CheckpointState = RunCheckpointNone
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.CreatedAt, run.UpdatedAt)
+	if run.Source == "" {
+		run.Source = "manual"
+	}
+	if run.TriggerType == "" {
+		switch run.Source {
+		case "schedule", "scheduled":
+			run.TriggerType = "scheduled"
+		case "goal":
+			run.TriggerType = "goal"
+		case "internal":
+			run.TriggerType = "internal"
+		default:
+			run.TriggerType = "manual"
+		}
+	}
+	for _, field := range []struct {
+		name     string
+		value    string
+		max      int
+		required bool
+		token    bool
+	}{
+		{"run id", run.ID, 128, true, false},
+		{"run agent id", run.AgentID, 128, true, false},
+		{"run trigger message id", run.TriggerMessageID, 128, false, false},
+		{"run dispatch id", run.DispatchID, 256, false, false},
+		{"run source", run.Source, 64, true, true},
+		{"run source id", run.SourceID, 256, false, false},
+	} {
+		if err := validateP2P3Text(field.name, field.value, field.max, field.required, field.token); err != nil {
+			return Run{}, err
+		}
+	}
+	if !validRunStatus(run.Status) {
+		return Run{}, errors.New("invalid run status")
+	}
+	if run.PermissionModeCap != "" && run.PermissionModeCap != "readOnly" && run.PermissionModeCap != "acceptEdits" {
+		return Run{}, errors.New("invalid run permission mode cap")
+	}
+	if run.TriggerType != "manual" && run.TriggerType != "scheduled" && run.TriggerType != "goal" && run.TriggerType != "internal" {
+		return Run{}, errors.New("invalid run trigger type")
+	}
+	if run.DurationMS < 0 {
+		return Run{}, errors.New("invalid run duration")
+	}
+	var err error
+	for name, value := range map[string]*string{
+		"run created_at": &run.CreatedAt,
+		"run updated_at": &run.UpdatedAt,
+	} {
+		if *value, err = canonicalP2P3Time(name, *value, true); err != nil {
+			return Run{}, err
+		}
+	}
+	for name, value := range map[string]*string{
+		"run started_at":      &run.StartedAt,
+		"run completed_at":    &run.CompletedAt,
+		"run git_snapshot_at": &run.GitSnapshotAt,
+		"run rolled_back_at":  &run.RolledBackAt,
+	} {
+		if *value, err = canonicalP2P3Time(name, *value, false); err != nil {
+			return Run{}, err
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, err
 	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET execution_generation = COALESCE(execution_generation,0) + 1 WHERE id = ?`, run.AgentID)
+	if err != nil {
+		return Run{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Run{}, err
+	} else if affected != 1 {
+		return Run{}, sql.ErrNoRows
+	}
+	var agentDeviceID string
+	if err := tx.QueryRowContext(ctx, `SELECT execution_generation, COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, run.AgentID).Scan(&run.ExecutionGeneration, &agentDeviceID); err != nil {
+		return Run{}, err
+	}
+	if run.ExecutionDeviceID == "" {
+		run.ExecutionDeviceID = agentDeviceID
+	}
+	if err := validateP2P3Text("run execution device id", run.ExecutionDeviceID, 128, true, false); err != nil {
+		return Run{}, err
+	}
+	var deviceExists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM execution_devices WHERE id = ?`, run.ExecutionDeviceID).Scan(&deviceExists); err != nil {
+		return Run{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id, permission_mode_cap, execution_generation, dispatch_id, duration_ms, trigger_type, execution_device_id, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, 0), ?, ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.ExecutionGeneration, run.DispatchID, run.DurationMS, run.TriggerType, run.ExecutionDeviceID, run.CreatedAt, run.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Run{}, fmt.Errorf("%w: run dispatch or execution generation already exists", ErrConflict)
+		}
+		return Run{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, err
+	}
 	return run, nil
+}
+
+func validRunStatus(status string) bool {
+	switch status {
+	case "pending", "running", "completed", "interrupted", "error", "superseded", "skipped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) UpdateRunStatus(ctx context.Context, runID, status, errorMessage string) error {
@@ -1563,7 +1807,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage str
 		return fmt.Errorf("invalid terminal run status %q", status)
 	}
 	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, error_message = NULLIF(?, ''), updated_at = ? WHERE id = ? AND status IN `+allowed, status, now, errorMessage, now, runID)
+	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = NULLIF(?, ''), updated_at = ? WHERE id = ? AND status IN `+allowed, status, now, now, errorMessage, now, runID)
 	if err != nil {
 		return err
 	}
@@ -1582,7 +1826,7 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 		return err
 	}
 	now := Now()
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, restartReason, now, runID)
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, now, restartReason, now, runID)
 	if err != nil {
 		return err
 	}
@@ -1600,31 +1844,41 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 	return tx.Commit()
 }
 
-func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
+const runSelectSQL = `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), COALESCE(execution_generation,0), COALESCE(dispatch_id,''), COALESCE(duration_ms,0), COALESCE(trigger_type,'manual'), COALESCE(execution_device_id,'local'), created_at, updated_at FROM runs`
+
+type runScanner func(dest ...any) error
+
+func scanRun(scan runScanner) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
+	err := scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.ExecutionGeneration, &run.DispatchID, &run.DurationMS, &run.TriggerType, &run.ExecutionDeviceID, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
+func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
+	return scanRun(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, runSelectSQL+` WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(dest...)
+	})
+}
+
 func (s *Store) GetRunByID(ctx context.Context, runID string) (Run, error) {
-	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
-	return run, err
+	return scanRun(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, runSelectSQL+` WHERE id = ?`, runID).Scan(dest...)
+	})
 }
 
 func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT ?`, agentID, limit)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE agent_id = ? ORDER BY execution_generation DESC, id DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1633,15 +1887,15 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 }
 
 func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY COALESCE(started_at, created_at) ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE status IN ('pending', 'running') ORDER BY execution_generation ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1650,15 +1904,15 @@ func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
 }
 
 func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY COALESCE(started_at, created_at) ASC, id ASC`, RunCheckpointRollingBack)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE checkpoint_state = ? ORDER BY execution_generation ASC, id ASC`, RunCheckpointRollingBack)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1707,6 +1961,67 @@ ORDER BY p.updated_at DESC`, strings.TrimSpace(userID))
 	return projects, rows.Err()
 }
 
+func (s *Store) ListNavigationConversations(ctx context.Context) ([]NavigationConversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT
+  p.id,
+  p.name,
+  COALESCE(p.git_path, ''),
+  p.updated_at,
+  w.id,
+  w.title,
+  w.role,
+  COALESCE(w.branch, ''),
+  w.updated_at,
+  a.id,
+  a.title,
+  a.type,
+  a.status,
+  a.model,
+  a.permission_mode,
+  COALESCE(a.cwd, ''),
+  a.message_count,
+  COALESCE(NULLIF(a.last_message_at, ''), a.updated_at) AS last_activity_at
+FROM projects p
+JOIN worklines w ON w.project_id = p.id
+JOIN agents a ON a.workline_id = w.id
+WHERE p.status = 'active'
+ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	conversations := make([]NavigationConversation, 0)
+	for rows.Next() {
+		var conversation NavigationConversation
+		if err := rows.Scan(
+			&conversation.ProjectID,
+			&conversation.ProjectName,
+			&conversation.ProjectPath,
+			&conversation.ProjectUpdatedAt,
+			&conversation.WorklineID,
+			&conversation.WorklineTitle,
+			&conversation.WorklineRole,
+			&conversation.WorklineBranch,
+			&conversation.WorklineUpdatedAt,
+			&conversation.AgentID,
+			&conversation.AgentTitle,
+			&conversation.AgentType,
+			&conversation.AgentStatus,
+			&conversation.Model,
+			&conversation.PermissionMode,
+			&conversation.CWD,
+			&conversation.MessageCount,
+			&conversation.LastActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, conversation)
+	}
+	return conversations, rows.Err()
+}
+
 func (s *Store) CreateProject(ctx context.Context, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
 	return s.createProject(ctx, "", name, description, gitPath, defaultModel, permissionMode)
 }
@@ -1728,7 +2043,7 @@ func (s *Store) createProject(ctx context.Context, ownerID, name, description, g
 	now := Now()
 	project := Project{ID: NewID(), Name: name, Description: description, Status: "active", FlowMode: "workspace", GitPath: gitPath, CreatedAt: now, UpdatedAt: now}
 	workline := Workline{ID: NewID(), ProjectID: project.ID, Title: "main", Status: "active", Role: "root", WorktreePath: gitPath, IsRoot: true, CreatedAt: now, UpdatedAt: now}
-	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, ExecutionDeviceID: "local", Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1750,7 +2065,7 @@ func (s *Store) createProject(ctx context.Context, ownerID, name, description, g
 	if _, err := tx.ExecContext(ctx, `INSERT INTO worklines (id, project_id, title, status, role, worktree_path, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, workline.ID, workline.ProjectID, workline.Title, workline.Status, workline.Role, workline.WorktreePath, boolInt(workline.IsRoot), workline.CreatedAt, workline.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, reasoning_effort, execution_device_id, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.ReasoningEffort, agent.ExecutionDeviceID, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
 	}
 	if ownerID != "" {
@@ -1815,7 +2130,7 @@ func (s *Store) CreateWorklineFork(ctx context.Context, parent Workline, title, 
 	}
 	now := Now()
 	workline := Workline{ID: NewID(), ProjectID: parent.ProjectID, Title: title, Status: "active", Role: "worktree", Branch: branch, WorktreePath: worktreePath, BaseBranch: baseBranch, ParentWorklineID: parent.ID, ForkPoint: forkPoint, HeadCommitSHA: forkPoint, StartCommitSHA: forkPoint, IsRoot: false, CreatedAt: now, UpdatedAt: now}
-	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: title, Model: model, PermissionMode: permissionMode, Status: "idle", CWD: worktreePath, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: title, Model: model, PermissionMode: permissionMode, ExecutionDeviceID: "local", Status: "idle", CWD: worktreePath, CreatedAt: now, UpdatedAt: now}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Workline{}, Agent{}, err
@@ -1824,7 +2139,7 @@ func (s *Store) CreateWorklineFork(ctx context.Context, parent Workline, title, 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO worklines (id, project_id, title, status, role, branch, worktree_path, base_branch, parent_workline_id, fork_point, head_commit_sha, start_commit_sha, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, workline.ID, workline.ProjectID, workline.Title, workline.Status, workline.Role, workline.Branch, workline.WorktreePath, workline.BaseBranch, workline.ParentWorklineID, workline.ForkPoint, workline.HeadCommitSHA, workline.StartCommitSHA, boolInt(workline.IsRoot), workline.CreatedAt, workline.UpdatedAt); err != nil {
 		return Workline{}, Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, reasoning_effort, execution_device_id, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.ReasoningEffort, agent.ExecutionDeviceID, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Workline{}, Agent{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1855,12 +2170,22 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 	return s.GetWorkline(ctx, sourceWorklineID)
 }
 
-func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
-	var n Agent
+const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
+
+type agentScanner func(dest ...any) error
+
+func scanAgent(scan agentScanner) (Agent, error) {
+	var agent Agent
 	var planMode int
-	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(reasoning_effort,''), COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE id = ?`, id).Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.ReasoningEffort, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt)
-	n.PlanMode = planMode != 0
-	return n, err
+	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &agent.ExecutionDeviceID, &agent.Status, &planMode, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	agent.PlanMode = planMode != 0
+	return agent, err
+}
+
+func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
+	return scanAgent(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, agentSelectSQL+` WHERE id = ?`, id).Scan(dest...)
+	})
 }
 
 func (s *Store) UpdateAgentCWD(ctx context.Context, id, cwd string) (Agent, error) {
@@ -1877,9 +2202,30 @@ func (s *Store) UpdateAgentCWD(ctx context.Context, id, cwd string) (Agent, erro
 	return s.GetAgent(ctx, id)
 }
 
-func (s *Store) UpdateAgentModel(ctx context.Context, id, model string) (Agent, error) {
+func (s *Store) UpdateAgentModel(ctx context.Context, id, model string, reasoningEffort ...string) (Agent, error) {
+	id = strings.TrimSpace(id)
+	model = strings.TrimSpace(model)
+	if err := validateP2P3Text("agent id", id, 128, true, false); err != nil {
+		return Agent{}, err
+	}
+	if err := validateP2P3Text("agent model", model, 256, true, false); err != nil {
+		return Agent{}, err
+	}
+	if len(reasoningEffort) > 1 {
+		return Agent{}, errors.New("update agent model accepts at most one reasoning effort")
+	}
 	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE agents SET model = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, now, id)
+	var result sql.Result
+	var err error
+	if len(reasoningEffort) == 1 {
+		effort := strings.TrimSpace(reasoningEffort[0])
+		if !validAgentReasoningEffort(effort, true) {
+			return Agent{}, errors.New("invalid agent reasoning effort")
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = NULLIF(?,''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, effort, now, id)
+	} else {
+		result, err = s.db.ExecContext(ctx, `UPDATE agents SET model = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, now, id)
+	}
 	if err != nil {
 		return Agent{}, err
 	}
@@ -1891,9 +2237,12 @@ func (s *Store) UpdateAgentModel(ctx context.Context, id, model string) (Agent, 
 	return s.GetAgent(ctx, id)
 }
 
-func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, effort string) (Agent, error) {
-	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE agents SET reasoning_effort = NULLIF(?, ''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, effort, now, id)
+func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, reasoningEffort string) (Agent, error) {
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if !validAgentReasoningEffort(reasoningEffort, true) {
+		return Agent{}, errors.New("invalid agent reasoning effort")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET reasoning_effort = NULLIF(?,''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, reasoningEffort, Now(), strings.TrimSpace(id))
 	if err != nil {
 		return Agent{}, err
 	}
@@ -1903,6 +2252,18 @@ func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, effort strin
 		return Agent{}, sql.ErrNoRows
 	}
 	return s.GetAgent(ctx, id)
+}
+
+func validAgentReasoningEffort(value string, allowEmpty bool) bool {
+	if value == "" {
+		return allowEmpty
+	}
+	switch value {
+	case "auto", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) UpdateAgentContextSummary(ctx context.Context, id, summary, boundaryMessageID string, prunedPercent int) error {
@@ -1926,20 +2287,18 @@ func (s *Store) UpdateAgentPermissionMode(ctx context.Context, id, mode string) 
 }
 
 func (s *Store) ListAgentsByWorkline(ctx context.Context, worklineID string) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(reasoning_effort,''), COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
+	rows, err := s.db.QueryContext(ctx, agentSelectSQL+` WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	agents := make([]Agent, 0)
 	for rows.Next() {
-		var n Agent
-		var planMode int
-		if err := rows.Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.ReasoningEffort, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		agent, err := scanAgent(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		n.PlanMode = planMode != 0
-		agents = append(agents, n)
+		agents = append(agents, agent)
 	}
 	return agents, rows.Err()
 }
@@ -2311,7 +2670,21 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 	default:
 		return ToolCall{}, fmt.Errorf("invalid tool call status %q", call.Status)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, started_at, completed_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.StartedAt, call.CompletedAt, call.CreatedAt, call.UpdatedAt)
+	call.ExecutionDeviceID = strings.TrimSpace(call.ExecutionDeviceID)
+	if call.ExecutionDeviceID == "" && strings.TrimSpace(call.RunID) != "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(execution_device_id,'local') FROM runs WHERE id = ? AND agent_id = ?`, call.RunID, call.AgentID).Scan(&call.ExecutionDeviceID); err != nil {
+			return ToolCall{}, err
+		}
+	}
+	if call.ExecutionDeviceID == "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, call.AgentID).Scan(&call.ExecutionDeviceID); err != nil {
+			return ToolCall{}, err
+		}
+	}
+	if err := validateP2P3Text("tool call execution device id", call.ExecutionDeviceID, 128, true, false); err != nil {
+		return ToolCall{}, err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, execution_device_id, started_at, completed_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.ExecutionDeviceID, call.StartedAt, call.CompletedAt, call.CreatedAt, call.UpdatedAt)
 	if err != nil {
 		return ToolCall{}, err
 	}
@@ -2321,7 +2694,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 func (s *Store) GetToolCallByUseID(ctx context.Context, agentID, toolUseID string) (ToolCall, error) {
 	var c ToolCall
 	var input, output string
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(execution_device_id,'local'), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.ExecutionDeviceID, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt)
 	if input != "" {
 		c.InputJSON = json.RawMessage(input)
 	}
@@ -2379,7 +2752,7 @@ func (s *Store) ListToolCallsByRun(ctx context.Context, agentID, runID string) (
 }
 
 func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([]ToolCall, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls `+where, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(execution_device_id,'local'), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2388,7 +2761,7 @@ func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([
 	for rows.Next() {
 		var c ToolCall
 		var input, output string
-		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.ExecutionDeviceID, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if input != "" {
@@ -2801,6 +3174,905 @@ func (s *Store) ListSkillAuditEvents(ctx context.Context, skillID string, limit 
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) CreateMemory(ctx context.Context, memory Memory) (Memory, error) {
+	canonical, keywordsJSON, err := canonicalMemory(memory, false)
+	if err != nil {
+		return Memory{}, err
+	}
+	if canonical.ID == "" {
+		canonical.ID = NewID()
+	}
+	if err := validateMemoryID(canonical.ID); err != nil {
+		return Memory{}, err
+	}
+	now := Now()
+	canonical.CreatedAt = now
+	canonical.UpdatedAt = now
+	_, err = s.db.ExecContext(ctx, `INSERT INTO memories (id, content, keywords_json, pinned, archived_at, created_at, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, canonical.ID, canonical.Content, keywordsJSON, boolInt(canonical.Pinned), canonical.ArchivedAt, canonical.CreatedAt, canonical.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Memory{}, fmt.Errorf("%w: memory id already exists", ErrConflict)
+		}
+		return Memory{}, err
+	}
+	return canonical, nil
+}
+
+func (s *Store) GetMemory(ctx context.Context, id string) (Memory, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Memory{}, sql.ErrNoRows
+	}
+	return scanMemory(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, content, keywords_json, pinned, COALESCE(archived_at,''), created_at, updated_at FROM memories WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+// ListMemories accepts no options, a MemoryListOptions value, a query string,
+// or a query string followed by includeArchived. Results are pinned first and
+// then newest-updated first.
+func (s *Store) ListMemories(ctx context.Context, args ...any) ([]Memory, error) {
+	options, err := parseMemoryListOptions(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content, keywords_json, pinned, COALESCE(archived_at,''), created_at, updated_at FROM memories WHERE ? = 1 OR archived_at IS NULL ORDER BY pinned DESC, updated_at DESC, id ASC`, boolInt(options.IncludeArchived))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	query := strings.ToLower(strings.TrimSpace(options.Query))
+	memories := make([]Memory, 0)
+	for rows.Next() {
+		memory, err := scanMemory(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		if query == "" || memoryMatchesQuery(memory, query) {
+			memories = append(memories, memory)
+		}
+	}
+	return memories, rows.Err()
+}
+
+func (s *Store) UpdateMemory(ctx context.Context, memory Memory) (Memory, error) {
+	canonical, keywordsJSON, err := canonicalMemory(memory, true)
+	if err != nil {
+		return Memory{}, err
+	}
+	existing, err := s.GetMemory(ctx, canonical.ID)
+	if err != nil {
+		return Memory{}, err
+	}
+	canonical.CreatedAt = existing.CreatedAt
+	canonical.UpdatedAt = nextMemoryUpdatedAt(existing.UpdatedAt)
+	result, err := s.db.ExecContext(ctx, `UPDATE memories SET content = ?, keywords_json = ?, pinned = ?, archived_at = NULLIF(?, ''), updated_at = ? WHERE id = ?`, canonical.Content, keywordsJSON, boolInt(canonical.Pinned), canonical.ArchivedAt, canonical.UpdatedAt, canonical.ID)
+	if err != nil {
+		return Memory{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Memory{}, err
+	} else if affected != 1 {
+		return Memory{}, sql.ErrNoRows
+	}
+	return canonical, nil
+}
+
+func (s *Store) DeleteMemory(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sql.ErrNoRows
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) SetMemoryPinned(ctx context.Context, id string, pinned bool) (Memory, error) {
+	memory, err := s.GetMemory(ctx, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	memory.Pinned = pinned
+	return s.UpdateMemory(ctx, memory)
+}
+
+func (s *Store) PinMemory(ctx context.Context, id string, pinned ...bool) (Memory, error) {
+	value := true
+	if len(pinned) > 1 {
+		return Memory{}, errors.New("pin memory accepts at most one pinned value")
+	}
+	if len(pinned) == 1 {
+		value = pinned[0]
+	}
+	return s.SetMemoryPinned(ctx, id, value)
+}
+
+func (s *Store) UnpinMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryPinned(ctx, id, false)
+}
+
+func (s *Store) SetMemoryArchived(ctx context.Context, id string, archived bool) (Memory, error) {
+	memory, err := s.GetMemory(ctx, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	if archived {
+		memory.ArchivedAt = Now()
+	} else {
+		memory.ArchivedAt = ""
+	}
+	return s.UpdateMemory(ctx, memory)
+}
+
+func (s *Store) ArchiveMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryArchived(ctx, id, true)
+}
+
+func (s *Store) UnarchiveMemory(ctx context.Context, id string) (Memory, error) {
+	return s.SetMemoryArchived(ctx, id, false)
+}
+
+func (s *Store) ListMatchingUninjectedMemories(ctx context.Context, agentID, text string, limit int) ([]Memory, error) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return nil, errors.New("memory injection agent id is required")
+	}
+	if limit <= 0 {
+		return []Memory{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.content, m.keywords_json, m.pinned, COALESCE(m.archived_at,''), m.created_at, m.updated_at FROM memories m WHERE m.archived_at IS NULL AND m.keywords_json <> '[]' AND NOT EXISTS (SELECT 1 FROM memory_injections i WHERE i.memory_id = m.id AND i.agent_id = ?) ORDER BY m.pinned DESC, m.updated_at DESC, m.id ASC`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	lowerText := strings.ToLower(text)
+	matches := make([]Memory, 0, limit)
+	for rows.Next() {
+		memory, err := scanMemory(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		if len(memory.Keywords) == 0 || !memoryKeywordsMatch(memory.Keywords, lowerText) {
+			continue
+		}
+		matches = append(matches, memory)
+		if len(matches) == limit {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return matches, nil
+}
+
+func (s *Store) MarkMemoriesInjected(ctx context.Context, agentID string, memoryIDs []string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("memory injection agent id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ?`, agentID).Scan(&exists); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(memoryIDs))
+	seen := make(map[string]struct{}, len(memoryIDs))
+	for _, rawID := range memoryIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return errors.New("memory injection memory id is required")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	injectedAt := Now()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_injections (memory_id, agent_id, injected_at) VALUES (?, ?, ?) ON CONFLICT(memory_id, agent_id) DO NOTHING`, id, agentID, injectedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func parseMemoryListOptions(args []any) (MemoryListOptions, error) {
+	var options MemoryListOptions
+	switch len(args) {
+	case 0:
+		return options, nil
+	case 1:
+		switch value := args[0].(type) {
+		case MemoryListOptions:
+			return value, nil
+		case *MemoryListOptions:
+			if value == nil {
+				return options, nil
+			}
+			return *value, nil
+		case string:
+			options.Query = value
+			return options, nil
+		case bool:
+			options.IncludeArchived = value
+			return options, nil
+		default:
+			return options, errors.New("invalid memory list options")
+		}
+	case 2:
+		query, queryOK := args[0].(string)
+		includeArchived, archivedOK := args[1].(bool)
+		if !queryOK || !archivedOK {
+			return options, errors.New("invalid memory list options")
+		}
+		options.Query = query
+		options.IncludeArchived = includeArchived
+		return options, nil
+	default:
+		return options, errors.New("invalid memory list options")
+	}
+}
+
+func canonicalMemory(memory Memory, requireID bool) (Memory, string, error) {
+	memory.ID = strings.TrimSpace(memory.ID)
+	memory.ArchivedAt = strings.TrimSpace(memory.ArchivedAt)
+	if requireID || memory.ID != "" {
+		if err := validateMemoryID(memory.ID); err != nil {
+			return Memory{}, "", err
+		}
+	}
+	if strings.TrimSpace(memory.Content) == "" {
+		return Memory{}, "", errors.New("memory content is required")
+	}
+	if len(memory.Content) > MemoryContentMaxBytes {
+		return Memory{}, "", fmt.Errorf("memory content exceeds %d bytes", MemoryContentMaxBytes)
+	}
+	if !utf8.ValidString(memory.Content) || strings.ContainsRune(memory.Content, 0) {
+		return Memory{}, "", errors.New("invalid memory content")
+	}
+	keywords, err := normalizeMemoryKeywords(memory.Keywords)
+	if err != nil {
+		return Memory{}, "", err
+	}
+	encoded, err := json.Marshal(keywords)
+	if err != nil {
+		return Memory{}, "", fmt.Errorf("encode memory keywords: %w", err)
+	}
+	memory.Keywords = keywords
+	if memory.ArchivedAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, memory.ArchivedAt); err != nil {
+			return Memory{}, "", errors.New("invalid memory archived_at")
+		}
+	}
+	return memory, string(encoded), nil
+}
+
+func validateMemoryID(id string) error {
+	if id == "" {
+		return errors.New("memory id is required")
+	}
+	if len(id) > 128 || !utf8.ValidString(id) || strings.ContainsRune(id, 0) {
+		return errors.New("invalid memory id")
+	}
+	return nil
+}
+
+func normalizeMemoryKeywords(keywords []string) ([]string, error) {
+	normalized := make([]string, 0, len(keywords))
+	seen := make(map[string]struct{}, len(keywords))
+	for _, keyword := range keywords {
+		keyword = strings.ToLower(strings.TrimSpace(keyword))
+		if keyword == "" {
+			return nil, errors.New("memory keyword must not be empty")
+		}
+		if !utf8.ValidString(keyword) || strings.ContainsRune(keyword, 0) {
+			return nil, errors.New("invalid memory keyword")
+		}
+		if utf8.RuneCountInString(keyword) > MemoryKeywordMaxRunes {
+			return nil, fmt.Errorf("memory keyword exceeds %d runes", MemoryKeywordMaxRunes)
+		}
+		if _, duplicate := seen[keyword]; duplicate {
+			continue
+		}
+		seen[keyword] = struct{}{}
+		normalized = append(normalized, keyword)
+		if len(normalized) > MemoryMaxKeywords {
+			return nil, fmt.Errorf("memory keywords exceed maximum of %d", MemoryMaxKeywords)
+		}
+	}
+	return normalized, nil
+}
+
+func memoryMatchesQuery(memory Memory, lowerQuery string) bool {
+	if strings.Contains(strings.ToLower(memory.Content), lowerQuery) {
+		return true
+	}
+	return memoryKeywordsMatch(memory.Keywords, lowerQuery)
+}
+
+func memoryKeywordsMatch(keywords []string, lowerText string) bool {
+	for _, keyword := range keywords {
+		if strings.Contains(lowerText, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func nextMemoryUpdatedAt(previous string) string {
+	now := time.Now().UTC()
+	if prior, err := time.Parse(time.RFC3339Nano, previous); err == nil && !now.After(prior) {
+		now = prior.Add(time.Nanosecond)
+	}
+	return now.Format(time.RFC3339Nano)
+}
+
+type memoryScanner func(dest ...any) error
+
+func scanMemory(scan memoryScanner) (Memory, error) {
+	var memory Memory
+	var keywordsJSON string
+	var pinned int
+	if err := scan(&memory.ID, &memory.Content, &keywordsJSON, &pinned, &memory.ArchivedAt, &memory.CreatedAt, &memory.UpdatedAt); err != nil {
+		return Memory{}, err
+	}
+	var keywords []string
+	if err := json.Unmarshal([]byte(keywordsJSON), &keywords); err != nil || keywords == nil {
+		return Memory{}, fmt.Errorf("stored memory keywords for %s are invalid", memory.ID)
+	}
+	normalized, err := normalizeMemoryKeywords(keywords)
+	if err != nil {
+		return Memory{}, fmt.Errorf("stored memory keywords for %s are invalid: %w", memory.ID, err)
+	}
+	memory.Keywords = normalized
+	memory.Pinned = pinned != 0
+	return memory, nil
+}
+
+func (s *Store) ListIntegrationConnections(ctx context.Context) ([]IntegrationConnection, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at FROM integration_connections ORDER BY kind ASC, name ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	connections := make([]IntegrationConnection, 0)
+	for rows.Next() {
+		connection, err := scanIntegrationConnection(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		connections = append(connections, connection)
+	}
+	return connections, rows.Err()
+}
+
+func (s *Store) GetIntegrationConnection(ctx context.Context, id string) (IntegrationConnection, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return IntegrationConnection{}, sql.ErrNoRows
+	}
+	return scanIntegrationConnection(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at FROM integration_connections WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+func (s *Store) CreateIntegrationConnection(ctx context.Context, connection IntegrationConnection) (IntegrationConnection, error) {
+	canonical, settings, refs, err := canonicalIntegrationConnection(connection)
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if canonical.ID == "" {
+		canonical.ID = NewID()
+	}
+	if err := validateIntegrationText("id", canonical.ID, 128, true, false); err != nil {
+		return IntegrationConnection{}, err
+	}
+	now := Now()
+	canonical.CreatedAt, canonical.UpdatedAt = now, now
+	_, err = s.db.ExecContext(ctx, `INSERT INTO integration_connections (id, kind, name, enabled, endpoint, settings_json, secret_refs_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, canonical.ID, canonical.Kind, canonical.Name, boolInt(canonical.Enabled), canonical.Endpoint, settings, refs, canonical.CreatedAt, canonical.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return IntegrationConnection{}, fmt.Errorf("%w: integration connection kind and name already exist", ErrConflict)
+		}
+		return IntegrationConnection{}, err
+	}
+	return canonical, nil
+}
+
+func (s *Store) UpdateIntegrationConnection(ctx context.Context, connection IntegrationConnection) (IntegrationConnection, error) {
+	canonical, settings, refs, err := canonicalIntegrationConnection(connection)
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if err := validateIntegrationText("id", canonical.ID, 128, true, false); err != nil {
+		return IntegrationConnection{}, err
+	}
+	canonical.UpdatedAt = Now()
+	result, err := s.db.ExecContext(ctx, `UPDATE integration_connections SET kind = ?, name = ?, enabled = ?, endpoint = ?, settings_json = ?, secret_refs_json = ?, updated_at = ? WHERE id = ?`, canonical.Kind, canonical.Name, boolInt(canonical.Enabled), canonical.Endpoint, settings, refs, canonical.UpdatedAt, canonical.ID)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return IntegrationConnection{}, fmt.Errorf("%w: integration connection kind and name already exist", ErrConflict)
+		}
+		return IntegrationConnection{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return IntegrationConnection{}, err
+	}
+	if affected == 0 {
+		return IntegrationConnection{}, sql.ErrNoRows
+	}
+	return s.GetIntegrationConnection(ctx, canonical.ID)
+}
+
+func (s *Store) DeleteIntegrationConnection(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sql.ErrNoRows
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM integration_connections WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func canonicalIntegrationConnection(connection IntegrationConnection) (IntegrationConnection, string, string, error) {
+	connection.ID = strings.TrimSpace(connection.ID)
+	connection.Kind = strings.TrimSpace(connection.Kind)
+	connection.Name = strings.TrimSpace(connection.Name)
+	connection.Endpoint = strings.TrimSpace(connection.Endpoint)
+	if err := validateIntegrationText("kind", connection.Kind, 64, true, true); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	if err := validateIntegrationText("name", connection.Name, 120, true, false); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	if err := validateIntegrationText("endpoint", connection.Endpoint, 2048, false, false); err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	settings, err := normalizeIntegrationSettings(connection.SettingsJSON)
+	if err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	secretRefs, encodedRefs, err := normalizeIntegrationSecretRefs(connection.SecretRefs)
+	if err != nil {
+		return IntegrationConnection{}, "", "", err
+	}
+	connection.SettingsJSON = settings
+	connection.SecretRefs = secretRefs
+	connection.SecretConfigured = integrationSecretConfigured(secretRefs)
+	return connection, string(settings), string(encodedRefs), nil
+}
+
+func validateIntegrationText(name, value string, maxBytes int, required, token bool) error {
+	if required && value == "" {
+		return fmt.Errorf("integration connection %s is required", name)
+	}
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxBytes || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid integration connection %s", name)
+	}
+	if token {
+		for i, char := range value {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (i > 0 && char >= '0' && char <= '9') || (i > 0 && strings.ContainsRune("_.:-", char)) {
+				continue
+			}
+			return fmt.Errorf("invalid integration connection %s", name)
+		}
+	}
+	return nil
+}
+
+func normalizeIntegrationSettings(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		trimmed = `{}`
+	}
+	if len(trimmed) > IntegrationSettingsMaxBytes {
+		return nil, fmt.Errorf("integration settings exceed %d bytes", IntegrationSettingsMaxBytes)
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return nil, errors.New("integration settings must be a valid JSON object")
+	}
+	var settings map[string]any
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&settings); err != nil || settings == nil {
+		return nil, errors.New("integration settings must be a valid JSON object")
+	}
+	if key, found := integrationSensitiveKey(settings); found {
+		return nil, fmt.Errorf("integration settings contain forbidden sensitive key %q", key)
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("encode integration settings: %w", err)
+	}
+	if len(encoded) > IntegrationSettingsMaxBytes {
+		return nil, fmt.Errorf("integration settings exceed %d bytes", IntegrationSettingsMaxBytes)
+	}
+	return encoded, nil
+}
+
+func integrationSensitiveKey(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if forbiddenIntegrationSettingsKey(key) {
+				return key, true
+			}
+			if nested, found := integrationSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if nested, found := integrationSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	}
+	return "", false
+}
+
+func forbiddenIntegrationSettingsKey(key string) bool {
+	var normalized strings.Builder
+	for _, char := range strings.ToLower(strings.TrimSpace(key)) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			normalized.WriteRune(char)
+		}
+	}
+	value := normalized.String()
+	for _, marker := range []string{"password", "passwd", "secret", "token", "apikey", "credential", "privatekey", "accesskey", "authorization", "cookie"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeIntegrationSecretRefs(input map[string]string) (map[string]string, json.RawMessage, error) {
+	if input == nil {
+		input = map[string]string{}
+	}
+	refs := make(map[string]string, len(input))
+	for rawName, value := range input {
+		name := strings.TrimSpace(rawName)
+		if !validIntegrationSecretName(name) {
+			return nil, nil, errors.New("invalid integration secret logical name")
+		}
+		if _, exists := refs[name]; exists {
+			return nil, nil, errors.New("duplicate integration secret logical name")
+		}
+		ref, err := secrets.ParseRef(value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid integration secret reference for %q: %w", name, err)
+		}
+		refs[name] = ref.String()
+	}
+	encoded, err := json.Marshal(refs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode integration secret references: %w", err)
+	}
+	if len(encoded) > IntegrationSecretRefsMaxBytes {
+		return nil, nil, fmt.Errorf("integration secret references exceed %d bytes", IntegrationSecretRefsMaxBytes)
+	}
+	return refs, encoded, nil
+}
+
+func validIntegrationSecretName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (i > 0 && char >= '0' && char <= '9') || (i > 0 && strings.ContainsRune("_.-", char)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func integrationSecretConfigured(refs map[string]string) map[string]bool {
+	configured := make(map[string]bool, len(refs))
+	for name := range refs {
+		configured[name] = true
+	}
+	return configured
+}
+
+type integrationConnectionScanner func(dest ...any) error
+
+func scanIntegrationConnection(scan integrationConnectionScanner) (IntegrationConnection, error) {
+	var connection IntegrationConnection
+	var enabled int
+	var settingsJSON, refsJSON string
+	if err := scan(&connection.ID, &connection.Kind, &connection.Name, &enabled, &connection.Endpoint, &settingsJSON, &refsJSON, &connection.CreatedAt, &connection.UpdatedAt); err != nil {
+		return IntegrationConnection{}, err
+	}
+	settings, err := normalizeIntegrationSettings(json.RawMessage(settingsJSON))
+	if err != nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration settings for %s are invalid: %w", connection.ID, err)
+	}
+	var refs map[string]string
+	if err := json.Unmarshal([]byte(refsJSON), &refs); err != nil || refs == nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration secret references for %s are invalid", connection.ID)
+	}
+	refs, _, err = normalizeIntegrationSecretRefs(refs)
+	if err != nil {
+		return IntegrationConnection{}, fmt.Errorf("stored integration secret references for %s are invalid: %w", connection.ID, err)
+	}
+	connection.Enabled = enabled != 0
+	connection.SettingsJSON = settings
+	connection.SecretRefs = refs
+	connection.SecretConfigured = integrationSecretConfigured(refs)
+	return connection, nil
+}
+
+func (s *Store) AddAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	canonical, err := canonicalAutomationAuditEvent(event)
+	if err != nil {
+		return AutomationAuditEvent{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO automation_audit_events (id, category, action, actor, agent_id, run_id, subject_type, subject_id, outcome, risk, details_json, created_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?)`, canonical.ID, canonical.Category, canonical.Action, canonical.Actor, canonical.AgentID, canonical.RunID, canonical.SubjectType, canonical.SubjectID, canonical.Outcome, canonical.Risk, string(canonical.DetailsJSON), canonical.CreatedAt)
+	if err != nil {
+		return AutomationAuditEvent{}, fmt.Errorf("insert automation audit event: %w", err)
+	}
+	return canonical, nil
+}
+
+// RecordAutomationAuditEvent is an explicit audit-oriented alias for callers
+// that do not otherwise use Store's Add naming convention.
+func (s *Store) RecordAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	return s.AddAutomationAuditEvent(ctx, event)
+}
+
+func (s *Store) CreateAutomationAuditEvent(ctx context.Context, event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	return s.AddAutomationAuditEvent(ctx, event)
+}
+
+// ListAutomationAuditEvents returns newest events first. A zero limit uses 50;
+// callers may request at most AutomationAuditMaxListLimit rows and paginate with
+// a non-negative offset.
+func (s *Store) ListAutomationAuditEvents(ctx context.Context, limit, offset int) ([]AutomationAuditEvent, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 0 || limit > AutomationAuditMaxListLimit {
+		return nil, fmt.Errorf("automation audit limit must be between 1 and %d", AutomationAuditMaxListLimit)
+	}
+	if offset < 0 {
+		return nil, errors.New("automation audit offset must not be negative")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, category, action, actor, COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(subject_type,''), COALESCE(subject_id,''), outcome, risk, details_json, created_at FROM automation_audit_events ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]AutomationAuditEvent, 0)
+	for rows.Next() {
+		var event AutomationAuditEvent
+		var details string
+		if err := rows.Scan(&event.ID, &event.Category, &event.Action, &event.Actor, &event.AgentID, &event.RunID, &event.SubjectType, &event.SubjectID, &event.Outcome, &event.Risk, &details, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		event.DetailsJSON, err = normalizeAutomationAuditDetails(json.RawMessage(details))
+		if err != nil {
+			return nil, fmt.Errorf("stored automation audit details for %s are invalid: %w", event.ID, err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func canonicalAutomationAuditEvent(event AutomationAuditEvent) (AutomationAuditEvent, error) {
+	event.ID = strings.TrimSpace(event.ID)
+	event.Category = strings.TrimSpace(event.Category)
+	event.Action = strings.TrimSpace(event.Action)
+	event.Actor = strings.TrimSpace(event.Actor)
+	event.AgentID = strings.TrimSpace(event.AgentID)
+	event.RunID = strings.TrimSpace(event.RunID)
+	event.SubjectType = strings.TrimSpace(event.SubjectType)
+	event.SubjectID = strings.TrimSpace(event.SubjectID)
+	event.Outcome = strings.TrimSpace(event.Outcome)
+	event.Risk = strings.TrimSpace(event.Risk)
+	event.CreatedAt = strings.TrimSpace(event.CreatedAt)
+
+	if event.ID == "" {
+		event.ID = NewID()
+	}
+	if event.CreatedAt == "" {
+		event.CreatedAt = Now()
+	}
+	for _, field := range []struct {
+		name     string
+		value    string
+		maxBytes int
+		required bool
+		token    bool
+	}{
+		{"id", event.ID, 128, true, false},
+		{"category", event.Category, 64, true, true},
+		{"action", event.Action, 96, true, true},
+		{"actor", event.Actor, 200, true, false},
+		{"agent_id", event.AgentID, 128, false, false},
+		{"run_id", event.RunID, 128, false, false},
+		{"subject_type", event.SubjectType, 64, false, true},
+		{"subject_id", event.SubjectID, 256, false, false},
+	} {
+		if err := validateAutomationAuditText(field.name, field.value, field.maxBytes, field.required, field.token); err != nil {
+			return AutomationAuditEvent{}, err
+		}
+	}
+	if (event.SubjectType == "") != (event.SubjectID == "") {
+		return AutomationAuditEvent{}, errors.New("automation audit subject_type and subject_id must be provided together")
+	}
+	if !validAutomationAuditOutcome(event.Outcome) {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit outcome")
+	}
+	if !validAutomationAuditRisk(event.Risk) {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit risk")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, event.CreatedAt); err != nil {
+		return AutomationAuditEvent{}, errors.New("invalid automation audit created_at")
+	}
+	var err error
+	event.DetailsJSON, err = normalizeAutomationAuditDetails(event.DetailsJSON)
+	if err != nil {
+		return AutomationAuditEvent{}, err
+	}
+	return event, nil
+}
+
+func validateAutomationAuditText(name, value string, maxBytes int, required, token bool) error {
+	if required && value == "" {
+		return fmt.Errorf("automation audit %s is required", name)
+	}
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxBytes || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid automation audit %s", name)
+	}
+	if token && !validAutomationAuditToken(value) {
+		return fmt.Errorf("invalid automation audit %s", name)
+	}
+	return nil
+}
+
+func validAutomationAuditToken(value string) bool {
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '.', '_', ':', '-', '/':
+			continue
+		default:
+			return false
+		}
+	}
+	return value != ""
+}
+
+func validAutomationAuditOutcome(value string) bool {
+	switch value {
+	case "success", "failure", "denied", "error", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAutomationAuditRisk(value string) bool {
+	switch value {
+	case "none", "low", "medium", "high", "critical":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAutomationAuditDetails(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if len(trimmed) == 0 {
+		trimmed = `{}`
+	}
+	if len(trimmed) > AutomationAuditDetailsMaxBytes {
+		return nil, fmt.Errorf("automation audit details exceed %d bytes", AutomationAuditDetailsMaxBytes)
+	}
+	var details map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &details); err != nil {
+		return nil, errors.New("automation audit details must be a valid JSON object")
+	}
+	if details == nil {
+		return nil, errors.New("automation audit details must be a valid JSON object")
+	}
+	if key, found := automationAuditSensitiveKey(details); found {
+		return nil, fmt.Errorf("automation audit details contain forbidden sensitive key %q", key)
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return nil, fmt.Errorf("encode automation audit details: %w", err)
+	}
+	if len(encoded) > AutomationAuditDetailsMaxBytes {
+		return nil, fmt.Errorf("automation audit details exceed %d bytes", AutomationAuditDetailsMaxBytes)
+	}
+	return json.RawMessage(encoded), nil
+}
+
+func automationAuditSensitiveKey(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if forbiddenAutomationAuditKey(key) {
+				return key, true
+			}
+			if nested, found := automationAuditSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if nested, found := automationAuditSensitiveKey(child); found {
+				return nested, true
+			}
+		}
+	}
+	return "", false
+}
+
+func forbiddenAutomationAuditKey(key string) bool {
+	var normalized strings.Builder
+	for _, char := range strings.ToLower(strings.TrimSpace(key)) {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			normalized.WriteRune(char)
+		}
+	}
+	value := normalized.String()
+	if value == "input" || strings.Contains(value, "rawinput") || strings.Contains(value, "inputjson") || strings.Contains(value, "toolinput") || value == "toolargs" || value == "toolarguments" {
+		return true
+	}
+	for _, marker := range []string{"password", "passwd", "secret", "apikey", "privatekey", "accesskey", "credential", "authorization", "cookie"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	if value == "token" || strings.HasSuffix(value, "token") {
+		return true
+	}
+	return false
 }
 
 func nextSkillUpdatedAt(previous string) string {

@@ -37,6 +37,8 @@ type settingsProviderResponse struct {
 	MaxTokens      int64                       `json:"maxTokens,omitempty"`
 	Configured     bool                        `json:"configured"`
 	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
+	Enabled        bool                        `json:"enabled"`
+	Origin         string                      `json:"origin"`
 	Capabilities   providers.Capabilities      `json:"capabilities"`
 	Management     *providerManagementResponse `json:"management,omitempty"`
 }
@@ -49,16 +51,23 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		metadata := s.providerSettingsMetadata(summary)
 		providerResponses = append(providerResponses, settingsProviderResponse{
 			Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
-			MaxTokens: summary.MaxTokens, Configured: summary.Configured, APIKeyOptional: summary.APIKeyOptional,
-			Capabilities: metadata.Capabilities, Management: metadata.Management,
+			MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyOptional: summary.APIKeyOptional,
+			Enabled: summary.Enabled, Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
 		})
 	}
+	runtimeSettings, err := s.runtimeSettingsForResponse(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":    cfg.Server,
-		"paths":     cfg.Paths,
-		"agent":     cfg.Agent,
-		"providers": providerResponses,
-		"version":   config.Version,
+		"server":          cfg.Server,
+		"paths":           cfg.Paths,
+		"agent":           cfg.Agent,
+		"providers":       providerResponses,
+		"runtimeSettings": runtimeSettings,
+		"tierOrder":       subscriptionTierOrderSnapshot(),
+		"version":         config.Version,
 	})
 }
 

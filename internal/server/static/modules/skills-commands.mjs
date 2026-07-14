@@ -92,3 +92,11 @@ export function effectiveOwnerSkills(response) {
 export function mergeEffectiveOwnerCommands(effectiveResponse, localTemplates) {
   return mergeSlashCommands(effectiveOwnerSkills(effectiveResponse), localTemplates);
 }
+
+// Browser-local templates are allowed only after at least one authoritative
+// effective-policy snapshot has loaded. A refresh failure may retain last-known
+// data as stale, but the first failure must fail closed.
+export function mergeAuthoritativeEffectiveCommands(policy, localTemplates) {
+  if (!policy?.hasAuthoritativeData) return [];
+  return mergeEffectiveOwnerCommands(policy, localTemplates);
+}
