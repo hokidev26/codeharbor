@@ -18,11 +18,14 @@ import (
 )
 
 const (
-	gitCheckpointTimeout            = 3 * time.Second
-	gitCheckpointStatusMaxBytes     = 1 << 20
-	gitCheckpointIndexMaxBytes      = 64 << 10
-	gitCheckpointDiagnosticMaxBytes = 64 << 10
-	gitCheckpointMaxPaths           = 500
+	gitCheckpointTimeout                  = 3 * time.Second
+	gitCheckpointStatusMaxBytes           = 1 << 20
+	gitCheckpointIndexMaxBytes            = 64 << 10
+	gitCheckpointDiagnosticMaxBytes       = 64 << 10
+	gitCheckpointMaxPaths                 = 500
+	gitCheckpointFingerprintTimeout       = 3 * time.Second
+	gitCheckpointMaxFileBytes       int64 = 4 << 20
+	gitCheckpointMaxTotalBytes      int64 = 32 << 20
 )
 
 type runGitToolSnapshot struct {
@@ -358,7 +361,9 @@ func gitWorktreeClean(ctx context.Context, repoRoot string) (bool, error) {
 }
 
 func gitRunChangeSnapshot(ctx context.Context, repoRoot string) (map[string]db.RunGitChange, error) {
-	out, err := runCheckpointGit(ctx, repoRoot, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
+	fingerprintCtx, cancel := context.WithTimeout(ctx, gitCheckpointFingerprintTimeout)
+	defer cancel()
+	out, err := runCheckpointGit(fingerprintCtx, repoRoot, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
 	if err != nil {
 		return nil, err
 	}
@@ -367,15 +372,19 @@ func gitRunChangeSnapshot(ctx context.Context, repoRoot string) (map[string]db.R
 		return nil, err
 	}
 	changes := make(map[string]db.RunGitChange, len(entries))
+	budget := &gitsnapshot.FingerprintBudget{MaxFileBytes: gitCheckpointMaxFileBytes, MaxTotalBytes: gitCheckpointMaxTotalBytes}
 	for _, entry := range entries {
+		if err := fingerprintCtx.Err(); err != nil {
+			return nil, fmt.Errorf("checkpoint fingerprint time budget exceeded: %w", err)
+		}
 		if _, exists := changes[entry.Path]; exists {
 			return nil, fmt.Errorf("git status reported duplicate checkpoint path: %s", entry.Path)
 		}
-		indexFingerprint, err := gitIndexFingerprint(ctx, repoRoot, entry.Path)
+		indexFingerprint, err := gitIndexFingerprint(fingerprintCtx, repoRoot, entry.Path)
 		if err != nil {
 			return nil, err
 		}
-		worktreeFingerprint, err := gitsnapshot.WorktreeFingerprint(repoRoot, entry.Path)
+		worktreeFingerprint, err := gitsnapshot.WorktreeFingerprintWithBudget(fingerprintCtx, repoRoot, entry.Path, budget)
 		if err != nil {
 			return nil, err
 		}

@@ -19,6 +19,50 @@ func TestResolveInCWDRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestFileToolsRejectSymlinkEscape(t *testing.T) {
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cwd, "link")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	calls := []struct {
+		name  string
+		tool  Tool
+		input string
+	}{
+		{"Read", ReadTool{}, `{"file_path":"link/secret.txt"}`},
+		{"Edit", EditTool{}, `{"file_path":"link/secret.txt","old_string":"secret","new_string":"changed"}`},
+		{"Write", WriteTool{}, `{"file_path":"link/new.txt","content":"escaped"}`},
+		{"Grep", GrepTool{}, `{"pattern":"secret","path":"link"}`},
+		{"Glob", GlobTool{}, `{"pattern":"*","path":"link"}`},
+	}
+	for _, tt := range calls {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tt.tool.Execute(context.Background(), Call{ID: "symlink", Name: tt.name, Input: json.RawMessage(tt.input)}, Env{CWD: cwd})
+			if err != nil || !result.IsError || !strings.Contains(result.Output, "escapes working directory") {
+				t.Fatalf("expected symlink escape rejection, result=%+v err=%v", result, err)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("write escaped through symlink, stat err=%v", err)
+	}
+}
+
+func TestReadToolBoundsLargeFiles(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "large.txt"), []byte(strings.Repeat("x", maxReadBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (ReadTool{}).Execute(context.Background(), Call{ID: "large", Name: "Read", Input: json.RawMessage(`{"file_path":"large.txt"}`)}, Env{CWD: cwd})
+	if err != nil || result.IsError || !result.Meta["truncated"].(bool) || !strings.HasSuffix(result.Output, "\n...[truncated]") {
+		t.Fatalf("expected bounded truncated read, result=%+v err=%v", result, err)
+	}
+}
+
 func TestEditToolReplacesUniqueString(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "hello.txt"), []byte("hello world"), 0o644); err != nil {

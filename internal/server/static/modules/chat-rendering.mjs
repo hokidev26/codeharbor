@@ -3,6 +3,8 @@ import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./forma
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
 
+const messagePageLimit = 100;
+
 export function createChatRenderingController({
   state,
   attachmentIcon,
@@ -18,49 +20,202 @@ export function createChatRenderingController({
 } = {}) {
   async function loadMessages(agentId = state.agent?.id) {
     if (!agentId) return;
-    let messages = [];
+    let page;
     try {
-      messages = await api(`/api/agents/${agentId}/messages`);
+      page = await api(`/api/agents/${encodeURIComponent(agentId)}/messages?limit=${messagePageLimit}`);
     } catch (err) {
       if (state.agent?.id === agentId) throw err;
       return;
     }
-    applyMessageSnapshot(messages, agentId);
+    applyMessageSnapshot(page?.messages, agentId, {
+      hasMoreBefore: page?.hasMoreBefore,
+      nextBefore: page?.nextBefore,
+    });
   }
 
-  function applyMessageSnapshot(messages, agentId = state.agent?.id) {
+  async function loadOlderMessages(agentId = state.agent?.id) {
+    if (!agentId || state.agent?.id !== agentId || !state.messageHasMoreBefore || !state.messageNextBefore || state.messageOlderLoading) return;
+    state.messageOlderLoading = true;
+    const el = $("messages");
+    const previousHeight = el?.scrollHeight || 0;
+    const previousTop = el?.scrollTop || 0;
+    applyMessageSnapshot(state.currentMessages, agentId, { preserveScroll: true });
+    try {
+      const page = await api(`/api/agents/${encodeURIComponent(agentId)}/messages?before=${encodeURIComponent(state.messageNextBefore)}&limit=${messagePageLimit}`);
+      if (state.agent?.id !== agentId) return;
+      const older = Array.isArray(page?.messages) ? page.messages : [];
+      const existing = new Set((state.currentMessages || []).map((message) => message?.id).filter(Boolean));
+      const merged = [...older.filter((message) => !message?.id || !existing.has(message.id)), ...(state.currentMessages || [])];
+      applyMessageSnapshot(merged, agentId, {
+        hasMoreBefore: page?.hasMoreBefore,
+        nextBefore: page?.nextBefore,
+        preserveScroll: true,
+      });
+      if (el) el.scrollTop = previousTop + Math.max(0, el.scrollHeight - previousHeight);
+    } finally {
+      state.messageOlderLoading = false;
+      if (state.agent?.id === agentId) applyMessageSnapshot(state.currentMessages, agentId, { preserveScroll: true });
+    }
+  }
+
+  function applyMessageSnapshot(messages, agentId = state.agent?.id, options = {}) {
     if (!agentId || state.agent?.id !== agentId) return false;
     const normalized = Array.isArray(messages) ? messages : [];
+    if (options.hasMoreBefore !== undefined) state.messageHasMoreBefore = Boolean(options.hasMoreBefore);
+    if (options.nextBefore !== undefined) state.messageNextBefore = String(options.nextBefore || "");
     const el = $("messages");
     state.currentMessages = normalized;
     state.messageCopyTexts = normalized.map(visibleMessageText);
     updateConversationCopyButton();
     if (!el) return true;
+    const liveAssistantCard = renderLiveAssistantCardHTML();
     const liveToolCards = renderLiveToolOutputCardsHTML();
     const runSummaryCard = renderRunSummaryCardHTML();
     const approvalCards = renderApprovalCardsHTML();
-    if (!normalized.length && !liveToolCards && !runSummaryCard && !approvalCards) {
+    if (!normalized.length && !liveAssistantCard && !liveToolCards && !runSummaryCard && !approvalCards) {
       el.classList.add("empty");
       el.textContent = "还没有消息。输入你的需求开始对话。";
       return true;
     }
     el.classList.remove("empty");
-    el.innerHTML = `${normalized.map((message, index) => `
+    const olderMessagesControl = state.messageHasMoreBefore ? `
+      <div class="message-history-control">
+        <button class="ghost-btn mini" type="button" data-load-older-messages ${state.messageOlderLoading ? "disabled" : ""}>
+          ${state.messageOlderLoading ? "正在加载…" : "加载更早消息"}
+        </button>
+      </div>
+    ` : "";
+    el.innerHTML = `${olderMessagesControl}${normalized.map((message, index) => `
       <div class="message ${escapeAttr(message.role)}">
         <div class="message-head">
-          <div class="message-role">${escapeHtml(message.role)}</div>
-          <button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="复制消息原文">复制</button>
+          <div class="message-role">${escapeHtml(message.role)}${message.correctionOfMessageId ? " · 更正" : ""}</div>
+          <div class="message-head-actions">
+            ${message.role === "user" ? `<button class="message-copy-btn" type="button" data-correct-message="${escapeAttr(message.id || "")}" title="更正并重新发送">更正</button>` : ""}
+            <button class="message-copy-btn" type="button" data-copy-message="${escapeAttr(String(index))}" title="复制消息原文">复制</button>
+          </div>
         </div>
-        <div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>
-        ${renderMessageAttachments(message)}
+        ${state.editingMessageId === message.id ? renderCorrectionEditor(message) : `<div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>${renderMessageAttachments(message)}`}
       </div>
-    `).join("")}${liveToolCards}${runSummaryCard}${approvalCards}`;
+    `).join("")}${liveAssistantCard}${liveToolCards}${runSummaryCard}${approvalCards}`;
     bindMessageActionButtons(el);
+    el.querySelector("[data-load-older-messages]")?.addEventListener("click", () => {
+      loadOlderMessages(agentId).catch(showError);
+    });
     bindRunSummaryButtons(el);
     bindApprovalButtons(el);
     bindCopyCodeButtons(el);
-    el.scrollTop = el.scrollHeight;
+    if (!options.preserveScroll) el.scrollTop = el.scrollHeight;
     return true;
+  }
+
+  function renderLiveAssistantCardHTML() {
+    const text = String(state.liveAssistantText || "");
+    if (!text) return "";
+    return `
+      <div class="message assistant live-assistant-message" data-live-assistant data-run-id="${escapeAttr(state.liveAssistantRunId || "")}">
+        <div class="message-head">
+          <div class="message-role">assistant</div>
+          <span class="live-assistant-status">正在生成</span>
+        </div>
+        <div class="message-content">${renderMarkdown(text)}</div>
+      </div>
+    `;
+  }
+
+  function renderLiveAssistantCard() {
+    const el = $("messages");
+    if (!el) return;
+    const existing = el.querySelector("[data-live-assistant]");
+    const html = renderLiveAssistantCardHTML();
+    if (!html) {
+      existing?.remove();
+      if (!state.currentMessages?.length && !renderLiveToolOutputCardsHTML() && !renderRunSummaryCardHTML() && !renderApprovalCardsHTML()) {
+        el.classList.add("empty");
+        el.textContent = "还没有消息。输入你的需求开始对话。";
+      }
+      return;
+    }
+    el.classList.remove("empty");
+    if (existing) existing.outerHTML = html;
+    else el.insertAdjacentHTML("beforeend", html);
+    bindCopyCodeButtons(el);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function appendLiveAssistantText(text, runId = "") {
+    const delta = String(text || "");
+    if (!delta) return;
+    if (runId && state.liveAssistantRunId && state.liveAssistantRunId !== runId) state.liveAssistantText = "";
+    if (runId) state.liveAssistantRunId = runId;
+    state.liveAssistantText = `${state.liveAssistantText || ""}${delta}`;
+    renderLiveAssistantCard();
+  }
+
+  function clearLiveAssistantText() {
+    state.liveAssistantText = "";
+    state.liveAssistantRunId = "";
+    renderLiveAssistantCard();
+  }
+
+  function renderCorrectionEditor(message) {
+    const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+    const files = Array.isArray(state.correctionFiles) ? state.correctionFiles : [];
+    return `
+      <form class="message-correction-editor" data-correction-form="${escapeAttr(message.id || "")}">
+        <textarea class="message-correction-text" data-correction-text rows="4">${escapeHtml(state.correctionText ?? visibleMessageText(message))}</textarea>
+        ${attachments.length ? `<div class="message-correction-attachments">${attachments.map((attachment) => `
+          <label><input type="checkbox" data-keep-correction-attachment value="${escapeAttr(attachment.id || "")}" checked /> ${escapeHtml(attachment.filename || "附件")}</label>
+        `).join("")}</div>` : ""}
+        ${files.length ? `<div class="message-correction-new-files">${files.map((file) => `<span>${escapeHtml(file.name || "附件")}</span>`).join("")}</div>` : ""}
+        <label class="message-correction-file-label">添加图片或文本文件<input type="file" data-correction-files multiple /></label>
+        <div class="message-correction-actions">
+          <button class="ghost-btn mini" type="button" data-correction-cancel>取消</button>
+          <button class="ghost-btn mini" type="submit">更正并重新发送</button>
+        </div>
+      </form>
+    `;
+  }
+
+  function correctionClipboardFiles(event) {
+    const direct = Array.from(event?.clipboardData?.files || []).filter(Boolean);
+    if (direct.length) return direct;
+    return Array.from(event?.clipboardData?.items || [])
+      .filter((item) => item?.kind === "file")
+      .map((item) => item.getAsFile?.())
+      .filter(Boolean);
+  }
+
+  function openCorrectionEditor(messageId) {
+    state.editingMessageId = messageId;
+    state.correctionText = visibleMessageText(state.currentMessages.find((message) => message.id === messageId) || {});
+    state.correctionFiles = [];
+    applyMessageSnapshot(state.currentMessages, state.agent?.id);
+  }
+
+  function closeCorrectionEditor() {
+    state.editingMessageId = "";
+    state.correctionText = "";
+    state.correctionFiles = [];
+    applyMessageSnapshot(state.currentMessages, state.agent?.id);
+  }
+
+  async function submitCorrection(form) {
+    const agentId = state.agent?.id;
+    const messageId = form?.dataset?.correctionForm || "";
+    if (!agentId || !messageId) return;
+    const text = form.querySelector("[data-correction-text]")?.value ?? state.correctionText ?? "";
+    const keepAttachmentIds = Array.from(form.querySelectorAll("[data-keep-correction-attachment]:checked")).map((input) => input.value).filter(Boolean);
+    const files = Array.isArray(state.correctionFiles) ? state.correctionFiles : [];
+    const payload = new FormData();
+    payload.append("text", text);
+    payload.append("keepAttachmentIds", JSON.stringify(keepAttachmentIds));
+    files.forEach((file) => payload.append("files", file, file.name || "attachment"));
+    await api(`/api/agents/${agentId}/messages/${encodeURIComponent(messageId)}/corrections`, { method: "POST", body: payload });
+    state.editingMessageId = "";
+    state.correctionText = "";
+    state.correctionFiles = [];
+    await loadMessages(agentId);
+    showToast("已创建更正消息并重新运行。", "success");
   }
 
   function clearRunSummary() {
@@ -990,6 +1145,28 @@ export function createChatRenderingController({
   }
 
   function bindMessageActionButtons(root) {
+    root.querySelectorAll("[data-correct-message]").forEach((button) => {
+      button.addEventListener("click", () => openCorrectionEditor(button.dataset.correctMessage || ""));
+    });
+    root.querySelector("[data-correction-cancel]")?.addEventListener("click", closeCorrectionEditor);
+    root.querySelector("[data-correction-form]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCorrection(event.currentTarget).catch(showError);
+    });
+    root.querySelector("[data-correction-text]")?.addEventListener("input", (event) => {
+      state.correctionText = event.target.value;
+    });
+    root.querySelector("[data-correction-files]")?.addEventListener("change", (event) => {
+      state.correctionText = root.querySelector("[data-correction-text]")?.value ?? state.correctionText ?? "";
+      state.correctionFiles = Array.from(event.target?.files || []).filter(Boolean);
+      applyMessageSnapshot(state.currentMessages, state.agent?.id);
+    });
+    root.querySelector("[data-correction-text]")?.addEventListener("paste", (event) => {
+      const files = correctionClipboardFiles(event);
+      if (!files.length) return;
+      state.correctionFiles = [...(state.correctionFiles || []), ...files];
+      window.setTimeout(() => applyMessageSnapshot(state.currentMessages, state.agent?.id), 0);
+    });
     root.querySelectorAll("[data-copy-message]").forEach((button) => {
       button.addEventListener("click", async () => {
         const index = Number(button.dataset.copyMessage || -1);
@@ -1021,9 +1198,11 @@ export function createChatRenderingController({
   }
 
   return {
+    appendLiveAssistantText,
     appendToolOutput,
     applyMessageSnapshot,
     clearCurrentAgentApprovals,
+    clearLiveAssistantText,
     clearMessageRefreshTimer,
     clearRunSummary,
     clearToolApproval,
@@ -1031,6 +1210,7 @@ export function createChatRenderingController({
     finishToolOutput,
     loadLatestRunSummary,
     loadMessages,
+    loadOlderMessages,
     loadRunSummary,
     rememberToolApproval,
     rememberToolStarted,

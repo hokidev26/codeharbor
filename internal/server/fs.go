@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -32,12 +33,16 @@ func (s *Server) fsBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]fsEntry, 0, len(entries))
 	for _, entry := range entries {
-		info, err := entry.Info()
+		childPath := filepath.Join(path, entry.Name())
+		resolvedChild, err := s.resolveFSPath(childPath)
+		if err != nil { // Do not expose metadata for symlinks outside the project boundary.
+			continue
+		}
+		info, err := os.Stat(resolvedChild)
 		if err != nil {
 			continue
 		}
-		childPath := filepath.Join(path, entry.Name())
-		items = append(items, fsEntry{Name: entry.Name(), Path: childPath, IsDir: entry.IsDir(), Size: info.Size(), ModTime: info.ModTime().UTC().Format(http.TimeFormat)})
+		items = append(items, fsEntry{Name: entry.Name(), Path: childPath, IsDir: info.IsDir(), Size: info.Size(), ModTime: info.ModTime().UTC().Format(http.TimeFormat)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "entries": items})
 }
@@ -53,7 +58,13 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = defaultDirectoryRoot(defaultProjectDir)
 	}
-	abs, err := filepath.Abs(path)
+	var abs string
+	var err error
+	if s.remoteHardeningActive(r) {
+		abs, err = s.resolveFSPath(path)
+	} else {
+		abs, err = filepath.Abs(path)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -73,13 +84,21 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]fsEntry, 0, len(entries))
+	remote := s.remoteHardeningActive(r)
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		childPath := filepath.Join(abs, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
+		if remote {
+			resolved, err := s.resolveFSPath(childPath)
+			if err != nil {
+				continue
+			}
+			childPath = resolved
+		}
+		info, err := os.Stat(childPath)
+		if err != nil || !info.IsDir() {
 			continue
 		}
 		items = append(items, fsEntry{Name: entry.Name(), Path: childPath, IsDir: true, Size: info.Size(), ModTime: info.ModTime().UTC().Format(http.TimeFormat)})
@@ -87,18 +106,31 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(items, func(i, j int) bool { return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name) })
 	parent := ""
 	if parentDir := filepath.Dir(abs); parentDir != abs {
-		parent = parentDir
+		if !remote {
+			parent = parentDir
+		} else if resolvedParent, err := s.resolveFSPath(parentDir); err == nil {
+			parent = resolvedParent
+		}
+	}
+	shortcuts := directoryShortcuts(defaultProjectDir)
+	if remote {
+		base, _ := s.resolveFSPath("")
+		shortcuts = []fsDirectoryShortcut{{Name: "Projects", Path: base}}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":      abs,
 		"name":      filepath.Base(abs),
 		"parent":    parent,
 		"entries":   items,
-		"shortcuts": directoryShortcuts(defaultProjectDir),
+		"shortcuts": shortcuts,
 	})
 }
 
 func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
+	if s.remoteHardeningActive(r) {
+		writeError(w, http.StatusForbidden, "native directory selection is unavailable for remote requests")
+		return
+	}
 	if runtime.GOOS != "darwin" {
 		writeError(w, http.StatusNotImplemented, "当前系统暂不支持原生资料夹选择器，请使用内置目录浏览器")
 		return
@@ -208,15 +240,20 @@ func (s *Server) fsPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const maxPreviewBytes = 256 * 1024
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		writeError(w, statusFromFSError(err), err.Error())
 		return
 	}
-	truncated := false
-	if len(data) > maxPreviewBytes {
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxPreviewBytes+1))
+	if err != nil {
+		writeError(w, statusFromFSError(err), err.Error())
+		return
+	}
+	truncated := len(data) > maxPreviewBytes
+	if truncated {
 		data = data[:maxPreviewBytes]
-		truncated = true
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "size": info.Size(), "truncated": truncated, "text": string(data)})
 }
@@ -243,35 +280,74 @@ func (s *Server) fsMkdir(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"path": path})
 }
 
-func (s *Server) resolveFSPath(input string) (string, error) {
+func (s *Server) fsBasePath() string {
 	cfg := s.configSnapshot()
 	base := cfg.Paths.DefaultProjectDir
 	if base == "" {
 		base = cfg.Paths.HomeDir
 	}
-	baseAbs, err := filepath.Abs(base)
+	return base
+}
+
+// resolveFSPath checks physical containment after resolving symlinks. For paths
+// that do not exist yet, it resolves the nearest existing ancestor so mkdir and
+// write-adjacent operations cannot escape through an in-project symlink.
+func (s *Server) resolveFSPath(input string) (string, error) {
+	baseAbs, err := filepath.Abs(s.fsBasePath())
+	if err != nil {
+		return "", err
+	}
+	baseReal, err := filepath.EvalSymlinks(baseAbs)
 	if err != nil {
 		return "", err
 	}
 	path := input
 	if path == "" {
-		path = baseAbs
+		path = baseReal
 	}
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(baseAbs, path)
+		path = filepath.Join(baseReal, path)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(baseAbs, abs)
+	resolved, err := resolvePhysicalFSPath(abs)
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !fsPathWithin(baseReal, resolved) {
 		return "", errors.New("path escapes default project directory")
 	}
-	return abs, nil
+	return resolved, nil
+}
+
+func resolvePhysicalFSPath(path string) (string, error) {
+	path = filepath.Clean(path)
+	missing := make([]string, 0)
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(path))
+		path = parent
+	}
+}
+
+func fsPathWithin(base, path string) bool {
+	rel, err := filepath.Rel(base, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func statusFromFSError(err error) int {

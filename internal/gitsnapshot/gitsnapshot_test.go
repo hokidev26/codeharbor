@@ -1,6 +1,7 @@
 package gitsnapshot
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,28 @@ func TestWorktreeFingerprintIncludesPermissionsAndContent(t *testing.T) {
 	}
 	if afterMode == afterContent {
 		t.Fatal("expected content change to change fingerprint")
+	}
+}
+
+func TestWorktreeFingerprintHonorsContextAndByteBudgets(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "first.txt"), []byte("1234"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("5678"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	budget := &FingerprintBudget{MaxFileBytes: 4, MaxTotalBytes: 6}
+	if _, err := WorktreeFingerprintWithBudget(context.Background(), repo, "first.txt", budget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WorktreeFingerprintWithBudget(context.Background(), repo, "second.txt", budget); err == nil || !strings.Contains(err.Error(), "total byte budget") {
+		t.Fatalf("expected aggregate byte limit, got %v", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := WorktreeFingerprintWithBudget(cancelled, repo, "first.txt", nil); err == nil {
+		t.Fatal("expected canceled context to stop fingerprinting")
 	}
 }
 

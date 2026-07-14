@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"autoto/internal/config"
+	"autoto/internal/db"
 	"autoto/internal/providers"
 )
 
@@ -62,7 +63,21 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.store.ListProjects(r.Context())
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var projects []db.Project
+	if hasUsers {
+		user, ok := s.requireUser(w, r)
+		if !ok {
+			return
+		}
+		projects, err = s.store.ListProjectsForUser(r.Context(), user.ID)
+	} else {
+		projects, err = s.store.ListProjects(r.Context())
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -103,7 +118,23 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		model = cfg.Agent.DefaultModel
 	}
 	permissionMode := s.safeDefaultPermissionModeForRequest(r, cfg.Agent.DefaultPermissionMode)
-	project, workline, agent, err := s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, permissionMode)
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var project db.Project
+	var workline db.Workline
+	var agent db.Agent
+	if hasUsers {
+		user, ok := s.requireUser(w, r)
+		if !ok {
+			return
+		}
+		project, workline, agent, err = s.store.CreateProjectForUser(r.Context(), user.ID, req.Name, req.Description, gitPath, model, permissionMode)
+	} else {
+		project, workline, agent, err = s.store.CreateProject(r.Context(), req.Name, req.Description, gitPath, model, permissionMode)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

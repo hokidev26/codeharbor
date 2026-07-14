@@ -145,12 +145,16 @@
                 <input id="attachFileInput" class="attachment-native-input" type="file" multiple aria-label="导入文件到聊天框" />
               </div>
               <div class="message-input-frame">
-                <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息…" aria-describedby="promptHistoryHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
+                <textarea id="messageText" class="message-input" rows="1" placeholder="发送消息…" aria-describedby="promptHistoryHint chatDraftLimitHint" aria-controls="slashCommandPalette" aria-expanded="false" aria-autocomplete="list"></textarea>
               </div>
               <button id="sendMessageBtn" class="send-btn round composer-send-btn" type="submit" title="发送" aria-label="发送消息">↵</button>
             </div>
             <div id="slashCommandPalette" class="slash-command-palette hidden" role="listbox" aria-label="斜杠命令"></div>
-            <div id="promptHistoryHint" class="prompt-history-hint"></div>
+            <div id="mentionPalette" class="slash-command-palette hidden" role="listbox" aria-label="用户提及"></div>
+            <div class="composer-hints">
+              <div id="promptHistoryHint" class="prompt-history-hint"></div>
+              <div id="chatDraftLimitHint" class="chat-draft-limit-hint" role="status" aria-live="polite"></div>
+            </div>
             <div class="composer-toolbar">
               <div class="composer-status" aria-live="polite" title="连接状态">
                 <span id="composerStatusDot" class="composer-status-dot"></span>
@@ -278,6 +282,23 @@
           </div>
           <div id="settingsContentBody" class="settings-content-body"></div>
         </section>
+      </div>
+    </div>
+
+    <div id="setupWizardModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setupWizardTitle">
+      <div class="modal-card setup-wizard-card">
+        <div class="modal-head">
+          <div>
+            <div id="setupWizardTitle" class="modal-title">选择可用模型</div>
+            <div class="modal-path">自动显示所有已注册且返回可用模型的 Provider，不依赖固定厂商列表。</div>
+          </div>
+          <button id="setupWizardCloseBtn" class="icon-btn" type="button" aria-label="关闭设置向导">×</button>
+        </div>
+        <div id="setupWizardModels" class="setup-wizard-models" aria-live="polite"></div>
+        <div class="setup-wizard-actions">
+          <button id="setupWizardCancelBtn" class="ghost-btn" type="button">取消</button>
+          <button id="setupWizardRefreshBtn" class="settings-action-btn primary" type="button">刷新模型</button>
+        </div>
       </div>
     </div>
 

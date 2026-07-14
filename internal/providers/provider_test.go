@@ -30,6 +30,7 @@ func TestBuiltInProvidersDeclareCapabilities(t *testing.T) {
 		NewOpenAIOfficial(config.ProviderConfig{Name: "openai", Type: "openai"}),
 		NewAnthropicProvider(config.ProviderConfig{Name: "anthropic", Type: "anthropic"}),
 		NewOpenAICompatible(config.ProviderConfig{Name: "relay", Type: "openai-compatible"}),
+		NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions"}),
 	} {
 		if got := CapabilitiesFor(provider); !got.Tools || !got.Streaming || !got.ImageInput {
 			t.Fatalf("expected built-in capabilities, got %+v", got)
@@ -38,7 +39,7 @@ func TestBuiltInProvidersDeclareCapabilities(t *testing.T) {
 }
 
 func TestNewProviderBuildsKnownTypes(t *testing.T) {
-	for _, providerType := range []string{"openai", "anthropic", "openai-compatible"} {
+	for _, providerType := range []string{"openai", "anthropic", "openai-compatible", "gemini-interactions"} {
 		provider, err := NewProvider(config.ProviderConfig{Name: providerType, Type: providerType})
 		if err != nil {
 			t.Fatalf("NewProvider(%q): %v", providerType, err)

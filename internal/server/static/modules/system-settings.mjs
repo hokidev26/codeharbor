@@ -1,6 +1,7 @@
 import { $, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes, formatDuration, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { localPreferenceBackupVersion } from "./preferences-data.mjs";
+import { api } from "./runtime.mjs";
 
 export function createSystemSettingsController({
   state,
@@ -343,6 +344,7 @@ export function createSystemSettingsController({
 
   function renderUserSettingsContent() {
     const status = state.authStatus;
+    const user = state.authUser;
     const hasUsers = Boolean(status?.hasUsers);
     const registrationOpen = Boolean(status?.registrationOpen);
     return `
@@ -350,20 +352,42 @@ export function createSystemSettingsController({
       <section class="settings-hero-card users-hero-card">
         <div>
           <div class="settings-hero-kicker">用户管理</div>
-          <div class="settings-hero-title">${escapeHtml(hasUsers ? "已有本地用户" : "尚未创建用户")}</div>
-          <p>当前版本保持本地开发 MVP 边界：这里先展示账户初始化和注册状态，后续可扩展为用户列表、角色和访问策略。</p>
+          <div class="settings-hero-title">${escapeHtml(user ? `@${user.handle}` : (hasUsers ? "登录本地账户" : "创建首个本地账户"))}</div>
+          <p>登录后，聊天草稿会按用户和 Agent 保存到服务端；这仍是本机 MVP 身份边界，不替代操作系统权限隔离。</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshAuthStatusBtn" class="settings-action-btn primary" type="button">刷新状态</button>
+          <button id="refreshAuthStatusBtn" class="settings-action-btn subtle" type="button">刷新状态</button>
+          ${user ? `<button id="authLogoutBtn" class="settings-action-btn" type="button">退出登录</button>` : ""}
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(status ? (hasUsers ? "已初始化" : "未初始化") : "加载中")}</strong><span>用户状态</span></div>
+        <div><strong>${escapeHtml(user ? "已登录" : "未登录")}</strong><span>会话</span></div>
         <div><strong>${escapeHtml(status ? (registrationOpen ? "开放" : "关闭") : "加载中")}</strong><span>注册入口</span></div>
         <div><strong>${escapeHtml(state.settings?.version || "0.1.0-dev")}</strong><span>实例版本</span></div>
       </div>
       ${state.authError ? `<div class="settings-inline-alert">${escapeHtml(state.authError)}</div>` : ""}
-      ${status ? renderAuthStatusSummary(status) : `<div class="settings-empty-card">正在加载本地账户状态。如果长时间没有变化，请点击“刷新状态”。</div>`}
+      ${user ? `
+        <section class="settings-provider-section highlighted">
+          <div class="settings-provider-title">当前账户</div>
+          <div class="settings-provider-meta">Handle：@${escapeHtml(user.handle)} · 角色：${escapeHtml(user.role || "user")}</div>
+        </section>
+      ` : `
+        <form id="authAccountForm" class="settings-provider-section settings-agent-form">
+          <div class="settings-provider-form-grid">
+            <label>Handle
+              <input id="authHandle" class="settings-field" autocomplete="username" placeholder="中文或 Unicode handle" />
+            </label>
+            <label>密码
+              <input id="authPassword" class="settings-field" type="password" autocomplete="current-password" minlength="8" placeholder="至少 8 个字符" />
+            </label>
+          </div>
+          <div class="settings-action-row settings-form-actions">
+            <button id="authLoginBtn" class="settings-action-btn primary" type="submit">登录</button>
+            <button id="authRegisterBtn" class="settings-action-btn subtle" type="button" ${registrationOpen || !hasUsers ? "" : "disabled"}>注册</button>
+          </div>
+        </form>
+      `}
+      ${status ? renderAuthStatusSummary(status) : `<div class="settings-empty-card">正在加载用户状态。</div>`}
     </div>
   `;
   }
@@ -417,11 +441,47 @@ export function createSystemSettingsController({
   `;
   }
 
-  function bindUserSettingsActions() {
-    $("refreshAuthStatusBtn")?.addEventListener("click", () => loadAuthStatus({ notify: true }).catch(showError));
-    if (!state.authStatus && !state.authError) {
-      loadAuthStatus().catch(showError);
+  async function loadCurrentAuthUser() {
+    try {
+      state.authUser = await api("/api/auth/me");
+    } catch (error) {
+      if (error?.status === 401) state.authUser = null;
+      else throw error;
     }
+    refreshActiveSettingsPanel?.();
+    return state.authUser;
+  }
+
+  async function submitAuthAccount(mode) {
+    const handle = $("authHandle")?.value.trim() || "";
+    const password = $("authPassword")?.value || "";
+    if (!handle || !password) throw new Error("请填写 Handle 和密码");
+    const user = await api(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify({ handle, password }) });
+    state.authUser = user;
+    await loadAuthStatus();
+    window.dispatchEvent(new CustomEvent("autoto:auth-changed", { detail: { user } }));
+    showToast(mode === "register" ? "账户已创建并登录。" : "登录成功。", "success");
+    refreshActiveSettingsPanel?.();
+  }
+
+  async function logoutAuthUser() {
+    await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+    state.authUser = null;
+    window.dispatchEvent(new CustomEvent("autoto:auth-changed", { detail: { user: null } }));
+    showToast("已退出本地账户。", "success");
+    refreshActiveSettingsPanel?.();
+  }
+
+  function bindUserSettingsActions() {
+    $("refreshAuthStatusBtn")?.addEventListener("click", () => Promise.all([loadAuthStatus({ notify: true }), loadCurrentAuthUser()]).catch(showError));
+    $("authAccountForm")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitAuthAccount("login").catch(showError);
+    });
+    $("authRegisterBtn")?.addEventListener("click", () => submitAuthAccount("register").catch(showError));
+    $("authLogoutBtn")?.addEventListener("click", () => logoutAuthUser().catch(showError));
+    if (!state.authStatus && !state.authError) loadAuthStatus().catch(showError);
+    if (state.authUser === undefined) loadCurrentAuthUser().catch(showError);
   }
   function renderStorageSettingsContent() {
     const summary = state.storageSummary;

@@ -13,13 +13,25 @@ All notable changes to Autoto are tracked here. The project is still an experime
 
 ### Added
 
+- Added a native `gemini-interactions` provider with SSE streaming, image input, function calling, reasoning effort, internal thought-signature replay, schema sanitization, and `x-goog-api-key` redaction.
+- Added local account sessions, Unicode/case-folded handles, per-user Agent drafts, handle suggestions, and immutable message corrections with retained or newly uploaded attachments.
+- Added a provider/model-driven setup wizard, live assistant streaming cards, clipboard attachments, localized Unicode-safe draft limits, and Agent reasoning controls.
+- Added persistent Run/ToolCall lifecycle timestamps, lightweight tool-call previews, and an active Run summary endpoint.
 - Added a frontend Run Summary card that loads completed/error/interrupted run summaries, shows tool/message/token/cost metrics, and links the review flow to the existing Git changes modal.
 - Added streaming Bash tool output over Agent WebSocket events, with a live output card in the chat UI while commands run.
 - Added persisted Webhook task notifications for approval, completion, interruption, superseded, and error events, including settings/test APIs and a Settings UI block.
 
 ### Changed
 
+- Model discovery now reports whether models were remotely discovered or fallback-only, and the setup wizard accepts any registered provider with usable models.
+- Run summaries no longer load complete tool inputs/outputs; full details remain available from the tool-call detail APIs.
+- Browser-local drafts remain an unauthenticated compatibility fallback, while logged-in users use versioned private server drafts.
 - Updated the July 9 planning notes and project roadmap to reflect completed provider reliability, database migration, project instruction loading, and run tracking work.
+
+### Security
+
+- Hardened tool and filesystem path resolution against symlink escapes, bounded file/DOCX/Git fingerprint work, and restricted remote root-directory browsing.
+- Hardened attachment filenames and MIME detection, explicitly cleans multipart temporary files, defaults downloads to attachment, and only inlines validated safe images with `nosniff`.
 
 ## v0.1.0 - 2026-07-07
 

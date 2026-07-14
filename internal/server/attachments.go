@@ -7,6 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -14,16 +18,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"autoto/internal/db"
 )
 
 const (
-	maxAttachmentBytes     int64 = 10 << 20
-	maxMessageUploadBytes  int64 = 25 << 20
-	maxAttachmentTextRunes       = 200000
-	multipartMemoryBytes   int64 = 8 << 20
+	maxAttachmentBytes       int64 = 10 << 20
+	maxMessageUploadBytes    int64 = 25 << 20
+	maxAttachmentTextRunes         = 200000
+	multipartMemoryBytes     int64 = 8 << 20
+	maxDOCXArchiveEntries          = 256
+	maxDOCXUncompressedBytes int64 = 16 << 20
+	maxDOCXDocumentBytes     int64 = 4 << 20
+	maxDOCXTextBytes               = 1 << 20
 )
 
 type attachmentUploadError struct {
@@ -35,6 +44,11 @@ func (e attachmentUploadError) Error() string { return e.Message }
 
 func parseMultipartAttachments(w http.ResponseWriter, r *http.Request) (string, string, []db.Attachment, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxMessageUploadBytes)
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		return "", "", nil, attachmentUploadError{Status: http.StatusBadRequest, Message: fmt.Sprintf("附件上传解析失败：%v", err)}
 	}
@@ -91,7 +105,7 @@ func buildAttachmentFromPart(header *multipart.FileHeader) (db.Attachment, error
 	}
 	filename := sanitizeAttachmentFilename(header.Filename)
 	mimeType := normalizeAttachmentMIME(filename, header.Header.Get("Content-Type"), data)
-	kind := classifyAttachment(filename, mimeType)
+	kind := classifyAttachment(filename, mimeType, data)
 	extractedText := extractAttachmentText(kind, filename, data)
 	return db.Attachment{
 		Filename:      filename,
@@ -104,19 +118,37 @@ func buildAttachmentFromPart(header *multipart.FileHeader) (db.Attachment, error
 }
 
 func sanitizeAttachmentFilename(name string) string {
+	name = strings.ToValidUTF8(name, "-")
 	name = strings.TrimSpace(filepath.Base(strings.ReplaceAll(name, "\\", "/")))
-	if name == "." || name == "/" || name == "" {
-		return "attachment"
-	}
-	return strings.Map(func(r rune) rune {
-		if r == 0 || r == '/' || r == '\\' || r == ':' {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '/' || r == '\\' || r == ':' {
 			return '-'
 		}
 		return r
 	}, name)
+	name = strings.TrimSpace(name)
+	if name == "." || name == ".." || name == "" {
+		return "attachment"
+	}
+	for len(name) > 255 {
+		name = name[:len(name)-1]
+		for !utf8.ValidString(name) {
+			name = name[:len(name)-1]
+		}
+	}
+	return name
 }
 
+// normalizeAttachmentMIME deliberately prefers bytes over an untrusted multipart
+// Content-Type or filename extension. This keeps HTML renamed to an image from
+// being classified or served as an image.
 func normalizeAttachmentMIME(filename, provided string, data []byte) string {
+	if len(data) > 0 {
+		detected := strings.Split(http.DetectContentType(data), ";")[0]
+		if detected != "application/octet-stream" {
+			return detected
+		}
+	}
 	provided = strings.TrimSpace(strings.Split(provided, ";")[0])
 	if provided != "" && provided != "application/octet-stream" {
 		return provided
@@ -124,31 +156,40 @@ func normalizeAttachmentMIME(filename, provided string, data []byte) string {
 	if extType := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))); extType != "" {
 		return strings.Split(extType, ";")[0]
 	}
-	if len(data) > 0 {
-		return http.DetectContentType(data)
-	}
 	return "application/octet-stream"
 }
 
-func classifyAttachment(filename, mimeType string) string {
+func classifyAttachment(filename, mimeType string, data []byte) string {
 	ext := strings.ToLower(filepath.Ext(filename))
 	mimeType = strings.ToLower(mimeType)
-	if strings.HasPrefix(mimeType, "image/") {
-		switch mimeType {
-		case "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif":
-			return "image"
-		}
+	if isSafeInlineImage(mimeType, data) {
+		return "image"
 	}
-	if mimeType == "application/pdf" || ext == ".pdf" {
+	if mimeType == "application/pdf" || (ext == ".pdf" && strings.HasPrefix(string(data), "%PDF-")) {
 		return "pdf"
 	}
-	if ext == ".docx" || strings.Contains(mimeType, "wordprocessingml.document") {
+	if (ext == ".docx" || strings.Contains(mimeType, "wordprocessingml.document")) && isZIPData(data) {
 		return "docx"
 	}
-	if strings.HasPrefix(mimeType, "text/") || knownTextExtension(ext) {
+	if strings.HasPrefix(mimeType, "text/") || mimeType == "application/json" || mimeType == "application/xml" || knownTextExtension(ext) {
 		return "text"
 	}
 	return "binary"
+}
+
+func isSafeInlineImage(mimeType string, data []byte) bool {
+	if mimeType != "image/png" && mimeType != "image/jpeg" && mimeType != "image/gif" {
+		return false
+	}
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return false
+	}
+	return (mimeType == "image/png" && format == "png") || (mimeType == "image/jpeg" && format == "jpeg") || (mimeType == "image/gif" && format == "gif")
+}
+
+func isZIPData(data []byte) bool {
+	return len(data) >= 4 && bytes.Equal(data[:4], []byte{'P', 'K', 3, 4})
 }
 
 func knownTextExtension(ext string) bool {
@@ -201,24 +242,47 @@ func extractDOCXText(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(reader.File) > maxDOCXArchiveEntries {
+		return "", errors.New("DOCX archive contains too many entries")
+	}
 	var document *zip.File
+	var totalUncompressed uint64
 	for _, file := range reader.File {
+		totalUncompressed += file.UncompressedSize64
+		if totalUncompressed > uint64(maxDOCXUncompressedBytes) {
+			return "", errors.New("DOCX archive exceeds decompression budget")
+		}
 		if file.Name == "word/document.xml" {
 			document = file
-			break
 		}
 	}
 	if document == nil {
 		return "", errors.New("word/document.xml not found")
+	}
+	if document.UncompressedSize64 > uint64(maxDOCXDocumentBytes) {
+		return "", errors.New("DOCX document exceeds decompression budget")
 	}
 	file, err := document.Open()
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	decoder := xml.NewDecoder(file)
+	decoder := xml.NewDecoder(io.LimitReader(file, maxDOCXDocumentBytes+1))
 	var builder strings.Builder
 	inText := false
+	lastWasNewline := false
+	appendText := func(value string) bool {
+		remaining := maxDOCXTextBytes - builder.Len()
+		if remaining <= 0 {
+			return false
+		}
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		builder.WriteString(value)
+		lastWasNewline = strings.HasSuffix(value, "\n")
+		return len(value) < remaining
+	}
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
@@ -233,10 +297,12 @@ func extractDOCXText(data []byte) (string, error) {
 			case "t":
 				inText = true
 			case "tab":
-				builder.WriteString("\t")
+				if !appendText("\t") {
+					return strings.TrimSpace(builder.String()), nil
+				}
 			case "br", "cr", "p":
-				if builder.Len() > 0 && !strings.HasSuffix(builder.String(), "\n") {
-					builder.WriteString("\n")
+				if builder.Len() > 0 && !lastWasNewline && !appendText("\n") {
+					return strings.TrimSpace(builder.String()), nil
 				}
 			}
 		case xml.EndElement:
@@ -244,8 +310,8 @@ func extractDOCXText(data []byte) (string, error) {
 				inText = false
 			}
 		case xml.CharData:
-			if inText {
-				builder.Write([]byte(t))
+			if inText && !appendText(string(t)) {
+				return strings.TrimSpace(builder.String()), nil
 			}
 		}
 	}

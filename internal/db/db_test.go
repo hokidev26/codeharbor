@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,6 +34,31 @@ func TestCreateProjectCreatesCoreRecords(t *testing.T) {
 	}
 	if got.WorklineID != workline.ID {
 		t.Fatalf("expected agent workline %s, got %s", workline.ID, got.WorklineID)
+	}
+}
+
+func TestUserHandleUnicodeCaseConflictAndValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	user, err := store.CreateUser(ctx, "Ａlice", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Handle != "Alice" {
+		t.Fatalf("expected NFKC handle, got %q", user.Handle)
+	}
+	if _, err := store.CreateUser(ctx, "alice", "hash"); !IsConflict(err) {
+		t.Fatalf("expected Unicode/case handle conflict, got %v", err)
+	}
+	for _, handle := range []string{"a b", "a@b", "a/b", "a\\b", "a\u200db", "a\nb"} {
+		if _, err := store.CreateUser(ctx, handle, "hash"); err == nil {
+			t.Fatalf("expected invalid handle %q to be rejected", handle)
+		}
 	}
 }
 
@@ -133,6 +159,276 @@ func TestAddMessageRoundTripsToolContentJSON(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].ID != message.ID || string(messages[0].ContentJSON) != string(raw) || messages[0].ParentToolID != "tool-1" {
 		t.Fatalf("unexpected round-trip message: %+v", messages)
+	}
+}
+
+func TestListMessagesPageUsesStableBackwardCursor(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, id := range []string{"message-a", "message-b", "message-c", "message-d", "message-e"} {
+		if _, err := store.AddMessage(ctx, Message{
+			ID:          id,
+			AgentID:     agent.ID,
+			Role:        "user",
+			ContentText: id,
+			CreatedAt:   fmt.Sprintf("2026-01-01T00:00:%02dZ", index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	latest, err := store.ListMessagesPage(ctx, agent.ID, "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !latest.HasMoreBefore || latest.NextBefore == "" || len(latest.Messages) != 2 || latest.Messages[0].ID != "message-d" || latest.Messages[1].ID != "message-e" {
+		t.Fatalf("unexpected latest page: %+v", latest)
+	}
+	older, err := store.ListMessagesPage(ctx, agent.ID, latest.NextBefore, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !older.HasMoreBefore || older.NextBefore == "" || len(older.Messages) != 2 || older.Messages[0].ID != "message-b" || older.Messages[1].ID != "message-c" {
+		t.Fatalf("unexpected older page: %+v", older)
+	}
+	oldest, err := store.ListMessagesPage(ctx, agent.ID, older.NextBefore, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldest.HasMoreBefore || oldest.NextBefore != "" || len(oldest.Messages) != 1 || oldest.Messages[0].ID != "message-a" {
+		t.Fatalf("unexpected oldest page: %+v", oldest)
+	}
+	if _, err := store.ListMessagesPage(ctx, agent.ID, "not-a-cursor", 2); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("expected invalid cursor error, got %v", err)
+	}
+}
+
+func TestMigrationV16AddsInternalProviderStateColumn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `ALTER TABLE agent_messages DROP COLUMN provider_state_json`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 15`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if !testColumnExists(t, ctx, store.DB(), "agent_messages", "provider_state_json") {
+		t.Fatal("expected v16 migration to add provider_state_json")
+	}
+}
+
+func TestMigrationV17SeparatesQueuedRunAndToolLifecycleTimes(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+PRAGMA foreign_keys = OFF;
+DROP TABLE runs;
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  trigger_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error_message TEXT,
+  base_head TEXT,
+  end_head TEXT,
+  checkpoint_repo_root TEXT,
+  git_snapshot_at TEXT,
+  checkpoint_state TEXT NOT NULL DEFAULT 'none',
+  checkpoint_error TEXT,
+  rolled_back_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_runs_agent_started ON runs(agent_id, started_at DESC);
+CREATE INDEX idx_runs_status ON runs(status);
+ALTER TABLE agent_tool_calls DROP COLUMN started_at;
+ALTER TABLE agent_tool_calls DROP COLUMN completed_at;
+ALTER TABLE agent_tool_calls DROP COLUMN updated_at;
+PRAGMA foreign_keys = ON;
+`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	now := Now()
+	if _, err := raw.ExecContext(ctx, `INSERT INTO agents (id, type, title, model, permission_mode, status, created_at, updated_at) VALUES ('agent-v16', 'primary', 'v16', 'fake:test', 'acceptEdits', 'idle', ?, ?)`, now, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO runs (id, agent_id, status, started_at, created_at, updated_at) VALUES ('queued-v16', 'agent-v16', 'pending', ?, ?, ?), ('running-v16', 'agent-v16', 'running', ?, ?, ?)`, now, now, now, now, now, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, tool_use_id, tool_name, status, created_at) VALUES ('pending-tool', 'agent-v16', 'pending-tool', 'Bash', 'pending_approval', ?), ('completed-tool', 'agent-v16', 'completed-tool', 'Read', 'completed', ?)`, now, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 16`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if version := readUserVersion(t, ctx, store.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected current migration version %d, got %d", CurrentDBVersion, version)
+	}
+	if !testColumnExists(t, ctx, store.DB(), "agent_tool_calls", "started_at") || !testColumnExists(t, ctx, store.DB(), "agent_tool_calls", "completed_at") || !testColumnExists(t, ctx, store.DB(), "agent_tool_calls", "updated_at") {
+		t.Fatal("expected v17 tool lifecycle columns")
+	}
+	queued, err := store.GetRun(ctx, "agent-v16", "queued-v16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.GetRun(ctx, "agent-v16", "running-v16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.StartedAt != "" || running.StartedAt == "" {
+		t.Fatalf("expected queued run to lose synthetic start and running run to retain it: queued=%+v running=%+v", queued, running)
+	}
+	pendingTool, err := store.GetToolCallByUseID(ctx, "agent-v16", "pending-tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedTool, err := store.GetToolCallByUseID(ctx, "agent-v16", "completed-tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pendingTool.StartedAt != "" || pendingTool.CompletedAt != "" || pendingTool.UpdatedAt == "" || completedTool.StartedAt == "" || completedTool.CompletedAt == "" {
+		t.Fatalf("unexpected migrated tool timestamps: pending=%+v completed=%+v", pendingTool, completedTool)
+	}
+}
+
+func TestMigrationV18BackfillsHandlesFromV17Users(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	raw := openRawDB(t, path)
+	if _, err := raw.ExecContext(ctx, schemaSQL); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+PRAGMA foreign_keys = OFF;
+DROP TABLE auth_sessions;
+DROP TABLE message_drafts;
+CREATE TABLE users_v17 (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT,
+  role TEXT NOT NULL DEFAULT 'user',
+  avatar_color TEXT,
+  avatar_image_id TEXT,
+  git_username TEXT,
+  git_email TEXT,
+  created_at TEXT NOT NULL
+);
+DROP TABLE users;
+ALTER TABLE users_v17 RENAME TO users;
+PRAGMA foreign_keys = ON;
+`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	now := Now()
+	if _, err := raw.ExecContext(ctx, `INSERT INTO users (id, username, password_hash, role, created_at) VALUES ('legacy-user', 'Ａlice', 'hash', 'user', ?)`, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 17`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var handle, handleKey string
+	if err := store.DB().QueryRowContext(ctx, `SELECT handle, handle_key FROM users WHERE id = 'legacy-user'`).Scan(&handle, &handleKey); err != nil {
+		t.Fatal(err)
+	}
+	if handle != "Alice" || handleKey != "alice" {
+		t.Fatalf("unexpected v18 handle backfill: handle=%q key=%q", handle, handleKey)
+	}
+	if !testColumnExists(t, ctx, store.DB(), "agent_messages", "correction_of_message_id") {
+		t.Fatal("expected v20 correction column")
+	}
+}
+
+func TestMessageProviderStateAndReasoningEffortRemainInternal(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "gemini:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := json.RawMessage(`{"tool-1":{"thought_signature":"secret-signature"}}`)
+	if _, err := store.AddMessage(ctx, Message{AgentID: agent.ID, Role: "assistant", ContentText: "tool call", ProviderStateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.ListMessages(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || string(messages[0].ProviderStateJSON) != string(state) {
+		t.Fatalf("provider state did not round-trip: %+v", messages)
+	}
+	encoded, err := json.Marshal(messages[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret-signature") || strings.Contains(string(encoded), "providerState") {
+		t.Fatalf("provider state leaked through public JSON: %s", encoded)
+	}
+	updated, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort did not round-trip: %+v", updated)
 	}
 }
 
@@ -274,6 +570,87 @@ func TestRunStoreRoundTripsAndSummarizes(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != run.ID {
 		t.Fatalf("unexpected runs: %+v", runs)
+	}
+}
+
+func TestRunAndToolLifecycleTimestampsFollowStateTransitions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Lifecycle", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.CreateRun(ctx, Run{AgentID: agent.ID, Status: "pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.StartedAt != "" || queued.CompletedAt != "" {
+		t.Fatalf("queued run must not have lifecycle times: %+v", queued)
+	}
+	if err := store.UpdateRunStatus(ctx, queued.ID, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	started, err := store.GetRun(ctx, agent.ID, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.StartedAt == "" || started.CompletedAt != "" {
+		t.Fatalf("running run must have only a start time: %+v", started)
+	}
+	if err := store.UpdateRunStatus(ctx, queued.ID, "running", ""); !IsConflict(err) {
+		t.Fatalf("second queued-to-running transition must conflict, got %v", err)
+	}
+	if err := store.CompleteRun(ctx, queued.ID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.GetRun(ctx, agent.ID, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.StartedAt != started.StartedAt || completed.CompletedAt == "" || completed.UpdatedAt == "" {
+		t.Fatalf("completion must preserve start and write completion/update time: %+v", completed)
+	}
+
+	call, err := store.AddToolCall(ctx, ToolCall{AgentID: agent.ID, RunID: queued.ID, ToolUseID: "lifecycle-tool", ToolName: "Bash", InputJSON: json.RawMessage(`{"command":"printf hi"}`), Status: "pending_approval"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.StartedAt != "" || call.CompletedAt != "" || call.UpdatedAt == "" {
+		t.Fatalf("pending tool must not have execution times: %+v", call)
+	}
+	if err := store.UpdateToolCallApproval(ctx, agent.ID, call.ToolUseID, "approved", "tester", "", "ok", ""); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := store.GetToolCallByUseID(ctx, agent.ID, call.ToolUseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != "approved" || approved.StartedAt != "" || approved.CompletedAt != "" || approved.PermissionDecidedAt == "" {
+		t.Fatalf("approval must not start execution: %+v", approved)
+	}
+	if err := store.MarkToolCallRunning(ctx, agent.ID, call.ToolUseID); err != nil {
+		t.Fatal(err)
+	}
+	runningCall, err := store.GetToolCallByUseID(ctx, agent.ID, call.ToolUseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runningCall.Status != "running" || runningCall.StartedAt == "" || runningCall.CompletedAt != "" {
+		t.Fatalf("running tool must have only start time: %+v", runningCall)
+	}
+	if err := store.UpdateToolCallResult(ctx, agent.ID, call.ToolUseID, json.RawMessage(`{"output":"ok"}`), "completed", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := store.GetToolCallByUseID(ctx, agent.ID, call.ToolUseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status != "completed" || finished.StartedAt != runningCall.StartedAt || finished.CompletedAt == "" || finished.UpdatedAt == "" {
+		t.Fatalf("completed tool must retain start and have completion/update times: %+v", finished)
 	}
 }
 

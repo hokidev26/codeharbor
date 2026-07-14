@@ -148,6 +148,7 @@ export function createModelProviderSettingsController({
       { key: "anthropic", label: "Anthropic兼容", providerName: "anthropic", providerType: "anthropic", help: "连接第三方 Anthropic Messages API 兼容网关。" },
       { key: "codex", label: "Codex中转", providerName: "cliproxyapi", providerType: "openai-compatible", providerProfile: "cliproxyapi", help: "连接本机 CLIProxyAPI；Codex 账号统一使用下方凭据导入。" },
       { key: "responses", label: "Responses兼容", providerName: "openai", providerType: "openai", help: "连接 OpenAI Responses API 兼容端点。" },
+      { key: "gemini-interactions", label: "Gemini Interactions", providerName: "gemini", providerType: "gemini-interactions", help: "连接 Gemini Interactions API，支持流式、函数调用、思考强度与图片输入。" },
       { key: "claude-code", label: "ClaudeCode中转", providerName: "anthropic", providerType: "anthropic", help: "按 Anthropic Messages API 兼容方式接入 Claude Code 中转。" },
       { key: "completions", label: "Completions老旧兼容", providerName: "openai-compatible", providerType: "openai-compatible", help: "连接 OpenAI Chat Completions 兼容中转站。" },
     ];
@@ -156,6 +157,7 @@ export function createModelProviderSettingsController({
   function defaultModelForProtocol(protocol) {
     if (protocol === "anthropic" || protocol === "claude-code") return "claude-sonnet-4-5";
     if (protocol === "codex") return "gpt-5.5";
+    if (protocol === "gemini-interactions") return "gemini-2.5-pro";
     return "gpt-4.1-mini";
   }
 
@@ -581,6 +583,7 @@ export function createModelProviderSettingsController({
       { value: "openai-compatible", label: "OpenAI-compatible" },
       { value: "openai", label: "OpenAI 官方" },
       { value: "anthropic", label: "Anthropic 官方" },
+      { value: "gemini-interactions", label: "Gemini Interactions" },
     ].map((item) => `<option value="${escapeAttr(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
   }
 
@@ -588,6 +591,7 @@ export function createModelProviderSettingsController({
     if (profile === "cliproxyapi") return "http://127.0.0.1:8317/v1";
     if (type === "openai-compatible") return "https://api.example.com/v1";
     if (type === "anthropic") return "留空使用 Anthropic 官方端点";
+    if (type === "gemini-interactions") return "https://generativelanguage.googleapis.com/v1beta/interactions";
     return "留空使用 OpenAI 官方端点";
   }
 
@@ -597,6 +601,8 @@ export function createModelProviderSettingsController({
     const rowsByProvider = {
       openai: [`export OPENAI_API_KEY="sk-..."`, `export OPENAI_MODEL="${model}"`],
       anthropic: [`export ANTHROPIC_API_KEY="sk-ant-..."`, `export ANTHROPIC_MODEL="${model}"`],
+      "gemini-interactions": [`export GEMINI_API_KEY="..."`, `export GEMINI_MODEL="${model}"`, `export GEMINI_BASE_URL="${baseURL}"`],
+      gemini: [`export GEMINI_API_KEY="..."`, `export GEMINI_MODEL="${model}"`, `export GEMINI_BASE_URL="${baseURL}"`],
       groq: [`export GROQ_API_KEY="gsk_..."`, `export GROQ_MODEL="${model}"`],
       cliproxyapi: [`export CLIPROXYAPI_BASE_URL="${baseURL}"`, `export CLIPROXYAPI_MODEL="${model}"`, `# 如果 CLIProxyAPI 启用了客户端 api-keys，再设置：`, `export CLIPROXYAPI_API_KEY="..."`],
       "openai-compatible": [`export OPENAI_COMPATIBLE_BASE_URL="${baseURL}"`, `export OPENAI_COMPATIBLE_API_KEY="sk-..."`, `export OPENAI_COMPATIBLE_MODEL="${model}"`],

@@ -229,3 +229,16 @@ func TestUpdateProviderConfigRejectsInvalidProviderName(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestProviderConfigUpdateAcceptsGeminiInteractions(t *testing.T) {
+	provider, err := providerConfigFromUpdateRequest("gemini", config.ProviderConfig{}, providerConfigUpdateRequest{Name: "gemini", Type: "gemini-interactions", APIKey: "runtime-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta/interactions" || provider.Model != "gemini-2.5-pro" {
+		t.Fatalf("unexpected Gemini defaults: %+v", provider)
+	}
+	if _, err := providers.NewProvider(provider); err != nil {
+		t.Fatalf("Gemini provider should register: %v", err)
+	}
+}

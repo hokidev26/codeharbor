@@ -31,6 +31,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Security.Exposed || cfg.Security.AccessPassword != "" {
 		t.Fatalf("expected local security defaults, got %+v", cfg.Security)
 	}
+	gemini := providerByName(cfg, "gemini")
+	if gemini == nil || gemini.Type != "gemini-interactions" || gemini.BaseURL != "https://generativelanguage.googleapis.com/v1beta/interactions" || gemini.Model != "gemini-2.5-pro" {
+		t.Fatalf("unexpected Gemini provider preset: %+v", gemini)
+	}
 	provider := providerByName(cfg, "cliproxyapi")
 	if provider == nil {
 		t.Fatal("expected CLIProxyAPI provider preset")
@@ -251,6 +255,7 @@ func TestDefaultBackendsFromEnv(t *testing.T) {
 func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-secret")
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+	t.Setenv("GEMINI_API_KEY", "gemini-secret")
 	t.Setenv("OPENAI_COMPATIBLE_API_KEY", "compatible-secret")
 	t.Setenv("CLIPROXYAPI_API_KEY", "cliproxy-secret")
 	t.Setenv("CODEHARBOR_AGENT_BACKEND_URL", "http://127.0.0.1:8000")
@@ -265,6 +270,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	expectedRuntimeKeys := map[string]string{
 		"openai":            "openai-secret",
 		"anthropic":         "anthropic-secret",
+		"gemini":            "gemini-secret",
 		"cliproxyapi":       "cliproxy-secret",
 		"openai-compatible": "compatible-secret",
 	}
@@ -281,7 +287,7 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"openai-secret", "anthropic-secret", "cliproxy-secret", "compatible-secret", "backend-secret", "remote-access-secret"} {
+	for _, secret := range []string{"openai-secret", "anthropic-secret", "gemini-secret", "cliproxy-secret", "compatible-secret", "backend-secret", "remote-access-secret"} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("persisted config contains secret %q", secret)
 		}

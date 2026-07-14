@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -99,6 +100,11 @@ func TestAgentLiveSnapshotV2RouteReturnsAuthoritativeWatermark(t *testing.T) {
 	defer server.Close()
 
 	app.hub.Publish(agentpkg.Event{Type: "agent.text", AgentID: agent.ID, Text: "snapshot"})
+	for i := 0; i < db.DefaultMessagePageLimit+1; i++ {
+		if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: fmt.Sprintf("message-%03d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/v2/agents/"+agent.ID+"/live-snapshot", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +124,12 @@ func TestAgentLiveSnapshotV2RouteReturnsAuthoritativeWatermark(t *testing.T) {
 	}
 	if snapshot.Protocol != agentpkg.ProtocolVersion || snapshot.Agent.ID != agent.ID || snapshot.Stream.StreamSession == "" || snapshot.Stream.LatestSequence != 1 {
 		t.Fatalf("unexpected live snapshot: %+v", snapshot)
+	}
+	if len(snapshot.Messages) != db.DefaultMessagePageLimit || !snapshot.MessageHasMoreBefore || snapshot.MessageNextBefore == "" {
+		t.Fatalf("expected a bounded live snapshot message window, got count=%d hasMore=%v cursor=%q", len(snapshot.Messages), snapshot.MessageHasMoreBefore, snapshot.MessageNextBefore)
+	}
+	if snapshot.Messages[0].ContentText != "message-001" || snapshot.Messages[len(snapshot.Messages)-1].ContentText != "message-100" {
+		t.Fatalf("unexpected live snapshot range: first=%q last=%q", snapshot.Messages[0].ContentText, snapshot.Messages[len(snapshot.Messages)-1].ContentText)
 	}
 }
 

@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 
 	"autoto/internal/skills"
@@ -22,13 +28,39 @@ type Store struct {
 	db *sql.DB
 }
 
-var ErrConflict = errors.New("conflict")
+const (
+	DefaultMessagePageLimit = 100
+	MaxMessagePageLimit     = 200
+)
+
+var (
+	ErrConflict      = errors.New("conflict")
+	ErrInvalidCursor = errors.New("invalid cursor")
+)
 
 type User struct {
 	ID        string `json:"id"`
-	Username  string `json:"username"`
+	Username  string `json:"username,omitempty"`
+	Handle    string `json:"handle"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
+}
+
+type AuthSession struct {
+	ID        string `json:"id"`
+	UserID    string `json:"userId"`
+	TokenHash string `json:"-"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt"`
+	RevokedAt string `json:"revokedAt,omitempty"`
+}
+
+type MessageDraft struct {
+	UserID      string `json:"userId"`
+	AgentID     string `json:"agentId"`
+	ContentText string `json:"contentText"`
+	Version     int64  `json:"version"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 type Project struct {
@@ -42,6 +74,13 @@ type Project struct {
 	DefaultBranch string `json:"defaultBranch,omitempty"`
 	CreatedAt     string `json:"createdAt"`
 	UpdatedAt     string `json:"updatedAt"`
+}
+
+type ProjectMember struct {
+	ProjectID string `json:"projectId"`
+	UserID    string `json:"userId"`
+	Role      string `json:"role"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type Workline struct {
@@ -76,6 +115,7 @@ type Agent struct {
 	Model                  string `json:"model"`
 	SystemPrompt           string `json:"systemPrompt,omitempty"`
 	PermissionMode         string `json:"permissionMode"`
+	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
 	EntityGeneration       int64  `json:"entityGeneration"`
 	PermissionGeneration   int64  `json:"permissionGeneration"`
 	Status                 string `json:"status"`
@@ -90,17 +130,25 @@ type Agent struct {
 }
 
 type Message struct {
-	ID           string          `json:"id"`
-	AgentID      string          `json:"agentId"`
-	RunID        string          `json:"runId,omitempty"`
-	Role         string          `json:"role"`
-	ContentJSON  json.RawMessage `json:"contentJson,omitempty"`
-	ContentText  string          `json:"contentText"`
-	ParentToolID string          `json:"parentToolUseId,omitempty"`
-	CommandText  string          `json:"commandText,omitempty"`
-	CreatedBy    string          `json:"createdBy,omitempty"`
-	CreatedAt    string          `json:"createdAt"`
-	Attachments  []Attachment    `json:"attachments,omitempty"`
+	ID                    string          `json:"id"`
+	AgentID               string          `json:"agentId"`
+	RunID                 string          `json:"runId,omitempty"`
+	Role                  string          `json:"role"`
+	ContentJSON           json.RawMessage `json:"contentJson,omitempty"`
+	ProviderStateJSON     json.RawMessage `json:"-"`
+	ContentText           string          `json:"contentText"`
+	ParentToolID          string          `json:"parentToolUseId,omitempty"`
+	CommandText           string          `json:"commandText,omitempty"`
+	CorrectionOfMessageID string          `json:"correctionOfMessageId,omitempty"`
+	CreatedBy             string          `json:"createdBy,omitempty"`
+	CreatedAt             string          `json:"createdAt"`
+	Attachments           []Attachment    `json:"attachments,omitempty"`
+}
+
+type MessagePage struct {
+	Messages      []Message `json:"messages"`
+	HasMoreBefore bool      `json:"hasMoreBefore"`
+	NextBefore    string    `json:"nextBefore,omitempty"`
 }
 
 type Run struct {
@@ -108,7 +156,7 @@ type Run struct {
 	AgentID            string `json:"agentId"`
 	TriggerMessageID   string `json:"triggerMessageId,omitempty"`
 	Status             string `json:"status"`
-	StartedAt          string `json:"startedAt"`
+	StartedAt          string `json:"startedAt,omitempty"`
 	CompletedAt        string `json:"completedAt,omitempty"`
 	ErrorMessage       string `json:"errorMessage,omitempty"`
 	BaseHead           string `json:"baseHead,omitempty"`
@@ -154,8 +202,33 @@ type RunSummary struct {
 	InputTokens      int64               `json:"inputTokens"`
 	OutputTokens     int64               `json:"outputTokens"`
 	CostUSD          float64             `json:"costUsd"`
-	ToolCalls        []ToolCall          `json:"toolCalls"`
+	ToolCalls        []ToolCallPreview   `json:"toolCalls"`
 	RecentMessages   []RunMessagePreview `json:"recentMessages,omitempty"`
+}
+
+type ActiveRunSummary struct {
+	Run              Run               `json:"run"`
+	MessageCount     int64             `json:"messageCount"`
+	ToolCallCount    int64             `json:"toolCallCount"`
+	PendingApprovals int64             `json:"pendingApprovals"`
+	ToolCalls        []ToolCallPreview `json:"toolCalls"`
+}
+
+type ToolCallPreview struct {
+	ID                  string `json:"id"`
+	RunID               string `json:"runId,omitempty"`
+	MessageID           string `json:"messageId,omitempty"`
+	ToolUseID           string `json:"toolUseId"`
+	ToolName            string `json:"toolName"`
+	Status              string `json:"status"`
+	DurationMS          int64  `json:"durationMs,omitempty"`
+	ErrorMessage        string `json:"errorMessage,omitempty"`
+	PermissionDecidedBy string `json:"permissionDecidedBy,omitempty"`
+	PermissionDecidedAt string `json:"permissionDecidedAt,omitempty"`
+	StartedAt           string `json:"startedAt,omitempty"`
+	CompletedAt         string `json:"completedAt,omitempty"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type RunMessagePreview struct {
@@ -198,7 +271,10 @@ type ToolCall struct {
 	PermissionSuggestions    string          `json:"permissionSuggestions,omitempty"`
 	PermissionGeneration     int64           `json:"permissionGeneration"`
 	PolicyGeneration         int64           `json:"policyGeneration"`
+	StartedAt                string          `json:"startedAt,omitempty"`
+	CompletedAt              string          `json:"completedAt,omitempty"`
 	CreatedAt                string          `json:"createdAt"`
+	UpdatedAt                string          `json:"updatedAt"`
 }
 
 type APIRequest struct {
@@ -671,6 +747,295 @@ func (s *Store) HasUsers(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+// CanonicalHandle makes handle comparisons stable across Unicode compatibility
+// forms and case variants. This is account identity for the local MVP, not a
+// project membership or OS-level tenancy boundary.
+func CanonicalHandle(handle string) (string, string, error) {
+	handle = norm.NFKC.String(handle)
+	if handle == "" || len([]rune(handle)) > 64 || !utf8.ValidString(handle) {
+		return "", "", errors.New("invalid handle")
+	}
+	for _, r := range handle {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) || r == '@' || r == '/' || r == '\\' {
+			return "", "", errors.New("invalid handle")
+		}
+	}
+	return handle, norm.NFKC.String(cases.Fold().String(handle)), nil
+}
+
+func (s *Store) CreateUser(ctx context.Context, handle, passwordHash string) (User, error) {
+	handle, handleKey, err := CanonicalHandle(handle)
+	if err != nil {
+		return User{}, err
+	}
+	if strings.TrimSpace(passwordHash) == "" {
+		return User{}, errors.New("password hash is required")
+	}
+	user := User{ID: NewID(), Username: handle, Handle: handle, Role: "user", CreatedAt: Now()}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+
+	var existingUsers int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&existingUsers); err != nil {
+		return User{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, handle, handle_key, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, user.ID, user.Username, user.Handle, handleKey, passwordHash, user.Role, user.CreatedAt); err != nil {
+		if isUniqueConstraint(err) {
+			return User{}, fmt.Errorf("%w: handle already exists", ErrConflict)
+		}
+		return User{}, err
+	}
+	if existingUsers == 0 {
+		if err := assignUnownedProjectsTx(ctx, tx, user.ID, user.CreatedAt); err != nil {
+			return User{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
+// CreateProjectMember records a member role. Repeated assignments preserve the
+// existing role so concurrent setup or migration retries are harmless.
+func (s *Store) CreateProjectMember(ctx context.Context, member ProjectMember) (ProjectMember, error) {
+	member.ProjectID = strings.TrimSpace(member.ProjectID)
+	member.UserID = strings.TrimSpace(member.UserID)
+	member.Role = strings.TrimSpace(member.Role)
+	if member.ProjectID == "" || member.UserID == "" {
+		return ProjectMember{}, errors.New("project and user are required")
+	}
+	if member.Role == "" {
+		member.Role = "member"
+	}
+	if member.Role != "owner" && member.Role != "member" {
+		return ProjectMember{}, errors.New("invalid project member role")
+	}
+	if member.CreatedAt == "" {
+		member.CreatedAt = Now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO project_members (project_id, user_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role`, member.ProjectID, member.UserID, member.Role, member.CreatedAt)
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	return member, nil
+}
+
+func (s *Store) DeleteProjectMember(ctx context.Context, projectID, userID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM project_members WHERE project_id = ? AND user_id = ?`, strings.TrimSpace(projectID), strings.TrimSpace(userID))
+	return err
+}
+
+func (s *Store) ListProjectMembers(ctx context.Context, projectID string) ([]ProjectMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT project_id, user_id, role, created_at FROM project_members WHERE project_id = ? ORDER BY created_at ASC, user_id ASC`, strings.TrimSpace(projectID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := make([]ProjectMember, 0)
+	for rows.Next() {
+		var member ProjectMember
+		if err := rows.Scan(&member.ProjectID, &member.UserID, &member.Role, &member.CreatedAt); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
+func (s *Store) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_members WHERE user_id = ? AND project_id = ?`, strings.TrimSpace(userID), strings.TrimSpace(projectID)).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// AssignUnownedProjectsToUser gives a user ownership only of projects that have
+// no members. It is used for first-user bootstrap and is safe to retry.
+func (s *Store) AssignUnownedProjectsToUser(ctx context.Context, userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return errors.New("user is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := assignUnownedProjectsTx(ctx, tx, userID, Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func assignUnownedProjectsTx(ctx context.Context, tx *sql.Tx, userID, createdAt string) error {
+	_, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
+SELECT p.id, ?, 'owner', ?
+FROM projects p
+WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)
+  AND NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id)`, userID, createdAt, userID)
+	return err
+}
+
+// CanAccessProject, CanAccessWorkline, and CanAccessAgent are the canonical
+// membership checks for all project-scoped server resources.
+func (s *Store) CanAccessProject(ctx context.Context, userID, projectID string) (bool, error) {
+	return s.IsProjectMember(ctx, userID, projectID)
+}
+
+func (s *Store) CanAccessWorkline(ctx context.Context, userID, worklineID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM worklines w JOIN project_members pm ON pm.project_id = w.project_id WHERE w.id = ? AND pm.user_id = ?`, strings.TrimSpace(worklineID), strings.TrimSpace(userID)).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) CanAccessAgent(ctx context.Context, userID, agentID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agents a JOIN worklines w ON w.id = a.workline_id JOIN project_members pm ON pm.project_id = w.project_id WHERE a.id = ? AND pm.user_id = ?`, strings.TrimSpace(agentID), strings.TrimSpace(userID)).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) GetUserByHandle(ctx context.Context, handle string) (User, string, error) {
+	_, handleKey, err := CanonicalHandle(handle)
+	if err != nil {
+		return User{}, "", err
+	}
+	var user User
+	var passwordHash string
+	err = s.db.QueryRowContext(ctx, `SELECT id, username, handle, role, created_at, COALESCE(password_hash, '') FROM users WHERE handle_key = ?`, handleKey).Scan(&user.ID, &user.Username, &user.Handle, &user.Role, &user.CreatedAt, &passwordHash)
+	return user, passwordHash, err
+}
+
+func (s *Store) ListUsersByHandlePrefix(ctx context.Context, prefix string, limit int) ([]User, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	key := ""
+	if prefix != "" {
+		_, canonical, err := CanonicalHandle(prefix)
+		if err != nil {
+			return nil, err
+		}
+		key = canonical
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username, handle, role, created_at FROM users WHERE handle_key LIKE ? ESCAPE '\' ORDER BY handle_key ASC LIMIT ?`, escapeLike(key)+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	users := make([]User, 0)
+	for rows.Next() {
+		var user User
+		if err := rows.Scan(&user.ID, &user.Username, &user.Handle, &user.Role, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "%", `\%`)
+	return strings.ReplaceAll(value, "_", `\_`)
+}
+
+func HashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Store) CreateAuthSession(ctx context.Context, session AuthSession) (AuthSession, error) {
+	if session.ID == "" {
+		session.ID = NewID()
+	}
+	if session.UserID == "" || session.TokenHash == "" || session.ExpiresAt == "" {
+		return AuthSession{}, errors.New("invalid auth session")
+	}
+	if session.CreatedAt == "" {
+		session.CreatedAt = Now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`, session.ID, session.UserID, session.TokenHash, session.CreatedAt, session.ExpiresAt)
+	if isUniqueConstraint(err) {
+		return AuthSession{}, fmt.Errorf("%w: session already exists", ErrConflict)
+	}
+	if err != nil {
+		return AuthSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Store) GetUserBySessionToken(ctx context.Context, token string, now time.Time) (User, AuthSession, error) {
+	var user User
+	var session AuthSession
+	err := s.db.QueryRowContext(ctx, `SELECT u.id, u.username, u.handle, u.role, u.created_at, s.id, s.user_id, s.token_hash, s.created_at, s.expires_at, COALESCE(s.revoked_at, '') FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`, HashSessionToken(token), now.UTC().Format(time.RFC3339Nano)).Scan(&user.ID, &user.Username, &user.Handle, &user.Role, &user.CreatedAt, &session.ID, &session.UserID, &session.TokenHash, &session.CreatedAt, &session.ExpiresAt, &session.RevokedAt)
+	return user, session, err
+}
+
+func (s *Store) RevokeAuthSessionToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`, Now(), HashSessionToken(token))
+	return err
+}
+
+func (s *Store) GetMessageDraft(ctx context.Context, userID, agentID string) (MessageDraft, error) {
+	var draft MessageDraft
+	err := s.db.QueryRowContext(ctx, `SELECT user_id, agent_id, content_text, version, updated_at FROM message_drafts WHERE user_id = ? AND agent_id = ?`, userID, agentID).Scan(&draft.UserID, &draft.AgentID, &draft.ContentText, &draft.Version, &draft.UpdatedAt)
+	return draft, err
+}
+
+func (s *Store) PutMessageDraft(ctx context.Context, draft MessageDraft, expectedVersion int64) (MessageDraft, error) {
+	if draft.UserID == "" || draft.AgentID == "" || expectedVersion < 0 || !utf8.ValidString(draft.ContentText) {
+		return MessageDraft{}, errors.New("invalid message draft")
+	}
+	now := Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MessageDraft{}, err
+	}
+	defer tx.Rollback()
+	if expectedVersion == 0 {
+		draft.Version, draft.UpdatedAt = 1, now
+		result, err := tx.ExecContext(ctx, `INSERT INTO message_drafts (user_id, agent_id, content_text, version, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, agent_id) DO NOTHING`, draft.UserID, draft.AgentID, draft.ContentText, draft.Version, draft.UpdatedAt)
+		if err != nil {
+			return MessageDraft{}, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return MessageDraft{}, err
+		}
+		if affected != 1 {
+			return MessageDraft{}, fmt.Errorf("%w: message draft was updated by another client", ErrConflict)
+		}
+	} else {
+		draft.Version, draft.UpdatedAt = expectedVersion+1, now
+		result, err := tx.ExecContext(ctx, `UPDATE message_drafts SET content_text = ?, version = ?, updated_at = ? WHERE user_id = ? AND agent_id = ? AND version = ?`, draft.ContentText, draft.Version, draft.UpdatedAt, draft.UserID, draft.AgentID, expectedVersion)
+		if err != nil {
+			return MessageDraft{}, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return MessageDraft{}, err
+		}
+		if affected != 1 {
+			return MessageDraft{}, fmt.Errorf("%w: message draft was updated by another client", ErrConflict)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return MessageDraft{}, err
+	}
+	return draft, nil
+}
+
+func (s *Store) DeleteMessageDraft(ctx context.Context, userID, agentID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM message_drafts WHERE user_id = ? AND agent_id = ?`, userID, agentID)
+	return err
+}
+
 func DefaultNotificationSettings() NotificationSettings {
 	now := Now()
 	return NotificationSettings{ID: "default", NotifyOnApproval: true, NotifyOnDone: true, NotifyOnError: true, CreatedAt: now, UpdatedAt: now}
@@ -951,16 +1316,33 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if run.UpdatedAt == "" {
 		run.UpdatedAt = run.CreatedAt
 	}
-	if run.StartedAt == "" {
-		run.StartedAt = run.CreatedAt
-	}
 	if run.Status == "" {
 		run.Status = "running"
+	}
+	switch run.Status {
+	case "pending":
+		// Queued work has not started. Do not synthesize a start timestamp.
+		run.StartedAt = ""
+		run.CompletedAt = ""
+	case "running":
+		if run.StartedAt == "" {
+			run.StartedAt = now
+		}
+		run.CompletedAt = ""
+	case "completed", "error", "interrupted", "superseded":
+		if run.StartedAt == "" {
+			run.StartedAt = run.CreatedAt
+		}
+		if run.CompletedAt == "" {
+			run.CompletedAt = now
+		}
+	default:
+		return Run{}, fmt.Errorf("invalid run status %q", run.Status)
 	}
 	if run.CheckpointState == "" {
 		run.CheckpointState = RunCheckpointNone
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.CreatedAt, run.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.CreatedAt, run.UpdatedAt)
 	if err != nil {
 		return Run{}, err
 	}
@@ -972,7 +1354,7 @@ func (s *Store) UpdateRunStatus(ctx context.Context, runID, status, errorMessage
 		return fmt.Errorf("invalid non-terminal run status transition to %q", status)
 	}
 	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = 'running', error_message = NULL, updated_at = ? WHERE id = ? AND status = 'pending'`, now, runID)
+	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = 'running', started_at = COALESCE(NULLIF(started_at, ''), ?), completed_at = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND status = 'pending'`, now, now, runID)
 	if err != nil {
 		return err
 	}
@@ -1212,7 +1594,7 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'interrupted', error_message = ?, updated_at = ? WHERE id = ?`, restartReason, now, agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_tool_calls SET status = 'denied', error_message = ?, permission_decided_by = 'system', permission_decided_at = ?, permission_deny_message = ?, permission_decision_reason = ?, permission_suggestions = NULL WHERE run_id = ? AND status IN ('pending_approval', 'approved', 'running')`, restartReason, now, restartReason, restartReason, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_tool_calls SET status = 'denied', completed_at = COALESCE(completed_at, ?), updated_at = ?, error_message = ?, permission_decided_by = 'system', permission_decided_at = ?, permission_deny_message = ?, permission_decision_reason = ?, permission_suggestions = NULL WHERE run_id = ? AND status IN ('pending_approval', 'approved', 'running')`, now, now, restartReason, now, restartReason, restartReason, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1220,13 +1602,13 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 
 func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
 func (s *Store) GetRunByID(ctx context.Context, runID string) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
@@ -1234,7 +1616,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`, agentID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1251,7 +1633,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 }
 
 func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY started_at ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY COALESCE(started_at, created_at) ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1268,7 +1650,7 @@ func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
 }
 
 func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY started_at ASC, id ASC`, RunCheckpointRollingBack)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY COALESCE(started_at, created_at) ASC, id ASC`, RunCheckpointRollingBack)
 	if err != nil {
 		return nil, err
 	}
@@ -1301,7 +1683,45 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	return projects, rows.Err()
 }
 
+func (s *Store) ListProjectsForUser(ctx context.Context, userID string) ([]Project, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT p.id, p.name, COALESCE(p.description,''), p.status, p.flow_mode,
+       COALESCE(p.git_path,''), COALESCE(p.remote_url,''), COALESCE(p.default_branch,''),
+       p.created_at, p.updated_at
+FROM projects p
+JOIN project_members pm ON pm.project_id = p.id
+WHERE pm.user_id = ?
+ORDER BY p.updated_at DESC`, strings.TrimSpace(userID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	projects := make([]Project, 0)
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Status, &p.FlowMode, &p.GitPath, &p.RemoteURL, &p.DefaultBranch, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
 func (s *Store) CreateProject(ctx context.Context, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
+	return s.createProject(ctx, "", name, description, gitPath, defaultModel, permissionMode)
+}
+
+// CreateProjectForUser atomically creates the project hierarchy and makes the
+// creating user its owner.
+func (s *Store) CreateProjectForUser(ctx context.Context, userID, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return Project{}, Workline{}, Agent{}, errors.New("user is required")
+	}
+	return s.createProject(ctx, userID, name, description, gitPath, defaultModel, permissionMode)
+}
+
+func (s *Store) createProject(ctx context.Context, ownerID, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
 	if name == "" {
 		return Project{}, Workline{}, Agent{}, errors.New("name is required")
 	}
@@ -1315,6 +1735,15 @@ func (s *Store) CreateProject(ctx context.Context, name, description, gitPath st
 		return Project{}, Workline{}, Agent{}, err
 	}
 	defer tx.Rollback()
+	if ownerID != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = ?`, ownerID).Scan(&count); err != nil {
+			return Project{}, Workline{}, Agent{}, err
+		}
+		if count != 1 {
+			return Project{}, Workline{}, Agent{}, sql.ErrNoRows
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO projects (id, name, description, status, flow_mode, git_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, project.ID, project.Name, project.Description, project.Status, project.FlowMode, project.GitPath, project.CreatedAt, project.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
 	}
@@ -1323,6 +1752,11 @@ func (s *Store) CreateProject(ctx context.Context, name, description, gitPath st
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
+	}
+	if ownerID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_members (project_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)`, project.ID, ownerID, now); err != nil {
+			return Project{}, Workline{}, Agent{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Project{}, Workline{}, Agent{}, err
@@ -1424,7 +1858,7 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
 	var n Agent
 	var planMode int
-	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE id = ?`, id).Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(reasoning_effort,''), COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE id = ?`, id).Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.ReasoningEffort, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt)
 	n.PlanMode = planMode != 0
 	return n, err
 }
@@ -1457,6 +1891,20 @@ func (s *Store) UpdateAgentModel(ctx context.Context, id, model string) (Agent, 
 	return s.GetAgent(ctx, id)
 }
 
+func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, effort string) (Agent, error) {
+	now := Now()
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET reasoning_effort = NULLIF(?, ''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, effort, now, id)
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, sql.ErrNoRows
+	}
+	return s.GetAgent(ctx, id)
+}
+
 func (s *Store) UpdateAgentContextSummary(ctx context.Context, id, summary, boundaryMessageID string, prunedPercent int) error {
 	now := Now()
 	_, err := s.db.ExecContext(ctx, `UPDATE agents SET context_summary = NULLIF(?, ''), prune_boundary_message_id = NULLIF(?, ''), pruned_percent = ?, prune_enabled = 1, updated_at = ? WHERE id = ?`, summary, boundaryMessageID, prunedPercent, now, id)
@@ -1478,7 +1926,7 @@ func (s *Store) UpdateAgentPermissionMode(ctx context.Context, id, mode string) 
 }
 
 func (s *Store) ListAgentsByWorkline(ctx context.Context, worklineID string) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(reasoning_effort,''), COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1487,7 +1935,7 @@ func (s *Store) ListAgentsByWorkline(ctx context.Context, worklineID string) ([]
 	for rows.Next() {
 		var n Agent
 		var planMode int
-		if err := rows.Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.ReasoningEffort, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, err
 		}
 		n.PlanMode = planMode != 0
@@ -1525,7 +1973,7 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 		return Message{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, content_text, command_text, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), msg.ContentText, nullEmpty(msg.CommandText), createdBy, msg.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, provider_state_json, content_text, command_text, correction_of_message_id, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), string(msg.ProviderStateJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CorrectionOfMessageID, createdBy, msg.CreatedAt); err != nil {
 		return Message{}, err
 	}
 	storedAttachments := make([]Attachment, 0, len(attachments))
@@ -1553,6 +2001,94 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 	return msg, nil
 }
 
+// CreateCorrectionWithRun creates a new user message instead of modifying its
+// source. Retained attachments are copied into new rows so the original message
+// remains immutable even if the correction is later deleted.
+func (s *Store) CreateCorrectionWithRun(ctx context.Context, agentID, sourceMessageID, contentText, commandText, createdBy string, keepAttachmentIDs []string, attachments []Attachment) (Message, Run, error) {
+	if strings.TrimSpace(contentText) == "" && len(keepAttachmentIDs) == 0 && len(attachments) == 0 {
+		return Message{}, Run{}, errors.New("text, files, or keepAttachmentIds is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Message{}, Run{}, err
+	}
+	defer tx.Rollback()
+	var role string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM agent_messages WHERE id = ? AND agent_id = ?`, sourceMessageID, agentID).Scan(&role); err != nil {
+		return Message{}, Run{}, err
+	}
+	if role != "user" {
+		return Message{}, Run{}, fmt.Errorf("%w: corrections require a user source message", ErrConflict)
+	}
+
+	retained := make([]Attachment, 0, len(keepAttachmentIDs))
+	seen := make(map[string]struct{}, len(keepAttachmentIDs))
+	for _, attachmentID := range keepAttachmentIDs {
+		if attachmentID == "" {
+			return Message{}, Run{}, errors.New("invalid keepAttachmentIds")
+		}
+		if _, ok := seen[attachmentID]; ok {
+			return Message{}, Run{}, errors.New("duplicate keepAttachmentIds")
+		}
+		seen[attachmentID] = struct{}{}
+		var attachment Attachment
+		if err := tx.QueryRowContext(ctx, `SELECT id, message_id, agent_id, filename, COALESCE(mime_type,''), kind, size_bytes, data_blob, COALESCE(extracted_text,''), created_at FROM agent_message_attachments WHERE id = ? AND message_id = ? AND agent_id = ?`, attachmentID, sourceMessageID, agentID).Scan(&attachment.ID, &attachment.MessageID, &attachment.AgentID, &attachment.Filename, &attachment.MIMEType, &attachment.Kind, &attachment.SizeBytes, &attachment.Data, &attachment.ExtractedText, &attachment.CreatedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Message{}, Run{}, fmt.Errorf("%w: attachment does not belong to source message", ErrConflict)
+			}
+			return Message{}, Run{}, err
+		}
+		attachment.ID = ""
+		retained = append(retained, attachment)
+	}
+
+	now := Now()
+	message := Message{ID: NewID(), AgentID: agentID, Role: "user", ContentText: contentText, CommandText: commandText, CorrectionOfMessageID: sourceMessageID, CreatedBy: createdBy, CreatedAt: now}
+	if message.ContentText != "" {
+		content, _ := json.Marshal([]map[string]string{{"type": "text", "text": message.ContentText}})
+		message.ContentJSON = content
+	}
+	if createdBy == "api" {
+		createdBy = ""
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, role, content_json, content_text, command_text, correction_of_message_id, created_by, created_at) VALUES (?, ?, 'user', ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?)`, message.ID, message.AgentID, string(message.ContentJSON), message.ContentText, message.CommandText, sourceMessageID, createdBy, message.CreatedAt); err != nil {
+		return Message{}, Run{}, err
+	}
+
+	allAttachments := append(retained, attachments...)
+	storedAttachments := make([]Attachment, 0, len(allAttachments))
+	for _, attachment := range allAttachments {
+		if attachment.ID == "" {
+			attachment.ID = NewID()
+		}
+		attachment.MessageID = message.ID
+		attachment.AgentID = agentID
+		if attachment.CreatedAt == "" {
+			attachment.CreatedAt = now
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_message_attachments (id, message_id, agent_id, filename, mime_type, kind, size_bytes, data_blob, extracted_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.MessageID, attachment.AgentID, attachment.Filename, attachment.MIMEType, attachment.Kind, attachment.SizeBytes, attachment.Data, attachment.ExtractedText, attachment.CreatedAt); err != nil {
+			return Message{}, Run{}, err
+		}
+		storedAttachments = append(storedAttachments, attachment)
+	}
+	run := Run{ID: NewID(), AgentID: agentID, TriggerMessageID: message.ID, Status: "pending", CheckpointState: RunCheckpointNone, CreatedAt: now, UpdatedAt: now}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, checkpoint_state, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.CheckpointState, run.CreatedAt, run.UpdatedAt); err != nil {
+		return Message{}, Run{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_messages SET run_id = ? WHERE id = ? AND agent_id = ?`, run.ID, message.ID, agentID); err != nil {
+		return Message{}, Run{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET message_count = message_count + 1, last_message_at = ?, updated_at = ? WHERE id = ?`, now, now, agentID); err != nil {
+		return Message{}, Run{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Message{}, Run{}, err
+	}
+	message.RunID = run.ID
+	message.Attachments = attachmentMetadata(storedAttachments)
+	return message, run, nil
+}
+
 func (s *Store) ListMessages(ctx context.Context, agentID string) ([]Message, error) {
 	messages, err := s.listMessages(ctx, agentID)
 	if err != nil {
@@ -1562,6 +2098,53 @@ func (s *Store) ListMessages(ctx context.Context, agentID string) ([]Message, er
 		return nil, err
 	}
 	return messages, nil
+}
+
+func (s *Store) ListMessagesPage(ctx context.Context, agentID, before string, limit int) (MessagePage, error) {
+	if limit <= 0 {
+		limit = DefaultMessagePageLimit
+	}
+	if limit > MaxMessagePageLimit {
+		limit = MaxMessagePageLimit
+	}
+	cursor, err := decodeMessageCursor(before)
+	if err != nil {
+		return MessagePage{}, err
+	}
+	query := `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ?`
+	args := []any{agentID}
+	if cursor.ID != "" {
+		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		args = append(args, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return MessagePage{}, err
+	}
+	messages, err := scanMessages(rows)
+	if err != nil {
+		return MessagePage{}, err
+	}
+	page := MessagePage{Messages: messages}
+	if len(page.Messages) > limit {
+		page.HasMoreBefore = true
+		page.Messages = page.Messages[:limit]
+	}
+	for i, j := 0, len(page.Messages)-1; i < j; i, j = i+1, j-1 {
+		page.Messages[i], page.Messages[j] = page.Messages[j], page.Messages[i]
+	}
+	if page.HasMoreBefore && len(page.Messages) > 0 {
+		page.NextBefore, err = encodeMessageCursor(messageCursor{CreatedAt: page.Messages[0].CreatedAt, ID: page.Messages[0].ID})
+		if err != nil {
+			return MessagePage{}, err
+		}
+	}
+	if err := s.populateMessageAttachments(ctx, page.Messages, false); err != nil {
+		return MessagePage{}, err
+	}
+	return page, nil
 }
 
 func (s *Store) ListMessagesWithAttachmentData(ctx context.Context, agentID string) ([]Message, error) {
@@ -1575,21 +2158,56 @@ func (s *Store) ListMessagesWithAttachmentData(ctx context.Context, agentID stri
 	return messages, nil
 }
 
+type messageCursor struct {
+	CreatedAt string `json:"createdAt"`
+	ID        string `json:"id"`
+}
+
+func encodeMessageCursor(cursor messageCursor) (string, error) {
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeMessageCursor(value string) (messageCursor, error) {
+	if strings.TrimSpace(value) == "" {
+		return messageCursor{}, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return messageCursor{}, ErrInvalidCursor
+	}
+	var cursor messageCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.CreatedAt == "" || cursor.ID == "" {
+		return messageCursor{}, ErrInvalidCursor
+	}
+	return cursor, nil
+}
+
 func (s *Store) listMessages(ctx context.Context, agentID string) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC`, agentID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC, id ASC`, agentID)
 	if err != nil {
 		return nil, err
 	}
+	return scanMessages(rows)
+}
+
+func scanMessages(rows *sql.Rows) ([]Message, error) {
 	defer rows.Close()
 	messages := make([]Message, 0)
 	for rows.Next() {
 		var m Message
-		var raw string
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &m.ContentText, &m.ParentToolID, &m.CommandText, &m.CreatedBy, &m.CreatedAt); err != nil {
+		var raw, providerState string
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &providerState, &m.ContentText, &m.ParentToolID, &m.CommandText, &m.CorrectionOfMessageID, &m.CreatedBy, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if raw != "" {
 			m.ContentJSON = json.RawMessage(raw)
+		}
+		if providerState != "" {
+			m.ProviderStateJSON = json.RawMessage(providerState)
 		}
 		messages = append(messages, m)
 	}
@@ -1660,13 +2278,40 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 	if call.CreatedAt == "" {
 		call.CreatedAt = Now()
 	}
+	if call.UpdatedAt == "" {
+		call.UpdatedAt = call.CreatedAt
+	}
 	if call.PermissionGeneration < 1 {
 		call.PermissionGeneration = 1
 	}
 	if call.PolicyGeneration < 1 {
 		call.PolicyGeneration = 1
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.CreatedAt)
+	switch call.Status {
+	case "pending_approval", "approved":
+		call.StartedAt = ""
+		call.CompletedAt = ""
+	case "running":
+		if call.StartedAt == "" {
+			call.StartedAt = call.CreatedAt
+		}
+		call.CompletedAt = ""
+	case "completed", "error", "succeeded", "failed":
+		if call.StartedAt == "" {
+			call.StartedAt = call.CreatedAt
+		}
+		if call.CompletedAt == "" {
+			call.CompletedAt = call.CreatedAt
+		}
+	case "denied":
+		call.StartedAt = ""
+		if call.CompletedAt == "" {
+			call.CompletedAt = call.CreatedAt
+		}
+	default:
+		return ToolCall{}, fmt.Errorf("invalid tool call status %q", call.Status)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, started_at, completed_at, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.StartedAt, call.CompletedAt, call.CreatedAt, call.UpdatedAt)
 	if err != nil {
 		return ToolCall{}, err
 	}
@@ -1676,7 +2321,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 func (s *Store) GetToolCallByUseID(ctx context.Context, agentID, toolUseID string) (ToolCall, error) {
 	var c ToolCall
 	var input, output string
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), created_at FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt)
 	if input != "" {
 		c.InputJSON = json.RawMessage(input)
 	}
@@ -1687,13 +2332,41 @@ func (s *Store) GetToolCallByUseID(ctx context.Context, agentID, toolUseID strin
 }
 
 func (s *Store) UpdateToolCallApproval(ctx context.Context, agentID, toolUseID, status, decidedBy, denyMessage, reason, suggestions string) error {
+	if status != "approved" && status != "denied" {
+		return fmt.Errorf("invalid tool approval status %q", status)
+	}
 	decidedAt := Now()
-	_, err := s.db.ExecContext(ctx, `UPDATE agent_tool_calls SET status = ?, permission_decided_by = NULLIF(?, ''), permission_decided_at = ?, permission_deny_message = NULLIF(?, ''), permission_decision_reason = NULLIF(?, ''), permission_suggestions = NULLIF(?, '') WHERE agent_id = ? AND tool_use_id = ?`, status, decidedBy, decidedAt, denyMessage, reason, suggestions, agentID, toolUseID)
+	completedAt := ""
+	if status == "denied" {
+		completedAt = decidedAt
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE agent_tool_calls SET status = ?, completed_at = COALESCE(NULLIF(completed_at, ''), NULLIF(?, '')), permission_decided_by = NULLIF(?, ''), permission_decided_at = ?, permission_deny_message = NULLIF(?, ''), permission_decision_reason = NULLIF(?, ''), permission_suggestions = NULLIF(?, ''), updated_at = ? WHERE agent_id = ? AND tool_use_id = ? AND status = 'pending_approval'`, status, completedAt, decidedBy, decidedAt, denyMessage, reason, suggestions, decidedAt, agentID, toolUseID)
 	return err
 }
 
+// MarkToolCallRunning claims an approved pending call immediately before execution.
+func (s *Store) MarkToolCallRunning(ctx context.Context, agentID, toolUseID string) error {
+	now := Now()
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_tool_calls SET status = 'running', started_at = COALESCE(NULLIF(started_at, ''), ?), completed_at = NULL, updated_at = ? WHERE agent_id = ? AND tool_use_id = ? AND status = 'approved'`, now, now, agentID, toolUseID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		return nil
+	}
+	return fmt.Errorf("%w: tool call cannot start: %s", ErrConflict, toolUseID)
+}
+
 func (s *Store) UpdateToolCallResult(ctx context.Context, agentID, toolUseID string, outputJSON json.RawMessage, status string, durationMS int64, errorMessage string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agent_tool_calls SET output_json = ?, status = ?, duration_ms = ?, error_message = NULLIF(?, '') WHERE agent_id = ? AND tool_use_id = ?`, string(outputJSON), status, durationMS, errorMessage, agentID, toolUseID)
+	if status != "completed" && status != "error" && status != "denied" {
+		return fmt.Errorf("invalid terminal tool call status %q", status)
+	}
+	now := Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE agent_tool_calls SET output_json = ?, status = ?, duration_ms = ?, completed_at = COALESCE(NULLIF(completed_at, ''), ?), error_message = NULLIF(?, ''), updated_at = ? WHERE agent_id = ? AND tool_use_id = ?`, string(outputJSON), status, durationMS, now, errorMessage, now, agentID, toolUseID)
 	return err
 }
 
@@ -1706,7 +2379,7 @@ func (s *Store) ListToolCallsByRun(ctx context.Context, agentID, runID string) (
 }
 
 func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([]ToolCall, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), created_at FROM agent_tool_calls `+where, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1715,7 +2388,7 @@ func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([
 	for rows.Next() {
 		var c ToolCall
 		var input, output string
-		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.StartedAt, &c.CompletedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if input != "" {
@@ -1744,7 +2417,7 @@ func (s *Store) RunSummary(ctx context.Context, agentID, runID string) (RunSumma
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0) FROM api_requests WHERE agent_id = ? AND run_id = ?`, agentID, runID).Scan(&summary.APIRequestCount, &summary.InputTokens, &summary.OutputTokens, &summary.CostUSD); err != nil {
 		return RunSummary{}, err
 	}
-	summary.ToolCalls, err = s.ListToolCallsByRun(ctx, agentID, runID)
+	summary.ToolCalls, err = s.listToolCallPreviewsByRun(ctx, agentID, runID, 12)
 	if err != nil {
 		return RunSummary{}, err
 	}
@@ -1753,6 +2426,51 @@ func (s *Store) RunSummary(ctx context.Context, agentID, runID string) (RunSumma
 		return RunSummary{}, err
 	}
 	return summary, nil
+}
+
+func (s *Store) ActiveRunSummary(ctx context.Context, agentID string) (ActiveRunSummary, error) {
+	var summary ActiveRunSummary
+	if err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND status IN ('pending', 'running') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, COALESCE(started_at, created_at) DESC, id DESC LIMIT 1`, agentID).Scan(&summary.Run.ID, &summary.Run.AgentID, &summary.Run.TriggerMessageID, &summary.Run.Status, &summary.Run.StartedAt, &summary.Run.CompletedAt, &summary.Run.ErrorMessage, &summary.Run.BaseHead, &summary.Run.EndHead, &summary.Run.CheckpointRepoRoot, &summary.Run.GitSnapshotAt, &summary.Run.CheckpointState, &summary.Run.CheckpointError, &summary.Run.RolledBackAt, &summary.Run.CreatedAt, &summary.Run.UpdatedAt); err != nil {
+		return ActiveRunSummary{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_messages WHERE agent_id = ? AND run_id = ?`, agentID, summary.Run.ID).Scan(&summary.MessageCount); err != nil {
+		return ActiveRunSummary{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END),0) FROM agent_tool_calls WHERE agent_id = ? AND run_id = ?`, agentID, summary.Run.ID).Scan(&summary.ToolCallCount, &summary.PendingApprovals); err != nil {
+		return ActiveRunSummary{}, err
+	}
+	var err error
+	summary.ToolCalls, err = s.listToolCallPreviewsByRun(ctx, agentID, summary.Run.ID, 6)
+	if err != nil {
+		return ActiveRunSummary{}, err
+	}
+	return summary, nil
+}
+
+func (s *Store) listToolCallPreviewsByRun(ctx context.Context, agentID, runID string, limit int) ([]ToolCallPreview, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 12
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND run_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, agentID, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	calls := make([]ToolCallPreview, 0)
+	for rows.Next() {
+		var call ToolCallPreview
+		if err := rows.Scan(&call.ID, &call.RunID, &call.MessageID, &call.ToolUseID, &call.ToolName, &call.Status, &call.DurationMS, &call.ErrorMessage, &call.PermissionDecidedBy, &call.PermissionDecidedAt, &call.StartedAt, &call.CompletedAt, &call.CreatedAt, &call.UpdatedAt); err != nil {
+			return nil, err
+		}
+		calls = append(calls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(calls)-1; i < j; i, j = i+1, j-1 {
+		calls[i], calls[j] = calls[j], calls[i]
+	}
+	return calls, nil
 }
 
 func (s *Store) listRunMessagePreviews(ctx context.Context, agentID, runID string, limit int) ([]RunMessagePreview, error) {
@@ -2617,6 +3335,9 @@ func isLowerHex(value string) bool {
 }
 
 func isUniqueConstraint(err error) bool {
+	if err == nil {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unique constraint") || strings.Contains(message, "constraint failed: unique")
 }

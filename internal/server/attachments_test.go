@@ -1,9 +1,13 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +106,59 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	if recorder.Body.String() != "hello attachment" {
 		t.Fatalf("unexpected attachment body: %q", recorder.Body.String())
 	}
+	if disposition := recorder.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment") {
+		t.Fatalf("expected downloads by default, got %q", disposition)
+	}
+	if recorder.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("expected nosniff on attachment response, got %q", recorder.Header().Get("X-Content-Type-Options"))
+	}
 	waitForAgentIdle(t, store, agent.ID)
+}
+
+func TestAttachmentUsesContentTypeOverClaimedImageAndSanitizesFilename(t *testing.T) {
+	data := []byte("<html><body>not an image</body></html>")
+	mimeType := normalizeAttachmentMIME("photo.png", "image/png", data)
+	if mimeType != "text/html" {
+		t.Fatalf("expected detected HTML MIME, got %q", mimeType)
+	}
+	if kind := classifyAttachment("photo.png", mimeType, data); kind != "text" {
+		t.Fatalf("expected fake image to avoid image classification, got %q", kind)
+	}
+	var imageData bytes.Buffer
+	pngImage := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	pngImage.Set(0, 0, color.Black)
+	if err := png.Encode(&imageData, pngImage); err != nil {
+		t.Fatal(err)
+	}
+	imageMIME := normalizeAttachmentMIME("photo.png", "application/octet-stream", imageData.Bytes())
+	if imageMIME != "image/png" || classifyAttachment("photo.png", imageMIME, imageData.Bytes()) != "image" {
+		t.Fatalf("expected a decoded PNG to be the only image kind, MIME=%q", imageMIME)
+	}
+	filename := sanitizeAttachmentFilename("../../report\x00\r\n.txt")
+	if filename != "report---.txt" || strings.ContainsAny(filename, "/\\\r\n\x00") {
+		t.Fatalf("expected traversal/control-safe filename, got %q", filename)
+	}
+	if got := sanitizeAttachmentFilename("../.."); got != "attachment" {
+		t.Fatalf("expected traversal-only filename fallback, got %q", got)
+	}
+}
+
+func TestExtractDOCXTextRejectsHighCompressionArchive(t *testing.T) {
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	file, err := writer.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte(strings.Repeat("A", int(maxDOCXDocumentBytes)+1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractDOCXText(buffer.Bytes()); err == nil || !strings.Contains(err.Error(), "decompression budget") {
+		t.Fatalf("expected DOCX decompression budget rejection, got %v", err)
+	}
 }
 
 func TestPostMessageMapsUnavailableServerSkillToConflict(t *testing.T) {

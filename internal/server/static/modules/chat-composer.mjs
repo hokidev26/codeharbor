@@ -1,14 +1,50 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
-import { formatBytes } from "./formatters.mjs";
+import { formatBytes, formatNumber } from "./formatters.mjs";
 import { chatDraftsKey, promptHistoryKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
 import { mergeSlashCommands, slashCommandInsertion } from "./skills-commands.mjs";
+
+export const maxChatDraftCharacters = 8000;
+
+export function interfaceLocale(documentRef = globalThis.document, navigatorRef = globalThis.navigator) {
+  return documentRef?.documentElement?.lang || navigatorRef?.language || "zh-CN";
+}
+
+export function unicodeCharacters(value = "") {
+  return Array.from(String(value || ""));
+}
+
+export function truncateChatDraft(value = "", max = maxChatDraftCharacters) {
+  const characters = unicodeCharacters(value);
+  return {
+    text: characters.slice(0, Math.max(0, max)).join(""),
+    length: characters.length,
+    truncated: characters.length > max,
+  };
+}
+
+export function mentionTrigger(value = "", cursor = String(value || "").length) {
+  const text = String(value || "").slice(0, Math.max(0, cursor));
+  const match = text.match(/(?:^|\s)@([^\s@]{0,64})$/u);
+  if (!match) return null;
+  const query = match[1] || "";
+  return { query, start: text.length - query.length - 1, end: text.length };
+}
+
+export function clipboardFiles(event) {
+  const files = Array.from(event?.clipboardData?.files || []).filter(Boolean);
+  if (files.length) return files;
+  return Array.from(event?.clipboardData?.items || [])
+    .filter((item) => item?.kind === "file")
+    .map((item) => item.getAsFile?.())
+    .filter(Boolean);
+}
 
 export function normalizeChatDrafts(value = {}) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Object.entries(source).reduce((acc, [key, draft]) => {
     const id = String(key || "").trim().slice(0, 120);
-    const text = String(draft || "").slice(0, 8000);
+    const { text } = truncateChatDraft(draft);
     if (id && text.trim()) acc[id] = text;
     return acc;
   }, {});
@@ -59,6 +95,13 @@ export function createChatComposerController({
     return state.agent?.id || state.workline?.id || state.project?.id || "global";
   }
 
+  function serverDraftState(agentId = state.agent?.id) {
+    if (!state.serverDrafts || typeof state.serverDrafts !== "object") state.serverDrafts = {};
+    if (!agentId) return null;
+    if (!state.serverDrafts[agentId]) state.serverDrafts[agentId] = { enabled: false, version: 0, seq: 0, timer: null };
+    return state.serverDrafts[agentId];
+  }
+
   function writeChatDrafts(drafts) {
     state.chatDrafts = normalizeChatDrafts(drafts);
     try {
@@ -70,24 +113,93 @@ export function createChatComposerController({
     const id = String(key || "").trim();
     if (!id) return;
     const drafts = { ...currentChatDrafts() };
-    const text = String(value || "").slice(0, 8000);
+    const { text } = truncateChatDraft(value);
     if (text.trim()) drafts[id] = text;
     else delete drafts[id];
     writeChatDrafts(drafts);
   }
 
+  async function persistServerDraft(agentId, value) {
+    const draftState = serverDraftState(agentId);
+    if (!draftState?.enabled) return;
+    const result = await api(`/api/agents/${agentId}/draft`, {
+      method: "PUT",
+      body: JSON.stringify({ text: truncateChatDraft(value).text, version: draftState.version }),
+    });
+    if (state.agent?.id === agentId) draftState.version = Number(result?.version || draftState.version + 1);
+  }
+
+  function scheduleServerDraftSave(agentId, value) {
+    const draftState = serverDraftState(agentId);
+    if (!draftState?.enabled) return;
+    window.clearTimeout(draftState.timer);
+    draftState.timer = window.setTimeout(() => {
+      persistServerDraft(agentId, value).catch(async (error) => {
+        if (error?.status === 409) {
+          try {
+            const latest = await api(`/api/agents/${agentId}/draft`);
+            draftState.version = Number(latest?.version || 0);
+            await persistServerDraft(agentId, value);
+            return;
+          } catch (retryError) {
+            error = retryError;
+          }
+        }
+        notifyTerminal?.(`[warn] 私有草稿保存失败：${error?.message || error}\n`);
+      });
+    }, 400);
+  }
+
   function saveCurrentChatDraft() {
     const input = $("messageText");
     if (!input) return;
+    const agentId = state.agent?.id;
+    const draftState = serverDraftState(agentId);
+    if (agentId && draftState?.enabled) {
+      scheduleServerDraftSave(agentId, input.value);
+      return;
+    }
     saveChatDraftForKey(currentChatDraftKey(), input.value);
   }
 
-  function restoreCurrentChatDraft() {
+  async function restoreCurrentChatDraft() {
+    const agentId = state.agent?.id;
+    if (agentId) {
+      const draftState = serverDraftState(agentId);
+      const seq = ++draftState.seq;
+      try {
+        const draft = await api(`/api/agents/${agentId}/draft`);
+        if (state.agent?.id !== agentId || draftState.seq !== seq) return;
+        draftState.enabled = true;
+        draftState.version = Number(draft?.version || 0);
+        saveChatDraftForKey(currentChatDraftKey(), "");
+        setMessageInputValue(draft?.contentText || "", { saveDraft: false });
+        return;
+      } catch (error) {
+        if (state.agent?.id !== agentId || draftState.seq !== seq) return;
+        if (error?.status === 404) {
+          draftState.enabled = true;
+          draftState.version = 0;
+          saveChatDraftForKey(currentChatDraftKey(), "");
+          setMessageInputValue("", { saveDraft: false });
+          return;
+        }
+        if (error?.status !== 401) notifyTerminal?.(`[warn] 私有草稿读取失败，已回退到浏览器草稿：${error?.message || error}\n`);
+      }
+    }
     const draft = currentChatDrafts()[currentChatDraftKey()] || "";
     setMessageInputValue(draft, { saveDraft: false });
   }
 
   function clearChatDraftForKey(key) {
+    const agentId = state.agent?.id;
+    const draftState = serverDraftState(agentId);
+    if (agentId && draftState?.enabled) {
+      window.clearTimeout(draftState.timer);
+      draftState.version = 0;
+      api(`/api/agents/${agentId}/draft`, { method: "DELETE" }).catch(() => {});
+      return;
+    }
     saveChatDraftForKey(key, "");
   }
 
@@ -205,11 +317,25 @@ export function createChatComposerController({
     }
   }
 
+  function updateDraftLimitHint() {
+    const input = $("messageText");
+    const hint = $("chatDraftLimitHint");
+    if (!input || !hint) return;
+    const length = unicodeCharacters(input.value).length;
+    const locale = interfaceLocale();
+    const over = Math.max(0, length - maxChatDraftCharacters);
+    hint.classList.toggle("warn", over > 0);
+    hint.textContent = over > 0
+      ? `已超出 ${formatNumber(over, locale)} 个字符；草稿只保存前 ${formatNumber(maxChatDraftCharacters, locale)} 个字符。`
+      : `${formatNumber(length, locale)} / ${formatNumber(maxChatDraftCharacters, locale)} 个字符`;
+  }
+
   function autoResizeMessageInput() {
     const input = $("messageText");
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
     updatePromptHistoryHint();
+    updateDraftLimitHint();
   }
 
   function openAttachmentPicker() {
@@ -266,6 +392,15 @@ export function createChatComposerController({
     const picker = event?.target;
     addPendingAttachmentFiles(picker?.files || []);
     if (picker) picker.value = "";
+  }
+
+  function handleMessagePaste(event) {
+    const files = clipboardFiles(event);
+    if (!files.length) return false;
+    addPendingAttachmentFiles(files);
+    // Keep the browser's normal text paste and undo stack intact when the
+    // clipboard contains both text and files.
+    return true;
   }
 
   function removePendingAttachment(id) {
@@ -368,6 +503,96 @@ export function createChatComposerController({
         : count
           ? `空输入时 ↑ 查看上一条提示，↓ 返回草稿。本地已保存 ${count}/30 条。`
           : "输入框为空时 ↑/↓ 可召回最近提示。";
+  }
+
+  function hideMentionPalette() {
+    state.mentionOpen = false;
+    state.mentionUsers = [];
+    state.mentionIndex = 0;
+    const palette = $("mentionPalette");
+    if (palette) {
+      palette.classList.add("hidden");
+      palette.innerHTML = "";
+    }
+  }
+
+  function insertMention(user) {
+    const input = $("messageText");
+    const trigger = mentionTrigger(input?.value || "", input?.selectionStart || 0);
+    if (!input || !trigger || !user?.handle) return false;
+    input.setRangeText(`@${user.handle} `, trigger.start, trigger.end, "end");
+    hideMentionPalette();
+    handleMessageInput();
+    input.focus();
+    return true;
+  }
+
+  function renderMentionPalette() {
+    const palette = $("mentionPalette");
+    if (!palette) return;
+    const users = Array.isArray(state.mentionUsers) ? state.mentionUsers : [];
+    if (!state.mentionOpen || !users.length) {
+      hideMentionPalette();
+      return;
+    }
+    state.mentionIndex = Math.max(0, Math.min(Number(state.mentionIndex || 0), users.length - 1));
+    palette.classList.remove("hidden");
+    palette.innerHTML = users.map((user, index) => `
+      <button class="slash-command-item ${index === state.mentionIndex ? "active" : ""}" type="button" data-mention-user="${escapeAttr(user.id || user.handle)}">
+        <span class="slash-command-name">@${escapeHtml(user.handle || "")}</span>
+        <span class="slash-command-desc">${escapeHtml(user.role || "user")}</span>
+      </button>
+    `).join("");
+    palette.querySelectorAll("[data-mention-user]").forEach((button, index) => {
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      button.addEventListener("click", () => insertMention(users[index]));
+    });
+  }
+
+  async function updateMentionPalette() {
+    if (state.mentionComposing) return;
+    const input = $("messageText");
+    const trigger = mentionTrigger(input?.value || "", input?.selectionStart || 0);
+    if (!trigger) {
+      hideMentionPalette();
+      return;
+    }
+    const seq = Number(state.mentionSeq || 0) + 1;
+    state.mentionSeq = seq;
+    try {
+      const users = await api(`/api/users?handlePrefix=${encodeURIComponent(trigger.query)}&limit=8`);
+      if (seq !== state.mentionSeq) return;
+      state.mentionUsers = Array.isArray(users) ? users : [];
+      state.mentionOpen = state.mentionUsers.length > 0;
+      state.mentionIndex = 0;
+      renderMentionPalette();
+    } catch (error) {
+      if (seq === state.mentionSeq && error?.status === 401) hideMentionPalette();
+    }
+  }
+
+  function handleMentionKeydown(event) {
+    if (!state.mentionOpen || state.mentionComposing) return false;
+    const users = Array.isArray(state.mentionUsers) ? state.mentionUsers : [];
+    if (!users.length) return false;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      state.mentionIndex = event.key === "ArrowDown"
+        ? (state.mentionIndex + 1) % users.length
+        : (state.mentionIndex - 1 + users.length) % users.length;
+      renderMentionPalette();
+      event.preventDefault();
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (insertMention(users[state.mentionIndex])) event.preventDefault();
+      return true;
+    }
+    if (event.key === "Escape") {
+      hideMentionPalette();
+      event.preventDefault();
+      return true;
+    }
+    return false;
   }
 
   function enabledSlashCommands() {
@@ -525,10 +750,12 @@ export function createChatComposerController({
     resetPromptHistoryNavigation();
     autoResizeMessageInput();
     updateSlashCommandPalette();
+    updateMentionPalette();
     saveCurrentChatDraft();
   }
 
   function handleMessageKeydown(event) {
+    if (handleMentionKeydown(event)) return;
     if (handleSlashCommandKeydown(event)) return;
     if (handlePromptHistoryNavigation(event)) return;
     if (isComposingInput(event) || event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
@@ -545,6 +772,8 @@ export function createChatComposerController({
     handleAttachmentDrop,
     handleMessageInput,
     handleMessageKeydown,
+    handleMessagePaste,
+    hideMentionPalette,
     hideSlashCommandPalette,
     importAttachmentFiles,
     loadChatDrafts,
@@ -555,6 +784,8 @@ export function createChatComposerController({
     sendMessage,
     setMessageInputValue,
     syncMessageComposerBusy,
+    updateDraftLimitHint,
+    updateMentionPalette,
     updatePromptHistoryHint,
     updateSlashCommandPalette,
   };

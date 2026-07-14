@@ -165,6 +165,22 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 	return msg, nil
 }
 
+// SubmitCorrection creates an immutable follow-up to a user message and starts a
+// new run. It intentionally does not alter the source message or reuse its run.
+func (r *Runner) SubmitCorrection(ctx context.Context, agentID, sourceMessageID, text, createdBy string, keepAttachmentIDs []string, attachments ...db.Attachment) (db.Message, error) {
+	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
+	if err != nil {
+		return db.Message{}, err
+	}
+	msg, run, err := r.store.CreateCorrectionWithRun(ctx, agentID, sourceMessageID, contentText, commandText, createdBy, keepAttachmentIDs, attachments)
+	if err != nil {
+		return db.Message{}, err
+	}
+	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments), "correctionOfMessageId": sourceMessageID}, run.ID)})
+	go r.runWithRun(context.Background(), agentID, run.ID, msg.ID)
+	return msg, nil
+}
+
 func (r *Runner) expandServerSkillCommand(ctx context.Context, values ...string) (contentText, commandText string, err error) {
 	if len(values) == 0 || len(values) > 2 {
 		return "", "", errors.New("skill command expansion requires text")
@@ -541,8 +557,9 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 
 		assistantBlocks := assistantToolUseBlocks(result.Text, result.ToolCalls)
 		assistantJSON, _ := json.Marshal(assistantBlocks)
+		assistantStateJSON := providerStateForBlocks(assistantBlocks)
 		assistantText := assistantToolUseText(result.Text, result.ToolCalls)
-		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON})
+		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON, ProviderStateJSON: assistantStateJSON})
 		if err != nil {
 			return err
 		}
@@ -1001,6 +1018,9 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 	if !capabilities.Tools {
 		request.Tools = nil
 	}
+	if capabilities.Reasoning {
+		request.ReasoningEffort = agentReasoningEffort(ctx, r.store, agentID)
+	}
 	events, err := provider.Generate(attemptCtx, request)
 	if err != nil {
 		r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), providers.Usage{}, err.Error())
@@ -1159,6 +1179,7 @@ func providerMessageFromDB(message db.Message) providers.Message {
 
 func contentBlocksFromMessage(message db.Message) []providers.ContentBlock {
 	blocks := contentBlocksFromJSON(message.ContentJSON)
+	applyProviderStateToBlocks(blocks, message.ProviderStateJSON)
 	if len(blocks) == 0 {
 		content := strings.TrimSpace(message.ContentText)
 		if content != "" {
@@ -1178,6 +1199,49 @@ func contentBlocksFromJSON(raw json.RawMessage) []providers.ContentBlock {
 		return nil
 	}
 	return blocks
+}
+
+func providerStateForBlocks(blocks []providers.ContentBlock) json.RawMessage {
+	state := make(map[string]json.RawMessage)
+	for _, block := range blocks {
+		if block.ToolUseID != "" && len(block.ProviderState) > 0 {
+			state[block.ToolUseID] = block.ProviderState
+		}
+	}
+	if len(state) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func applyProviderStateToBlocks(blocks []providers.ContentBlock, raw json.RawMessage) {
+	if len(blocks) == 0 || len(raw) == 0 {
+		return
+	}
+	var state map[string]json.RawMessage
+	if json.Unmarshal(raw, &state) != nil {
+		return
+	}
+	for i := range blocks {
+		if value := state[blocks[i].ToolUseID]; len(value) > 0 {
+			blocks[i].ProviderState = value
+		}
+	}
+}
+
+func agentReasoningEffort(ctx context.Context, store *db.Store, agentID string) string {
+	if store == nil {
+		return ""
+	}
+	agent, err := store.GetAgent(ctx, agentID)
+	if err != nil {
+		return ""
+	}
+	return agent.ReasoningEffort
 }
 
 func attachmentBlocks(message db.Message) []providers.ContentBlock {
@@ -1344,6 +1408,9 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 	}
 	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
 	defer unlockGitMutation()
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); err != nil {
+		return tools.Result{}, fmt.Errorf("persist running tool call: %w", err)
+	}
 	started := time.Now()
 	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agentID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agentID, "", call)})
 	duration := time.Since(started).Milliseconds()
@@ -1358,8 +1425,8 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 		status = "error"
 		errMsg = err.Error()
 	}
-	if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); recordErr != nil {
-		slog.Warn("record tool call failed", "agentId", agentID, "toolUseId", call.ID, "error", recordErr)
+	if recordErr := r.store.UpdateToolCallResult(ctx, agentID, call.ID, output, status, duration, errMsg); recordErr != nil {
+		slog.Warn("record tool call result failed", "agentId", agentID, "toolUseId", call.ID, "error", recordErr)
 	}
 	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
 	return result, err
@@ -1386,6 +1453,13 @@ func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID 
 	r.publish(Event{Type: "tool.started", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}, runID)})
 	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
 	defer unlockGitMutation()
+	if updateExisting {
+		if err := r.store.MarkToolCallRunning(ctx, agent.ID, call.ID); err != nil {
+			return tools.Result{}, fmt.Errorf("persist approved tool call as running: %w", err)
+		}
+	} else if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permissionReason)}); err != nil {
+		return tools.Result{}, fmt.Errorf("persist running tool call: %w", err)
+	}
 	gitBefore := r.captureRunToolGitBefore(ctx, agent, runID, risk)
 	started := time.Now()
 	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agent.ID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agent.ID, runID, call)})
@@ -1402,12 +1476,8 @@ func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID 
 		errMsg = err.Error()
 	}
 	output, _ := json.Marshal(result)
-	if updateExisting {
-		if recordErr := r.store.UpdateToolCallResult(ctx, agent.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
-			slog.Warn("update approved tool call failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
-		}
-	} else if _, recordErr := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: status, DurationMS: duration, ErrorMessage: errMsg, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permissionReason)}); recordErr != nil {
-		slog.Warn("record tool call failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
+	if recordErr := r.store.UpdateToolCallResult(ctx, agent.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
+		slog.Warn("update tool call result failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
 	}
 	r.publish(Event{Type: "tool.finished", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}, runID)})
 	return result, err
@@ -1938,38 +2008,65 @@ func (r *Runner) toolSpecs() []providers.ToolSpec {
 }
 
 func toolInputSchema(input any) map[string]any {
-	schema := map[string]any{"type": "object", "properties": map[string]any{}}
 	t := reflect.TypeOf(input)
 	if t == nil {
-		return schema
+		return map[string]any{"type": "object", "properties": map[string]any{}}
 	}
+	schema := jsonSchemaForType(t, make(map[reflect.Type]bool))
+	if schema["type"] != "object" {
+		return map[string]any{"type": "object", "properties": map[string]any{"input": schema}, "required": []string{"input"}}
+	}
+	return schema
+}
+
+func jsonSchemaForType(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct {
+	if visiting[t] {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
+	case reflect.Slice, reflect.Array:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return map[string]any{"type": "string"}
+		}
+		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem(), visiting)}
+	case reflect.Map:
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	case reflect.Struct:
+		visiting[t] = true
+		defer delete(visiting, t)
+		properties := make(map[string]any)
+		required := make([]string, 0)
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+			name, omitEmpty := jsonFieldName(field)
+			if name == "" {
+				continue
+			}
+			properties[name] = jsonSchemaForType(field.Type, visiting)
+			if !omitEmpty {
+				required = append(required, name)
+			}
+		}
+		schema := map[string]any{"type": "object", "properties": properties}
+		if len(required) > 0 {
+			schema["required"] = required
+		}
 		return schema
+	default:
+		return map[string]any{"type": "string"}
 	}
-	properties := map[string]any{}
-	required := make([]string, 0)
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if field.PkgPath != "" {
-			continue
-		}
-		name, omitEmpty := jsonFieldName(field)
-		if name == "" {
-			continue
-		}
-		properties[name] = map[string]any{"type": jsonSchemaType(field.Type)}
-		if !omitEmpty {
-			required = append(required, name)
-		}
-	}
-	schema["properties"] = properties
-	if len(required) > 0 {
-		schema["required"] = required
-	}
-	return schema
 }
 
 func jsonFieldName(field reflect.StructField) (string, bool) {
@@ -1992,29 +2089,6 @@ func jsonFieldName(field reflect.StructField) (string, bool) {
 	return name, omitEmpty
 }
 
-func jsonSchemaType(t reflect.Type) string {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	switch t.Kind() {
-	case reflect.Bool:
-		return "boolean"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return "integer"
-	case reflect.Float32, reflect.Float64:
-		return "number"
-	case reflect.Slice, reflect.Array:
-		if t.Elem().Kind() == reflect.Uint8 {
-			return "string"
-		}
-		return "array"
-	case reflect.Map, reflect.Struct:
-		return "object"
-	default:
-		return "string"
-	}
-}
-
 func assistantToolUseBlocks(text string, calls []providers.ToolCall) []providers.ContentBlock {
 	blocks := make([]providers.ContentBlock, 0, 1+len(calls))
 	if strings.TrimSpace(text) != "" {
@@ -2022,7 +2096,7 @@ func assistantToolUseBlocks(text string, calls []providers.ToolCall) []providers
 	}
 	for _, call := range calls {
 		call = normalizeProviderToolCall(call)
-		blocks = append(blocks, providers.ContentBlock{Type: "tool_use", ToolUseID: call.ID, ToolName: call.Name, Input: call.Input})
+		blocks = append(blocks, providers.ContentBlock{Type: "tool_use", ToolUseID: call.ID, ToolName: call.Name, Input: call.Input, ProviderState: call.ProviderState})
 	}
 	return blocks
 }

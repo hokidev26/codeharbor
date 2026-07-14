@@ -21,6 +21,7 @@ import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServe
 import { api, webSocketURL } from "./runtime.mjs";
 import { settingsItems, settingsSections } from "./settings-data.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
+import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs";
 import { createTerminalController } from "./terminal.mjs";
@@ -79,6 +80,7 @@ const state = {
   runtimeError: "",
   runtimeSeq: 0,
   authStatus: null,
+  authUser: undefined,
   authError: "",
   authSeq: 0,
   profile: null,
@@ -126,6 +128,9 @@ const state = {
   messageRefreshTimersByAgent: {},
   currentMessages: [],
   messageCopyTexts: [],
+  messageHasMoreBefore: false,
+  messageNextBefore: "",
+  messageOlderLoading: false,
   activeRunSummary: null,
   activeRunSummaryRunId: "",
   runSummaryLoading: false,
@@ -133,6 +138,8 @@ const state = {
   runRollbackBusy: false,
   runSummarySeq: 0,
   liveToolOutputs: {},
+  liveAssistantText: "",
+  liveAssistantRunId: "",
   pendingToolApprovals: {},
   gitStatus: null,
   gitDiff: null,
@@ -250,9 +257,11 @@ const {
 } = gitWorkflow;
 
 const {
+  appendLiveAssistantText,
   appendToolOutput,
   applyMessageSnapshot,
   clearCurrentAgentApprovals,
+  clearLiveAssistantText,
   clearMessageRefreshTimer,
   clearRunSummary,
   clearToolApproval,
@@ -260,6 +269,7 @@ const {
   finishToolOutput,
   loadLatestRunSummary,
   loadMessages,
+  loadOlderMessages,
   loadRunSummary,
   rememberToolApproval,
   rememberToolStarted,
@@ -386,6 +396,17 @@ const {
   setPreferredModel,
 } = modelProviderSettings;
 
+const setupWizard = createSetupWizardController({
+  state,
+  loadModelCatalog,
+  loadSettings,
+  openSettingsModal,
+  renderModelOptions,
+  setPreferredModel,
+  showToast,
+});
+const { bindSetupWizardActions, openSetupWizard } = setupWizard;
+
 const chatComposer = createChatComposerController({
   state,
   attachmentKind,
@@ -407,6 +428,7 @@ const {
   handleAttachmentDrop,
   handleMessageInput,
   handleMessageKeydown,
+  handleMessagePaste,
   hideSlashCommandPalette,
   importAttachmentFiles,
   loadChatDrafts,
@@ -417,6 +439,7 @@ const {
   sendMessage,
   setMessageInputValue,
   syncMessageComposerBusy,
+  updateDraftLimitHint,
   updatePromptHistoryHint,
   updateSlashCommandPalette,
 } = chatComposer;
@@ -1716,9 +1739,13 @@ async function selectProject(id) {
   state.project = state.projects.find((project) => project.id === id) || null;
   state.workline = null;
   state.agent = null;
+  clearLiveAssistantText();
   syncMessageComposerBusy();
   state.currentMessages = [];
   state.messageCopyTexts = [];
+  state.messageHasMoreBefore = false;
+  state.messageNextBefore = "";
+  state.messageOlderLoading = false;
   resetGitWorkflowState();
   updateConversationCopyButton();
   setMessageInputValue("", { saveDraft: false });
@@ -1780,7 +1807,7 @@ async function enterAgent() {
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
   renderModelOptions();
-  restoreCurrentChatDraft();
+  await restoreCurrentChatDraft();
   syncMessageComposerBusy();
   clearRunSummary();
   connectWS();
@@ -1863,10 +1890,14 @@ function applyAgentLiveSnapshot(snapshot) {
   const agentId = snapshot?.agent?.id || "";
   if (!agentId || state.agent?.id !== agentId) return;
   state.agent = snapshot.agent;
+  clearLiveAssistantText();
   state.liveToolOutputs = Object.fromEntries(Object.entries(state.liveToolOutputs || {}).filter(([, value]) => value?.agentId && value.agentId !== agentId));
   clearRunSummary();
   replacePendingApprovals(snapshot.pendingApprovals, agentId);
-  applyMessageSnapshot(snapshot.messages, agentId);
+  applyMessageSnapshot(snapshot.messages, agentId, {
+    hasMoreBefore: snapshot.messageHasMoreBefore,
+    nextBefore: snapshot.messageNextBefore,
+  });
   const permissionMode = $("permissionMode");
   if (permissionMode) permissionMode.value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
@@ -1874,7 +1905,7 @@ function applyAgentLiveSnapshot(snapshot) {
   updateWorkspaceMetaPills();
   syncMessageComposerBusy();
   const latestRun = snapshot.latestRun;
-  if (latestRun?.id && ["completed", "failed", "interrupted"].includes(latestRun.status)) {
+  if (latestRun?.id && ["completed", "error", "interrupted", "superseded"].includes(latestRun.status)) {
     loadRunSummary(latestRun.id, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾恢复失败：${error?.message || error}\n`));
   }
 }
@@ -1884,7 +1915,11 @@ function handleAgentStreamEvent(event) {
   if (!agentId || (event.agentId && event.agentId !== agentId)) return;
   if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
   const runId = event.data?.runId || "";
-  if (event.type === "agent.started") clearRunSummary();
+  if (event.type === "agent.started") {
+    clearRunSummary();
+    clearLiveAssistantText();
+  }
+  if (event.type === "agent.text") appendLiveAssistantText(event.text || event.data?.text || "", runId);
   if (event.type === "tool.started") rememberToolStarted(event);
   if (event.type === "tool.output") appendToolOutput(event);
   if (event.type === "tool.approval_required") {
@@ -1896,6 +1931,7 @@ function handleAgentStreamEvent(event) {
     finishToolOutput(event);
   }
   if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
+  if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) clearLiveAssistantText();
   if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) scheduleMessageRefresh(80, agentId);
   if (["agent.done", "agent.error", "agent.interrupted"].includes(event.type) && runId) {
     loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾加载失败：${error?.message || error}\n`));
@@ -1991,6 +2027,7 @@ function showError(err) {
   notifyTerminal(`[error] ${message}\n`);
 }
 
+bindSetupWizardActions();
 document.addEventListener("keydown", handleGlobalEscape);
 document.addEventListener("keydown", handleSettingsSearchShortcut);
 document.addEventListener("click", handleDirectoryShortcutClick);
@@ -2018,9 +2055,9 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
 $("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
-$("settingsWizardBtn").addEventListener("click", (event) => {
+$("settingsWizardBtn").addEventListener("click", () => {
   closeSettingsModal();
-  openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError);
+  openSetupWizard().catch(showError);
 });
 $("manageBackendsBtn").addEventListener("click", () => { closeSidebarSettingsMenu(); openBackendsModal(); });
 $("closeBackendsModalBtn").addEventListener("click", closeBackendsModal);
@@ -2111,6 +2148,9 @@ $("composerInputShell")?.addEventListener("dragleave", handleAttachmentDragLeave
 $("composerInputShell")?.addEventListener("drop", handleAttachmentDrop);
 $("messageText").addEventListener("input", handleMessageInput);
 $("messageText").addEventListener("keydown", handleMessageKeydown);
+$("messageText").addEventListener("paste", handleMessagePaste);
+$("messageText").addEventListener("compositionstart", () => { state.mentionComposing = true; });
+$("messageText").addEventListener("compositionend", () => { state.mentionComposing = false; handleMessageInput(); });
 $("messageText").addEventListener("focus", updateSlashCommandPalette);
 $("messageText").addEventListener("blur", () => window.setTimeout(hideSlashCommandPalette, 120));
 $("terminalOutput").addEventListener("keydown", handleTerminalKeydown);
@@ -2121,6 +2161,10 @@ $("terminalOutput").addEventListener("paste", (event) => {
 });
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", resizeTerminal);
+window.addEventListener("autoto:auth-changed", () => {
+  state.serverDrafts = {};
+  if (state.agent?.id) restoreCurrentChatDraft().catch(showError);
+});
 window.addEventListener("beforeunload", saveCurrentChatDraft);
 $("saveAgentBtn").addEventListener("click", () => saveAgentSettings().catch(showError));
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));

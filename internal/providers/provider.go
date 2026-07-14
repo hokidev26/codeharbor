@@ -31,6 +31,10 @@ type ContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	Output    string          `json:"output,omitempty"`
 	IsError   bool            `json:"isError,omitempty"`
+
+	// ProviderState carries opaque adapter state (for example Gemini thought
+	// signatures). It is persisted separately from public message JSON.
+	ProviderState json.RawMessage `json:"-"`
 }
 
 type ToolSpec struct {
@@ -40,9 +44,10 @@ type ToolSpec struct {
 }
 
 type ToolCall struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input,omitempty"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	ProviderState json.RawMessage `json:"-"`
 }
 
 type Usage struct {
@@ -53,10 +58,11 @@ type Usage struct {
 }
 
 type GenerateRequest struct {
-	Model        string
-	SystemPrompt string
-	Messages     []Message
-	Tools        []ToolSpec
+	Model           string
+	SystemPrompt    string
+	Messages        []Message
+	Tools           []ToolSpec
+	ReasoningEffort string
 }
 
 type Event struct {
@@ -80,6 +86,7 @@ type Capabilities struct {
 	Tools      bool `json:"tools"`
 	Streaming  bool `json:"streaming"`
 	ImageInput bool `json:"imageInput"`
+	Reasoning  bool `json:"reasoning"`
 }
 
 type CapabilityProvider interface {
@@ -102,6 +109,8 @@ func NewProvider(cfg config.ProviderConfig) (Provider, error) {
 		return NewAnthropicProvider(cfg), nil
 	case "openai-compatible":
 		return NewOpenAICompatible(cfg), nil
+	case "gemini-interactions":
+		return NewGeminiInteractions(cfg), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider type %q", cfg.Type)
 	}

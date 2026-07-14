@@ -33,13 +33,14 @@ Autoto stores its default config at `~/.autoto/config.json` and its database at 
 - Autoto is intended for local use. The embedded UI is served by the same local Go service.
 - Browser-originated API calls must pass a per-process local token injected into the UI; cross-site `Origin` requests are rejected, and `Sec-Fetch-Site: cross-site` is rejected even when `Origin` is absent.
 - `X-Autoto-Token` is the canonical browser API and WebSocket token header. `X-CodeHarbor-Token` is accepted only for legacy-client compatibility; WebSocket clients may also provide the local token through the `token` query parameter.
-- The local token is a browser cross-site protection, not a multi-user authentication system. A process or user that can read the local UI response on the same machine can also obtain the token.
+- The local token remains browser cross-site protection. Optional local account sessions add per-user draft ownership and message attribution, but they do not isolate operating-system users or yet enforce project membership across every route.
 - Requests whose `Host` is not loopback, requests carrying remote forwarding headers such as `X-Forwarded-Host`, `Forwarded`, `X-Forwarded-For`, `CF-Connecting-IP`, or `Cf-Ray`, or any request while `security.exposed` / `AUTOTO_EXPOSED=true` is active, enter remote hardening mode. `CODEHARBOR_EXPOSED` remains a legacy fallback, but `AUTOTO_EXPOSED` takes precedence when both are set.
 - Remote hardening requires `AUTOTO_ACCESS_PASSWORD` before serving the UI or API and caps permission modes at `acceptEdits` by disabling `bypassPermissions`. `CODEHARBOR_ACCESS_PASSWORD` is accepted only as a legacy fallback; `AUTOTO_ACCESS_PASSWORD` wins when both are set.
 - Remote hardening disables the interactive PTY terminal by default. Enable it only with `AUTOTO_REMOTE_TERMINAL=true` after putting the instance behind a trusted edge authentication layer. `CODEHARBOR_REMOTE_TERMINAL` is the legacy fallback.
 - Remote access cookies are process-local, expire after 24 hours, rotate on restart, and can be cleared from the UI logout action. The canonical cookie is `autoto_remote_access`; the legacy `codeharbor_remote_access` cookie is accepted and cleared for compatibility. API clients may send `Authorization: Bearer $AUTOTO_ACCESS_PASSWORD` or the canonical `X-Autoto-Access: $AUTOTO_ACCESS_PASSWORD`; `X-CodeHarbor-Access` remains a legacy header alias.
 - Git status/diff/log/commit and workline workflow APIs reject repositories outside the current project path, configured default project directory, or an Autoto-created workline worktree under `.autoto-worktrees`.
-- Tools can interact with the local filesystem within configured working directories.
+- Read/Edit/Write/Glob/Grep and filesystem browse/preview/mkdir resolve symlinks and reject paths whose physical location escapes the configured boundary; concurrent path replacement still remains an operating-system-level TOCTOU concern.
+- Attachment uploads are size-bounded, sanitize display filenames, clean multipart temporary files, and default downloads to attachment; only validated safe image formats are served inline with `nosniff`.
 - Bash and stdio MCP execution are permission-gated but remain powerful local code execution.
 - MCP registry entries can launch local stdio processes; registry API responses expose environment variable names only, not stored values.
 - Backend API keys are stored locally and are never returned by API responses; responses expose only whether a key is configured.
@@ -71,7 +72,7 @@ Cloudflare's current dashboard flow is documented in their official Zero Trust d
 
 Planned security improvements include:
 
-- Real login sessions, per-user authorization scopes, and audit trails before exposing Autoto to other users or networks
+- Project membership enforcement, per-route authorization scopes, and broader audit trails before exposing Autoto to other users or networks
 - Optional encryption for locally stored backend API keys and MCP environment values
 - A formal migration system for future schema changes
 - More granular tool approval and audit trails

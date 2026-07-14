@@ -25,9 +25,15 @@ type wsControlFrame struct {
 }
 
 func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
-	agentID := r.URL.Query().Get("id")
+	agentID := r.URL.Query().Get("agentId")
+	if agentID == "" {
+		agentID = r.URL.Query().Get("id")
+	}
 	if agentID == "" {
 		writeError(w, http.StatusBadRequest, "id query parameter is required")
+		return
+	}
+	if !s.requireAgentAccess(w, r, agentID) {
 		return
 	}
 	if !s.validateWebSocketRequest(w, r) {

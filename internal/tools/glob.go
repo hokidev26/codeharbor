@@ -29,23 +29,29 @@ func (GlobTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	if input.Pattern == "" {
 		return Result{Output: "pattern is required", IsError: true}, nil
 	}
-	root := env.CWD
-	if input.Path != "" {
-		resolved, err := resolveInCWD(env.CWD, input.Path)
-		if err != nil {
-			return Result{Output: err.Error(), IsError: true}, nil
-		}
-		root = resolved
+	rootInput := input.Path
+	if rootInput == "" {
+		rootInput = "."
+	}
+	root, err := resolveInCWD(env.CWD, rootInput)
+	if err != nil {
+		return Result{Output: err.Error(), IsError: true}, nil
 	}
 	matches, err := filepath.Glob(filepath.Join(root, input.Pattern))
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	for i, match := range matches {
-		if rel, err := filepath.Rel(root, match); err == nil {
-			matches[i] = rel
+	safeMatches := matches[:0]
+	for _, match := range matches {
+		resolved, err := resolveInCWD(env.CWD, match)
+		if err != nil {
+			continue
+		}
+		if rel, err := filepath.Rel(root, resolved); err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			safeMatches = append(safeMatches, rel)
 		}
 	}
+	matches = safeMatches
 	out := strings.Join(matches, "\n")
 	if out == "" {
 		out = "No matches found"

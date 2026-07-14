@@ -119,13 +119,16 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		providerType = "openai-compatible"
 	}
 	switch providerType {
-	case "openai-compatible", "anthropic", "openai":
+	case "openai-compatible", "anthropic", "openai", "gemini-interactions":
 	default:
-		return config.ProviderConfig{}, errors.New("API 协议当前仅支持 openai-compatible、anthropic 或 openai")
+		return config.ProviderConfig{}, errors.New("API 协议当前仅支持 openai-compatible、anthropic、openai 或 gemini-interactions")
 	}
 	baseURL := strings.TrimSpace(req.BaseURL)
 	if providerType == "openai-compatible" && baseURL == "" {
 		return config.ProviderConfig{}, errors.New("中转站 Base URL 不能为空")
+	}
+	if providerType == "gemini-interactions" && baseURL == "" {
+		baseURL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" && existing.Name == name {
@@ -135,6 +138,8 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		switch providerType {
 		case "anthropic":
 			model = "claude-sonnet-4-5"
+		case "gemini-interactions":
+			model = "gemini-2.5-pro"
 		default:
 			model = "gpt-4.1-mini"
 		}

@@ -30,6 +30,7 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
   - OpenAI official Responses API with SDK streaming text deltas and usage capture
   - Anthropic official Messages API with SDK streaming text deltas, tool-use deltas, usage capture, and automatic 5m prompt-cache breakpoints for sufficiently large requests
   - OpenAI-compatible Chat Completions APIs
+  - Gemini Interactions API with SSE streaming, images, native function calls, reasoning effort, and internal thought-signature replay
   - CLIProxyAPI local OpenAI-compatible preset
 - Core tools:
   - Read
@@ -50,7 +51,9 @@ Existing CodeHarbor configuration, `CODEHARBOR_*` environment variables, `X-Code
 - Agent Server backend registry with sidebar and Agent Admin management UI for compatible OpenHands Agent Server endpoints
 - Settings modal search/filter with keyboard focus shortcut for quickly locating growing product configuration panels
 - Chat message copy actions for exporting individual messages and the current conversation as Markdown
-- Browser-local chat draft autosave/restore per Agent, including migration through local preference backups
+- Versioned private chat drafts per logged-in user and Agent, with browser-local drafts retained only as an unauthenticated compatibility fallback
+- Unicode/case-insensitive local account handles, `@handle` suggestions, and immutable user-message corrections with retained/new attachments
+- Clipboard image/file attachments, Unicode-safe localized draft limits, and browser-native text undo/redo
 - Browser-local prompt history for the chat composer, with empty-input ↑/↓ recall and migration through local preference backups
 - Chat-composer slash command palette backed by enabled local Skills command templates
 - Browser-local Settings → Profile preferences for display identity, avatar initials, workspace label, and Git identity helpers
@@ -149,6 +152,9 @@ OPENAI_API_KEY
 OPENAI_MODEL
 ANTHROPIC_API_KEY
 ANTHROPIC_MODEL
+GEMINI_API_KEY
+GEMINI_MODEL
+GEMINI_BASE_URL
 OPENAI_BASE_URL
 OPENAI_COMPATIBLE_BASE_URL
 OPENAI_COMPATIBLE_API_KEY

@@ -38,13 +38,13 @@ func (GrepTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	root := env.CWD
-	if input.Path != "" {
-		resolved, err := resolveInCWD(env.CWD, input.Path)
-		if err != nil {
-			return Result{Output: err.Error(), IsError: true}, nil
-		}
-		root = resolved
+	rootInput := input.Path
+	if rootInput == "" {
+		rootInput = "."
+	}
+	root, err := resolveInCWD(env.CWD, rootInput)
+	if err != nil {
+		return Result{Output: err.Error(), IsError: true}, nil
 	}
 	limit := input.HeadLimit
 	if limit <= 0 {
@@ -55,7 +55,11 @@ func (GrepTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 		if err != nil || d.IsDir() || len(lines) >= limit {
 			return err
 		}
-		file, err := os.Open(path)
+		resolved, err := resolveInCWD(env.CWD, path)
+		if err != nil {
+			return nil // Skip symlinks that resolve outside the working directory.
+		}
+		file, err := os.Open(resolved)
 		if err != nil {
 			return nil
 		}

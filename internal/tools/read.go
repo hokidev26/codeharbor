@@ -3,8 +3,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 )
+
+const maxReadBytes = 100000
 
 type ReadTool struct{}
 
@@ -27,14 +30,26 @@ func (ReadTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	data, err := os.ReadFile(path)
+	limit := input.Limit
+	if limit <= 0 || limit > maxReadBytes {
+		limit = maxReadBytes
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	limit := input.Limit
-	if limit == 0 {
-		limit = 100000
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil {
+		return Result{Output: err.Error(), IsError: true}, nil
 	}
-	text, cut := truncate(string(data), limit)
+	cut := len(data) > limit
+	if cut {
+		data = data[:limit]
+	}
+	text := string(data)
+	if cut {
+		text += "\n...[truncated]"
+	}
 	return Result{Output: text, Meta: map[string]any{"path": path, "truncated": cut}}, nil
 }

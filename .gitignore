@@ -27,3 +27,7 @@ tmp/
 .DS_Store
 .narrafork/
 .worktrees/
+
+# Local source/reference repositories
+/autoto-legacy/
+/codeharbor-references/

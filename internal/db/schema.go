@@ -6,6 +6,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
+  handle TEXT NOT NULL,
+  handle_key TEXT NOT NULL UNIQUE,
   password_hash TEXT,
   role TEXT NOT NULL DEFAULT 'user',
   avatar_color TEXT,
@@ -14,6 +16,26 @@ CREATE TABLE IF NOT EXISTS users (
   git_email TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS message_drafts (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  content_text TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_drafts_agent ON message_drafts(agent_id);
 
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
@@ -31,6 +53,16 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, user_id),
+  CHECK (role IN ('owner', 'member'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
 
 CREATE TABLE IF NOT EXISTS worklines (
   id TEXT PRIMARY KEY,
@@ -116,8 +148,8 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   trigger_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'running',
-  started_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  started_at TEXT,
   completed_at TEXT,
   error_message TEXT,
   base_head TEXT,
@@ -154,6 +186,7 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   parent_tool_use_id TEXT,
   role TEXT NOT NULL,
   content_json TEXT,
+  provider_state_json TEXT,
   content_text TEXT,
   tokens_in INTEGER,
   cost_usd REAL,
@@ -163,6 +196,7 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   meter_unit TEXT,
   commit_sha TEXT,
   command_text TEXT,
+  correction_of_message_id TEXT REFERENCES agent_messages(id) ON DELETE RESTRICT,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL
 );
@@ -210,7 +244,10 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
   provider TEXT,
   model TEXT,
   result_message_id TEXT,
-  created_at TEXT NOT NULL
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_agent ON agent_tool_calls(agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON agent_tool_calls(run_id, created_at);

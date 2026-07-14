@@ -33,6 +33,9 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agentId query parameter is required")
 		return
 	}
+	if !s.requireAgentAccess(w, r, agentID) {
+		return
+	}
 	agent, err := s.store.GetAgent(r.Context(), agentID)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())

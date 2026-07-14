@@ -98,6 +98,11 @@ export function createWorkspaceSettingsController({
               ${renderPermissionModeOptions(agent.permissionMode || "acceptEdits")}
             </select>
           </label>
+          <label>思考强度
+            <select id="agentSettingsReasoningEffort" class="settings-field">
+              ${["", "low", "medium", "high"].map((value) => `<option value="${escapeAttr(value)}" ${value === (agent.reasoningEffort || "") ? "selected" : ""}>${escapeHtml(value || "自动")}</option>`).join("")}
+            </select>
+          </label>
           <label>消息数
             <input class="settings-field" value="${escapeAttr(formatNumber(agent.messageCount || 0))}" readonly />
           </label>
@@ -212,6 +217,7 @@ export function createWorkspaceSettingsController({
     const id = state.agent.id;
     const model = $("agentSettingsModel")?.value.trim() || "";
     const permissionMode = $("agentSettingsPermissionMode")?.value || "acceptEdits";
+    const reasoningEffort = $("agentSettingsReasoningEffort")?.value || "";
     const cwd = $("agentSettingsCWD")?.value.trim() || "";
     if (!cwd) throw new Error("请填写工作目录");
     setSettingsSubmitButtonState(form, "[data-agent-submit]", true, "保存中");
@@ -228,6 +234,9 @@ export function createWorkspaceSettingsController({
       }
       if (permissionMode && permissionMode !== state.agent.permissionMode) {
         if (!await applyPatch("permission-mode", { permissionMode })) return;
+      }
+      if (reasoningEffort !== (state.agent.reasoningEffort || "")) {
+        if (!await applyPatch("reasoning-effort", { reasoningEffort })) return;
       }
       if (cwd && cwd !== state.agent.cwd) {
         if (!await applyPatch("cwd", { cwd })) return;

@@ -70,6 +70,7 @@ Current adapters include:
 - Anthropic official Messages API with SDK streaming and automatic 5m prompt-cache breakpoints for sufficiently large requests.
 - OpenAI official Responses API with SDK streaming.
 - OpenAI-compatible Chat Completions APIs, including the CLIProxyAPI preset.
+- Gemini Interactions API in stateless mode, with provider-native steps and thought signatures persisted in the internal-only `provider_state_json` message field.
 
 Provider code is responsible for translating Autoto's normalized message/tool representation into each upstream API shape and translating upstream deltas back into normalized events.
 
@@ -138,8 +139,10 @@ These handlers reuse the Git boundary model: repositories must stay within the p
 - `projects`: local workspaces.
 - `worklines`: worklines, including root worklines plus fork/worktree/merge metadata.
 - `agents`: agent persona/runtime configuration for a workline.
-- `agent_messages`: user, assistant, and tool-result transcript entries.
-- `agent_tool_calls`: pending/completed/denied tool execution records.
+- `agent_messages`: user, assistant, and tool-result transcript entries; provider-native continuity state is stored separately and excluded from public JSON.
+- `agent_tool_calls`: pending/completed/denied tool execution records with persisted start/completion/update timestamps.
+- `users` / `auth_sessions`: local account handles and revocable opaque browser sessions.
+- `message_drafts`: versioned per-user, per-Agent private drafts.
 - `api_requests`: provider usage, latency, and estimated cost source data.
 - `agent_backends`: Agent Server integration registry entries.
 - `mcp_servers`: stdio MCP server registry entries used by APIs and MCP core tools.

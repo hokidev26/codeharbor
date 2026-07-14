@@ -18,13 +18,15 @@ import (
 )
 
 type agentLiveSnapshotResponse struct {
-	Protocol         int                      `json:"protocol"`
-	Agent            db.Agent                 `json:"agent"`
-	Messages         []db.Message             `json:"messages"`
-	PendingApprovals []db.ToolCall            `json:"pendingApprovals"`
-	LatestRun        *db.Run                  `json:"latestRun,omitempty"`
-	Generations      db.PermissionGenerations `json:"generations"`
-	Stream           agentpkg.StreamWatermark `json:"stream"`
+	Protocol             int                      `json:"protocol"`
+	Agent                db.Agent                 `json:"agent"`
+	Messages             []db.Message             `json:"messages"`
+	MessageHasMoreBefore bool                     `json:"messageHasMoreBefore"`
+	MessageNextBefore    string                   `json:"messageNextBefore,omitempty"`
+	PendingApprovals     []db.ToolCall            `json:"pendingApprovals"`
+	LatestRun            *db.Run                  `json:"latestRun,omitempty"`
+	Generations          db.PermissionGenerations `json:"generations"`
+	Stream               agentpkg.StreamWatermark `json:"stream"`
 }
 
 func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -40,13 +42,15 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agentLiveSnapshotResponse{
-		Protocol:         agentpkg.ProtocolVersion,
-		Agent:            snapshot.Agent,
-		Messages:         snapshot.Messages,
-		PendingApprovals: snapshot.PendingApprovals,
-		LatestRun:        snapshot.LatestRun,
-		Generations:      snapshot.Generations,
-		Stream:           watermark,
+		Protocol:             agentpkg.ProtocolVersion,
+		Agent:                snapshot.Agent,
+		Messages:             snapshot.Messages,
+		MessageHasMoreBefore: snapshot.MessageHasMoreBefore,
+		MessageNextBefore:    snapshot.MessageNextBefore,
+		PendingApprovals:     snapshot.PendingApprovals,
+		LatestRun:            snapshot.LatestRun,
+		Generations:          snapshot.Generations,
+		Stream:               watermark,
 	})
 }
 
@@ -124,6 +128,29 @@ type updatePermissionModeRequest struct {
 	PermissionMode string `json:"permissionMode"`
 }
 
+type updateReasoningEffortRequest struct {
+	ReasoningEffort string `json:"reasoningEffort"`
+}
+
+func (s *Server) updateAgentReasoningEffort(w http.ResponseWriter, r *http.Request) {
+	var req updateReasoningEffortRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
+	if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+		writeError(w, http.StatusBadRequest, "reasoningEffort 必须为 low、medium、high 或空字符串")
+		return
+	}
+	agent, err := s.store.UpdateAgentReasoningEffort(r.Context(), chi.URLParam(r, "id"), effort)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
+}
+
 func (s *Server) updateAgentPermissionMode(w http.ResponseWriter, r *http.Request) {
 	var req updatePermissionModeRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -170,12 +197,25 @@ func (s *Server) interruptAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
-	messages, err := s.store.ListMessages(r.Context(), chi.URLParam(r, "id"))
+	limit := db.DefaultMessagePageLimit
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > db.MaxMessagePageLimit {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
+		}
+		limit = parsed
+	}
+	page, err := s.store.ListMessagesPage(r.Context(), chi.URLParam(r, "id"), r.URL.Query().Get("before"), limit)
 	if err != nil {
+		if errors.Is(err, db.ErrInvalidCursor) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, messages)
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +226,19 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, runs)
+}
+
+func (s *Server) getActiveRunSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := s.store.ActiveRunSummary(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "active run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) getRunSummary(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +295,12 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
+	if user, ok, err := s.currentUser(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if ok {
+		req.CreatedBy = user.ID
+	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), req.Text, req.CreatedBy)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
@@ -264,6 +323,12 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
+	}
+	if user, ok, err := s.currentUser(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if ok {
+		createdBy = user.ID
 	}
 	msg, err := s.runner.SubmitUserMessage(r.Context(), chi.URLParam(r, "id"), text, createdBy, attachments...)
 	if err != nil {
@@ -288,10 +353,11 @@ func (s *Server) getMessageAttachment(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	disposition := "attachment"
-	if attachment.Kind == "image" || attachment.Kind == "pdf" || strings.HasPrefix(contentType, "text/") {
+	if attachment.Kind == "image" && isSafeInlineImage(strings.ToLower(contentType), attachment.Data) {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(attachment.Data)), 10))
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": attachment.Filename}))
 	w.WriteHeader(http.StatusOK)

@@ -23,11 +23,12 @@ type scriptedProvider struct {
 	requests   []providers.GenerateRequest
 	turns      [][]providers.Event
 	onGenerate func(int)
+	reasoning  bool
 }
 
 func (p *scriptedProvider) Name() string { return "fake" }
 func (p *scriptedProvider) Capabilities() providers.Capabilities {
-	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true}
+	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: p.reasoning}
 }
 func (p *scriptedProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
@@ -117,7 +118,7 @@ func TestRunnerAutoExecutesToolCallsAndRecordsUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if call.ToolName != "Read" || call.Status != "completed" || call.MessageID == "" {
+	if call.ToolName != "Read" || call.Status != "completed" || call.MessageID == "" || call.StartedAt == "" || call.CompletedAt == "" || call.UpdatedAt == "" {
 		t.Fatalf("unexpected stored tool call: %+v", call)
 	}
 	messages, err := store.ListMessages(ctx, agent.ID)
@@ -167,6 +168,27 @@ func TestSubmitUserMessageExpandsServerSkillAuthoritatively(t *testing.T) {
 	}
 	if strings.Contains(message.ContentText, "/REVIEW-DIFF") {
 		t.Fatalf("model input must use the database prompt, got %q", message.ContentText)
+	}
+}
+
+func TestSubmitCorrectionReexpandsServerSkillAuthoritatively(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.CreateSkill(ctx, invocationSkillRecord(t, "/review-diff", "Review the current diff carefully.", true)); err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "old prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newAgentTestRunner(store, &scriptedProvider{turns: [][]providers.Event{{{Type: "done", Done: true}}}}, config.AgentConfig{MaxTurns: 1})
+	message, err := runner.SubmitCorrection(ctx, agent.ID, source.ID, "/REVIEW-DIFF src/main.go", "api", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.CommandText != "/REVIEW-DIFF src/main.go" || !strings.Contains(message.ContentText, "Review the current diff carefully.") {
+		t.Fatalf("correction did not re-expand server skill: %+v", message)
 	}
 }
 
@@ -443,7 +465,7 @@ func TestRunnerWaitsForBashApprovalAndAllowsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if call.Status != "completed" || call.PermissionDecidedBy != "test" {
+	if call.Status != "completed" || call.PermissionDecidedBy != "test" || call.PermissionDecidedAt == "" || call.StartedAt == "" || call.CompletedAt == "" || call.UpdatedAt == "" {
 		t.Fatalf("unexpected approved call: %+v", call)
 	}
 	if !requestHasToolResult(provider.request(1), "bash-1", false) {
@@ -475,7 +497,7 @@ func TestRunnerBashApprovalDenyFeedsErrorResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if call.Status != "denied" || call.PermissionDenyMessage != "no" {
+	if call.Status != "denied" || call.PermissionDenyMessage != "no" || call.PermissionDecidedAt == "" || call.StartedAt != "" || call.CompletedAt == "" || call.UpdatedAt == "" {
 		t.Fatalf("unexpected denied call: %+v", call)
 	}
 	if !requestHasToolResult(provider.request(1), "bash-deny", true) {
@@ -1171,6 +1193,66 @@ func TestProviderMessageFromDBRestoresToolBlocks(t *testing.T) {
 	}
 }
 
+func TestProviderMessageFromDBRestoresInternalProviderState(t *testing.T) {
+	blocks := []providers.ContentBlock{{Type: "tool_use", ToolUseID: "tool-1", ToolName: "Read", Input: json.RawMessage(`{"file_path":"README.md"}`)}}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := providerMessageFromDB(db.Message{Role: "assistant", ContentJSON: raw, ProviderStateJSON: json.RawMessage(`{"tool-1":{"thought_signature":"signature-1"}}`)})
+	if len(message.Blocks) != 1 || geminiThoughtSignatureForTest(message.Blocks[0].ProviderState) != "signature-1" {
+		t.Fatalf("provider state was not restored: %+v", message.Blocks)
+	}
+}
+
+func TestToolInputSchemaBuildsNestedObjectsAndArrays(t *testing.T) {
+	type child struct {
+		Name string `json:"name"`
+	}
+	type input struct {
+		Child    child           `json:"child"`
+		Children []child         `json:"children,omitempty"`
+		Options  map[string]bool `json:"options,omitempty"`
+	}
+	schema := toolInputSchema(input{})
+	properties := schema["properties"].(map[string]any)
+	childSchema := properties["child"].(map[string]any)
+	if childSchema["type"] != "object" || childSchema["properties"].(map[string]any)["name"].(map[string]any)["type"] != "string" {
+		t.Fatalf("nested struct schema was not recursive: %+v", schema)
+	}
+	childrenSchema := properties["children"].(map[string]any)
+	if childrenSchema["type"] != "array" || childrenSchema["items"].(map[string]any)["type"] != "object" {
+		t.Fatalf("nested array schema was not recursive: %+v", schema)
+	}
+	if properties["options"].(map[string]any)["type"] != "object" {
+		t.Fatalf("map schema should remain an object: %+v", schema)
+	}
+}
+
+func TestRunnerPassesPersistedReasoningEffortToSupportingProvider(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "high"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{reasoning: true, turns: [][]providers.Event{{{Type: "text", Text: "done"}, {Type: "done", Done: true}}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 1})
+	runner.Run(ctx, agent.ID)
+	if provider.requestCount() != 1 || provider.request(0).ReasoningEffort != "high" {
+		t.Fatalf("expected persisted reasoning effort in provider request, got %+v", provider.request(0))
+	}
+}
+
+func geminiThoughtSignatureForTest(raw json.RawMessage) string {
+	var state map[string]string
+	_ = json.Unmarshal(raw, &state)
+	return state["thought_signature"]
+}
+
 func TestRunnerPendingRunCancelsActiveAndRerunsWithLatestMessages(t *testing.T) {
 	ctx := context.Background()
 	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
@@ -1580,6 +1662,54 @@ func assertCompletedRollingBackRecovery(t *testing.T, ctx context.Context, store
 	}
 	if len(changes) != 1 || changes[0].Path != "owned.txt" {
 		t.Fatalf("expected rollback recovery to preserve audit changes, got %+v", changes)
+	}
+}
+
+func TestRunnerInvalidatesLargeFileCheckpointWithoutBlockingRun(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.name", "Autoto Test"}, {"config", "user.email", "test@example.com"}} {
+		if _, err := runCheckpointGit(ctx, repo, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeTestFile(repo, "tracked.txt", "base\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "tracked.txt"}, {"commit", "-m", "initial"}} {
+		if _, err := runCheckpointGit(ctx, repo, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, agent := newAgentTestStore(t, repo, "acceptEdits")
+	defer store.Close()
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "write a large file"}); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string]string{"file_path": "large.bin", "content": strings.Repeat("x", int(gitCheckpointMaxFileBytes)+1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{
+		{{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "large-write", Name: "Write", Input: input}}, {Type: "done", Done: true}},
+		{{Type: "text", Text: "done"}, {Type: "done", Done: true}},
+	}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 3})
+	runner.Run(ctx, agent.ID)
+
+	updated, err := store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "idle" {
+		t.Fatalf("checkpoint budget must not block the run, got agent status %q", updated.Status)
+	}
+	runs, err := store.ListRuns(ctx, agent.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].CheckpointState != db.RunCheckpointInvalid || !strings.Contains(runs[0].CheckpointError, "file") || !strings.Contains(runs[0].CheckpointError, "budget") {
+		t.Fatalf("expected invalid large-file checkpoint, got %+v", runs)
 	}
 }
 

@@ -32,6 +32,9 @@ type modelProviderResponse struct {
 	DefaultModel   string                      `json:"defaultModel"`
 	MaxTokens      int64                       `json:"maxTokens,omitempty"`
 	Models         []string                    `json:"models"`
+	ModelsSource   string                      `json:"modelsSource"`
+	Available      bool                        `json:"available"`
+	Discovered     bool                        `json:"discovered"`
 	Configured     bool                        `json:"configured"`
 	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
 	Capabilities   providers.Capabilities      `json:"capabilities"`
@@ -67,6 +70,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		DefaultModel:   provider.Model,
 		MaxTokens:      provider.MaxTokens,
 		Models:         fallbackModels(provider.Model),
+		ModelsSource:   "configured-default",
 		Configured:     provider.Configured,
 		APIKeyOptional: provider.APIKeyOptional,
 		Capabilities:   metadata.Capabilities,
@@ -74,11 +78,13 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		ManagementURL:  providerManagementURL(provider),
 	}
 	if s.providers == nil {
+		response.ModelsSource = "fallback"
 		response.Error = "模型注册表尚未初始化。"
 		return response
 	}
 	registered, ok := s.providers.Get(provider.Name)
 	if !ok {
+		response.ModelsSource = "fallback"
 		response.Error = fmt.Sprintf("provider %s 尚未注册。", provider.Name)
 		return response
 	}
@@ -87,10 +93,14 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	defer cancel()
 	models, err := registered.ListModels(listCtx)
 	if err != nil {
+		response.ModelsSource = "fallback"
 		response.Error = friendlyModelListError(provider, err)
 		return response
 	}
 	response.Models = normalizeModelNames(models, provider.Model)
+	response.ModelsSource = "remote"
+	response.Discovered = len(response.Models) > 0
+	response.Available = response.Configured && response.Discovered
 	return response
 }
 

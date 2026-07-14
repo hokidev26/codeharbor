@@ -303,7 +303,14 @@ func (s *Server) worklineAndProject(ctx context.Context, worklineID string) (db.
 func (s *Server) mergeTargetWorkline(ctx context.Context, projectID, targetWorklineID string) (db.Workline, error) {
 	targetWorklineID = strings.TrimSpace(targetWorklineID)
 	if targetWorklineID != "" {
-		return s.store.GetWorkline(ctx, targetWorklineID)
+		target, err := s.store.GetWorkline(ctx, targetWorklineID)
+		if err != nil {
+			return db.Workline{}, err
+		}
+		if target.ProjectID != projectID {
+			return db.Workline{}, sql.ErrNoRows
+		}
+		return target, nil
 	}
 	worklines, err := s.store.ListWorklinesByProject(ctx, projectID)
 	if err != nil {

@@ -7,12 +7,13 @@ import (
 	"strings"
 )
 
-const CurrentDBVersion = 15
+const CurrentDBVersion = 21
 
 type migration struct {
-	version int
-	name    string
-	up      func(context.Context, *sql.Tx) error
+	version            int
+	name               string
+	up                 func(context.Context, *sql.Tx) error
+	disableForeignKeys bool
 }
 
 var migrations = []migration{
@@ -31,6 +32,12 @@ var migrations = []migration{
 	{version: 13, name: "agent and workline naming", up: migrateV13AgentWorklineNaming},
 	{version: 14, name: "agent stream and permission generations", up: migrateV14AgentStreamGenerations},
 	{version: 15, name: "scoped skill revisions", up: migrateV15ScopedSkillRevisions},
+	{version: 16, name: "internal message provider state", up: migrateV16MessageProviderState},
+	{version: 17, name: "run and tool call lifecycle timestamps", up: migrateV17RunToolCallLifecycle, disableForeignKeys: true},
+	{version: 18, name: "user handles and auth sessions", up: migrateV18UserHandlesAndAuthSessions},
+	{version: 19, name: "per-user agent message drafts", up: migrateV19MessageDrafts},
+	{version: 20, name: "immutable message corrections", up: migrateV20MessageCorrections},
+	{version: 21, name: "project memberships", up: migrateV21ProjectMembers},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -73,12 +80,42 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 }
 
 func runMigration(ctx context.Context, db *sql.DB, m migration) error {
-	tx, err := db.BeginTx(ctx, nil)
+	if !m.disableForeignKeys {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin migration %d %s: %w", m.version, m.name, err)
+		}
+		defer tx.Rollback()
+		if err := m.up(ctx, tx); err != nil {
+			return fmt.Errorf("run migration %d %s: %w", m.version, m.name, err)
+		}
+		if err := setUserVersion(ctx, tx, m.version); err != nil {
+			return fmt.Errorf("set database version %d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d %s: %w", m.version, m.name, err)
+		}
+		return nil
+	}
+
+	// SQLite cannot relax the old runs.started_at NOT NULL constraint in place.
+	// Rebuilding its referenced table is safe only while foreign keys are disabled
+	// on the same connection before the migration transaction begins.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection %d %s: %w", m.version, m.name, err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for migration %d %s: %w", m.version, m.name, err)
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %d %s: %w", m.version, m.name, err)
 	}
 	defer tx.Rollback()
-
 	if err := m.up(ctx, tx); err != nil {
 		return fmt.Errorf("run migration %d %s: %w", m.version, m.name, err)
 	}
@@ -582,6 +619,177 @@ CREATE INDEX idx_skill_audit_events_skill_created ON skill_audit_events(skill_id
 		}
 	}
 	return nil
+}
+
+func migrateV16MessageProviderState(ctx context.Context, tx *sql.Tx) error {
+	return ensureColumn(ctx, tx, "agent_messages", "provider_state_json", "TEXT")
+}
+
+func migrateV17RunToolCallLifecycle(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "started_at", definition: "TEXT"},
+		{name: "completed_at", definition: "TEXT"},
+		{name: "updated_at", definition: "TEXT"},
+	} {
+		if err := ensureColumn(ctx, tx, "agent_tool_calls", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE runs_v17 (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  trigger_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  started_at TEXT,
+  completed_at TEXT,
+  error_message TEXT,
+  base_head TEXT,
+  end_head TEXT,
+  checkpoint_repo_root TEXT,
+  git_snapshot_at TEXT,
+  checkpoint_state TEXT NOT NULL DEFAULT 'none',
+  checkpoint_error TEXT,
+  rolled_back_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO runs_v17 (
+  id, agent_id, trigger_message_id, status, started_at, completed_at,
+  error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at,
+  checkpoint_state, checkpoint_error, rolled_back_at, created_at, updated_at
+)
+SELECT
+  id, agent_id, trigger_message_id, status,
+  CASE WHEN status = 'pending' THEN NULL ELSE NULLIF(started_at, '') END,
+  completed_at, error_message, base_head, end_head, checkpoint_repo_root,
+  git_snapshot_at, COALESCE(NULLIF(checkpoint_state, ''), 'none'),
+  checkpoint_error, rolled_back_at, created_at, updated_at
+FROM runs;
+DROP TABLE runs;
+ALTER TABLE runs_v17 RENAME TO runs;
+CREATE INDEX idx_runs_agent_started ON runs(agent_id, started_at DESC);
+CREATE INDEX idx_runs_status ON runs(status);
+UPDATE agent_tool_calls
+SET started_at = CASE
+      WHEN status IN ('running', 'completed', 'error', 'succeeded', 'failed') THEN COALESCE(NULLIF(started_at, ''), created_at)
+      ELSE NULL
+    END,
+    completed_at = CASE
+      WHEN status IN ('completed', 'error', 'denied', 'succeeded', 'failed') THEN COALESCE(NULLIF(completed_at, ''), created_at)
+      ELSE NULL
+    END,
+    updated_at = COALESCE(NULLIF(updated_at, ''), created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_run_updated ON agent_tool_calls(run_id, updated_at DESC);
+`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateV18UserHandlesAndAuthSessions(ctx context.Context, tx *sql.Tx) error {
+	if err := ensureColumn(ctx, tx, "users", "handle", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "users", "handle_key", "TEXT"); err != nil {
+		return err
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, username, COALESCE(handle, '') FROM users`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, username, handle string
+		if err := rows.Scan(&id, &username, &handle); err != nil {
+			return err
+		}
+		if strings.TrimSpace(handle) == "" {
+			handle = username
+		}
+		normalized, key, err := CanonicalHandle(handle)
+		if err != nil {
+			return fmt.Errorf("backfill handle for user %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET handle = ?, handle_key = ? WHERE id = ?`, normalized, key, id); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_handle_key ON users(handle_key);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+`)
+	return err
+}
+
+func migrateV19MessageDrafts(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS message_drafts (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  content_text TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_drafts_agent ON message_drafts(agent_id);
+`)
+	return err
+}
+
+func migrateV20MessageCorrections(ctx context.Context, tx *sql.Tx) error {
+	return ensureColumn(ctx, tx, "agent_messages", "correction_of_message_id", "TEXT REFERENCES agent_messages(id) ON DELETE RESTRICT")
+}
+
+func migrateV21ProjectMembers(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, user_id),
+  CHECK (role IN ('owner', 'member'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
+`); err != nil {
+		return err
+	}
+
+	// An upgraded database may already contain projects but no membership data.
+	// Give every unassigned project to the oldest usable account, while keeping
+	// retries and duplicate memberships harmless.
+	_, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
+SELECT p.id, u.id, 'owner', p.created_at
+FROM projects p
+JOIN (
+  SELECT id
+  FROM users
+  WHERE TRIM(id) <> ''
+  ORDER BY created_at ASC, id ASC
+  LIMIT 1
+) u
+WHERE NOT EXISTS (
+  SELECT 1 FROM project_members pm WHERE pm.project_id = p.id
+)`)
+	return err
 }
 
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {

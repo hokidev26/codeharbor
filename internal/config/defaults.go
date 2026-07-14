@@ -155,6 +155,13 @@ func Default() (Config, error) {
 				Model:     getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
 				MaxTokens: 4096,
 			},
+			{
+				Name:    "gemini",
+				Type:    "gemini-interactions",
+				BaseURL: getenv("GEMINI_INTERACTIONS_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/interactions"),
+				APIKey:  os.Getenv("GEMINI_API_KEY"),
+				Model:   getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+			},
 			defaultCLIProxyAPIProvider(),
 			{
 				Name:    "openai-compatible",
@@ -431,6 +438,16 @@ func applyProviderEnvDefaults(provider *ProviderConfig) {
 		}
 		if provider.Model == "" {
 			provider.Model = getenv("OPENAI_COMPATIBLE_MODEL", getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+		}
+	case "gemini-interactions":
+		if provider.BaseURL == "" {
+			provider.BaseURL = getenv("GEMINI_INTERACTIONS_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/interactions")
+		}
+		if provider.APIKey == "" {
+			provider.APIKey = os.Getenv("GEMINI_API_KEY")
+		}
+		if provider.Model == "" {
+			provider.Model = getenv("GEMINI_MODEL", "gemini-2.5-pro")
 		}
 	}
 }

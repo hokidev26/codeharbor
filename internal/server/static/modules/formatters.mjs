@@ -1,7 +1,11 @@
-export function formatNumber(value) {
+export function formatNumber(value, locale = "zh-CN") {
   const number = Number(value || 0);
   if (!Number.isFinite(number)) return "0";
-  return new Intl.NumberFormat("zh-CN").format(number);
+  try {
+    return new Intl.NumberFormat(locale || "zh-CN").format(number);
+  } catch {
+    return new Intl.NumberFormat("zh-CN").format(number);
+  }
 }
 
 export function formatBytes(value) {
