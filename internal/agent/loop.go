@@ -27,6 +27,9 @@ type Runner struct {
 	hub       *Hub
 	cfg       config.AgentConfig
 
+	reasoningMu            sync.RWMutex
+	defaultReasoningEffort string
+
 	runMu   sync.Mutex
 	running map[string]*activeRun
 
@@ -48,7 +51,10 @@ type activeRun struct {
 	pendingTriggerMessageID string
 }
 
-var ErrAgentBusy = errors.New("agent is busy")
+var (
+	ErrAgentBusy                  = errors.New("agent is busy")
+	ErrRemoteExecutionUnavailable = errors.New("remote execution transport is not implemented")
+)
 
 type SourceSubmission struct {
 	AgentID           string
@@ -56,16 +62,19 @@ type SourceSubmission struct {
 	Source            string
 	SourceID          string
 	PermissionModeCap string
+	DispatchID        string
+	TriggerType       string
 }
 
 type NotificationEvent struct {
-	Event     string
-	RunID     string
-	AgentID   string
-	Status    string
-	Error     string
-	ToolUseID string
-	ToolName  string
+	Event               string
+	RunID               string
+	AgentID             string
+	Status              string
+	Error               string
+	ToolUseID           string
+	ToolName            string
+	ExecutionGeneration int64
 }
 
 type Notifier interface {
@@ -134,7 +143,50 @@ const (
 )
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	return &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	runner := &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, defaultReasoningEffort: "auto", running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	if store != nil {
+		if settings, err := store.GetRuntimeSettings(context.Background()); err == nil {
+			runner.SetDefaultReasoningEffort(settings.DefaultReasoningEffort)
+		}
+	}
+	return runner
+}
+
+func (r *Runner) SetDefaultReasoningEffort(effort string) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		effort = "auto"
+	}
+	r.reasoningMu.Lock()
+	r.defaultReasoningEffort = effort
+	r.reasoningMu.Unlock()
+}
+
+func (r *Runner) reasoningEffort(agentEffort string) string {
+	if effort := strings.ToLower(strings.TrimSpace(agentEffort)); effort != "" {
+		return effort
+	}
+	r.reasoningMu.RLock()
+	effort := r.defaultReasoningEffort
+	r.reasoningMu.RUnlock()
+	if effort == "" {
+		return "auto"
+	}
+	return effort
+}
+
+func (r *Runner) EnsureLocalExecution(ctx context.Context, agentID string) error {
+	if r == nil || r.store == nil {
+		return errors.New("agent runner is not initialized")
+	}
+	agent, err := r.store.GetAgent(ctx, strings.TrimSpace(agentID))
+	if err != nil {
+		return err
+	}
+	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
+		return fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
+	}
+	return nil
 }
 
 func (r *Runner) SetNotifier(notifier Notifier) {
@@ -150,12 +202,20 @@ func (r *Runner) notify(event NotificationEvent) {
 	if notifier == nil {
 		return
 	}
+	if event.ExecutionGeneration == 0 && strings.TrimSpace(event.RunID) != "" && r.store != nil {
+		if run, err := r.store.GetRunByID(context.Background(), event.RunID); err == nil {
+			event.ExecutionGeneration = run.ExecutionGeneration
+		}
+	}
 	notifier.Notify(context.Background(), event)
 }
 
 var serverSkillCommandPattern = regexp.MustCompile(`^(/[A-Za-z0-9][A-Za-z0-9_-]{0,62})(?:$|[ \t\r\n]+([\s\S]*))`)
 
 func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
+	if err := r.EnsureLocalExecution(ctx, agentID); err != nil {
+		return db.Message{}, err
+	}
 	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
 	if err != nil {
 		return db.Message{}, err
@@ -178,12 +238,18 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 }
 
 func (r *Runner) SubmitSchedule(ctx context.Context, schedule db.Schedule) (db.Run, error) {
+	return r.SubmitScheduleDispatch(ctx, schedule, db.NewID())
+}
+
+func (r *Runner) SubmitScheduleDispatch(ctx context.Context, schedule db.Schedule, dispatchID string) (db.Run, error) {
 	return r.SubmitSource(ctx, SourceSubmission{
 		AgentID:           schedule.AgentID,
 		Prompt:            schedule.Prompt,
 		Source:            "schedule",
 		SourceID:          schedule.ID,
 		PermissionModeCap: schedule.PermissionMode,
+		DispatchID:        dispatchID,
+		TriggerType:       "scheduled",
 	})
 }
 
@@ -198,6 +264,7 @@ func (r *Runner) SubmitInternal(ctx context.Context, agentID, sourceID, prompt, 
 		Source:            "internal",
 		SourceID:          sourceID,
 		PermissionModeCap: permissionModeCap,
+		TriggerType:       "internal",
 	})
 }
 
@@ -210,11 +277,28 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 	submission.Source = strings.TrimSpace(submission.Source)
 	submission.SourceID = strings.TrimSpace(submission.SourceID)
 	submission.PermissionModeCap = strings.TrimSpace(submission.PermissionModeCap)
+	submission.DispatchID = strings.TrimSpace(submission.DispatchID)
+	submission.TriggerType = strings.TrimSpace(submission.TriggerType)
 	if submission.AgentID == "" || submission.Prompt == "" || submission.SourceID == "" {
 		return db.Run{}, errors.New("agent, prompt, and source id are required")
 	}
-	if submission.Source != "schedule" && submission.Source != "internal" {
+	switch submission.Source {
+	case "schedule":
+		if submission.DispatchID == "" {
+			return db.Run{}, errors.New("scheduled source requires a dispatch id")
+		}
+		if submission.TriggerType != "scheduled" {
+			return db.Run{}, errors.New("scheduled source requires scheduled trigger type")
+		}
+	case "internal":
+		if submission.TriggerType != "internal" {
+			return db.Run{}, errors.New("internal source requires internal trigger type")
+		}
+	default:
 		return db.Run{}, errors.New("source must be schedule or internal")
+	}
+	if len(submission.DispatchID) > 256 {
+		return db.Run{}, errors.New("dispatch id exceeds size limit")
 	}
 	if submission.PermissionModeCap != "readOnly" && submission.PermissionModeCap != "acceptEdits" {
 		return db.Run{}, errors.New("permission mode cap must be readOnly or acceptEdits")
@@ -222,8 +306,20 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 	if err := ctx.Err(); err != nil {
 		return db.Run{}, err
 	}
-	if _, err := r.store.GetAgent(ctx, submission.AgentID); err != nil {
+	if err := r.EnsureLocalExecution(ctx, submission.AgentID); err != nil {
 		return db.Run{}, err
+	}
+	if submission.DispatchID != "" {
+		existing, found, err := r.runForDispatch(ctx, submission.DispatchID)
+		if err != nil {
+			return db.Run{}, err
+		}
+		if found {
+			if existing.AgentID != submission.AgentID || existing.Source != submission.Source || existing.SourceID != submission.SourceID || existing.TriggerType != submission.TriggerType {
+				return db.Run{}, fmt.Errorf("%w: dispatch id belongs to another submission", db.ErrConflict)
+			}
+			return existing, nil
+		}
 	}
 
 	r.runMu.Lock()
@@ -255,6 +351,8 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 		Source:            submission.Source,
 		SourceID:          submission.SourceID,
 		PermissionModeCap: submission.PermissionModeCap,
+		DispatchID:        submission.DispatchID,
+		TriggerType:       submission.TriggerType,
 	})
 	if err != nil {
 		r.runMu.Unlock()
@@ -273,6 +371,22 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 	r.publish(Event{Type: "message.created", AgentID: submission.AgentID, MessageID: msg.ID, Text: submission.Prompt, Data: mergeEventData(map[string]any{"source": submission.Source, "sourceId": submission.SourceID}, run.ID)})
 	go r.executeRegisteredRun(runCtx, submission.AgentID, active)
 	return run, nil
+}
+
+func (r *Runner) runForDispatch(ctx context.Context, dispatchID string) (db.Run, bool, error) {
+	var runID, agentID string
+	err := r.store.DB().QueryRowContext(ctx, `SELECT id, agent_id FROM runs WHERE dispatch_id = ?`, dispatchID).Scan(&runID, &agentID)
+	if db.IsNotFound(err) {
+		return db.Run{}, false, nil
+	}
+	if err != nil {
+		return db.Run{}, false, err
+	}
+	run, err := r.store.GetRun(ctx, agentID, runID)
+	if err != nil {
+		return db.Run{}, false, err
+	}
+	return run, true, nil
 }
 
 func (r *Runner) ActiveRunCount() int {
@@ -601,6 +715,9 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	if err != nil {
 		return err
 	}
+	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
+		return fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
+	}
 	if runID != "" {
 		run, err := r.store.GetRun(ctx, agentID, runID)
 		if err != nil {
@@ -654,7 +771,7 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			return err
 		}
 		agent = updatedAgent
-		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs)
+		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort))
 		if err != nil {
 			return err
 		}
@@ -1188,14 +1305,14 @@ type modelTurnResult struct {
 	StopReason string
 }
 
-func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error) {
+func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string) (modelTurnResult, error) {
 	maxRetries := r.cfg.MaxTransientRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		result, err, retryable := r.runModelTurnAttempt(ctx, agentID, runID, provider, model, systemPrompt, messages, toolSpecs)
+		result, err, retryable := r.runModelTurnAttempt(ctx, agentID, runID, provider, model, systemPrompt, messages, toolSpecs, reasoningEffort)
 		if err == nil {
 			return result, nil
 		}
@@ -1214,12 +1331,15 @@ func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provid
 	return modelTurnResult{}, lastErr
 }
 
-func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) (modelTurnResult, error, bool) {
+func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string) (modelTurnResult, error, bool) {
 	started := time.Now()
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	capabilities := providers.CapabilitiesFor(provider)
-	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs}
+	if !capabilities.SupportsReasoningEffort(reasoningEffort) {
+		return modelTurnResult{}, fmt.Errorf("%w: provider %q does not support requested effort %q", providers.ErrReasoningEffortUnsupported, provider.Name(), reasoningEffort), false
+	}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort}
 	if !capabilities.Tools {
 		request.Tools = nil
 	}
@@ -1461,6 +1581,9 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 	if err != nil {
 		return tools.Result{}, err
 	}
+	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
+		return tools.Result{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
+	}
 	if runID != "" {
 		run, runErr := r.store.GetRun(ctx, agentID, runID)
 		if runErr != nil {
@@ -1544,6 +1667,9 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return tools.Result{}, err
+	}
+	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
+		return tools.Result{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
 	}
 	if r.tools == nil {
 		return tools.Result{}, errors.New("tool registry is not initialized")
@@ -2293,8 +2419,26 @@ func normalizeProviderToolCall(call providers.ToolCall) providers.ToolCall {
 }
 
 func (r *Runner) publish(event Event) {
-	if r.hub != nil {
-		r.hub.Publish(event)
+	if r.hub == nil {
+		return
+	}
+	if event.Data != nil && event.Data["executionGeneration"] == nil && r.store != nil && terminalAgentEvent(event.Type) {
+		if runID, _ := event.Data["runId"].(string); strings.TrimSpace(runID) != "" {
+			if run, err := r.store.GetRunByID(context.Background(), runID); err == nil {
+				event.Data["executionGeneration"] = run.ExecutionGeneration
+				event.Data["status"] = run.Status
+			}
+		}
+	}
+	r.hub.Publish(event)
+}
+
+func terminalAgentEvent(eventType string) bool {
+	switch eventType {
+	case "agent.done", "agent.error", "agent.interrupted":
+		return true
+	default:
+		return false
 	}
 }
 

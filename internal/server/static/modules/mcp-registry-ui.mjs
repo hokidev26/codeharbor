@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { buildMCPRegistryPayload, parseMCPCommandLine } from "./mcp-registry.mjs";
+import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 
 export function createMCPRegistryUIController({
@@ -62,7 +63,7 @@ export function createMCPRegistryUIController({
       const result = await api(`/api/mcp/servers/${id}/tools`);
       state.mcpRegistryTools = { ...(state.mcpRegistryTools || {}), [id]: result };
       if (shouldRefreshMCPRegistryPanel()) refreshActiveSettingsPanel?.();
-      showToast?.(`已发现 ${result.count || 0} 个 MCP 工具。`, "success");
+      showToast?.(t("mcp.discoveredTools", { count: result.count || 0 }), "success");
     } finally {
       setMCPRegistryActionBusy(id, "tools", false);
     }
@@ -78,10 +79,10 @@ export function createMCPRegistryUIController({
     try {
       if (editingId) {
         await api(`/api/mcp/servers/${editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
-        showToast?.("已更新后端 MCP server。", "success");
+        showToast?.(t("mcp.updated"), "success");
       } else {
         await api("/api/mcp/servers", { method: "POST", body: JSON.stringify(payload) });
-        showToast?.("已创建后端 MCP server。", "success");
+        showToast?.(t("mcp.created"), "success");
       }
       clearMCPRegistryForm();
       state.mcpRegistryLoaded = false;
@@ -117,7 +118,7 @@ export function createMCPRegistryUIController({
 
   function editMCPRegistryServer(id) {
     const server = state.mcpRegistryServers.find((item) => item.id === id);
-    if (!server) throw new Error("MCP server 不存在");
+    if (!server) throw new Error(t("mcp.serverNotFound"));
     state.mcpRegistryEditingId = id;
     if (shouldRefreshMCPRegistryPanel()) refreshActiveSettingsPanel?.();
   }
@@ -129,7 +130,7 @@ export function createMCPRegistryUIController({
 
   async function toggleMCPRegistryServer(id) {
     const server = state.mcpRegistryServers.find((item) => item.id === id);
-    if (!server) throw new Error("MCP server 不存在");
+    if (!server) throw new Error(t("mcp.serverNotFound"));
     setMCPRegistryActionBusy(id, "toggle", true);
     try {
       await api(`/api/mcp/servers/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: !server.enabled }) });
@@ -141,8 +142,8 @@ export function createMCPRegistryUIController({
 
   async function deleteMCPRegistryServer(id) {
     const server = state.mcpRegistryServers.find((item) => item.id === id);
-    if (!server) throw new Error("MCP server 不存在");
-    if (!window.confirm(`删除 MCP server ${server.name || id}？`)) return;
+    if (!server) throw new Error(t("mcp.serverNotFound"));
+    if (!window.confirm(t("mcp.deleteConfirm", { name: server.name || id }))) return;
     setMCPRegistryActionBusy(id, "delete", true);
     try {
       await api(`/api/mcp/servers/${id}`, { method: "DELETE" });
@@ -151,7 +152,7 @@ export function createMCPRegistryUIController({
       state.mcpRegistryTools = nextTools;
       if (state.mcpRegistryEditingId === id) state.mcpRegistryEditingId = "";
       await loadMCPRegistryServers({ force: true });
-      showToast?.("已删除后端 MCP server。", "success");
+      showToast?.(t("mcp.deleted"), "success");
     } finally {
       setMCPRegistryActionBusy(id, "delete", false);
     }
@@ -159,9 +160,9 @@ export function createMCPRegistryUIController({
 
   async function registerMCPDraftServer(id) {
     const draft = currentSkillsPreferences().mcpServers.find((server) => server.id === id);
-    if (!draft) throw new Error("MCP 草案不存在");
+    if (!draft) throw new Error(t("mcp.draftNotFound"));
     const parsed = parseMCPCommandLine(draft.command);
-    if (!parsed.command) throw new Error("MCP 草案缺少启动命令");
+    if (!parsed.command) throw new Error(t("mcp.draftCommandRequired"));
     setMCPRegistryActionBusy(id, "register", true);
     try {
       await api("/api/mcp/servers", {
@@ -176,16 +177,16 @@ export function createMCPRegistryUIController({
       });
       state.mcpRegistryLoaded = false;
       await loadMCPRegistryServers({ force: true });
-      showToast?.("已保存到后端 MCP registry。", "success");
+      showToast?.(t("mcp.registered"), "success");
     } finally {
       setMCPRegistryActionBusy(id, "register", false);
     }
   }
 
   function renderMCPRegistryList() {
-    if (state.mcpRegistryLoading && !state.mcpRegistryLoaded) return `<div class="settings-empty-card compact">正在加载后端 MCP registry...</div>`;
-    if (state.mcpRegistryError) return `<div class="settings-empty-card compact danger">MCP registry 加载失败：${escapeHtml(state.mcpRegistryError)}</div>`;
-    if (!state.mcpRegistryServers.length) return `<div class="settings-empty-card compact">后端 registry 暂无 MCP server。可先添加浏览器本地草案，再保存到 registry。</div>`;
+    if (state.mcpRegistryLoading && !state.mcpRegistryLoaded) return `<div class="settings-empty-card compact">${escapeHtml(t("mcp.loading"))}</div>`;
+    if (state.mcpRegistryError) return `<div class="settings-empty-card compact danger">${escapeHtml(t("mcp.loadFailed", { message: state.mcpRegistryError }))}</div>`;
+    if (!state.mcpRegistryServers.length) return `<div class="settings-empty-card compact">${escapeHtml(t("mcp.emptyList"))}</div>`;
     return `<div class="skill-command-list">${state.mcpRegistryServers.map(renderMCPRegistryServerCard).join("")}</div>`;
   }
 
@@ -194,24 +195,24 @@ export function createMCPRegistryUIController({
     const discovering = isMCPRegistryActionBusy(server.id, "tools");
     const toggling = isMCPRegistryActionBusy(server.id, "toggle");
     const deleting = isMCPRegistryActionBusy(server.id, "delete");
-    const status = server.enabled ? "enabled" : "disabled";
+    const status = t(server.enabled ? "mcp.enabled" : "mcp.disabled");
     const args = Array.isArray(server.args) && server.args.length ? ` ${server.args.join(" ")}` : "";
-    const envText = Array.isArray(server.envKeys) && server.envKeys.length ? `env: ${server.envKeys.join(", ")}` : "env: none";
+    const envText = Array.isArray(server.envKeys) && server.envKeys.length ? t("mcp.environmentWithKeys", { keys: server.envKeys.join(", ") }) : t("mcp.noEnvironment");
     return `
     <div class="skill-command-card ${server.enabled ? "" : "disabled"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(server.name || "MCP Server")} <span class="settings-status-pill ${server.enabled ? "ok" : "muted"}">${escapeHtml(status)}</span></div>
-        <div class="settings-provider-meta">serverId: <code>${escapeHtml(server.id)}</code></div>
+        <div class="skill-command-title">${escapeHtml(server.name || t("mcp.defaultServerName"))} <span class="settings-status-pill ${server.enabled ? "ok" : "muted"}">${escapeHtml(status)}</span></div>
+        <div class="settings-provider-meta">${escapeHtml(t("mcp.serverId"))}: <code>${escapeHtml(server.id)}</code></div>
         <div class="settings-provider-meta">${escapeHtml(server.transport || "stdio")} · ${escapeHtml((server.command || "") + args)}</div>
-        <div class="settings-provider-meta">${escapeHtml(envText)}${server.cwd ? ` · cwd: ${escapeHtml(server.cwd)}` : ""}</div>
+        <div class="settings-provider-meta">${escapeHtml(envText)}${server.cwd ? ` · ${escapeHtml(t("mcp.cwd", { cwd: server.cwd }))}` : ""}</div>
         ${tools ? renderMCPRegistryToolsResult(tools) : ""}
       </div>
       <div class="settings-action-row">
-        <button class="settings-action-btn subtle" type="button" data-mcp-registry-tools="${escapeAttr(server.id)}" ${discovering || !server.enabled ? "disabled" : ""}>${discovering ? "发现中" : "发现工具"}</button>
-        <button class="settings-action-btn subtle" type="button" data-mcp-registry-edit="${escapeAttr(server.id)}" ${discovering || toggling || deleting ? "disabled" : ""}>编辑</button>
-        <button class="settings-action-btn subtle" type="button" data-mcp-registry-toggle="${escapeAttr(server.id)}" ${toggling || deleting ? "disabled" : ""}>${toggling ? "切换中" : (server.enabled ? "停用" : "启用")}</button>
-        <button class="settings-action-btn subtle" type="button" data-mcp-registry-copy="${escapeAttr(server.id)}">复制 serverId</button>
-        <button class="settings-action-btn danger" type="button" data-mcp-registry-delete="${escapeAttr(server.id)}" ${deleting ? "disabled" : ""}>${deleting ? "删除中" : "删除"}</button>
+        <button class="settings-action-btn subtle" type="button" data-mcp-registry-tools="${escapeAttr(server.id)}" ${discovering || !server.enabled ? "disabled" : ""}>${escapeHtml(t(discovering ? "mcp.discovering" : "mcp.discoverTools"))}</button>
+        <button class="settings-action-btn subtle" type="button" data-mcp-registry-edit="${escapeAttr(server.id)}" ${discovering || toggling || deleting ? "disabled" : ""}>${escapeHtml(t("mcp.edit"))}</button>
+        <button class="settings-action-btn subtle" type="button" data-mcp-registry-toggle="${escapeAttr(server.id)}" ${toggling || deleting ? "disabled" : ""}>${escapeHtml(t(toggling ? "mcp.toggling" : (server.enabled ? "mcp.disable" : "mcp.enable")))}</button>
+        <button class="settings-action-btn subtle" type="button" data-mcp-registry-copy="${escapeAttr(server.id)}">${escapeHtml(t("mcp.copyServerId"))}</button>
+        <button class="settings-action-btn danger" type="button" data-mcp-registry-delete="${escapeAttr(server.id)}" ${deleting ? "disabled" : ""}>${escapeHtml(t(deleting ? "mcp.deleting" : "mcp.delete"))}</button>
       </div>
     </div>
   `;
@@ -219,11 +220,11 @@ export function createMCPRegistryUIController({
 
   function renderMCPRegistryToolsResult(result) {
     const tools = Array.isArray(result.tools) ? result.tools : [];
-    if (!tools.length) return `<div class="settings-provider-meta">tools/list：没有返回工具。</div>`;
+    if (!tools.length) return `<div class="settings-provider-meta">${escapeHtml(t("mcp.noToolsReturned"))}</div>`;
     return `
     <div class="settings-empty-card compact">
-      <strong>tools/list · ${tools.length}</strong>
-      <div class="settings-provider-meta">${tools.map((tool) => escapeHtml(tool.name || "unnamed")).join(" · ")}</div>
+      <strong>${escapeHtml(t("mcp.toolsListCount", { count: tools.length }))}</strong>
+      <div class="settings-provider-meta">${tools.map((tool) => escapeHtml(tool.name || t("mcp.unnamedTool"))).join(" · ")}</div>
     </div>
   `;
   }

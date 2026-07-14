@@ -16,21 +16,23 @@ import (
 )
 
 type fakeScheduleRunner struct {
-	mu    sync.Mutex
-	runs  []db.Schedule
-	err   error
-	store *db.Store
+	mu         sync.Mutex
+	runs       []db.Schedule
+	dispatches []string
+	err        error
+	store      *db.Store
 }
 
-func (r *fakeScheduleRunner) SubmitSchedule(ctx context.Context, schedule db.Schedule) (db.Run, error) {
+func (r *fakeScheduleRunner) SubmitScheduleDispatch(ctx context.Context, schedule db.Schedule, dispatchID string) (db.Run, error) {
 	r.mu.Lock()
 	r.runs = append(r.runs, schedule)
+	r.dispatches = append(r.dispatches, dispatchID)
 	err := r.err
 	r.mu.Unlock()
 	if err != nil {
 		return db.Run{}, err
 	}
-	return r.store.CreateRun(ctx, db.Run{AgentID: schedule.AgentID, Status: "running", Source: "schedule", SourceID: schedule.ID, PermissionModeCap: schedule.PermissionMode})
+	return r.store.CreateRun(ctx, db.Run{AgentID: schedule.AgentID, Status: "running", Source: "schedule", SourceID: schedule.ID, PermissionModeCap: schedule.PermissionMode, DispatchID: dispatchID, TriggerType: "scheduled"})
 }
 
 func newAutomationStore(t *testing.T) *db.Store {

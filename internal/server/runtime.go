@@ -98,7 +98,14 @@ type runtimeSecuritySummary struct {
 }
 
 func (s *Server) runtimeSummary(w http.ResponseWriter, r *http.Request) {
-	summary := buildRuntimeSummary(s.configSnapshot(), s.configPathSnapshot(), s.startedAt)
+	cfg := s.configSnapshot()
+	summary := buildRuntimeSummary(cfg, s.configPathSnapshot(), s.startedAt)
+	summary.Providers.Configured = 0
+	for _, provider := range cfg.Providers.Summaries() {
+		if s.providerConfigured(provider) {
+			summary.Providers.Configured++
+		}
+	}
 	summary.Security = s.runtimeSecuritySummaryForRequest(r)
 	writeJSON(w, http.StatusOK, summary)
 }

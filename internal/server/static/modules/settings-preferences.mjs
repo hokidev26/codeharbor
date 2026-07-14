@@ -1,4 +1,6 @@
 import { $ } from "./dom.mjs";
+import { applyDocumentLocale, applyStaticTranslations, currentUILocale } from "./i18n.mjs";
+import { setRegionalPreferences } from "./locale-registry.mjs";
 import {
   appearancePrefsKey,
   appearanceStyleVersion,
@@ -7,26 +9,32 @@ import {
   defaultIMGatewayPrefs,
   defaultNotificationPrefs,
   defaultProfilePrefs,
+  defaultRegionalPrefs,
   defaultSearchPrefs,
   defaultSkillsPrefs,
   imGatewayPrefsKey,
   legacyLocalPreferenceBackupKind,
   legacyLocalPreferenceKey,
   localPreferenceBackupKeys,
+  localPreferenceBackupLabel,
   localPreferenceBackupKind,
   localPreferenceBackupVersion,
   migrateLegacyLocalPreferences,
   notificationPrefsKey,
+  normalizeImportedRegionalPreferences,
+  normalizeRegionalPreferences,
   preferredModelKey,
   profilePrefsKey,
   promptHistoryKey,
   readLocalPreference,
   recentDirectoriesKey,
+  regionalPrefsKey,
   relayProtocolPrefsKey,
   searchPrefsKey,
   skillsPrefsKey,
   terminalPrefsKey,
 } from "./preferences-data.mjs";
+import { preferencesMessage } from "./messages-preferences.mjs";
 
 export function createSettingsPreferencesController({
   state,
@@ -51,6 +59,10 @@ export function createSettingsPreferencesController({
   updateSlashCommandPalette,
 } = {}) {
   let localPreferencesMigrated = false;
+
+  function pt(key, params = {}) {
+    return preferencesMessage(key, params, currentUILocale());
+  }
 
   function ensureLocalPreferencesMigrated() {
     if (localPreferencesMigrated) return;
@@ -88,7 +100,7 @@ export function createSettingsPreferencesController({
     } catch {}
     applyProfilePreferences();
     if (state.activeSettingsPanel === "profile") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.("个人资料已保存。", "success", { force: true });
+    if (notify) showToast?.(pt("settings.profileSaved"), "success", { force: true });
   }
 
   function resetProfilePreferences() {
@@ -105,10 +117,16 @@ export function createSettingsPreferencesController({
     const accountName = $("sidebarAccountName");
     const menuName = $("sidebarMenuProfileName");
     const menuMeta = $("sidebarMenuProfileMeta");
+    const settingsAvatar = $("settingsIdentityAvatar");
+    const settingsName = $("settingsIdentityName");
+    const settingsMeta = $("settingsIdentityMeta");
     if (avatar) avatar.textContent = profile.avatarInitials;
     if (accountName) accountName.textContent = displayName;
     if (menuName) menuName.textContent = displayName;
-    if (menuMeta) menuMeta.textContent = profile.roleLabel || "本地工作台";
+    if (menuMeta) menuMeta.textContent = profile.roleLabel || pt("settings.localWorkspace");
+    if (settingsAvatar) settingsAvatar.textContent = profile.avatarInitials;
+    if (settingsName) settingsName.textContent = displayName;
+    if (settingsMeta) settingsMeta.textContent = profile.roleLabel || pt("settings.localWorkspace");
     updateSidebarAccountSummary();
   }
 
@@ -121,11 +139,13 @@ export function createSettingsPreferencesController({
     const version = String(state.settings?.version || "0.1.0-dev").replace(/^v/i, "");
     const backend = activeBackend?.();
     const meta = $("sidebarAccountMeta");
-    if (meta) meta.textContent = `v${version} · ${backend?.name || "本地"}`;
+    if (meta) meta.textContent = `v${version} · ${backend?.name || pt("settings.localBackend")}`;
+    const settingsMeta = $("settingsIdentityMeta");
+    if (settingsMeta) settingsMeta.textContent = `v${version} · ${backend?.name || pt("settings.localBackend")}`;
     const mobileVersionChip = $("mobileVersionChip");
-    if (mobileVersionChip) mobileVersionChip.textContent = `更新: v${version} → …`;
+    if (mobileVersionChip) mobileVersionChip.textContent = pt("settings.updateVersion", { version });
     const mobileDrawerVersionChip = $("mobileDrawerVersionChip");
-    if (mobileDrawerVersionChip) mobileDrawerVersionChip.textContent = `更新: v${version} → …`;
+    if (mobileDrawerVersionChip) mobileDrawerVersionChip.textContent = pt("settings.updateVersion", { version });
     const mobileDrawerVersionText = $("mobileDrawerVersionText");
     if (mobileDrawerVersionText) mobileDrawerVersionText.textContent = `v${version}`;
   }
@@ -134,7 +154,41 @@ export function createSettingsPreferencesController({
     const rows = [];
     if (profile.gitName) rows.push(`git config --global user.name "${profile.gitName.replace(/"/g, "\\\"")}"`);
     if (profile.gitEmail) rows.push(`git config --global user.email "${profile.gitEmail.replace(/"/g, "\\\"")}"`);
-    return rows.join("\n") || "# 尚未填写 Git 姓名或邮箱";
+    return rows.join("\n") || pt("settings.gitIdentityMissing");
+  }
+
+  function loadRegionalPreferences() {
+    try {
+      return normalizeRegionalPreferences(JSON.parse(safeReadLocalPreference(regionalPrefsKey) || "{}"));
+    } catch {
+      return normalizeRegionalPreferences(defaultRegionalPrefs);
+    }
+  }
+
+  function currentRegionalPreferences() {
+    if (!state.regionalPrefs) state.regionalPrefs = loadRegionalPreferences();
+    return state.regionalPrefs;
+  }
+
+  function applyRegionalPreferences() {
+    state.regionalPrefs = setRegionalPreferences(currentRegionalPreferences());
+    applyDocumentLocale(state.regionalPrefs.locale);
+    applyStaticTranslations();
+    return state.regionalPrefs;
+  }
+
+  function saveRegionalPreferences(next, { notify = false } = {}) {
+    state.regionalPrefs = normalizeRegionalPreferences(next);
+    try {
+      localStorage.setItem(regionalPrefsKey, JSON.stringify(state.regionalPrefs));
+    } catch {}
+    applyRegionalPreferences();
+    if (["regional", "appearance"].includes(state.activeSettingsPanel)) refreshActiveSettingsPanel?.();
+    if (notify) showToast?.(pt("settings.appearanceSaved"), "success", { force: true });
+  }
+
+  function resetRegionalPreferences() {
+    saveRegionalPreferences(defaultRegionalPrefs, { notify: true });
   }
 
   function loadSearchPreferences() {
@@ -183,7 +237,7 @@ export function createSettingsPreferencesController({
       localStorage.setItem(searchPrefsKey, JSON.stringify(state.searchPrefs));
     } catch {}
     if (state.activeSettingsPanel === "network-search") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.("网络搜索策略已保存。", "success", { force: true });
+    if (notify) showToast?.(pt("settings.searchSaved"), "success", { force: true });
   }
 
   function resetSearchPreferences() {
@@ -196,8 +250,8 @@ export function createSettingsPreferencesController({
       brave: "Brave Search",
       tavily: "Tavily",
       searxng: "SearXNG",
-      custom: "自定义端点",
-    }[provider] || provider || "未选择";
+      custom: pt("settings.customEndpoint"),
+    }[provider] || provider || pt("settings.noSelection");
   }
 
   function searchPrefsExport() {
@@ -267,7 +321,7 @@ export function createSettingsPreferencesController({
     if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel?.();
     updatePromptHistoryHint?.();
     updateSlashCommandPalette?.();
-    if (notify) showToast?.("技能工作台已保存。", "success", { force: true });
+    if (notify) showToast?.(pt("settings.skillsSaved"), "success", { force: true });
   }
 
   function resetSkillsPreferences() {
@@ -328,7 +382,7 @@ export function createSettingsPreferencesController({
       localStorage.setItem(imGatewayPrefsKey, JSON.stringify(state.imGatewayPrefs));
     } catch {}
     if (state.activeSettingsPanel === "im-gateway") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.("IM 网关策略已保存。", "success", { force: true });
+    if (notify) showToast?.(pt("settings.imGatewaySaved"), "success", { force: true });
   }
 
   function resetIMGatewayPreferences() {
@@ -337,14 +391,14 @@ export function createSettingsPreferencesController({
 
   function imGatewayChannelLabel(channel) {
     return {
-      webhook: "通用 Webhook",
+      webhook: pt("settings.genericWebhook"),
       discord: "Discord",
       slack: "Slack",
       telegram: "Telegram",
-      lark: "飞书/Lark",
-      wecom: "企业微信",
-      custom: "自定义网关",
-    }[channel] || channel || "未选择";
+      lark: pt("settings.lark"),
+      wecom: pt("settings.wecom"),
+      custom: pt("settings.customGateway"),
+    }[channel] || channel || pt("settings.noSelection");
   }
 
   function imGatewayPrefsExport() {
@@ -383,7 +437,7 @@ export function createSettingsPreferencesController({
       localStorage.setItem(notificationPrefsKey, JSON.stringify(state.notifications));
     } catch {}
     if (state.activeSettingsPanel === "notifications") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.("通知偏好已保存。", "success", { force: true });
+    if (notify) showToast?.(pt("settings.notificationSaved"), "success", { force: true });
   }
 
   function setNotificationPreference(field, value) {
@@ -465,12 +519,15 @@ export function createSettingsPreferencesController({
     } catch {}
     applyAppearancePreferences({ applyTerminalDefault });
     if (state.activeSettingsPanel === "appearance") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.("外观偏好已保存。", "success");
+    if (notify) showToast?.(pt("settings.appearanceSaved"), "success");
   }
 
   function applyAppearancePreferences({ applyTerminalDefault = false } = {}) {
     const prefs = currentAppearancePreferences();
-    document.body.classList.toggle("theme-light", prefs.theme === "light");
+    // The white-shell layout is anchored to the legacy light selector. Keep that
+    // structural marker in both themes and layer night colors without swapping
+    // out any grid, sizing, positioning, or responsive rules.
+    document.body.classList.toggle("theme-light", true);
     document.body.classList.toggle("theme-dark", prefs.theme === "dark");
     document.body.classList.toggle("ui-density-compact", prefs.density === "compact");
     document.body.classList.toggle("ui-density-comfortable", prefs.density !== "compact");
@@ -550,6 +607,7 @@ export function createSettingsPreferencesController({
     if (key === notificationPrefsKey) return normalizeNotificationPreferences(value || {});
     if (key === appearancePrefsKey) return normalizeAppearancePreferences(value || {});
     if (key === terminalPrefsKey) return normalizeTerminalPreferences(value || {});
+    if (key === regionalPrefsKey) return normalizeImportedRegionalPreferences(value || {});
     if (key === chatDraftsKey) return normalizeChatDrafts(value || {});
     if (key === promptHistoryKey) return normalizePromptHistory(value);
     if (key === recentDirectoriesKey) return normalizeRecentDirectories(value);
@@ -563,7 +621,7 @@ export function createSettingsPreferencesController({
         try {
           parsed = JSON.parse(parsed || "null");
         } catch {
-          throw new Error(`${entry.label} 不是有效 JSON`);
+          throw new Error(pt("backup.invalidJSON", { label: entry.label }));
         }
       }
       return JSON.stringify(normalizeImportedJSONPreference(entry.key, parsed));
@@ -579,15 +637,15 @@ export function createSettingsPreferencesController({
     try {
       payload = JSON.parse(text);
     } catch {
-      throw new Error("备份 JSON 格式无效");
+      throw new Error(pt("backup.invalidFormat"));
     }
     const kind = String(payload?.kind || "").trim();
     if (kind && kind !== localPreferenceBackupKind && kind !== legacyLocalPreferenceBackupKind) {
-      throw new Error("不支持的本地偏好备份格式");
+      throw new Error(pt("backup.unsupportedFormat"));
     }
     const preferences = payload?.preferences || payload?.settings || payload?.values;
     if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
-      throw new Error("备份中未找到 preferences 配置");
+      throw new Error(pt("backup.preferencesMissing"));
     }
     const hasPreference = (key) => Object.prototype.hasOwnProperty.call(preferences, key);
     const updates = localPreferenceBackupKeys
@@ -596,14 +654,14 @@ export function createSettingsPreferencesController({
         const key = hasPreference(entry.key) ? entry.key : legacyLocalPreferenceKey(entry.key);
         return { entry, raw: normalizeImportedLocalPreference(entry, preferences[key]) };
       });
-    if (!updates.length) throw new Error("备份中没有可导入的 Autoto 本地偏好");
+    if (!updates.length) throw new Error(pt("backup.noImportablePreferences"));
     try {
       updates.forEach(({ entry, raw }) => {
         if (!raw && entry.key !== relayProtocolPrefsKey) localStorage.removeItem(entry.key);
         else localStorage.setItem(entry.key, raw);
       });
     } catch {
-      throw new Error("浏览器无法写入本地偏好，可能是隐私模式或存储空间不足");
+      throw new Error(pt("backup.storageWriteFailed"));
     }
     reloadLocalPreferencesFromStorage();
     return updates.length;
@@ -616,11 +674,13 @@ export function createSettingsPreferencesController({
     state.skillsPrefs = loadSkillsPreferences();
     state.notifications = loadNotificationPreferences();
     state.terminalPrefs = loadTerminalPreferences();
+    state.regionalPrefs = loadRegionalPreferences();
     state.chatDrafts = loadChatDrafts();
     state.promptHistory = loadPromptHistory();
     state.appearance = loadAppearancePreferences();
     applyProfilePreferences();
     applyAppearancePreferences();
+    applyRegionalPreferences();
     trimTerminalOutput?.();
     updatePromptHistoryHint?.();
     renderRecentSidebarDirectories?.();
@@ -628,14 +688,18 @@ export function createSettingsPreferencesController({
     renderModelOptions?.();
   }
 
+  applyRegionalPreferences();
+
   return {
     applyAppearancePreferences,
     applyProfilePreferences,
+    applyRegionalPreferences,
     createLocalPreferencesBackup,
     currentAppearancePreferences,
     currentIMGatewayPreferences,
     currentNotificationPreferences,
     currentProfilePreferences,
+    currentRegionalPreferences,
     currentSearchPreferences,
     currentSkillsPreferences,
     imGatewayChannelLabel,
@@ -644,6 +708,7 @@ export function createSettingsPreferencesController({
     loadIMGatewayPreferences,
     loadNotificationPreferences,
     loadProfilePreferences,
+    loadRegionalPreferences,
     loadSearchPreferences,
     loadSkillsPreferences,
     localPreferencesBackupSummary,
@@ -652,10 +717,12 @@ export function createSettingsPreferencesController({
     normalizeAppearancePreferences,
     normalizeDomainList,
     normalizeIMGatewayPreferences,
+    normalizeImportedRegionalPreferences,
     normalizeLineList,
     normalizeMCPServer,
     normalizeNotificationPreferences,
     normalizeProfilePreferences,
+    normalizeRegionalPreferences,
     normalizeSearchPreferences,
     normalizeSkillCommand,
     normalizeSkillsPreferences,
@@ -668,6 +735,7 @@ export function createSettingsPreferencesController({
     resetIMGatewayPreferences,
     resetNotificationPreferences,
     resetProfilePreferences,
+    resetRegionalPreferences,
     resetSearchPreferences,
     resetSkillsPreferences,
     restoreLocalPreferencesBackup,
@@ -675,6 +743,7 @@ export function createSettingsPreferencesController({
     saveIMGatewayPreferences,
     saveNotificationPreferences,
     saveProfilePreferences,
+    saveRegionalPreferences,
     saveSearchPreferences,
     saveSkillsPreferences,
     searchPrefsExport,

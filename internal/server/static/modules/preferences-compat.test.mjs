@@ -2,9 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  defaultRegionalPrefs,
   legacyLocalPreferenceBackupKind,
   localPreferenceBackupKind,
+  normalizeImportedRegionalPreferences,
+  normalizeRegionalPreferences,
   profilePrefsKey,
+  regionalPrefsKey,
 } from "./preferences-data.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 
@@ -125,6 +129,52 @@ test("backup export uses Autoto format and import accepts legacy CodeHarbor form
     const backup = controller.createLocalPreferencesBackup();
     assert.equal(backup.kind, localPreferenceBackupKind);
     assert.ok(Object.keys(backup.preferences).every((key) => key.startsWith("autoto.")));
+  });
+});
+
+test("regional preferences default to auto and import legacy field names", () => {
+  const storage = new MemoryStorage();
+
+  withBrowserStorage(storage, () => {
+    const controller = createController({ settings: { version: "1.2.3" } });
+    assert.deepEqual(controller.currentRegionalPreferences(), defaultRegionalPrefs);
+    assert.deepEqual(normalizeRegionalPreferences({ locale: "invalid", timezone: "Mars/Olympus" }), {
+      locale: "auto",
+      timezone: "auto",
+    });
+    assert.deepEqual(normalizeImportedRegionalPreferences({
+      regionalPreferences: { language: "zh", timeZone: "Asia/Shanghai" },
+    }), {
+      locale: "zh-CN",
+      timezone: "Asia/Shanghai",
+    });
+    controller.saveRegionalPreferences({ locale: "zh-Hant-HK", timezone: "Asia/Taipei" });
+    assert.deepEqual(JSON.parse(storage.getItem(regionalPrefsKey)), {
+      locale: "zh-TW",
+      timezone: "Asia/Taipei",
+    });
+
+    const imported = controller.restoreLocalPreferencesBackup(JSON.stringify({
+      kind: legacyLocalPreferenceBackupKind,
+      version: 1,
+      preferences: {
+        "codeharbor.regional": { language: "en", timeZone: "UTC" },
+      },
+    }));
+
+    assert.equal(imported, 1);
+    assert.deepEqual(JSON.parse(storage.getItem(regionalPrefsKey)), {
+      locale: "en-US",
+      timezone: "UTC",
+    });
+    assert.deepEqual(controller.currentRegionalPreferences(), {
+      locale: "en-US",
+      timezone: "UTC",
+    });
+    assert.deepEqual(controller.createLocalPreferencesBackup().preferences[regionalPrefsKey], {
+      locale: "en-US",
+      timezone: "UTC",
+    });
   });
 });
 

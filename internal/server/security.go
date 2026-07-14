@@ -72,6 +72,23 @@ func (s *Server) localRequestGuard(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) sensitiveLocalTokenGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireSensitiveLocalToken(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireSensitiveLocalToken(w http.ResponseWriter, r *http.Request) bool {
+	if !constantTimeEqualToken(r.Header.Get(localTokenHeader), s.localToken) {
+		writeError(w, http.StatusUnauthorized, "missing or invalid local API token")
+		return false
+	}
+	return true
+}
+
 func (s *Server) validateWebSocketRequest(w http.ResponseWriter, r *http.Request) bool {
 	if !s.sameOriginRequest(r) {
 		writeError(w, http.StatusForbidden, "cross-origin websocket request denied")

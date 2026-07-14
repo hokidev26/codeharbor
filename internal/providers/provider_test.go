@@ -2,12 +2,20 @@ package providers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"autoto/internal/config"
 )
 
 type registryTestProvider struct{ name string }
+
+type capabilityRegistryTestProvider struct {
+	registryTestProvider
+	capabilities Capabilities
+}
+
+func (p capabilityRegistryTestProvider) Capabilities() Capabilities { return p.capabilities }
 
 func (p registryTestProvider) Name() string { return p.name }
 func (registryTestProvider) ListModels(context.Context) ([]string, error) {
@@ -20,8 +28,26 @@ func (registryTestProvider) Generate(context.Context, GenerateRequest) (<-chan E
 }
 
 func TestCapabilitiesForUnknownProviderIsEmpty(t *testing.T) {
-	if got := CapabilitiesFor(registryTestProvider{name: "unknown"}); got != (Capabilities{}) {
+	if got := CapabilitiesFor(registryTestProvider{name: "unknown"}); got.Tools || got.Streaming || got.ImageInput || got.ReasoningEffort || len(got.ReasoningEfforts) != 0 {
 		t.Fatalf("expected no optional capabilities, got %+v", got)
+	}
+}
+
+func TestCapabilitiesCanonicalizeLegacyReasoningBoolean(t *testing.T) {
+	legacy := capabilityRegistryTestProvider{
+		registryTestProvider: registryTestProvider{name: "legacy"},
+		capabilities:         Capabilities{ReasoningEffort: true},
+	}
+	if got := CapabilitiesFor(legacy); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high" {
+		t.Fatalf("legacy reasoning capability was not canonicalized: %+v", got)
+	}
+
+	explicit := capabilityRegistryTestProvider{
+		registryTestProvider: registryTestProvider{name: "explicit"},
+		capabilities:         Capabilities{ReasoningEfforts: []string{" xhigh ", "medium", "unknown", "low", "medium"}},
+	}
+	if got := CapabilitiesFor(explicit); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,xhigh" {
+		t.Fatalf("explicit reasoning capability was not canonicalized: %+v", got)
 	}
 }
 
@@ -72,5 +98,118 @@ func TestRegistryDefaultUsesModelPrefixThenConfigOrder(t *testing.T) {
 	provider, err = registry.Default()
 	if err != nil || provider.Name() != "first" {
 		t.Fatalf("expected config-order default first, provider=%v err=%v", provider, err)
+	}
+}
+
+func TestRegistryUnregisterClearsDefaultAndDisabledConfigsAreSkipped(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(registryTestProvider{name: "enabled"})
+	registry.Register(registryTestProvider{name: "disabled"})
+	configs := []config.ProviderConfig{
+		{Name: "disabled", Disabled: true},
+		{Name: "enabled"},
+	}
+	if !registry.SetDefaultFromConfig("disabled:model", configs) {
+		t.Fatal("expected enabled fallback to become default")
+	}
+	provider, err := registry.Default()
+	if err != nil || provider.Name() != "enabled" {
+		t.Fatalf("disabled config selected as default: provider=%v err=%v", provider, err)
+	}
+	if !registry.Unregister("enabled") {
+		t.Fatal("expected unregister to remove provider")
+	}
+	if _, _, err := registry.Resolve("enabled:model"); err == nil {
+		t.Fatal("unregistered provider must not resolve")
+	}
+	if _, err := registry.Default(); err == nil {
+		t.Fatal("unregistering default must clear stale default")
+	}
+}
+
+func TestReasoningCapabilitiesAreProviderSpecific(t *testing.T) {
+	if got := CapabilitiesFor(NewOpenAIOfficial(config.ProviderConfig{})); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high" {
+		t.Fatalf("official OpenAI provider should support the standard reasoning efforts, got %+v", got)
+	}
+	if got := CapabilitiesFor(NewCodexProvider(config.ProviderConfig{Type: config.ProviderTypeCodex})); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high,xhigh" {
+		t.Fatalf("Codex provider should declare xhigh, got %+v", got)
+	}
+	if CapabilitiesFor(NewAnthropicProvider(config.ProviderConfig{})).ReasoningEffort {
+		t.Fatal("Anthropic provider should not claim OpenAI reasoning effort support")
+	}
+	if CapabilitiesFor(NewOpenAICompatible(config.ProviderConfig{})).ReasoningEffort {
+		t.Fatal("ordinary compatible provider should not claim reasoning effort support")
+	}
+	if got := CapabilitiesFor(NewOpenAICompatible(config.ProviderConfig{Profile: config.ProviderProfileCLIProxyAPI})); !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high" {
+		t.Fatalf("CLIProxyAPI profile should support the standard reasoning efforts, got %+v", got)
+	}
+}
+
+func TestNewProviderRejectsInvalidRuntimeIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  config.ProviderConfig
+		want string
+	}{
+		{name: "client-version", cfg: config.ProviderConfig{Type: "openai", ClientVersion: "1.2.3\r\nCodex"}, want: "client version"},
+		{name: "installation-id", cfg: config.ProviderConfig{Type: "openai-compatible", InstallationID: "not-a-uuid"}, want: "installation ID"},
+		{name: "non-v4-installation-id", cfg: config.ProviderConfig{Type: "openai", InstallationID: "123e4567-e89b-12d3-a456-426614174000"}, want: "UUIDv4"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewProvider(test.cfg); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected identity validation error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestRegistryDefaultSkipsUnconfiguredProviderAdapters(t *testing.T) {
+	registry := NewRegistry()
+	openAI := NewOpenAIOfficial(config.ProviderConfig{Name: "openai", Type: "openai", Model: "gpt"})
+	anthropic := NewAnthropicProvider(config.ProviderConfig{Name: "anthropic", Type: "anthropic", Model: "claude"})
+	compatible := NewOpenAICompatible(config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:65510/v1", Model: "model"})
+	local := NewOpenAICompatible(config.ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI, BaseURL: "http://127.0.0.1:8317/v1", Model: "model", APIKeyOptional: true})
+	for _, provider := range []Provider{openAI, anthropic, compatible, local} {
+		registry.Register(provider)
+	}
+	configs := []config.ProviderConfig{
+		{Name: "openai", Type: "openai", Model: "gpt"},
+		{Name: "anthropic", Type: "anthropic", Model: "claude"},
+		{Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:65510/v1", Model: "model"},
+		{Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI, BaseURL: "http://127.0.0.1:8317/v1", Model: "model", APIKeyOptional: true},
+	}
+	if !registry.SetDefaultFromConfig("openai:gpt", configs) {
+		t.Fatal("expected configured CLIProxyAPI fallback")
+	}
+	provider, err := registry.Default()
+	if err != nil || provider.Name() != "cliproxyapi" {
+		t.Fatalf("unconfigured API-key providers became default: provider=%v err=%v", provider, err)
+	}
+}
+
+func TestNewProviderRejectsUnsafeCustomBaseURLs(t *testing.T) {
+	for _, providerType := range []string{"openai-compatible", "openai", "anthropic"} {
+		t.Run(providerType, func(t *testing.T) {
+			_, err := NewProvider(config.ProviderConfig{Name: "custom", Type: providerType, BaseURL: "http://169.254.169.254/v1", Model: "model", APIKey: "fixture-key"})
+			if err == nil {
+				t.Fatal("metadata base URL must be rejected")
+			}
+			if strings.Contains(err.Error(), "fixture-key") || strings.Contains(err.Error(), "169.254") {
+				t.Fatalf("unsafe URL error leaked sensitive input: %v", err)
+			}
+		})
+	}
+	if _, err := NewProvider(config.ProviderConfig{Name: "local", Type: "openai-compatible", BaseURL: "http://127.0.0.1:11434/v1", Model: "model", APIKeyOptional: true}); err != nil {
+		t.Fatalf("loopback provider base URL must remain supported: %v", err)
+	}
+}
+
+func TestRegistryRejectsAggregateWithoutSource(t *testing.T) {
+	registry := NewRegistry()
+	if _, _, err := registry.Resolve("aggregate:fast"); err == nil || !strings.Contains(err.Error(), "source") {
+		t.Fatalf("expected missing aggregate source error, got %v", err)
+	}
+	if _, _, err := registry.Resolve("aggregate:"); err == nil || !strings.Contains(err.Error(), "name") {
+		t.Fatalf("expected empty aggregate name error, got %v", err)
 	}
 }

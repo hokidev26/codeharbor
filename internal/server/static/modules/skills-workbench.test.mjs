@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { currentUILocale, setUILocale } from "./i18n.mjs";
 import { isCurrentRestoreReviewConflict, renderSkillRevisionDrawer, renderSkillScopeBadge, restoreRevisionWithCurrentRiskConfirmation, skillContextLabel, skillScopeShadowHint } from "./skills-workbench.mjs";
 
 test("scope labels, badges, and owner shadow hints describe v2 ownership", () => {
@@ -9,6 +10,24 @@ test("scope labels, badges, and owner shadow hints describe v2 ownership", () =>
   assert.match(renderSkillScopeBadge({ scope: "workspace" }), /工作线/);
   assert.equal(skillScopeShadowHint({ scope: "global" }, { scope: "workspace", worklineId: "w-1" }), "由全局作用域 owner 生效");
   assert.equal(skillScopeShadowHint({ shadowedBy: "workspace" }, { scope: "global" }), "已被更具体作用域的服务端 Skill 覆盖");
+});
+
+test("scope labels, badges, and revision controls follow the active UI locale", () => {
+  const previous = currentUILocale();
+  try {
+    setUILocale("en");
+    assert.equal(skillContextLabel({ scope: "global" }), "Global scope");
+    assert.equal(skillScopeShadowHint({ scope: "global" }, { scope: "workspace" }), "Owned by Global scope");
+    assert.match(renderSkillScopeBadge({ scope: "workspace" }), /Workline/);
+    assert.match(renderSkillRevisionDrawer({ drawer: {}, revisions: {} }), /Revision history/);
+
+    setUILocale("zh-TW");
+    assert.equal(skillContextLabel({ scope: "project", projectId: "p-1" }), "專案作用域 · p-1");
+    assert.match(renderSkillScopeBadge({ scope: "workspace" }), /工作線/);
+    assert.match(renderSkillRevisionDrawer({ drawer: {}, revisions: {} }), /修訂記錄/);
+  } finally {
+    setUILocale(previous);
+  }
 });
 
 test("revision drawer renders revision actions and selected detail safely", () => {
@@ -52,8 +71,8 @@ test("restore displays the structured current scan and retries with its content 
   ]);
   assert.deepEqual(restored, { id: "s-1" });
   assert.equal(isCurrentRestoreReviewConflict(reviewConflict), true);
-  assert.match(confirmationMessage, /Scanner version: 7/);
-  assert.match(confirmationMessage, /Content hash: 0123456789abcdef…/);
+  assert.match(confirmationMessage, /扫描器版本：7/);
+  assert.match(confirmationMessage, /内容哈希：0123456789abcdef…/);
   assert.match(confirmationMessage, /network_or_external_url: Contains an external URL\./);
 });
 

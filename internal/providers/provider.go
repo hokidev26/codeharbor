@@ -53,10 +53,11 @@ type Usage struct {
 }
 
 type GenerateRequest struct {
-	Model        string
-	SystemPrompt string
-	Messages     []Message
-	Tools        []ToolSpec
+	Model           string
+	SystemPrompt    string
+	Messages        []Message
+	Tools           []ToolSpec
+	ReasoningEffort string
 }
 
 type Event struct {
@@ -77,25 +78,57 @@ type Provider interface {
 // Capabilities are optional provider features. Providers that do not implement
 // CapabilityProvider are treated as supporting no optional features.
 type Capabilities struct {
-	Tools      bool `json:"tools"`
-	Streaming  bool `json:"streaming"`
-	ImageInput bool `json:"imageInput"`
+	Tools            bool     `json:"tools"`
+	Streaming        bool     `json:"streaming"`
+	ImageInput       bool     `json:"imageInput"`
+	ReasoningEffort  bool     `json:"reasoningEffort"`
+	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
 }
 
 type CapabilityProvider interface {
 	Capabilities() Capabilities
 }
 
+// ConfigurationProvider reports whether a runtime provider currently has the
+// credentials required to serve requests. It is intentionally optional so API
+// key providers can continue using config-derived readiness.
+type ConfigurationProvider interface {
+	Configured() bool
+}
+
+func ConfiguredFor(provider Provider, fallback bool) bool {
+	if provider, ok := provider.(ConfigurationProvider); ok {
+		return provider.Configured()
+	}
+	return fallback
+}
+
 func CapabilitiesFor(provider Provider) Capabilities {
 	if provider, ok := provider.(CapabilityProvider); ok {
-		return provider.Capabilities()
+		return canonicalCapabilities(provider.Capabilities())
 	}
 	return Capabilities{}
 }
 
 // NewProvider constructs a provider adapter from a normalized provider config.
 func NewProvider(cfg config.ProviderConfig) (Provider, error) {
-	switch strings.TrimSpace(cfg.Type) {
+	providerType := strings.TrimSpace(cfg.Type)
+	if providerType == "openai" || providerType == "openai-compatible" || providerType == "anthropic" {
+		if err := validateProviderRuntimeConfig(cfg); err != nil {
+			return nil, err
+		}
+	}
+	if providerType == config.ProviderTypeCodex {
+		if err := validateProviderRuntimeIdentity(cfg); err != nil {
+			return nil, err
+		}
+	}
+	switch providerType {
+	case config.ProviderTypeCodex:
+		if err := ValidateCodexProviderConfig(cfg); err != nil {
+			return nil, err
+		}
+		return NewCodexProvider(cfg), nil
 	case "openai":
 		return NewOpenAIOfficial(cfg), nil
 	case "anthropic":
@@ -108,9 +141,10 @@ func NewProvider(cfg config.ProviderConfig) (Provider, error) {
 }
 
 type Registry struct {
-	mu          sync.RWMutex
-	providers   map[string]Provider
-	defaultName string
+	mu              sync.RWMutex
+	providers       map[string]Provider
+	defaultName     string
+	aggregateSource AggregateSource
 }
 
 func NewRegistry() *Registry {
@@ -123,6 +157,40 @@ func (r *Registry) Register(provider Provider) {
 	r.providers[provider.Name()] = provider
 }
 
+// Unregister removes a provider from runtime resolution. If it was selected as
+// the default, the default is cleared so callers cannot receive a stale adapter.
+// Call SetDefaultFromConfig after unregistering when a safe fallback exists.
+func (r *Registry) Unregister(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.providers[name]; !ok {
+		return false
+	}
+	delete(r.providers, name)
+	if r.defaultName == name {
+		r.defaultName = ""
+	}
+	return true
+}
+
+// SetAggregateSource configures the runtime source used by aggregate providers.
+// Replacing the source affects aggregate providers that were already resolved.
+func (r *Registry) SetAggregateSource(source AggregateSource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.aggregateSource = source
+}
+
+func (r *Registry) aggregateSourceSnapshot() AggregateSource {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.aggregateSource
+}
+
 func (r *Registry) Get(name string) (Provider, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -132,6 +200,18 @@ func (r *Registry) Get(name string) (Provider, bool) {
 
 func (r *Registry) Resolve(model string) (Provider, string, error) {
 	providerName, modelName := SplitModel(model)
+	if strings.EqualFold(providerName, aggregateProviderPrefix) {
+		if providerName != aggregateProviderPrefix {
+			return nil, "", fmt.Errorf("aggregate model prefix must be %q", aggregateProviderPrefix)
+		}
+		if r.aggregateSourceSnapshot() == nil {
+			return nil, "", errors.New("aggregate provider source is not configured")
+		}
+		return newAggregateProvider(r, modelName), modelName, nil
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), aggregateProviderPrefix+":") {
+		return nil, "", errors.New("aggregate name must not be empty")
+	}
 	if providerName != "" {
 		provider, ok := r.Get(providerName)
 		if !ok {
@@ -174,12 +254,24 @@ func (r *Registry) SetDefault(name string) error {
 // configuration order. It returns false when no configured provider is registered.
 func (r *Registry) SetDefaultFromConfig(defaultModel string, configs []config.ProviderConfig) bool {
 	preferred, _ := SplitModel(defaultModel)
+	known := make(map[string]bool, len(configs))
+	disabled := make(map[string]bool, len(configs))
+	for _, cfg := range configs {
+		name := strings.TrimSpace(cfg.Name)
+		if name == "" {
+			continue
+		}
+		known[name] = true
+		disabled[name] = cfg.Disabled
+	}
+
 	candidates := make([]string, 0, len(configs)+1)
-	if preferred != "" {
+	if preferred != "" && (!known[preferred] || !disabled[preferred]) {
 		candidates = append(candidates, preferred)
 	}
 	for _, cfg := range configs {
-		if name := strings.TrimSpace(cfg.Name); name != "" && name != preferred {
+		name := strings.TrimSpace(cfg.Name)
+		if name != "" && !cfg.Disabled && name != preferred {
 			candidates = append(candidates, name)
 		}
 	}
@@ -187,10 +279,18 @@ func (r *Registry) SetDefaultFromConfig(defaultModel string, configs []config.Pr
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, name := range candidates {
-		if _, ok := r.providers[name]; ok {
-			r.defaultName = name
-			return true
+		provider, ok := r.providers[name]
+		if !ok {
+			continue
 		}
+		// Known runtime adapters report readiness from their live credentials.
+		// Providers without this optional interface are retained for backwards
+		// compatible registry use (notably tests and external adapters).
+		if configured, ok := provider.(ConfigurationProvider); ok && !configured.Configured() {
+			continue
+		}
+		r.defaultName = name
+		return true
 	}
 	r.defaultName = ""
 	return false

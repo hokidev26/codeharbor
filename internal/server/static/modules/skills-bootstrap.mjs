@@ -1,3 +1,5 @@
+import { t } from "./messages-skills.mjs";
+
 const SKILL_SCOPES = new Set(["global", "project", "workspace"]);
 
 export function normalizeSkillScope(scope) {
@@ -72,9 +74,9 @@ export function normalizeSkillsPage(response = {}) {
 
 export function createSkillRestorePayload(revision, { expectedUpdatedAt, acknowledgeRisk = false, acknowledgedContentHash = "" } = {}) {
   const revisionNo = Number(revision?.revisionNo ?? revision?.revision);
-  if (!Number.isSafeInteger(revisionNo) || revisionNo < 1) throw new Error("技能修订版本缺失，不能恢复");
+  if (!Number.isSafeInteger(revisionNo) || revisionNo < 1) throw new Error(t("skillsWorkbench.errors.restoreRevisionMissing"));
   const updatedAt = String(expectedUpdatedAt || "").trim();
-  if (!updatedAt) throw new Error("技能当前版本时间戳缺失，不能安全恢复");
+  if (!updatedAt) throw new Error(t("skillsWorkbench.errors.restoreTimestampMissing"));
   return {
     revisionNo,
     expectedUpdatedAt: updatedAt,
@@ -186,7 +188,7 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
       if (append && !sameSnapshotSequence(bucket.snapshotSequence, page.snapshotSequence)) {
         resetPageCursor(bucket, { clearItems: true });
         bucket.status = "loading";
-        bucket.error = "Skills 分页快照已变化，已废弃旧游标并重新加载。";
+        bucket.error = t("skillsWorkbench.errors.pageSnapshotChanged");
         changed();
         return load(context);
       }
@@ -213,7 +215,7 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
     const context = currentContext(contextOverride);
     const bucket = ensureSkillsContextState(state, context);
     const index = bucket.items.findIndex((item) => item.id === id);
-    if (index < 0) throw new Error("服务端技能不存在");
+    if (index < 0) throw new Error(t("skillsWorkbench.errors.skillNotFound"));
     const before = bucket.items[index];
     try {
       const detail = await api(buildSkillDetailV2URL(id, context));
@@ -251,7 +253,7 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
       if (append && !sameSnapshotSequence(revisionState.snapshotSequence, page.snapshotSequence)) {
         resetPageCursor(revisionState, { clearItems: true });
         revisionState.status = "loading";
-        revisionState.error = "修订分页快照已变化，已废弃旧游标并重新加载。";
+        revisionState.error = t("skillsWorkbench.errors.revisionSnapshotChanged");
         changed();
         return loadRevisions(id, context);
       }
@@ -302,7 +304,7 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
 
   async function loadEffective(agentId, contextOverride, { restarted = false } = {}) {
     const normalizedAgentId = String(agentId || "").trim();
-    if (!normalizedAgentId) throw new Error("当前 Agent 缺失，不能加载 effective Skills");
+    if (!normalizedAgentId) throw new Error(t("skillsWorkbench.errors.agentMissing"));
     const context = currentContext(contextOverride);
     const key = effectiveKey(normalizedAgentId, context);
     const root = phaseBRoot(state);
@@ -326,11 +328,11 @@ export function createSkillsPhaseBController({ state = {}, api, getContext = () 
         const page = normalizeSkillsPage(await api(buildEffectiveSkillsV2URL(normalizedAgentId, context, { cursor, limit: pageSize })));
         if (requestSequence !== entry.requestSequence) return entry.items;
         if (snapshotSequence !== null && !sameSnapshotSequence(snapshotSequence, page.snapshotSequence)) {
-          if (restarted) throw new Error("effective Skills 分页快照持续不一致，已停止加载。" );
+          if (restarted) throw new Error(t("skillsWorkbench.errors.effectiveSnapshotMismatch"));
           resetPageCursor(entry, { clearItems: true });
           entry.hasAuthoritativeData = false;
           entry.status = "loading";
-          entry.error = "effective Skills 分页快照已变化，正在重新加载。";
+          entry.error = t("skillsWorkbench.errors.effectiveSnapshotChanged");
           changed();
           return loadEffective(normalizedAgentId, context, { restarted: true });
         }

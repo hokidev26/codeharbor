@@ -1,4 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
+import { formatBytes } from "./formatters.mjs";
+import { t } from "./i18n.mjs";
+import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 
 export const PREVIEW_IFRAME_SANDBOX = "allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-scripts";
 const PREVIEW_LOG_LINE_LIMIT = 400;
@@ -25,14 +28,14 @@ export function renderWorkspaceEntriesHTML(entries, selectedPath = "") {
     const directoryOrder = Number(Boolean(b?.isDir)) - Number(Boolean(a?.isDir));
     return directoryOrder || String(a?.name || "").localeCompare(String(b?.name || ""));
   });
-  if (!sorted.length) return '<div class="workspace-empty-state">此目录为空。</div>';
+  if (!sorted.length) return `<div class="workspace-empty-state">${escapeHtml(t("workspace.explorer.emptyDirectory"))}</div>`;
   return sorted.map((entry) => {
     const path = String(entry?.path || "");
-    const name = String(entry?.name || path || "未命名");
+    const name = String(entry?.name || path || t("workspace.explorer.unnamed"));
     const isDir = Boolean(entry?.isDir);
     const editable = entry?.editable !== false;
     const size = Number.isFinite(Number(entry?.size)) ? Number(entry.size) : 0;
-    const meta = isDir ? "目录" : `${formatBytes(size)}${editable ? "" : " · 只读"}`;
+    const meta = isDir ? t("workspace.explorer.directory") : `${formatBytes(size)}${editable ? "" : ` · ${t("workspace.explorer.readOnly")}`}`;
     return `
       <button class="workspace-entry ${path === selectedPath ? "active" : ""}" type="button" data-workspace-path="${escapeAttr(path)}" data-workspace-dir="${isDir ? "true" : "false"}" title="${escapeAttr(path || name)}">
         <span class="workspace-entry-icon" aria-hidden="true">${isDir ? "▱" : "◇"}</span>
@@ -45,7 +48,7 @@ export function renderWorkspaceEntriesHTML(entries, selectedPath = "") {
 
 export function renderPreviewProfileOptionsHTML(profiles, selectedId = "") {
   const list = Array.isArray(profiles) ? profiles : [];
-  if (!list.length) return '<option value="">未检测到预览配置</option>';
+  if (!list.length) return `<option value="">${escapeHtml(t("workspace.explorer.noProfiles"))}</option>`;
   return list.map((profile) => {
     const id = previewProfileId(profile);
     const label = previewProfileLabel(profile);
@@ -55,8 +58,8 @@ export function renderPreviewProfileOptionsHTML(profiles, selectedId = "") {
 
 export function renderPreviewFrameHTML(url) {
   const safeURL = String(url || "");
-  if (!safeURL) return '<div class="workspace-preview-empty">启动预览后会在此处显示页面。</div>';
-  return `<iframe class="workspace-preview-iframe" src="${escapeAttr(safeURL)}" sandbox="${escapeAttr(PREVIEW_IFRAME_SANDBOX)}" referrerpolicy="no-referrer" title="项目预览"></iframe>`;
+  if (!safeURL) return `<div class="workspace-preview-empty">${escapeHtml(t("workspace.explorer.previewEmpty"))}</div>`;
+  return `<iframe class="workspace-preview-iframe" src="${escapeAttr(safeURL)}" sandbox="${escapeAttr(PREVIEW_IFRAME_SANDBOX)}" referrerpolicy="no-referrer" title="${escapeAttr(t("workspace.explorer.previewTitle"))}"></iframe>`;
 }
 
 export function buildPreviewURL(status, locationLike = globalThis.location) {
@@ -75,6 +78,19 @@ export function buildPreviewURL(status, locationLike = globalThis.location) {
     if (!/^https?:$/.test(parsed.protocol)) return "";
     if (locationLike?.origin && parsed.origin === locationLike.origin) return "";
     return parsed.href;
+  } catch {
+    return "";
+  }
+}
+
+export function normalizePreviewNavigationURL(value, baseURL = "", locationLike = globalThis.location) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const base = baseURL || `${locationLike?.protocol || "http:"}//${locationLike?.hostname || "localhost"}/`;
+    const url = new URL(raw, base);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    return url.href;
   } catch {
     return "";
   }
@@ -102,6 +118,8 @@ export function createWorkspaceExplorerController({
   clearTimeoutFn = (...args) => globalThis.clearTimeout(...args),
   showError = () => {},
   showToast = () => {},
+  onPreviewOpen = () => {},
+  onPreviewClose = () => {},
   pollIntervalMs = 2000,
 } = {}) {
   initializeWorkspaceState(state);
@@ -148,7 +166,8 @@ export function createWorkspaceExplorerController({
     state.workspaceOriginalContent = "";
     state.workspaceFileLoading = false;
     state.workspaceSaving = false;
-    state.workspaceFileStatus = "请选择左侧文件。";
+    state.workspaceFileStatus = t("workspace.explorer.selectFile");
+    state.workspaceFileStatusError = false;
     state.workspaceProfiles = [];
     state.workspaceSelectedProfileId = "";
     state.workspacePreviewStatus = null;
@@ -156,6 +175,11 @@ export function createWorkspaceExplorerController({
     state.workspacePreviewLoading = false;
     state.workspacePreviewBusy = false;
     state.workspacePreviewError = "";
+    state.workspacePreviewURL = "";
+    state.workspacePreviewHistory = [];
+    state.workspacePreviewHistoryIndex = -1;
+    state.workspacePreviewViewport = "adaptive";
+    state.workspacePreviewAutoStart = false;
   }
 
   function setAgent(agent) {
@@ -164,10 +188,13 @@ export function createWorkspaceExplorerController({
       renderWorkspaceButtonState();
       return false;
     }
+    const wasPreview = state.workspaceOpen && state.workspaceTab === "preview";
     invalidateRequests();
     stopPreviewPolling();
     state.workspaceOpen = false;
     element("workspaceModal")?.classList.add("hidden");
+    element("workspaceModal")?.classList.remove("workspace-preview-dock-mode");
+    if (wasPreview) onPreviewClose();
     state.workspaceAgentId = nextId;
     resetWorkspaceView();
     renderWorkspaceButtonState();
@@ -176,27 +203,53 @@ export function createWorkspaceExplorerController({
   }
 
   function renderWorkspaceButtonState() {
-    const button = element("workspaceExplorerBtn");
-    if (!button) return;
+    const filesButton = element("workspaceExplorerBtn");
+    const previewButton = element("workspacePreviewBtn");
     const enabled = Boolean(liveAgentId());
-    button.disabled = !enabled;
-    button.classList.toggle("active", enabled && state.workspaceOpen);
-    button.setAttribute("aria-expanded", enabled && state.workspaceOpen ? "true" : "false");
-    button.title = enabled ? "打开工作区文件和预览" : "请先选择 Agent";
+    const filesOpen = enabled && state.workspaceOpen && state.workspaceTab === "files";
+    const previewOpen = enabled && state.workspaceOpen && state.workspaceTab === "preview";
+    const running = previewRunning(state.workspacePreviewStatus || {});
+
+    if (filesButton) {
+      filesButton.disabled = !enabled;
+      filesButton.classList.toggle("active", filesOpen);
+      filesButton.setAttribute("aria-expanded", filesOpen ? "true" : "false");
+      filesButton.title = enabled ? t("workspace.explorer.openFiles") : t("workspace.explorer.selectAgent");
+    }
+    if (previewButton) {
+      previewButton.disabled = !enabled;
+      previewButton.classList.toggle("active", previewOpen);
+      previewButton.classList.toggle("preview-running", running);
+      previewButton.setAttribute("aria-expanded", previewOpen ? "true" : "false");
+      previewButton.title = !enabled ? t("workspace.explorer.selectAgent") : running ? t("workspace.explorer.previewRunning") : t("workspace.explorer.openPreview");
+    }
+    const indicator = element("workspacePreviewIndicator");
+    if (indicator) {
+      indicator.classList.toggle("running", running);
+      indicator.classList.toggle("busy", !running && (state.workspacePreviewLoading || state.workspacePreviewBusy));
+      indicator.classList.toggle("error", Boolean(state.workspacePreviewError));
+      indicator.classList.toggle("idle", !running && !state.workspacePreviewLoading && !state.workspacePreviewBusy && !state.workspacePreviewError);
+    }
   }
 
-  function openWorkspace() {
+  function openWorkspace(tab = "files") {
     if (!liveAgentId()) return false;
     if (currentAgentId() !== liveAgentId()) setAgent(state.agent);
+    state.workspaceTab = tab === "preview" ? "preview" : "files";
     state.workspaceOpen = true;
-    element("workspaceModal")?.classList.remove("hidden");
+    const modal = element("workspaceModal");
+    modal?.classList.remove("hidden");
+    modal?.classList.toggle("workspace-preview-dock-mode", state.workspaceTab === "preview");
+    if (state.workspaceTab === "preview") onPreviewOpen();
     renderWorkspaceButtonState();
     renderWorkspace();
-    loadTree(state.workspacePath || "").catch(showError);
+    if (state.workspaceTab === "preview") loadPreview().catch(showError);
+    else loadTree(state.workspacePath || "").catch(showError);
     return true;
   }
 
   function closeWorkspace() {
+    const wasPreview = state.workspaceOpen && state.workspaceTab === "preview";
     state.workspaceOpen = false;
     invalidateRequests();
     stopPreviewPolling();
@@ -205,7 +258,10 @@ export function createWorkspaceExplorerController({
     state.workspaceSaving = false;
     state.workspacePreviewLoading = false;
     state.workspacePreviewBusy = false;
-    element("workspaceModal")?.classList.add("hidden");
+    const modal = element("workspaceModal");
+    modal?.classList.add("hidden");
+    modal?.classList.remove("workspace-preview-dock-mode");
+    if (wasPreview) onPreviewClose();
     renderWorkspaceButtonState();
   }
 
@@ -244,7 +300,8 @@ export function createWorkspaceExplorerController({
     if (!agentId || !requestedPath) return null;
     const seq = ++state.workspaceFileSeq;
     state.workspaceFileLoading = true;
-    state.workspaceFileStatus = "正在加载文件…";
+    state.workspaceFileStatus = t("workspace.explorer.loadingFile");
+    state.workspaceFileStatusError = false;
     renderEditor();
     try {
       const query = new URLSearchParams({ path: requestedPath });
@@ -255,6 +312,7 @@ export function createWorkspaceExplorerController({
       state.workspaceFileContent = String(payload?.content ?? "");
       state.workspaceOriginalContent = state.workspaceFileContent;
       state.workspaceFileStatus = workspaceFileStatusText(state.workspaceFile);
+      state.workspaceFileStatusError = false;
       renderTree();
       return payload;
     } catch (error) {
@@ -263,7 +321,8 @@ export function createWorkspaceExplorerController({
       state.workspaceFilePath = requestedPath;
       state.workspaceFileContent = "";
       state.workspaceOriginalContent = "";
-      state.workspaceFileStatus = `加载失败：${error?.message || String(error)}`;
+      state.workspaceFileStatus = t("workspace.explorer.loadFailed", { message: error?.message || String(error) });
+      state.workspaceFileStatusError = true;
       throw error;
     } finally {
       if (isCurrent("workspaceFileSeq", seq, agentId)) {
@@ -280,7 +339,8 @@ export function createWorkspaceExplorerController({
     if (editor) state.workspaceFileContent = String(editor.value ?? "");
     if (!agentId || !file?.path) return false;
     if (file.readOnly || file.truncated) {
-      state.workspaceFileStatus = file.truncated ? "文件内容已截断，不能保存。" : "此文件为只读，不能保存。";
+      state.workspaceFileStatus = file.truncated ? t("workspace.explorer.truncated") : t("workspace.explorer.fileReadOnly");
+      state.workspaceFileStatusError = true;
       renderEditorControls();
       showToast(state.workspaceFileStatus, "warn", { force: true });
       return false;
@@ -289,7 +349,8 @@ export function createWorkspaceExplorerController({
     const path = normalizeRelativePath(file.path);
     const payload = buildWorkspaceSavePayload(path, state.workspaceFileContent, file.modTime);
     state.workspaceSaving = true;
-    state.workspaceFileStatus = "正在保存…";
+    state.workspaceFileStatus = t("workspace.explorer.saving");
+    state.workspaceFileStatusError = false;
     renderEditorControls();
     try {
       const result = await request(`/api/agents/${encodeURIComponent(agentId)}/workspace/file?${new URLSearchParams({ path }).toString()}`, {
@@ -299,17 +360,20 @@ export function createWorkspaceExplorerController({
       if (!isCurrent("workspaceSaveSeq", seq, agentId)) return false;
       state.workspaceFile = { ...file, ...result, path, content: state.workspaceFileContent };
       state.workspaceOriginalContent = state.workspaceFileContent;
-      state.workspaceFileStatus = "已保存。";
-      showToast("文件已保存。", "success", { force: true });
+      state.workspaceFileStatus = t("workspace.explorer.saved");
+      state.workspaceFileStatusError = false;
+      showToast(t("workspace.explorer.fileSaved"), "success", { force: true });
       return true;
     } catch (error) {
       if (!isCurrent("workspaceSaveSeq", seq, agentId)) return false;
       if (Number(error?.status) === 409) {
-        state.workspaceFileStatus = "文件已在磁盘上变更，请重新加载后再保存。";
+        state.workspaceFileStatus = t("workspace.explorer.fileChanged");
+        state.workspaceFileStatusError = true;
         showToast(state.workspaceFileStatus, "error", { force: true });
         return false;
       }
-      state.workspaceFileStatus = `保存失败：${error?.message || String(error)}`;
+      state.workspaceFileStatus = sx("workspace.saveFailed", { message: error?.message || String(error) });
+      state.workspaceFileStatusError = true;
       throw error;
     } finally {
       if (isCurrent("workspaceSaveSeq", seq, agentId)) {
@@ -321,10 +385,18 @@ export function createWorkspaceExplorerController({
 
   function selectTab(tab) {
     const next = tab === "preview" ? "preview" : "files";
-    if (state.workspaceTab === next) return;
+    if (state.workspaceTab === next) {
+      renderWorkspaceButtonState();
+      return;
+    }
+    const previous = state.workspaceTab;
     state.workspaceTab = next;
     state.workspacePreviewSeq += 1;
     stopPreviewPolling();
+    element("workspaceModal")?.classList.toggle("workspace-preview-dock-mode", next === "preview");
+    if (state.workspaceOpen && previous !== "preview" && next === "preview") onPreviewOpen();
+    if (state.workspaceOpen && previous === "preview" && next !== "preview") onPreviewClose();
+    renderWorkspaceButtonState();
     renderWorkspace();
     if (next === "preview") loadPreview().catch(showError);
   }
@@ -346,6 +418,9 @@ export function createWorkspaceExplorerController({
       const [status, logs] = await Promise.all([request(`${base}/status`), request(`${base}/logs`)]);
       if (!isCurrent("workspacePreviewSeq", seq, agentId)) return null;
       applyPreviewPayload(status, logs);
+      if (state.workspacePreviewAutoStart && !previewRunning(status) && state.workspaceSelectedProfileId) {
+        setTimeoutFn(() => startPreview().catch(showError), 0);
+      }
       return { detected, status, logs };
     } catch (error) {
       if (!isCurrent("workspacePreviewSeq", seq, agentId)) return null;
@@ -401,7 +476,7 @@ export function createWorkspaceExplorerController({
       const status = await request(`/api/agents/${encodeURIComponent(agentId)}/preview/start`, { method: "POST", body: JSON.stringify(body) });
       if (!isCurrent("workspacePreviewSeq", seq, agentId)) return false;
       state.workspacePreviewStatus = status || {};
-      showToast("预览已启动。", "success", { force: true });
+      showToast(t("workspace.explorer.previewStarted"), "success", { force: true });
       await refreshPreview();
       return true;
     } catch (error) {
@@ -427,7 +502,7 @@ export function createWorkspaceExplorerController({
       const status = await request(`/api/agents/${encodeURIComponent(agentId)}/preview/stop`, { method: "POST" });
       if (!isCurrent("workspacePreviewSeq", seq, agentId)) return false;
       state.workspacePreviewStatus = status || { running: false };
-      showToast("预览已停止。", "success", { force: true });
+      showToast(t("workspace.explorer.previewStopped"), "success", { force: true });
       await refreshPreview();
       return true;
     } catch (error) {
@@ -447,12 +522,65 @@ export function createWorkspaceExplorerController({
     state.workspacePreviewLogs = boundPreviewLogs(logs);
     const statusProfileId = String(status?.profileId || "");
     if (statusProfileId) state.workspaceSelectedProfileId = statusProfileId;
+    const homeURL = buildPreviewURL(status, locationLike);
+    if (homeURL && !state.workspacePreviewURL) {
+      state.workspacePreviewURL = homeURL;
+      state.workspacePreviewHistory = [homeURL];
+      state.workspacePreviewHistoryIndex = 0;
+    }
+  }
+
+  function normalizedBrowserURL(value) {
+    const base = state.workspacePreviewURL || buildPreviewURL(state.workspacePreviewStatus, locationLike);
+    return normalizePreviewNavigationURL(value, base, locationLike);
+  }
+
+  function navigatePreview(value, { replace = false } = {}) {
+    const url = normalizedBrowserURL(value);
+    if (!url) {
+      showToast(t("workspace.explorer.invalidAddress"), "warn", { force: true });
+      return false;
+    }
+    const history = Array.isArray(state.workspacePreviewHistory) ? [...state.workspacePreviewHistory] : [];
+    let index = Number(state.workspacePreviewHistoryIndex ?? -1);
+    if (replace && index >= 0) history[index] = url;
+    else {
+      history.splice(index + 1);
+      history.push(url);
+      index = history.length - 1;
+    }
+    state.workspacePreviewURL = url;
+    state.workspacePreviewHistory = history.slice(-40);
+    state.workspacePreviewHistoryIndex = Math.min(index, state.workspacePreviewHistory.length - 1);
+    renderPreview();
+    return true;
+  }
+
+  function navigatePreviewHistory(delta) {
+    const history = state.workspacePreviewHistory || [];
+    const next = Number(state.workspacePreviewHistoryIndex || 0) + delta;
+    if (next < 0 || next >= history.length) return false;
+    state.workspacePreviewHistoryIndex = next;
+    state.workspacePreviewURL = history[next];
+    renderPreview();
+    return true;
+  }
+
+  function reloadPreviewFrame() {
+    const frameHost = element("workspacePreviewFrameHost");
+    if (frameHost?.dataset) frameHost.dataset.previewUrl = "";
+    renderPreview();
+  }
+
+  function setPreviewViewport(viewport) {
+    state.workspacePreviewViewport = ["desktop", "tablet"].includes(viewport) ? viewport : "adaptive";
+    renderPreview();
   }
 
   function openPreviewExternal() {
-    const url = buildPreviewURL(state.workspacePreviewStatus, locationLike);
+    const url = state.workspacePreviewURL || buildPreviewURL(state.workspacePreviewStatus, locationLike);
     if (!url) {
-      showToast("预览地址不可用，或与 Autoto 页面同源。", "warn", { force: true });
+      showToast(t("workspace.explorer.previewUnavailable"), "warn", { force: true });
       return false;
     }
     openWindow(url, "_blank", "noopener,noreferrer");
@@ -471,7 +599,7 @@ export function createWorkspaceExplorerController({
       button?.setAttribute("aria-selected", active ? "true" : "false");
     });
     const subtitle = element("workspaceModalSubtitle");
-    if (subtitle) subtitle.textContent = state.agent?.cwd || state.project?.gitPath || "当前 Agent 工作目录";
+    if (subtitle) subtitle.textContent = state.agent?.cwd || state.project?.gitPath || t("workspace.explorer.agentDirectory");
     renderTree();
     renderEditor();
     renderPreview();
@@ -486,7 +614,7 @@ export function createWorkspaceExplorerController({
     if (refresh) refresh.disabled = state.workspaceTreeLoading;
     const tree = element("workspaceTree");
     if (!tree) return;
-    if (state.workspaceTreeLoading) tree.innerHTML = '<div class="workspace-loading-state">正在加载目录…</div>';
+    if (state.workspaceTreeLoading) tree.innerHTML = `<div class="workspace-loading-state">${escapeHtml(t("workspace.explorer.loadingDirectory"))}</div>`;
     else if (state.workspaceTreeError) tree.innerHTML = `<div class="workspace-error-state">${escapeHtml(state.workspaceTreeError)}</div>`;
     else tree.innerHTML = renderWorkspaceEntriesHTML(state.workspaceEntries, state.workspaceFilePath);
   }
@@ -504,14 +632,14 @@ export function createWorkspaceExplorerController({
     if (editor) {
       editor.readOnly = readOnly;
       editor.disabled = state.workspaceFileLoading;
-      editor.placeholder = state.workspaceFileLoading ? "正在加载…" : "从左侧选择可编辑文本文件";
+      editor.placeholder = state.workspaceFileLoading ? t("workspace.explorer.editorLoading") : t("workspace.explorer.editorHint");
     }
     const path = element("workspaceEditorPath");
-    if (path) path.textContent = state.workspaceFilePath || "未选择文件";
+    if (path) path.textContent = state.workspaceFilePath || t("workspace.explorer.noFile");
     const status = element("workspaceEditorStatus");
     if (status) {
       status.textContent = state.workspaceFileStatus || "";
-      status.classList.toggle("error", /失败|不能保存|磁盘上变更/.test(state.workspaceFileStatus || ""));
+      status.classList.toggle("error", Boolean(state.workspaceFileStatusError));
     }
     const reload = element("workspaceReloadFileBtn");
     if (reload) reload.disabled = !file?.path || state.workspaceFileLoading || state.workspaceSaving;
@@ -544,20 +672,40 @@ export function createWorkspaceExplorerController({
     if (start) start.disabled = state.workspacePreviewBusy || state.workspacePreviewLoading || running || !state.workspaceSelectedProfileId;
     const stop = element("workspaceStopPreviewBtn");
     if (stop) stop.disabled = state.workspacePreviewBusy || !running;
-    const url = buildPreviewURL(status, locationLike);
+    const homeURL = buildPreviewURL(status, locationLike);
+    const url = state.workspacePreviewURL || homeURL;
     const external = element("workspaceOpenPreviewBtn");
     if (external) external.disabled = !url;
+    const address = element("workspacePreviewAddress");
+    if (address && address.value !== url) address.value = url || "";
+    const history = state.workspacePreviewHistory || [];
+    const historyIndex = Number(state.workspacePreviewHistoryIndex ?? -1);
+    const back = element("workspacePreviewBackBtn");
+    const forward = element("workspacePreviewForwardBtn");
+    if (back) back.disabled = historyIndex <= 0;
+    if (forward) forward.disabled = historyIndex < 0 || historyIndex >= history.length - 1;
+    const autoStart = element("workspacePreviewAutoStart");
+    if (autoStart) autoStart.checked = Boolean(state.workspacePreviewAutoStart);
+    globalThis.document?.querySelectorAll?.("[data-preview-viewport]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.previewViewport === state.workspacePreviewViewport);
+    });
     const frameHost = element("workspacePreviewFrameHost");
-    if (frameHost && String(frameHost.dataset?.previewUrl || "") !== url) {
-      frameHost.innerHTML = renderPreviewFrameHTML(url);
-      if (frameHost.dataset) frameHost.dataset.previewUrl = url;
+    if (frameHost) {
+      frameHost.classList.remove("viewport-adaptive", "viewport-desktop", "viewport-tablet");
+      frameHost.classList.add(`viewport-${state.workspacePreviewViewport || "adaptive"}`);
+      if (String(frameHost.dataset?.previewUrl || "") !== url) {
+        frameHost.innerHTML = renderPreviewFrameHTML(url);
+        if (frameHost.dataset) frameHost.dataset.previewUrl = url;
+      }
     }
     const logs = element("workspacePreviewLogs");
-    if (logs) logs.textContent = state.workspacePreviewLogs || "暂无预览日志。";
+    if (logs) logs.textContent = state.workspacePreviewLogs || t("workspace.explorer.noLogs");
+    renderWorkspaceButtonState();
   }
 
   function bind() {
-    element("workspaceExplorerBtn")?.addEventListener("click", openWorkspace);
+    element("workspaceExplorerBtn")?.addEventListener("click", () => openWorkspace("files"));
+    element("workspacePreviewBtn")?.addEventListener("click", () => openWorkspace("preview"));
     element("closeWorkspaceModalBtn")?.addEventListener("click", closeWorkspace);
     element("workspaceModal")?.addEventListener("click", (event) => {
       if (event.target?.id === "workspaceModal") closeWorkspace();
@@ -575,7 +723,8 @@ export function createWorkspaceExplorerController({
     });
     element("workspaceEditor")?.addEventListener("input", (event) => {
       state.workspaceFileContent = String(event.target?.value ?? "");
-      state.workspaceFileStatus = state.workspaceFileContent === state.workspaceOriginalContent ? workspaceFileStatusText(state.workspaceFile) : "有未保存的修改。";
+      state.workspaceFileStatus = state.workspaceFileContent === state.workspaceOriginalContent ? workspaceFileStatusText(state.workspaceFile) : t("workspace.explorer.unsaved");
+      state.workspaceFileStatusError = false;
       renderEditorControls();
     });
     element("workspaceSaveFileBtn")?.addEventListener("click", () => saveFile().catch(showError));
@@ -588,6 +737,24 @@ export function createWorkspaceExplorerController({
     element("workspaceStartPreviewBtn")?.addEventListener("click", () => startPreview().catch(showError));
     element("workspaceStopPreviewBtn")?.addEventListener("click", () => stopPreview().catch(showError));
     element("workspaceOpenPreviewBtn")?.addEventListener("click", openPreviewExternal);
+    element("workspacePreviewNavigateForm")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      navigatePreview(element("workspacePreviewAddress")?.value || "");
+    });
+    element("workspacePreviewBackBtn")?.addEventListener("click", () => navigatePreviewHistory(-1));
+    element("workspacePreviewForwardBtn")?.addEventListener("click", () => navigatePreviewHistory(1));
+    element("workspacePreviewReloadBtn")?.addEventListener("click", reloadPreviewFrame);
+    element("workspacePreviewHomeBtn")?.addEventListener("click", () => {
+      const home = buildPreviewURL(state.workspacePreviewStatus, locationLike);
+      if (home) navigatePreview(home);
+    });
+    element("workspacePreviewAutoStart")?.addEventListener("change", (event) => {
+      state.workspacePreviewAutoStart = Boolean(event.target?.checked);
+      if (state.workspacePreviewAutoStart && !previewRunning(state.workspacePreviewStatus || {}) && state.workspaceSelectedProfileId) startPreview().catch(showError);
+    });
+    globalThis.document?.querySelectorAll?.("[data-preview-viewport]").forEach((button) => {
+      button.addEventListener("click", () => setPreviewViewport(button.dataset.previewViewport));
+    });
     globalThis.document?.addEventListener?.("keydown", (event) => {
       if (event.key === "Escape" && state.workspaceOpen) {
         closeWorkspace();
@@ -632,7 +799,8 @@ function initializeWorkspaceState(state) {
     workspaceOriginalContent: "",
     workspaceFileLoading: false,
     workspaceSaving: false,
-    workspaceFileStatus: "请选择左侧文件。",
+    workspaceFileStatus: t("workspace.explorer.selectFile"),
+    workspaceFileStatusError: false,
     workspaceProfiles: [],
     workspaceSelectedProfileId: "",
     workspacePreviewStatus: null,
@@ -640,6 +808,11 @@ function initializeWorkspaceState(state) {
     workspacePreviewLoading: false,
     workspacePreviewBusy: false,
     workspacePreviewError: "",
+    workspacePreviewURL: "",
+    workspacePreviewHistory: [],
+    workspacePreviewHistoryIndex: -1,
+    workspacePreviewViewport: "adaptive",
+    workspacePreviewAutoStart: false,
     workspacePreviewTimer: null,
     workspaceTreeSeq: 0,
     workspaceFileSeq: 0,
@@ -655,18 +828,11 @@ function normalizeRelativePath(path) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(/\/{2,}/g, "/");
 }
 
-function formatBytes(value) {
-  const size = Math.max(0, Number(value) || 0);
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10240 ? 1 : 0)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function workspaceFileStatusText(file) {
-  if (!file) return "请选择左侧文件。";
-  if (file.truncated) return "文件内容已截断，仅供查看，不能保存。";
-  if (file.readOnly) return "只读文件，不能保存。";
-  return "已加载，可编辑。";
+  if (!file) return t("workspace.explorer.selectFile");
+  if (file.truncated) return t("workspace.explorer.truncated");
+  if (file.readOnly) return t("workspace.explorer.fileReadOnly");
+  return t("workspace.explorer.saved");
 }
 
 function previewProfileId(profile) {
@@ -675,7 +841,7 @@ function previewProfileId(profile) {
 
 function previewProfileLabel(profile) {
   const id = previewProfileId(profile);
-  return String(profile?.label || profile?.title || profile?.name || id || "未命名配置");
+  return String(profile?.label || profile?.title || profile?.name || id || t("workspace.explorer.unnamed"));
 }
 
 function previewRunning(status) {
@@ -684,13 +850,13 @@ function previewRunning(status) {
 }
 
 function previewStatusText(status, loading) {
-  if (loading && !status) return "正在检测预览配置…";
-  if (!status || !Object.keys(status).length) return "预览未启动";
+  if (loading && !status) return t("workspace.explorer.detecting");
+  if (!status || !Object.keys(status).length) return t("workspace.explorer.notStarted");
   if (previewRunning(status)) {
     const port = status.port || status.previewPort;
-    return port ? `运行中 · 端口 ${port}` : "运行中";
+    return port ? t("workspace.explorer.runningPort", { port }) : t("workspace.chat.running");
   }
-  return String(status.message || status.status || status.state || "预览未启动");
+  return String(status.message || status.status || status.state || t("workspace.explorer.notStarted"));
 }
 
 function parsePreviewPort(value) {

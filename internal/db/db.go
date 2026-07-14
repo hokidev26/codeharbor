@@ -71,6 +71,9 @@ type Workline struct {
 type Agent struct {
 	ID                     string `json:"id"`
 	WorklineID             string `json:"worklineId,omitempty"`
+	ParentAgentID          string `json:"parentAgentId,omitempty"`
+	ForkMessageID          string `json:"forkMessageId,omitempty"`
+	InheritMode            string `json:"inheritMode,omitempty"`
 	Type                   string `json:"type"`
 	SubagentType           string `json:"subagentType,omitempty"`
 	Title                  string `json:"title"`
@@ -79,6 +82,9 @@ type Agent struct {
 	PermissionMode         string `json:"permissionMode"`
 	EntityGeneration       int64  `json:"entityGeneration"`
 	PermissionGeneration   int64  `json:"permissionGeneration"`
+	ExecutionGeneration    int64  `json:"executionGeneration"`
+	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
+	ExecutionDeviceID      string `json:"executionDeviceId"`
 	Status                 string `json:"status"`
 	PlanMode               bool   `json:"planMode"`
 	CWD                    string `json:"cwd,omitempty"`
@@ -126,25 +132,30 @@ type Message struct {
 }
 
 type Run struct {
-	ID                 string `json:"id"`
-	AgentID            string `json:"agentId"`
-	TriggerMessageID   string `json:"triggerMessageId,omitempty"`
-	Status             string `json:"status"`
-	StartedAt          string `json:"startedAt"`
-	CompletedAt        string `json:"completedAt,omitempty"`
-	ErrorMessage       string `json:"errorMessage,omitempty"`
-	BaseHead           string `json:"baseHead,omitempty"`
-	EndHead            string `json:"endHead,omitempty"`
-	CheckpointRepoRoot string `json:"checkpointRepoRoot,omitempty"`
-	GitSnapshotAt      string `json:"gitSnapshotAt,omitempty"`
-	CheckpointState    string `json:"checkpointState"`
-	CheckpointError    string `json:"checkpointError,omitempty"`
-	RolledBackAt       string `json:"rolledBackAt,omitempty"`
-	Source             string `json:"source"`
-	SourceID           string `json:"sourceId,omitempty"`
-	PermissionModeCap  string `json:"permissionModeCap,omitempty"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                  string `json:"id"`
+	AgentID             string `json:"agentId"`
+	TriggerMessageID    string `json:"triggerMessageId,omitempty"`
+	Status              string `json:"status"`
+	StartedAt           string `json:"startedAt"`
+	CompletedAt         string `json:"completedAt,omitempty"`
+	ErrorMessage        string `json:"errorMessage,omitempty"`
+	BaseHead            string `json:"baseHead,omitempty"`
+	EndHead             string `json:"endHead,omitempty"`
+	CheckpointRepoRoot  string `json:"checkpointRepoRoot,omitempty"`
+	GitSnapshotAt       string `json:"gitSnapshotAt,omitempty"`
+	CheckpointState     string `json:"checkpointState"`
+	CheckpointError     string `json:"checkpointError,omitempty"`
+	RolledBackAt        string `json:"rolledBackAt,omitempty"`
+	Source              string `json:"source"`
+	SourceID            string `json:"sourceId,omitempty"`
+	PermissionModeCap   string `json:"permissionModeCap,omitempty"`
+	ExecutionGeneration int64  `json:"executionGeneration"`
+	DispatchID          string `json:"dispatchId,omitempty"`
+	DurationMS          int64  `json:"durationMs,omitempty"`
+	TriggerType         string `json:"triggerType"`
+	ExecutionDeviceID   string `json:"executionDeviceId"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 const (
@@ -223,6 +234,7 @@ type ToolCall struct {
 	PermissionSuggestions    string          `json:"permissionSuggestions,omitempty"`
 	PermissionGeneration     int64           `json:"permissionGeneration"`
 	PolicyGeneration         int64           `json:"policyGeneration"`
+	ExecutionDeviceID        string          `json:"executionDeviceId"`
 	CreatedAt                string          `json:"createdAt"`
 }
 
@@ -503,6 +515,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
 	if err := store.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := store.ensureRuntimeSettings(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1037,6 +1053,15 @@ func (s *Store) DeleteToolPermissionRule(ctx context.Context, id string) error {
 }
 
 func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
+	run.ID = strings.TrimSpace(run.ID)
+	run.AgentID = strings.TrimSpace(run.AgentID)
+	run.TriggerMessageID = strings.TrimSpace(run.TriggerMessageID)
+	run.DispatchID = strings.TrimSpace(run.DispatchID)
+	run.Source = strings.TrimSpace(run.Source)
+	run.SourceID = strings.TrimSpace(run.SourceID)
+	run.PermissionModeCap = strings.TrimSpace(run.PermissionModeCap)
+	run.TriggerType = strings.TrimSpace(run.TriggerType)
+	run.ExecutionDeviceID = strings.TrimSpace(run.ExecutionDeviceID)
 	if run.ID == "" {
 		run.ID = NewID()
 	}
@@ -1056,26 +1081,119 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if run.CheckpointState == "" {
 		run.CheckpointState = RunCheckpointNone
 	}
-	run.Source = strings.TrimSpace(run.Source)
 	if run.Source == "" {
 		run.Source = "manual"
 	}
-	run.SourceID = strings.TrimSpace(run.SourceID)
-	run.PermissionModeCap = strings.TrimSpace(run.PermissionModeCap)
-	if err := validateP2P3Text("run source", run.Source, 64, true, true); err != nil {
-		return Run{}, err
+	if run.TriggerType == "" {
+		switch run.Source {
+		case "schedule", "scheduled":
+			run.TriggerType = "scheduled"
+		case "goal":
+			run.TriggerType = "goal"
+		case "internal":
+			run.TriggerType = "internal"
+		default:
+			run.TriggerType = "manual"
+		}
 	}
-	if err := validateP2P3Text("run source id", run.SourceID, 256, false, false); err != nil {
-		return Run{}, err
+	for _, field := range []struct {
+		name     string
+		value    string
+		max      int
+		required bool
+		token    bool
+	}{
+		{"run id", run.ID, 128, true, false},
+		{"run agent id", run.AgentID, 128, true, false},
+		{"run trigger message id", run.TriggerMessageID, 128, false, false},
+		{"run dispatch id", run.DispatchID, 256, false, false},
+		{"run source", run.Source, 64, true, true},
+		{"run source id", run.SourceID, 256, false, false},
+	} {
+		if err := validateP2P3Text(field.name, field.value, field.max, field.required, field.token); err != nil {
+			return Run{}, err
+		}
+	}
+	if !validRunStatus(run.Status) {
+		return Run{}, errors.New("invalid run status")
 	}
 	if run.PermissionModeCap != "" && run.PermissionModeCap != "readOnly" && run.PermissionModeCap != "acceptEdits" {
 		return Run{}, errors.New("invalid run permission mode cap")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id, permission_mode_cap, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.CreatedAt, run.UpdatedAt)
+	if run.TriggerType != "manual" && run.TriggerType != "scheduled" && run.TriggerType != "goal" && run.TriggerType != "internal" {
+		return Run{}, errors.New("invalid run trigger type")
+	}
+	if run.DurationMS < 0 {
+		return Run{}, errors.New("invalid run duration")
+	}
+	var err error
+	for name, value := range map[string]*string{
+		"run started_at": &run.StartedAt,
+		"run created_at": &run.CreatedAt,
+		"run updated_at": &run.UpdatedAt,
+	} {
+		if *value, err = canonicalP2P3Time(name, *value, true); err != nil {
+			return Run{}, err
+		}
+	}
+	for name, value := range map[string]*string{
+		"run completed_at":    &run.CompletedAt,
+		"run git_snapshot_at": &run.GitSnapshotAt,
+		"run rolled_back_at":  &run.RolledBackAt,
+	} {
+		if *value, err = canonicalP2P3Time(name, *value, false); err != nil {
+			return Run{}, err
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, err
 	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET execution_generation = COALESCE(execution_generation,0) + 1 WHERE id = ?`, run.AgentID)
+	if err != nil {
+		return Run{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Run{}, err
+	} else if affected != 1 {
+		return Run{}, sql.ErrNoRows
+	}
+	var agentDeviceID string
+	if err := tx.QueryRowContext(ctx, `SELECT execution_generation, COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, run.AgentID).Scan(&run.ExecutionGeneration, &agentDeviceID); err != nil {
+		return Run{}, err
+	}
+	if run.ExecutionDeviceID == "" {
+		run.ExecutionDeviceID = agentDeviceID
+	}
+	if err := validateP2P3Text("run execution device id", run.ExecutionDeviceID, 128, true, false); err != nil {
+		return Run{}, err
+	}
+	var deviceExists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM execution_devices WHERE id = ?`, run.ExecutionDeviceID).Scan(&deviceExists); err != nil {
+		return Run{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id, permission_mode_cap, execution_generation, dispatch_id, duration_ms, trigger_type, execution_device_id, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, 0), ?, ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.ExecutionGeneration, run.DispatchID, run.DurationMS, run.TriggerType, run.ExecutionDeviceID, run.CreatedAt, run.UpdatedAt)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Run{}, fmt.Errorf("%w: run dispatch or execution generation already exists", ErrConflict)
+		}
+		return Run{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, err
+	}
 	return run, nil
+}
+
+func validRunStatus(status string) bool {
+	switch status {
+	case "pending", "running", "completed", "interrupted", "error", "superseded", "skipped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) UpdateRunStatus(ctx context.Context, runID, status, errorMessage string) error {
@@ -1292,7 +1410,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage str
 		return fmt.Errorf("invalid terminal run status %q", status)
 	}
 	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, error_message = NULLIF(?, ''), updated_at = ? WHERE id = ? AND status IN `+allowed, status, now, errorMessage, now, runID)
+	result, err := s.db.ExecContext(ctx, `UPDATE runs SET status = ?, completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = NULLIF(?, ''), updated_at = ? WHERE id = ? AND status IN `+allowed, status, now, now, errorMessage, now, runID)
 	if err != nil {
 		return err
 	}
@@ -1311,7 +1429,7 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 		return err
 	}
 	now := Now()
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, restartReason, now, runID)
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, now, restartReason, now, runID)
 	if err != nil {
 		return err
 	}
@@ -1329,31 +1447,41 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 	return tx.Commit()
 }
 
-func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
+const runSelectSQL = `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), COALESCE(execution_generation,0), COALESCE(dispatch_id,''), COALESCE(duration_ms,0), COALESCE(trigger_type,'manual'), COALESCE(execution_device_id,'local'), created_at, updated_at FROM runs`
+
+type runScanner func(dest ...any) error
+
+func scanRun(scan runScanner) (Run, error) {
 	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt)
+	err := scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.ExecutionGeneration, &run.DispatchID, &run.DurationMS, &run.TriggerType, &run.ExecutionDeviceID, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
+func (s *Store) GetRun(ctx context.Context, agentID, runID string) (Run, error) {
+	return scanRun(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, runSelectSQL+` WHERE agent_id = ? AND id = ?`, agentID, runID).Scan(dest...)
+	})
+}
+
 func (s *Store) GetRunByID(ctx context.Context, runID string) (Run, error) {
-	var run Run
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE id = ?`, runID).Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt)
-	return run, err
+	return scanRun(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, runSelectSQL+` WHERE id = ?`, runID).Scan(dest...)
+	})
 }
 
 func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`, agentID, limit)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE agent_id = ? ORDER BY execution_generation DESC, id DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1362,15 +1490,15 @@ func (s *Store) ListRuns(ctx context.Context, agentID string, limit int) ([]Run,
 }
 
 func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE status IN ('pending', 'running') ORDER BY started_at ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE status IN ('pending', 'running') ORDER BY execution_generation ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1379,15 +1507,15 @@ func (s *Store) ListRecoverableRuns(ctx context.Context) ([]Run, error) {
 }
 
 func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, started_at, COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), created_at, updated_at FROM runs WHERE checkpoint_state = ? ORDER BY started_at ASC, id ASC`, RunCheckpointRollingBack)
+	rows, err := s.db.QueryContext(ctx, runSelectSQL+` WHERE checkpoint_state = ? ORDER BY execution_generation ASC, id ASC`, RunCheckpointRollingBack)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]Run, 0)
 	for rows.Next() {
-		var run Run
-		if err := rows.Scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		run, err := scanRun(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1480,7 +1608,7 @@ func (s *Store) CreateProject(ctx context.Context, name, description, gitPath st
 	now := Now()
 	project := Project{ID: NewID(), Name: name, Description: description, Status: "active", FlowMode: "workspace", GitPath: gitPath, CreatedAt: now, UpdatedAt: now}
 	workline := Workline{ID: NewID(), ProjectID: project.ID, Title: "main", Status: "active", Role: "root", WorktreePath: gitPath, IsRoot: true, CreatedAt: now, UpdatedAt: now}
-	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, ExecutionDeviceID: "local", Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1493,7 +1621,7 @@ func (s *Store) CreateProject(ctx context.Context, name, description, gitPath st
 	if _, err := tx.ExecContext(ctx, `INSERT INTO worklines (id, project_id, title, status, role, worktree_path, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, workline.ID, workline.ProjectID, workline.Title, workline.Status, workline.Role, workline.WorktreePath, boolInt(workline.IsRoot), workline.CreatedAt, workline.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, reasoning_effort, execution_device_id, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.ReasoningEffort, agent.ExecutionDeviceID, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Project{}, Workline{}, Agent{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1553,7 +1681,7 @@ func (s *Store) CreateWorklineFork(ctx context.Context, parent Workline, title, 
 	}
 	now := Now()
 	workline := Workline{ID: NewID(), ProjectID: parent.ProjectID, Title: title, Status: "active", Role: "worktree", Branch: branch, WorktreePath: worktreePath, BaseBranch: baseBranch, ParentWorklineID: parent.ID, ForkPoint: forkPoint, HeadCommitSHA: forkPoint, StartCommitSHA: forkPoint, IsRoot: false, CreatedAt: now, UpdatedAt: now}
-	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: title, Model: model, PermissionMode: permissionMode, Status: "idle", CWD: worktreePath, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: title, Model: model, PermissionMode: permissionMode, ExecutionDeviceID: "local", Status: "idle", CWD: worktreePath, CreatedAt: now, UpdatedAt: now}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Workline{}, Agent{}, err
@@ -1562,7 +1690,7 @@ func (s *Store) CreateWorklineFork(ctx context.Context, parent Workline, title, 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO worklines (id, project_id, title, status, role, branch, worktree_path, base_branch, parent_workline_id, fork_point, head_commit_sha, start_commit_sha, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, workline.ID, workline.ProjectID, workline.Title, workline.Status, workline.Role, workline.Branch, workline.WorktreePath, workline.BaseBranch, workline.ParentWorklineID, workline.ForkPoint, workline.HeadCommitSHA, workline.StartCommitSHA, boolInt(workline.IsRoot), workline.CreatedAt, workline.UpdatedAt); err != nil {
 		return Workline{}, Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, reasoning_effort, execution_device_id, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), ?, ?, ?, ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.PermissionMode, agent.ReasoningEffort, agent.ExecutionDeviceID, agent.Status, agent.CWD, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Workline{}, Agent{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1593,12 +1721,22 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 	return s.GetWorkline(ctx, sourceWorklineID)
 }
 
-func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
-	var n Agent
+const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
+
+type agentScanner func(dest ...any) error
+
+func scanAgent(scan agentScanner) (Agent, error) {
+	var agent Agent
 	var planMode int
-	err := s.db.QueryRowContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE id = ?`, id).Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt)
-	n.PlanMode = planMode != 0
-	return n, err
+	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &agent.ExecutionDeviceID, &agent.Status, &planMode, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	agent.PlanMode = planMode != 0
+	return agent, err
+}
+
+func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
+	return scanAgent(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, agentSelectSQL+` WHERE id = ?`, id).Scan(dest...)
+	})
 }
 
 func (s *Store) UpdateAgentCWD(ctx context.Context, id, cwd string) (Agent, error) {
@@ -1615,9 +1753,30 @@ func (s *Store) UpdateAgentCWD(ctx context.Context, id, cwd string) (Agent, erro
 	return s.GetAgent(ctx, id)
 }
 
-func (s *Store) UpdateAgentModel(ctx context.Context, id, model string) (Agent, error) {
+func (s *Store) UpdateAgentModel(ctx context.Context, id, model string, reasoningEffort ...string) (Agent, error) {
+	id = strings.TrimSpace(id)
+	model = strings.TrimSpace(model)
+	if err := validateP2P3Text("agent id", id, 128, true, false); err != nil {
+		return Agent{}, err
+	}
+	if err := validateP2P3Text("agent model", model, 256, true, false); err != nil {
+		return Agent{}, err
+	}
+	if len(reasoningEffort) > 1 {
+		return Agent{}, errors.New("update agent model accepts at most one reasoning effort")
+	}
 	now := Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE agents SET model = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, now, id)
+	var result sql.Result
+	var err error
+	if len(reasoningEffort) == 1 {
+		effort := strings.TrimSpace(reasoningEffort[0])
+		if !validAgentReasoningEffort(effort, true) {
+			return Agent{}, errors.New("invalid agent reasoning effort")
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = NULLIF(?,''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, effort, now, id)
+	} else {
+		result, err = s.db.ExecContext(ctx, `UPDATE agents SET model = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, now, id)
+	}
 	if err != nil {
 		return Agent{}, err
 	}
@@ -1627,6 +1786,35 @@ func (s *Store) UpdateAgentModel(ctx context.Context, id, model string) (Agent, 
 		return Agent{}, sql.ErrNoRows
 	}
 	return s.GetAgent(ctx, id)
+}
+
+func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, reasoningEffort string) (Agent, error) {
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if !validAgentReasoningEffort(reasoningEffort, true) {
+		return Agent{}, errors.New("invalid agent reasoning effort")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET reasoning_effort = NULLIF(?,''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, reasoningEffort, Now(), strings.TrimSpace(id))
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, sql.ErrNoRows
+	}
+	return s.GetAgent(ctx, id)
+}
+
+func validAgentReasoningEffort(value string, allowEmpty bool) bool {
+	if value == "" {
+		return allowEmpty
+	}
+	switch value {
+	case "auto", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) UpdateAgentContextSummary(ctx context.Context, id, summary, boundaryMessageID string, prunedPercent int) error {
@@ -1650,20 +1838,18 @@ func (s *Store) UpdateAgentPermissionMode(ctx context.Context, id, mode string) 
 }
 
 func (s *Store) ListAgentsByWorkline(ctx context.Context, worklineID string) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(workline_id,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
+	rows, err := s.db.QueryContext(ctx, agentSelectSQL+` WHERE workline_id = ? ORDER BY type ASC, created_at ASC`, worklineID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	agents := make([]Agent, 0)
 	for rows.Next() {
-		var n Agent
-		var planMode int
-		if err := rows.Scan(&n.ID, &n.WorklineID, &n.Type, &n.SubagentType, &n.Title, &n.Model, &n.SystemPrompt, &n.PermissionMode, &n.EntityGeneration, &n.PermissionGeneration, &n.Status, &planMode, &n.CWD, &n.MessageCount, &n.ContextSummary, &n.PruneBoundaryMessageID, &n.PrunedPercent, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		agent, err := scanAgent(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		n.PlanMode = planMode != 0
-		agents = append(agents, n)
+		agents = append(agents, agent)
 	}
 	return agents, rows.Err()
 }
@@ -1838,7 +2024,21 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 	if call.PolicyGeneration < 1 {
 		call.PolicyGeneration = 1
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.CreatedAt)
+	call.ExecutionDeviceID = strings.TrimSpace(call.ExecutionDeviceID)
+	if call.ExecutionDeviceID == "" && strings.TrimSpace(call.RunID) != "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(execution_device_id,'local') FROM runs WHERE id = ? AND agent_id = ?`, call.RunID, call.AgentID).Scan(&call.ExecutionDeviceID); err != nil {
+			return ToolCall{}, err
+		}
+	}
+	if call.ExecutionDeviceID == "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, call.AgentID).Scan(&call.ExecutionDeviceID); err != nil {
+			return ToolCall{}, err
+		}
+	}
+	if err := validateP2P3Text("tool call execution device id", call.ExecutionDeviceID, 128, true, false); err != nil {
+		return ToolCall{}, err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_calls (id, agent_id, run_id, message_id, tool_use_id, tool_name, input_json, output_json, status, duration_ms, error_message, permission_decided_by, permission_decided_at, permission_deny_message, permission_decision_reason, permission_suggestions, permission_generation, policy_generation, execution_device_id, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?)`, call.ID, call.AgentID, call.RunID, call.MessageID, call.ToolUseID, call.ToolName, string(call.InputJSON), string(call.OutputJSON), call.Status, call.DurationMS, call.ErrorMessage, call.PermissionDecidedBy, call.PermissionDecidedAt, call.PermissionDenyMessage, call.PermissionDecisionReason, call.PermissionSuggestions, call.PermissionGeneration, call.PolicyGeneration, call.ExecutionDeviceID, call.CreatedAt)
 	if err != nil {
 		return ToolCall{}, err
 	}
@@ -1848,7 +2048,7 @@ func (s *Store) AddToolCall(ctx context.Context, call ToolCall) (ToolCall, error
 func (s *Store) GetToolCallByUseID(ctx context.Context, agentID, toolUseID string) (ToolCall, error) {
 	var c ToolCall
 	var input, output string
-	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), created_at FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(execution_device_id,'local'), created_at FROM agent_tool_calls WHERE agent_id = ? AND tool_use_id = ?`, agentID, toolUseID).Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.ExecutionDeviceID, &c.CreatedAt)
 	if input != "" {
 		c.InputJSON = json.RawMessage(input)
 	}
@@ -1878,7 +2078,7 @@ func (s *Store) ListToolCallsByRun(ctx context.Context, agentID, runID string) (
 }
 
 func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([]ToolCall, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), created_at FROM agent_tool_calls `+where, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(permission_decided_by,''), COALESCE(permission_decided_at,''), COALESCE(permission_deny_message,''), COALESCE(permission_decision_reason,''), COALESCE(permission_suggestions,''), COALESCE(permission_generation,1), COALESCE(policy_generation,1), COALESCE(execution_device_id,'local'), created_at FROM agent_tool_calls `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1887,7 +2087,7 @@ func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([
 	for rows.Next() {
 		var c ToolCall
 		var input, output string
-		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.RunID, &c.MessageID, &c.ToolUseID, &c.ToolName, &input, &output, &c.Status, &c.DurationMS, &c.ErrorMessage, &c.PermissionDecidedBy, &c.PermissionDecidedAt, &c.PermissionDenyMessage, &c.PermissionDecisionReason, &c.PermissionSuggestions, &c.PermissionGeneration, &c.PolicyGeneration, &c.ExecutionDeviceID, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		if input != "" {

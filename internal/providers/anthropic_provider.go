@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -14,8 +15,9 @@ import (
 )
 
 type AnthropicProvider struct {
-	cfg    config.ProviderConfig
-	client anthropic.Client
+	cfg       config.ProviderConfig
+	client    anthropic.Client
+	configErr error
 }
 
 func NewAnthropicProvider(cfg config.ProviderConfig) *AnthropicProvider {
@@ -28,23 +30,32 @@ func NewAnthropicProvider(cfg config.ProviderConfig) *AnthropicProvider {
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 4096
 	}
-	opts := make([]option.RequestOption, 0, 2)
+	configErr := validateProviderRuntimeConfig(cfg)
+	opts := make([]option.RequestOption, 0, 3)
+	opts = append(opts, option.WithHTTPClient(providerHTTPClient(90*time.Second)))
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return &AnthropicProvider{cfg: cfg, client: anthropic.NewClient(opts...)}
+	return &AnthropicProvider{cfg: cfg, client: anthropic.NewClient(opts...), configErr: configErr}
 }
 
 func (p *AnthropicProvider) Name() string { return p.cfg.Name }
+
+func (p *AnthropicProvider) Configured() bool {
+	return p != nil && p.configErr == nil && strings.TrimSpace(p.cfg.APIKey) != ""
+}
 
 func (p *AnthropicProvider) Capabilities() Capabilities {
 	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
 }
 
 func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
 	if p.cfg.APIKey == "" {
 		return []string{p.cfg.Model}, nil
 	}
@@ -65,14 +76,18 @@ func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 }
 
 func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
+	if _, err := normalizeReasoningEffort(req.ReasoningEffort, false, p.cfg.Name); err != nil {
+		return nil, err
+	}
+	if p.cfg.APIKey == "" {
+		return nil, providerUnavailableError(p.cfg.Name, "API key is not configured")
+	}
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-		if p.cfg.APIKey == "" {
-			out <- Event{Type: "text", Text: "Anthropic provider is not configured. Set ANTHROPIC_API_KEY to enable Messages API calls."}
-			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
-			return
-		}
 		model := req.Model
 		if model == "" {
 			model = p.cfg.Model

@@ -72,6 +72,147 @@ func (p *scriptedProvider) requestCount() int {
 	return len(p.requests)
 }
 
+type reasoningScriptedProvider struct {
+	*scriptedProvider
+	supported        bool
+	reasoningEfforts []string
+}
+
+func (p *reasoningScriptedProvider) Capabilities() providers.Capabilities {
+	capabilities := p.scriptedProvider.Capabilities()
+	capabilities.ReasoningEffort = p.supported
+	capabilities.ReasoningEfforts = append([]string(nil), p.reasoningEfforts...)
+	return capabilities
+}
+
+func TestRunnerUsesRuntimeDefaultReasoningEffort(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	settings, err := store.GetRuntimeSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effort := "high"
+	if _, err := store.UpdateRuntimeSettings(ctx, db.RuntimeSettingsPatch{DefaultReasoningEffort: &effort, ExpectedRevision: settings.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "think"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{
+		{Type: "text", Text: "done"},
+		{Type: "done", Done: true, StopReason: "end_turn"},
+	}}}
+	runner := newAgentTestRunner(store, &reasoningScriptedProvider{scriptedProvider: provider, supported: true}, config.AgentConfig{MaxTurns: 1})
+	if err := runner.run(ctx, agent.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.request(0).ReasoningEffort; got != "high" {
+		t.Fatalf("expected runtime default reasoning effort, got %q", got)
+	}
+}
+
+func TestRunnerAgentReasoningEffortOverridesRuntimeDefault(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	settings, err := store.GetRuntimeSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultEffort := "high"
+	if _, err := store.UpdateRuntimeSettings(ctx, db.RuntimeSettingsPatch{DefaultReasoningEffort: &defaultEffort, ExpectedRevision: settings.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "low"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "think briefly"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{
+		{Type: "text", Text: "done"},
+		{Type: "done", Done: true, StopReason: "end_turn"},
+	}}}
+	runner := newAgentTestRunner(store, &reasoningScriptedProvider{scriptedProvider: provider, supported: true}, config.AgentConfig{MaxTurns: 1})
+	if err := runner.run(ctx, agent.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.request(0).ReasoningEffort; got != "low" {
+		t.Fatalf("expected agent reasoning effort override, got %q", got)
+	}
+}
+
+func TestRunnerRejectsUnsupportedExplicitReasoningEffort(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "medium"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "think"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{}
+	runner := newAgentTestRunner(store, &reasoningScriptedProvider{scriptedProvider: provider, supported: false}, config.AgentConfig{MaxTurns: 1})
+	err := runner.run(ctx, agent.ID, "")
+	if !errors.Is(err, providers.ErrReasoningEffortUnsupported) || !strings.Contains(err.Error(), "fake") || !strings.Contains(err.Error(), "medium") {
+		t.Fatalf("expected explicit unsupported reasoning error, got %v", err)
+	}
+	if provider.requestCount() != 0 {
+		t.Fatalf("unsupported reasoning request reached provider %d times", provider.requestCount())
+	}
+}
+
+func TestRunnerUsesXHighWhenProviderDeclaresIt(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "think deeply"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{
+		{Type: "text", Text: "done"},
+		{Type: "done", Done: true, StopReason: "end_turn"},
+	}}}
+	runner := newAgentTestRunner(store, &reasoningScriptedProvider{
+		scriptedProvider: provider,
+		supported:        true,
+		reasoningEfforts: []string{"low", "medium", "high", "xhigh"},
+	}, config.AgentConfig{MaxTurns: 1})
+	if err := runner.run(ctx, agent.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.request(0).ReasoningEffort; got != "xhigh" {
+		t.Fatalf("expected xhigh request, got %q", got)
+	}
+}
+
+func TestRunnerRejectsXHighForLegacyReasoningCapability(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
+	defer store.Close()
+	if _, err := store.UpdateAgentReasoningEffort(ctx, agent.ID, "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "think deeply"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{}
+	runner := newAgentTestRunner(store, &reasoningScriptedProvider{scriptedProvider: provider, supported: true}, config.AgentConfig{MaxTurns: 1})
+	err := runner.run(ctx, agent.ID, "")
+	if !errors.Is(err, providers.ErrReasoningEffortUnsupported) || !strings.Contains(err.Error(), "xhigh") {
+		t.Fatalf("expected xhigh unsupported error, got %v", err)
+	}
+	if provider.requestCount() != 0 {
+		t.Fatalf("unsupported xhigh reached provider %d times", provider.requestCount())
+	}
+}
+
 func TestRunnerAutoExecutesToolCallsAndRecordsUsage(t *testing.T) {
 	ctx := context.Background()
 	projectDir := t.TempDir()

@@ -22,17 +22,22 @@ import {
 } from "./directory-browser.mjs";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
+import { t } from "./i18n.mjs";
+import { appMainT as am } from "./messages-app-main-extra.mjs";
+import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-1";
 import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, webSocketURL } from "./runtime.mjs";
+import { firstSettingsItemForCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs";
 import { settingsItems, settingsSections } from "./settings-data.mjs";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
+import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs";
 import { createTerminalController } from "./terminal.mjs";
@@ -75,6 +80,9 @@ const state = {
   workline: null,
   agent: null,
   healthSeq: 0,
+  healthOK: null,
+  healthLabel: "checking",
+  agentStreamStatus: "idle",
   settings: null,
   settingsLoadSeq: 0,
   modelCatalog: null,
@@ -84,12 +92,16 @@ const state = {
   providerAuthSeq: 0,
   providerConfigStatus: "",
   providerConfigExpanded: {},
+  providerConsole: {},
   storageSummary: null,
   storageError: "",
   storageSeq: 0,
   licenseSummary: null,
   licenseError: "",
   licenseSeq: 0,
+  updateStatus: null,
+  updateError: "",
+  updateSeq: 0,
   usageSummary: null,
   usageError: "",
   usageSeq: 0,
@@ -139,6 +151,8 @@ const state = {
   agentRefreshing: false,
   agentSaving: false,
   agentSavePending: false,
+  reasoningEffortSaving: false,
+  reasoningEffortPending: undefined,
   messageSendingByAgent: {},
   messageRefreshTimersByAgent: {},
   currentMessages: [],
@@ -171,7 +185,8 @@ const state = {
   initializing: false,
   initSeq: 0,
   settingsWarmupStarted: false,
-  activeSettingsPanel: "profile",
+  activeSettingsPanel: "providers",
+  activeSettingsCategory: "api",
   settingsSearchQuery: "",
   backendDeleteConfirmId: "",
   backends: [],
@@ -222,6 +237,14 @@ const workspaceExplorer = createWorkspaceExplorerController({
   request: api,
   showError,
   showToast,
+  onPreviewOpen: () => {
+    closeConversationDetails();
+    toggleTerminal(true);
+    $("appShell")?.classList.add("preview-open");
+  },
+  onPreviewClose: () => {
+    $("appShell")?.classList.remove("preview-open");
+  },
 });
 
 function getSelectedModelValue() {
@@ -254,6 +277,7 @@ const {
   loadTerminalPreferences,
   normalizeTerminalPreferences,
   reconnectTerminalFromSettings,
+  renderTerminalButtonState,
   renderTerminalSettingsContent,
   resizeTerminal,
   saveTerminalPreferences,
@@ -275,6 +299,8 @@ const {
 
 const {
   bind: bindWorkspaceExplorer,
+  closeWorkspace,
+  openWorkspace,
   setAgent: setWorkspaceExplorerAgent,
 } = workspaceExplorer;
 
@@ -303,7 +329,7 @@ const agentStream = createAgentStreamController({
   onEvent: handleAgentStreamEvent,
   onSnapshot: applyAgentLiveSnapshot,
   onStatus: updateAgentStreamStatus,
-  onError: (error) => notifyTerminal(`[warn] Agent 实时流恢复失败：${error?.message || error}\n`),
+  onError: (error) => notifyTerminal(`[warn] ${am("agentStreamRestoreFailed", { message: error?.message || error })}\n`),
 });
 
 const directoryBrowser = createDirectoryBrowserController({
@@ -396,7 +422,7 @@ const modelProviderSettings = createModelProviderSettingsController({
 const {
   bindModelSettingsActions,
   bindProviderSettingsActions,
-  cliProxyProviderSummary,
+  codexProviderSummary,
   currentModelValue,
   currentProviderConfig,
   getPreferredModel,
@@ -415,9 +441,13 @@ const {
   setPreferredModel,
 } = modelProviderSettings;
 
+const specBoard = createSpecBoardController({ request: api, showError, showToast });
+specBoard.bind();
+
 const chatComposer = createChatComposerController({
   state,
   attachmentKind,
+  currentProviderConfig,
   currentSkillsPreferences,
   getEffectiveSkillsPolicy: () => skillsPhaseB?.getEffectivePolicy(state.agent?.id, getEffectiveSkillContext()) || {
     items: [], status: "idle", error: "", hasAuthoritativeData: false,
@@ -430,6 +460,7 @@ const chatComposer = createChatComposerController({
   scheduleMessageRefresh,
   showModelSetupNotice,
   showToast,
+  onMessageAccepted: (result, agentId) => specBoard.handleGoalConfirmation(result, agentId),
 });
 
 const {
@@ -444,8 +475,12 @@ const {
   loadChatDrafts,
   loadPromptHistory,
   openAttachmentPicker,
+  refreshReasoningEffortControl,
   restoreCurrentChatDraft,
   saveCurrentChatDraft,
+  saveReasoningEffort,
+  scheduleMessageInputResize,
+  selectedReasoningEffort,
   sendMessage,
   setMessageInputValue,
   syncMessageComposerBusy,
@@ -497,6 +532,7 @@ const {
   currentAppearancePreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
+  currentRegionalPreferences,
   currentSearchPreferences,
   loadAppearancePreferences,
   loadNotificationPreferences,
@@ -519,6 +555,7 @@ const {
   restoreLocalPreferencesBackup,
   saveNotificationPreferences,
   saveProfilePreferences,
+  saveRegionalPreferences,
   saveSearchPreferences,
   saveSkillsPreferences,
   searchPrefsExport,
@@ -535,6 +572,7 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   currentAppearancePreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
+  currentRegionalPreferences,
   currentSearchPreferences,
   notifyTerminal,
   profileDisplayName,
@@ -546,6 +584,7 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   saveServerNotificationSettings,
   testServerNotification,
   saveProfilePreferences,
+  saveRegionalPreferences,
   saveSearchPreferences,
   searchPrefsExport,
   searchProviderLabel,
@@ -573,6 +612,7 @@ const systemSettings = createSystemSettingsController({
   loadLicenseSummary,
   loadRuntimeSummary,
   loadStorageSummary,
+  loadUpdateStatus,
   loadUsageSummary,
   localPreferencesBackupSummary,
   localPreferencesBackupText,
@@ -658,12 +698,12 @@ function setSkillContext(context = {}) {
   });
   if (requested.scope === "project" && !requested.projectId) {
     state.skillContextScope = "global";
-    showToast("请先选择项目，再查看项目级 Skills。", "warn");
+    showToast(sx("app.projectSkillsRequired"), "warn");
     return getSkillContext();
   }
   if (requested.scope === "workspace" && !requested.worklineId) {
     state.skillContextScope = state.project?.id ? "project" : "global";
-    showToast("请先选择工作线，再查看工作区 Skills。", "warn");
+    showToast(sx("app.workspaceSkillsRequired"), "warn");
     return getSkillContext();
   }
   state.skillContextScope = requested.scope;
@@ -694,7 +734,7 @@ async function refreshEffectiveSkillsPolicy() {
   try {
     return await skillsPhaseB.loadEffective(agentId, getEffectiveSkillContext());
   } catch (error) {
-    notifyTerminal(`[warn] effective Skills 刷新失败：${error?.message || error}\n`);
+    notifyTerminal(`[warn] ${am("effectiveSkillsRefreshFailed", { message: error?.message || error })}\n`);
     return [];
   }
 }
@@ -782,11 +822,111 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions }],
 ].forEach(([key, panel]) => settingsPanelRegistry.register(key, panel));
 
+function updateRuntimeStatusButton() {
+  const button = $("runtimeStatusBtn");
+  const indicator = $("runtimeStatusIndicator");
+  if (!button || !indicator) return;
+  const streamStatus = state.agentStreamStatus || "idle";
+  const security = state.runtimeSummary?.security || {};
+  const remoteWarning = Boolean(security.remoteAccessRequired && !security.accessPasswordConfigured);
+  let tone = "idle";
+  if (state.healthOK === false || state.runtimeError || streamStatus === "offline" || remoteWarning) tone = "error";
+  else if (["syncing", "resyncing", "connecting", "reconnecting"].includes(streamStatus)) tone = "busy";
+  else if (state.healthOK === true && (!state.agent || streamStatus === "connected")) tone = "ok";
+  indicator.className = `header-tool-indicator ${tone}`;
+  button.classList.toggle("tool-error", tone === "error");
+  const streamLabel = state.agent ? `Agent ${streamStatus}` : t("chat.noAgent");
+  button.title = `${t("workspace.main.conversationDetails")} · ${state.healthLabel || "checking"} · ${streamLabel}${remoteWarning ? " · access password is not configured" : ""}`;
+}
+
+function conversationDetailMetrics() {
+  const messages = Array.isArray(state.currentMessages) ? state.currentMessages : [];
+  const summary = state.activeRunSummary || {};
+  const terminal = terminalOutputStats();
+  const previewRunning = Boolean(state.workspacePreviewStatus?.running || ["running", "started", "ready"].includes(String(state.workspacePreviewStatus?.status || "").toLowerCase()));
+  return {
+    messages: messages.length,
+    cost: Number(summary.costUsd || 0),
+    inputTokens: Number(summary.inputTokens || 0),
+    outputTokens: Number(summary.outputTokens || 0),
+    cacheTokens: Number(summary.cacheReadTokens || summary.cachedTokens || 0),
+    tools: Number(summary.toolCallCount || (Array.isArray(summary.toolCalls) ? summary.toolCalls.length : 0)),
+    terminal: state.terminalWS ? 1 : terminal.lines > 1 ? 1 : 0,
+    browser: previewRunning ? 1 : 0,
+    approvals: Number(summary.pendingApprovals || 0),
+  };
+}
+
+function renderConversationDetails() {
+  const body = $("conversationDetailsBody");
+  if (!body) return;
+  const metrics = conversationDetailMetrics();
+  const rows = [
+    [sx("app.sessionId"), state.agent?.id || "—", true],
+    [sx("app.type"), state.agent?.type || sx("app.programWorkspace")],
+    [sx("app.projectPath"), state.agent?.cwd || state.project?.gitPath || "—", true],
+    [sx("app.projectName"), state.project?.name || "—"],
+    [sx("app.workline"), state.workline?.title || state.workline?.id || "—"],
+    [sx("app.currentModel"), state.agent?.model || currentWorkspaceModel()],
+    [sx("app.permissionMode"), state.agent?.permissionMode || "—"],
+  ];
+  body.innerHTML = `
+    <section class="conversation-detail-hero"><div><h2>${escapeHtml(state.project?.name || state.agent?.title || sx("app.noConversationSelected"))}</h2><p>${escapeHtml(state.agent?.title || sx("app.selectConversationHint"))}</p></div><span class="conversation-detail-status">${escapeHtml(state.agent?.status || t("chat.idle"))}</span></section>
+    <section class="conversation-metric-grid">
+      ${[["Messages", metrics.messages], ["Cost", `$${metrics.cost.toFixed(4)}`], [sx("app.inputTokens"), metrics.inputTokens], [sx("app.outputTokens"), metrics.outputTokens], [sx("app.cacheTokens"), metrics.cacheTokens], [sx("app.tools"), metrics.tools], [t("terminal.title"), metrics.terminal], [sx("app.browser"), metrics.browser], [sx("app.pendingApprovals"), metrics.approvals]].map(([label, value]) => `<div class="conversation-metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(typeof value === "number" ? formatNumber(value) : value)}</strong></div>`).join("")}
+    </section>
+    <section class="conversation-detail-table">${rows.map(([label, value, copy]) => `<div class="conversation-detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${copy && value !== "—" ? `<button type="button" data-copy-detail="${escapeAttr(value)}">${escapeHtml(t("workspace.chat.copy"))}</button>` : ""}</div>`).join("")}</section>
+    <button class="legacy-secondary-btn conversation-runtime-link" type="button" data-details-runtime>${escapeHtml(sx("app.viewRuntime"))}</button>
+  `;
+  body.querySelectorAll("[data-copy-detail]").forEach((node) => node.addEventListener("click", () => copyText(node.dataset.copyDetail)));
+  body.querySelector("[data-details-runtime]")?.addEventListener("click", () => {
+    closeConversationDetails();
+    openSettingsModal("runtime");
+  });
+}
+
+function openConversationDetails() {
+  if (!state.agent) showToast(am("selectConversationFirst"), "warn");
+  closeWorkspace();
+  toggleTerminal(true);
+  $("appShell")?.classList.add("details-open");
+  $("conversationDetailsPanel")?.classList.remove("hidden");
+  $("runtimeStatusBtn")?.classList.add("active");
+  $("runtimeStatusBtn")?.setAttribute("aria-expanded", "true");
+  renderConversationDetails();
+}
+
+function closeConversationDetails() {
+  $("appShell")?.classList.remove("details-open");
+  $("conversationDetailsPanel")?.classList.add("hidden");
+  $("runtimeStatusBtn")?.classList.remove("active");
+  $("runtimeStatusBtn")?.setAttribute("aria-expanded", "false");
+}
+
 function setHealth(ok, text) {
+  state.healthOK = Boolean(ok);
+  state.healthLabel = text;
   const badge = $("healthBadge");
-  badge.textContent = text;
-  badge.classList.toggle("ok", ok);
-  badge.classList.toggle("err", !ok);
+  if (badge) {
+    badge.textContent = text;
+    badge.classList.toggle("ok", ok);
+    badge.classList.toggle("err", !ok);
+  }
+  const globalHealthDot = $("globalHealthDot");
+  const globalHealthText = $("globalHealthText");
+  globalHealthDot?.classList.toggle("ok", ok);
+  globalHealthDot?.classList.toggle("err", !ok);
+  if (globalHealthText) globalHealthText.textContent = t(ok ? "shell.online" : "shell.offline");
+  updateRuntimeStatusButton();
+}
+
+function updateGlobalThemeToggle() {
+  const button = $("globalThemeToggleBtn");
+  const icon = $("globalThemeToggleIcon");
+  if (!button || !icon) return;
+  const dark = currentAppearancePreferences().theme === "dark";
+  button.setAttribute("aria-pressed", dark ? "true" : "false");
+  icon.textContent = dark ? "☀" : "☾";
 }
 
 async function loadHealth() {
@@ -809,6 +949,7 @@ async function loadSettings() {
     state.settings = settings;
     updateSidebarAccountSummary();
     renderModelOptions();
+    refreshReasoningEffortControl();
   } catch (err) {
     if (seq === state.settingsLoadSeq) throw err;
   }
@@ -819,11 +960,11 @@ async function loadServerNotificationSettings({ notify = false } = {}) {
   state.serverNotificationError = "";
   try {
     state.serverNotificationSettings = await api("/api/notifications/settings");
-    if (notify) notifyTerminal("[info] 服务端通知设置已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("notificationSettingsRefreshed")}\n`);
   } catch (err) {
     state.serverNotificationSettings = null;
     state.serverNotificationError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 服务端通知设置刷新失败：${state.serverNotificationError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("notificationSettingsRefreshFailed", { message: state.serverNotificationError })}\n`);
   } finally {
     state.serverNotificationLoading = false;
   }
@@ -835,8 +976,8 @@ async function saveServerNotificationSettings(payload) {
   state.serverNotificationError = "";
   try {
     state.serverNotificationSettings = await api("/api/notifications/settings", { method: "PUT", body: JSON.stringify(payload) });
-    showToast("Webhook 通知设置已保存。", "success", { force: true });
-    notifyTerminal("[info] Webhook 通知设置已保存。\n");
+    showToast(am("notificationSettingsSaved"), "success", { force: true });
+    notifyTerminal(`[info] ${am("notificationSettingsSaved")}\n`);
   } catch (err) {
     state.serverNotificationError = err.message || String(err);
     showError(err);
@@ -851,8 +992,8 @@ async function testServerNotification() {
   state.serverNotificationError = "";
   try {
     await api("/api/notifications/test", { method: "POST", body: JSON.stringify({}) });
-    showToast("Webhook 测试通知已发送。", "success", { force: true });
-    notifyTerminal("[info] Webhook 测试通知已发送。\n");
+    showToast(am("notificationTestSent"), "success", { force: true });
+    notifyTerminal(`[info] ${am("notificationTestSent")}\n`);
   } catch (err) {
     state.serverNotificationError = err.message || String(err);
     showError(err);
@@ -889,10 +1030,10 @@ async function loadServerSkills({ notify = false } = {}) {
   applyServerSkillsLoadResult(state, seq, { ...result, skills: result.skills.sort(sortServerSkills) });
   if (result.status === "ready") state.serverSkillsHadServerData = true;
   if (notify) {
-    const fallback = hadServerData ? "已保留上次加载的服务端策略" : "尚无 authoritative policy，本地模板保持不可用";
+    const fallback = hadServerData ? am("serverSkillsFallbackKept") : am("serverSkillsNoAuthoritative");
     notifyTerminal(result.error
-      ? `[warn] 服务端技能刷新失败，${fallback}：${result.error}\n`
-      : "[info] 服务端技能已刷新。\n");
+      ? `[warn] ${am("serverSkillsRefreshFailed", { fallback, message: result.error })}\n`
+      : `[info] ${am("serverSkillsRefreshed")}\n`);
   }
   refreshServerSkillsUI();
   return state.serverSkills;
@@ -900,15 +1041,15 @@ async function loadServerSkills({ notify = false } = {}) {
 
 async function loadServerSkillDetail(id) {
   const skill = (state.serverSkills || []).find((item) => item.id === id);
-  if (!skill) throw new Error("服务端技能不存在");
+  if (!skill) throw new Error(am("serverSkillMissing"));
   if (skill.detailLoaded && String(skill.prompt || "").trim()) return skill;
   const requestedUpdatedAt = skill.updatedAt;
   try {
     const detail = await api(`/api/skills/${encodeURIComponent(id)}`);
     const latest = (state.serverSkills || []).find((item) => item.id === id);
-    if (!latest) throw new Error("服务端技能不存在");
+    if (!latest) throw new Error(am("serverSkillMissing"));
     if (latest.updatedAt !== requestedUpdatedAt && detail.updatedAt !== latest.updatedAt) {
-      throw new Error("技能详情已变化，请重新打开后重试");
+      throw new Error(am("serverSkillChanged"));
     }
     const merged = { ...latest, ...detail, detailLoaded: true, detailError: "" };
     state.serverSkills = (state.serverSkills || []).map((item) => item.id === id ? merged : item).sort(sortServerSkills);
@@ -933,7 +1074,7 @@ async function createServerSkill(payload, { silent = false } = {}) {
     state.serverSkills = [{ ...created, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== created.id)].sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
     await invalidateAndRefreshEffectiveSkillsPolicy();
-    if (!silent) showToast("服务端技能已保存。", "success", { force: true });
+    if (!silent) showToast(am("serverSkillSaved"), "success", { force: true });
     return created;
   } catch (err) {
     state.serverSkillsError = err.message || String(err);
@@ -949,7 +1090,7 @@ async function updateServerSkill(id, payload, { silent = false } = {}) {
   state.serverSkillsError = "";
   try {
     const current = (state.serverSkills || []).find((item) => item.id === id);
-    if (!current?.updatedAt) throw new Error("服务端技能版本缺失，请刷新后重试");
+    if (!current?.updatedAt) throw new Error(am("serverSkillVersionMissing"));
     const updated = await api(`/api/skills/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ ...payload, expectedUpdatedAt: current.updatedAt }),
@@ -957,14 +1098,14 @@ async function updateServerSkill(id, payload, { silent = false } = {}) {
     state.serverSkills = (state.serverSkills || []).map((item) => item.id === updated.id ? { ...updated, detailLoaded: true } : item).sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
     await invalidateAndRefreshEffectiveSkillsPolicy();
-    if (!silent) showToast("服务端技能已更新。", "success", { force: true });
+    if (!silent) showToast(am("serverSkillUpdated"), "success", { force: true });
     return updated;
   } catch (err) {
     if (isOptimisticSkillConflict(err)) {
       await loadServerSkills();
       const message = state.serverSkillsStatus === "ready"
-        ? "技能已被其他客户端更新；已刷新服务端列表，请检查后重试。"
-        : "技能已被其他客户端更新，但自动刷新失败；请手动刷新后重试。";
+        ? am("serverSkillConflictRefreshed")
+        : am("serverSkillConflictRefreshFailed");
       state.serverSkillsError = message;
       throw new Error(message);
     }
@@ -983,7 +1124,7 @@ async function deleteServerSkill(id) {
     await api(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
     state.serverSkills = (state.serverSkills || []).filter((item) => item.id !== id);
     await invalidateAndRefreshEffectiveSkillsPolicy();
-    showToast("服务端技能已删除。", "success", { force: true });
+    showToast(am("serverSkillDeleted"), "success", { force: true });
   } catch (err) {
     state.serverSkillsError = err.message || String(err);
     throw err;
@@ -1005,7 +1146,7 @@ async function importServerSkill(content) {
     state.serverSkills = [{ ...imported, detailLoaded: true }, ...(state.serverSkills || []).filter((item) => item.id !== imported.id)].sort(sortServerSkills);
     state.serverSkillsStatus = "ready";
     await invalidateAndRefreshEffectiveSkillsPolicy();
-    showToast("SKILL.md 已导入并保持停用状态。", "success", { force: true });
+    showToast(am("skillImportedDisabled"), "success", { force: true });
     return imported;
   } catch (err) {
     state.serverSkillsError = err.message || String(err);
@@ -1021,10 +1162,10 @@ async function loadWorkflowPreferences({ notify = false } = {}) {
   state.workflowError = "";
   try {
     state.workflowPreferences = await api("/api/workflow/preferences");
-    if (notify) notifyTerminal("[info] 工作流权限偏好已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("workflowPreferencesRefreshed")}\n`);
   } catch (err) {
     state.workflowError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 工作流权限偏好刷新失败：${state.workflowError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("workflowPreferencesRefreshFailed", { message: state.workflowError })}\n`);
   } finally {
     state.workflowLoading = false;
     if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
@@ -1036,7 +1177,7 @@ async function saveWorkflowPreferences(payload) {
   state.workflowError = "";
   try {
     state.workflowPreferences = await api("/api/workflow/preferences", { method: "PUT", body: JSON.stringify(payload) });
-    showToast("工具权限偏好已保存。", "success", { force: true });
+    showToast(am("toolPermissionPreferencesSaved"), "success", { force: true });
   } catch (err) {
     state.workflowError = err.message || String(err);
     showError(err);
@@ -1051,10 +1192,10 @@ async function loadToolPermissionRules({ notify = false } = {}) {
   state.toolPermissionRulesError = "";
   try {
     state.toolPermissionRules = await api("/api/workflow/tool-permissions");
-    if (notify) notifyTerminal("[info] 工具权限规则已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("toolPermissionRulesRefreshed")}\n`);
   } catch (err) {
     state.toolPermissionRulesError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 工具权限规则刷新失败：${state.toolPermissionRulesError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("toolPermissionRulesRefreshFailed", { message: state.toolPermissionRulesError })}\n`);
   } finally {
     state.toolPermissionRulesLoading = false;
     if (state.activeSettingsPanel === "skills") refreshActiveSettingsPanel();
@@ -1067,7 +1208,7 @@ async function createToolPermissionRule(payload) {
   try {
     const rule = await api("/api/workflow/tool-permissions", { method: "POST", body: JSON.stringify(payload) });
     state.toolPermissionRules = [rule, ...(state.toolPermissionRules || [])].sort(toolPermissionRuleSort);
-    showToast("工具权限规则已添加。", "success", { force: true });
+    showToast(am("toolPermissionRuleAdded"), "success", { force: true });
   } catch (err) {
     state.toolPermissionRulesError = err.message || String(err);
     showError(err);
@@ -1083,7 +1224,7 @@ async function updateToolPermissionRule(id, payload) {
   try {
     const rule = await api(`/api/workflow/tool-permissions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) });
     state.toolPermissionRules = (state.toolPermissionRules || []).map((item) => item.id === id ? rule : item).sort(toolPermissionRuleSort);
-    showToast("工具权限规则已更新。", "success", { force: true });
+    showToast(am("toolPermissionRuleUpdated"), "success", { force: true });
   } catch (err) {
     state.toolPermissionRulesError = err.message || String(err);
     showError(err);
@@ -1099,7 +1240,7 @@ async function deleteToolPermissionRule(id) {
   try {
     await api(`/api/workflow/tool-permissions/${encodeURIComponent(id)}`, { method: "DELETE" });
     state.toolPermissionRules = (state.toolPermissionRules || []).filter((item) => item.id !== id);
-    showToast("工具权限规则已删除。", "success", { force: true });
+    showToast(am("toolPermissionRuleDeleted"), "success", { force: true });
   } catch (err) {
     state.toolPermissionRulesError = err.message || String(err);
     showError(err);
@@ -1128,26 +1269,27 @@ async function loadModelCatalog() {
     state.modelCatalog = { providers: [], error: err.message };
   }
   renderModelOptions();
+  refreshReasoningEffortControl();
   refreshActiveSettingsPanel();
 }
 
 async function loadStorageSummary({ notify = false } = {}) {
   const seq = ++state.storageSeq;
   const button = $("refreshStorageSummaryBtn");
-  setButtonBusy(button, true, "扫描中");
+  setButtonBusy(button, true, am("scanning"));
   try {
     const summary = await api("/api/storage/summary");
     if (seq !== state.storageSeq) return;
     state.storageSummary = summary;
     state.storageError = "";
-    if (notify) notifyTerminal("[info] 储存空间统计已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("storageRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.storageSeq) return;
     state.storageSummary = null;
     state.storageError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 储存空间统计失败：${state.storageError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("storageRefreshFailed", { message: state.storageError })}\n`);
   } finally {
-    if (seq === state.storageSeq) setButtonBusy(button, false, "扫描中");
+    if (seq === state.storageSeq) setButtonBusy(button, false, am("scanning"));
   }
   if (seq === state.storageSeq && state.activeSettingsPanel === "storage") refreshActiveSettingsPanel();
 }
@@ -1155,41 +1297,62 @@ async function loadStorageSummary({ notify = false } = {}) {
 async function loadLicenseSummary({ notify = false } = {}) {
   const seq = ++state.licenseSeq;
   const button = $("refreshLicensesBtn");
-  setButtonBusy(button, true, "刷新中");
+  setButtonBusy(button, true, am("refreshing"));
   try {
     const summary = await api("/api/licenses");
     if (seq !== state.licenseSeq) return;
     state.licenseSummary = summary;
     state.licenseError = "";
-    if (notify) notifyTerminal("[info] 第三方依赖许可证已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("licensesRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.licenseSeq) return;
     state.licenseSummary = null;
     state.licenseError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 第三方依赖许可证刷新失败：${state.licenseError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("licensesRefreshFailed", { message: state.licenseError })}\n`);
   } finally {
-    if (seq === state.licenseSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.licenseSeq) setButtonBusy(button, false, am("refreshing"));
   }
   if (seq === state.licenseSeq && state.activeSettingsPanel === "about") refreshActiveSettingsPanel();
+}
+
+async function loadUpdateStatus({ notify = false } = {}) {
+  const seq = ++state.updateSeq;
+  const button = $("checkForUpdatesBtn");
+  setButtonBusy(button, true, am("checking"));
+  try {
+    const status = await api("/api/update/status");
+    if (seq !== state.updateSeq) return;
+    state.updateStatus = status;
+    state.updateError = "";
+    if (notify) notifyTerminal(`[info] ${am("updateStatus", { status: status?.status || "unknown" })}\n`);
+  } catch (err) {
+    if (seq !== state.updateSeq) return;
+    state.updateStatus = null;
+    state.updateError = err.message || String(err);
+    if (notify) notifyTerminal(`[warn] ${am("updateCheckFailed", { message: state.updateError })}\n`);
+  } finally {
+    if (seq === state.updateSeq) setButtonBusy(button, false, am("checking"));
+  }
+  if (seq === state.updateSeq && state.activeSettingsPanel === "about") refreshActiveSettingsPanel();
 }
 
 async function loadUsageSummary({ notify = false } = {}) {
   const seq = ++state.usageSeq;
   const button = $("refreshUsageSummaryBtn");
-  setButtonBusy(button, true, "刷新中");
+  setButtonBusy(button, true, am("refreshing"));
   try {
     const summary = await api("/api/usage/summary");
     if (seq !== state.usageSeq) return;
     state.usageSummary = summary;
     state.usageError = "";
-    if (notify) notifyTerminal("[info] 使用统计已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("usageRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.usageSeq) return;
     state.usageSummary = null;
     state.usageError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 使用统计刷新失败：${state.usageError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("usageRefreshFailed", { message: state.usageError })}\n`);
   } finally {
-    if (seq === state.usageSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.usageSeq) setButtonBusy(button, false, am("refreshing"));
   }
   if (seq === state.usageSeq && state.activeSettingsPanel === "usage") refreshActiveSettingsPanel();
 }
@@ -1197,7 +1360,7 @@ async function loadUsageSummary({ notify = false } = {}) {
 async function loadWorklineContainerData({ notify = false } = {}) {
   const seq = ++state.worklinesSeq;
   const button = $("refreshWorklinesBtn");
-  setButtonBusy(button, true, "刷新中");
+  setButtonBusy(button, true, am("refreshing"));
   const projectId = state.project?.id || "";
   try {
     if (!projectId) {
@@ -1222,15 +1385,15 @@ async function loadWorklineContainerData({ notify = false } = {}) {
       state.worklineAgents = [];
     }
     state.worklinesError = "";
-    if (notify) notifyTerminal("[info] 工作线与代理状态已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("worklinesAgentsRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.worklinesSeq || state.project?.id !== projectId) return;
     state.projectWorklines = [];
     state.worklineAgents = [];
     state.worklinesError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 工作线与代理刷新失败：${state.worklinesError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("worklinesAgentsRefreshFailed", { message: state.worklinesError })}\n`);
   } finally {
-    if (seq === state.worklinesSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.worklinesSeq) setButtonBusy(button, false, am("refreshing"));
   }
   if (seq === state.worklinesSeq && state.activeSettingsPanel === "worklines-containers") refreshActiveSettingsPanel();
 }
@@ -1238,20 +1401,20 @@ async function loadWorklineContainerData({ notify = false } = {}) {
 async function loadAuthStatus({ notify = false } = {}) {
   const seq = ++state.authSeq;
   const button = $("refreshAuthStatusBtn");
-  setButtonBusy(button, true, "刷新中");
+  setButtonBusy(button, true, am("refreshing"));
   try {
     const status = await api("/api/auth/status");
     if (seq !== state.authSeq) return;
     state.authStatus = status;
     state.authError = "";
-    if (notify) notifyTerminal("[info] 用户与注册状态已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("userRegistrationRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.authSeq) return;
     state.authStatus = null;
     state.authError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] 用户与注册状态刷新失败：${state.authError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("userRegistrationRefreshFailed", { message: state.authError })}\n`);
   } finally {
-    if (seq === state.authSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.authSeq) setButtonBusy(button, false, am("refreshing"));
   }
   if (seq === state.authSeq && state.activeSettingsPanel === "users") refreshActiveSettingsPanel();
 }
@@ -1259,22 +1422,22 @@ async function loadAuthStatus({ notify = false } = {}) {
 async function loadRuntimeSummary({ notify = false } = {}) {
   const seq = ++state.runtimeSeq;
   const button = $("refreshRuntimeSummaryBtn");
-  setButtonBusy(button, true, "刷新中");
+  setButtonBusy(button, true, am("refreshing"));
   try {
     const summary = await api("/api/runtime/summary");
     if (seq !== state.runtimeSeq) return;
     state.runtimeSummary = summary;
     state.runtimeError = "";
     updateSecurityModeUI();
-    if (notify) notifyTerminal("[info] 运行时状态已刷新。\n");
+    if (notify) notifyTerminal(`[info] ${am("runtimeRefreshed")}\n`);
   } catch (err) {
     if (seq !== state.runtimeSeq) return;
     state.runtimeSummary = null;
     state.runtimeError = err.message || String(err);
     updateSecurityModeUI();
-    if (notify) notifyTerminal(`[warn] 运行时状态刷新失败：${state.runtimeError}\n`);
+    if (notify) notifyTerminal(`[warn] ${am("runtimeRefreshFailed", { message: state.runtimeError })}\n`);
   } finally {
-    if (seq === state.runtimeSeq) setButtonBusy(button, false, "刷新中");
+    if (seq === state.runtimeSeq) setButtonBusy(button, false, am("refreshing"));
   }
   if (seq === state.runtimeSeq && ["servers-system", "runtime"].includes(state.activeSettingsPanel)) refreshActiveSettingsPanel();
 }
@@ -1306,19 +1469,105 @@ function setGlobalRailActive(target = "conversation") {
   });
 }
 
-function openSettingsModal(key = "profile") {
+function openSettingsModal(key = "providers") {
+  closeEmployeeOverview();
+  closeConversationDetails();
+  if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
+  const itemKey = settingsItems.some((item) => item.key === key) ? key : "providers";
   state.settingsSearchQuery = "";
+  state.activeSettingsCategory = settingsCategoryForItem(itemKey, "api");
   $("settingsModal").classList.remove("hidden");
   setGlobalRailActive(globalRailSettingsTargets.has(key) ? key : "profile");
   syncSettingsSearchInput();
   warmSettingsData();
-  renderSettingsNav(key);
-  selectSettingsPanel(key);
+  renderSettingsNav(itemKey);
+  selectSettingsPanel(itemKey);
 }
 
 function closeSettingsModal() {
   $("settingsModal").classList.add("hidden");
   setGlobalRailActive("conversation");
+}
+
+function employeeAgentRecords() {
+  const records = new Map();
+  (state.navigationConversations || []).forEach((item) => {
+    if (item?.agentId && !records.has(item.agentId)) records.set(item.agentId, item);
+  });
+  if (state.agent?.id && !records.has(state.agent.id)) {
+    records.set(state.agent.id, {
+      agentId: state.agent.id,
+      agentTitle: state.agent.title || state.agent.id,
+      agentStatus: state.agent.status || "idle",
+      model: state.agent.model || "",
+      permissionMode: state.agent.permissionMode || "",
+      cwd: state.agent.cwd || "",
+      projectId: state.project?.id || "",
+      projectName: state.project?.name || "",
+      worklineId: state.workline?.id || "",
+      worklineTitle: state.workline?.title || "",
+    });
+  }
+  return [...records.values()];
+}
+
+function renderEmployeeOverview() {
+  const body = $("employeeOverviewBody");
+  if (!body) return;
+  const agents = employeeAgentRecords();
+  const schedules = automationControl.getState().schedules || [];
+  body.innerHTML = `
+    <section class="employee-section">
+      <div class="employee-section-head"><div><h2>${escapeHtml(am("employeeTeamTitle"))}</h2><p>${escapeHtml(am("employeeTeamDescription"))}</p></div><button class="legacy-primary-btn" type="button" data-employee-action="new">${escapeHtml(am("addEmployee"))}</button></div>
+      <div class="employee-card-grid">
+        ${agents.length ? agents.map((agent) => `
+          <button class="employee-card ${agent.agentId === state.agent?.id ? "active" : ""}" type="button" data-employee-target="${escapeAttr(agent.targetId || "")}" ${agent.targetId ? "" : "disabled"}>
+            <span class="employee-avatar">${escapeHtml(String(agent.agentTitle || "AI").slice(0, 2).toUpperCase())}</span>
+            <span class="employee-card-main"><strong>${escapeHtml(agent.agentTitle || agent.agentId)}</strong><small>${escapeHtml(agent.projectName || am("unlinkedProject"))} · ${escapeHtml(agent.worklineTitle || agent.agentStatus || "idle")}</small><em>${escapeHtml(agent.model || am("noModelSelected"))}</em></span>
+            <span class="employee-status ${escapeAttr(agent.agentStatus || "idle")}">${escapeHtml(agent.agentStatus || "idle")}</span>
+          </button>
+        `).join("") : `<div class="legacy-empty-panel">${escapeHtml(am("noEmployees"))}</div>`}
+      </div>
+    </section>
+    <section class="employee-section schedule-section">
+      <div class="employee-section-head"><div><h2>${escapeHtml(am("scheduledTasksTitle"))}</h2><p>${escapeHtml(am("scheduledTasksDescription"))}</p></div><div class="employee-actions"><button class="legacy-primary-btn" type="button" data-employee-action="schedule">${escapeHtml(am("addSchedule"))}</button><button class="legacy-secondary-btn" type="button" data-employee-action="history">${escapeHtml(am("executionHistory"))}</button></div></div>
+      <div class="employee-schedule-layout">
+        <div class="employee-schedule-list">
+          ${schedules.length ? schedules.map((schedule) => `<button type="button" class="employee-schedule-row" data-employee-action="schedule"><strong>${escapeHtml(schedule.name || schedule.id)}</strong><small>${escapeHtml(schedule.expression || am("cronUnconfigured"))} · ${escapeHtml(schedule.status || "ready")}</small></button>`).join("") : `<div class="legacy-empty-panel compact">${escapeHtml(am("noScheduledTasks"))}</div>`}
+        </div>
+        <div class="employee-schedule-detail">${schedules.length ? `<strong>${escapeHtml(schedules[0].name || schedules[0].id)}</strong><p>${escapeHtml(schedules[0].prompt || am("taskContentMissing"))}</p><dl><div><dt>Agent</dt><dd>${escapeHtml(schedules[0].agentId || "—")}</dd></div><div><dt>${escapeHtml(am("nextRun"))}</dt><dd>${escapeHtml(formatTimestamp(schedules[0].nextRunAt))}</dd></div></dl>` : escapeHtml(am("editOrAddTask"))}</div>
+      </div>
+    </section>
+  `;
+  body.querySelectorAll("[data-employee-target]").forEach((node) => {
+    node.addEventListener("click", () => {
+      const target = node.dataset.employeeTarget;
+      if (!target) return;
+      closeEmployeeOverview();
+      selectNavigationConversation(target).catch(showError);
+    });
+  });
+  body.querySelectorAll("[data-employee-action]").forEach((node) => {
+    node.addEventListener("click", () => {
+      const action = node.dataset.employeeAction;
+      closeEmployeeOverview();
+      openSettingsModal(action === "new" ? "agents" : "im-gateway");
+    });
+  });
+}
+
+async function openEmployeeOverview() {
+  closeSettingsModal();
+  setGlobalRailActive("agents");
+  $("employeeOverviewModal")?.classList.remove("hidden");
+  renderEmployeeOverview();
+  await automationControl.load();
+  renderEmployeeOverview();
+}
+
+function closeEmployeeOverview() {
+  $("employeeOverviewModal")?.classList.add("hidden");
+  if (!$("settingsModal") || $("settingsModal").classList.contains("hidden")) setGlobalRailActive("conversation");
 }
 
 function activateGlobalRailTarget(target) {
@@ -1327,9 +1576,14 @@ function activateGlobalRailTarget(target) {
   closeMobileSidebar();
   if (key === "conversation") {
     closeSettingsModal();
+    closeEmployeeOverview();
     return;
   }
-  if (globalRailSettingsTargets.has(key)) openSettingsModal(key);
+  if (key === "agents") {
+    openEmployeeOverview().catch(showError);
+    return;
+  }
+  if (globalRailSettingsTargets.has(key)) openSettingsModal(key === "profile" ? "providers" : key);
 }
 
 function normalizedSettingsSearchQuery() {
@@ -1365,29 +1619,53 @@ function syncSettingsSearchInput() {
   $("clearSettingsSearchBtn")?.classList.toggle("visible", Boolean(normalizedSettingsSearchQuery()));
 }
 
-function renderSettingsNav(activeKey = "profile") {
-  const nav = $("settingsNav");
+function settingsItemsForCategory(categoryKey) {
+  const category = settingsCategoryByKey(categoryKey);
+  return category.items.map((key) => settingsItems.find((item) => item.key === key)).filter(Boolean);
+}
+
+function renderSettingsCategoryNav(activeCategory = "api") {
+  const nav = $("settingsCategoryNav");
+  if (!nav) return;
+  nav.innerHTML = legacySettingsCategories.map((category) => `
+    <button class="legacy-settings-category ${category.key === activeCategory ? "active" : ""}" type="button" role="tab" aria-selected="${category.key === activeCategory ? "true" : "false"}" data-settings-category="${escapeAttr(category.key)}">${escapeHtml(category.label)}</button>
+  `).join("");
+  nav.querySelectorAll("[data-settings-category]").forEach((node) => {
+    node.addEventListener("click", () => selectSettingsCategory(node.dataset.settingsCategory));
+  });
+}
+
+function selectSettingsCategory(categoryKey) {
+  const category = settingsCategoryByKey(categoryKey);
+  state.activeSettingsCategory = category.key;
+  state.settingsSearchQuery = "";
   syncSettingsSearchInput();
-  const sections = filteredSettingsSections();
-  if (!sections.length) {
-    nav.innerHTML = `
-      <div class="settings-nav-empty">
-        <strong>没有匹配的设置</strong>
-        <span>换个关键词试试，例如“模型”“终端”“备份”或“技能”。</span>
-      </div>
-    `;
+  const current = state.activeSettingsPanel || "";
+  const nextKey = category.items.includes(current) ? current : firstSettingsItemForCategory(category.key);
+  renderSettingsNav(nextKey);
+  selectSettingsPanel(nextKey);
+}
+
+function renderSettingsNav(activeKey = "providers") {
+  const nav = $("settingsNav");
+  if (!nav) return;
+  syncSettingsSearchInput();
+  const query = normalizedSettingsSearchQuery();
+  const categoryKey = query ? settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api") : settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api");
+  state.activeSettingsCategory = categoryKey;
+  renderSettingsCategoryNav(categoryKey);
+  const items = query
+    ? filteredSettingsSections().flatMap((section) => section.items)
+    : settingsItemsForCategory(categoryKey);
+  nav.closest(".legacy-settings-subbar")?.classList.remove("hidden");
+  if (!items.length) {
+    nav.innerHTML = `<div class="settings-nav-empty"><strong>${escapeHtml(am("noMatchingSettings"))}</strong><span>${escapeHtml(am("matchingSettingsHint"))}</span></div>`;
     return;
   }
-  nav.innerHTML = sections.map((section) => `
-    <div class="settings-nav-section">
-      <div class="settings-nav-heading">${escapeHtml(section.title)}</div>
-      ${section.items.map((item) => `
-        <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.subtitle)}">
-          <span class="settings-nav-icon">${escapeHtml(item.icon)}</span>
-          <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.subtitle)}</small></span>
-        </button>
-      `).join("")}
-    </div>
+  nav.innerHTML = items.map((item) => `
+    <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" role="tab" aria-selected="${item.key === activeKey ? "true" : "false"}" data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.subtitle)}">
+      <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong></span>
+    </button>
   `).join("");
   nav.querySelectorAll("[data-settings-key]").forEach((node) => {
     node.addEventListener("click", () => selectSettingsPanel(node.dataset.settingsKey));
@@ -1419,12 +1697,22 @@ function focusSettingsSearchInput({ select = false } = {}) {
 function selectSettingsPanel(key) {
   const item = settingsItems.find((entry) => entry.key === key) || settingsItems[0];
   const panel = settingsPanelRegistry.resolve(item.key);
+  const categoryKey = settingsCategoryForItem(item.key, state.activeSettingsCategory || "api");
+  state.activeSettingsCategory = categoryKey;
   state.activeSettingsPanel = item.key;
+  renderSettingsCategoryNav(categoryKey);
+  const nav = $("settingsNav");
+  if (!normalizedSettingsSearchQuery() && !nav?.querySelector(`[data-settings-key="${item.key}"]`)) renderSettingsNav(item.key);
+  const isAboutPanel = item.key === "about";
+  $("settingsContentTitle")?.closest(".settings-content-head")?.classList.toggle("hidden", isAboutPanel);
+  $("settingsContentBody")?.closest(".settings-content")?.classList.toggle("about-panel-active", isAboutPanel);
   $("settingsContentTitle").textContent = item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
   $("settingsContentBody").innerHTML = panel ? panel.render(item) : renderGenericSettingsContent(item);
-  $("settingsNav").querySelectorAll(".settings-nav-item").forEach((node) => {
-    node.classList.toggle("active", node.dataset.settingsKey === item.key);
+  nav?.querySelectorAll(".settings-nav-item").forEach((node) => {
+    const active = node.dataset.settingsKey === item.key;
+    node.classList.toggle("active", active);
+    node.setAttribute("aria-selected", active ? "true" : "false");
   });
   panel?.bind?.(item);
 }
@@ -1485,52 +1773,52 @@ async function copyToClipboard(text) {
 async function copyText(text) {
   if (!text) return;
   if (await copyToClipboard(text)) {
-    showToast("已复制到剪贴板。", "success");
-    notifyTerminal("[info] 已复制到剪贴板。\n");
+    showToast(am("copiedToClipboard"), "success");
+    notifyTerminal(`[info] ${am("copiedToClipboard")}\n`);
     return;
   }
-  showToast("复制失败，请手动选择文本复制。", "warn");
-  notifyTerminal("[warn] 复制到剪贴板失败。\n");
+  showToast(am("copyFailed"), "warn");
+  notifyTerminal(`[warn] ${am("copyFailed")}\n`);
 }
 
 function settingsPanelDetails(key) {
   const base = {
     profile: [
-      { title: "当前状态", text: "本地 MVP 暂未启用完整账户系统，后续会在这里管理头像、昵称和资料。" },
-      { title: "快捷动作", text: "可扩展为导入头像、设置显示名称和绑定 Git 身份。" },
+      { title: am("currentStatus"), text: am("profileStatusDescription") },
+      { title: am("quickActions"), text: am("profileQuickActionsDescription") },
     ],
     models: [
-      { title: "默认模型", text: state.settings?.agent?.defaultModel || "尚未加载默认模型" },
-      { title: "已配置提供商", text: `${state.settings?.providers?.length || 0} 个 provider profile` },
+      { title: am("defaultModel"), text: state.settings?.agent?.defaultModel || am("defaultModelNotLoaded") },
+      { title: am("configuredProviders"), text: am("providerProfiles", { count: state.settings?.providers?.length || 0 }) },
     ],
     agents: [
-      { title: "默认权限", text: state.settings?.agent?.defaultPermissionMode || "acceptEdits" },
-      { title: "运行策略", text: "后续会管理自动工具调用、计划模式和代理行为。" },
+      { title: am("defaultPermission"), text: state.settings?.agent?.defaultPermissionMode || "acceptEdits" },
+      { title: am("executionPolicy"), text: am("executionPolicyDescription") },
     ],
     providers: [
-      { title: "CLIProxyAPI", text: cliProxyProviderSummary() },
-      { title: "Secret", text: "默认 config 写盘会脱敏；如 CLIProxyAPI 配置了 api-keys，请通过 CLIPROXYAPI_API_KEY 注入。" },
+      { title: "Codex OAuth", text: codexProviderSummary() },
+      { title: "Secret", text: am("secretDescription") },
     ],
     "agent-admin": [
-      { title: "后端数量", text: `${state.backends.length} 个 Agent Server backend` },
-      { title: "当前后端", text: activeBackend()?.name || "未配置后端" },
+      { title: am("backendCount"), text: am("agentServerBackends", { count: state.backends.length }) },
+      { title: am("currentBackend"), text: activeBackend()?.name || am("backendNotConfigured") },
     ],
     "servers-system": [
-      { title: "服务端口", text: `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "7788"}` },
-      { title: "版本", text: state.settings?.version || "0.1.0-dev" },
+      { title: am("serverPort"), text: `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "7788"}` },
+      { title: am("version"), text: state.settings?.version || "0.1.0-dev" },
     ],
     about: [
       { title: "Autoto", text: "Local-first Go AI coding Autoto server MVP." },
-      { title: "License", text: "MIT License；第三方依赖请查看 THIRD_PARTY_NOTICES.md。" },
+      { title: "License", text: am("licenseDescription") },
     ],
   };
   return base[key] || [
-    { title: "页面已预留", text: "该设置项已加入导航，具体配置表单将在后续版本补齐。" },
-    { title: "下一步", text: "可根据实际后端能力继续接入 API、验证和保存逻辑。" },
+    { title: am("reservedPage"), text: am("reservedPageDescription") },
+    { title: am("nextStep"), text: am("nextStepDescription") },
   ];
 }
 
-function renderEmptyWorkspaceCard({ title = "选择资料夹，让 AI 开始工作", text = "Autoto 会在该资料夹内读取、编辑文件，并按权限执行命令。", action = "选择资料夹", hint = "也可以点击左侧 AI 代理右侧的 ＋。", icon = "☻" } = {}) {
+function renderEmptyWorkspaceCard({ title = t("chat.emptyTitle"), text = t("chat.emptyDescription"), action = t("chat.chooseFolderAction"), hint = t("chat.emptyHint"), icon = "☻" } = {}) {
   return `
     <div class="empty-workspace-card">
       <div class="empty-workspace-icon">${escapeHtml(icon)}</div>
@@ -1551,20 +1839,27 @@ function showEmptyWorkspaceState(options = {}) {
 
 function permissionLabel(value) {
   const labels = {
-    readOnly: "只读",
-    acceptEdits: "可编辑",
-    bypassPermissions: "全部允许",
-    dontAsk: "不询问",
-    default: "自动",
+    readOnly: t("chat.permission.readOnly"),
+    acceptEdits: t("chat.permission.editable"),
+    bypassPermissions: t("chat.permission.allowAll"),
+    dontAsk: t("chat.permission.dontAsk"),
+    default: t("chat.permission.automatic"),
   };
-  return labels[value] || value || "自动";
+  return labels[value] || value || t("chat.permission.automatic");
 }
 
 function updatePermissionModeDisplay() {
   const select = $("permissionMode");
-  const display = document.querySelector(".mode-display");
+  const display = document.querySelector(".permission-toolbar-pill .mode-display");
   if (!select || !display) return;
-  display.textContent = permissionLabel(effectivePermissionForDisplay(select.value));
+  const permission = effectivePermissionForDisplay(select.value);
+  const label = permissionLabel(permission);
+  display.textContent = label;
+  const badge = $("permissionRiskBadge");
+  if (badge) {
+    badge.textContent = label;
+    badge.classList.toggle("danger", permission === "bypassPermissions");
+  }
 }
 
 function currentSecuritySummary() {
@@ -1594,7 +1889,7 @@ function enforcePermissionSelectCap() {
   const option = Array.from(select.options).find((item) => item.value === "bypassPermissions");
   if (option) {
     option.disabled = disabled;
-    option.textContent = disabled ? "全部允许（远程禁用）" : "全部允许";
+    option.textContent = disabled ? `${t("chat.permission.allowAll")} (${t("workspace.terminal.remoteDisabled")})` : t("chat.permission.allowAll");
   }
   if (disabled && select.value === "bypassPermissions") {
     select.value = "acceptEdits";
@@ -1605,11 +1900,11 @@ function enforcePermissionSelectCap() {
 async function logoutRemoteAccess() {
   closeSidebarSettingsMenu();
   if (!remoteSecurityHardeningActive()) {
-    showToast("本地 MVP 暂未启用完整账户系统，无需退出登录。", "info");
+    showToast(t("workspace.main.localMvpNoLogout"), "info");
     return;
   }
   await api("/auth/remote-access/logout", { method: "POST" });
-  showToast("已退出远程访问，请重新输入访问密码。", "success", { force: true });
+  showToast(t("workspace.main.remoteLoggedOut"), "success", { force: true });
   location.reload();
 }
 
@@ -1619,17 +1914,17 @@ function updateSecurityModeUI() {
   const terminalLocked = Boolean(security?.remoteAccessRequired && security?.remoteTerminalAllowed === false);
   const badge = $("securityModeBadge");
   if (badge) {
-    badge.textContent = active ? "隧道收紧" : "本地";
-    badge.title = security?.message || (active ? "远程收紧已启用" : "本地模式");
+    badge.textContent = active ? t("workspace.main.remoteHardened") : t("workspace.main.local");
+    badge.title = security?.message || (active ? t("workspace.main.remoteHardened") : t("workspace.main.local"));
     badge.classList.toggle("warn", active);
     badge.classList.toggle("ok", !active);
   }
   const banner = $("remoteSecurityBanner");
   if (banner) {
     if (active) {
-      const passwordText = security?.accessPasswordConfigured ? "访问密码已启用" : "未配置访问密码";
-      const terminalText = terminalLocked ? "终端已锁定" : "终端显式开放";
-      banner.innerHTML = `<strong>远程收紧</strong><span>${escapeHtml(passwordText)} · 已禁用自动执行 · ${escapeHtml(terminalText)}</span>`;
+      const passwordText = security?.accessPasswordConfigured ? t("workspace.main.passwordEnabled") : t("workspace.main.passwordMissing");
+      const terminalText = terminalLocked ? t("workspace.main.terminalLocked") : t("workspace.main.terminalOpen");
+      banner.innerHTML = `<strong>${escapeHtml(t("workspace.main.remoteHardened"))}</strong><span>${escapeHtml(passwordText)} · ${escapeHtml(t("workspace.main.autoExecutionDisabled"))} · ${escapeHtml(terminalText)}</span>`;
       banner.classList.remove("hidden");
       banner.classList.toggle("danger", !security?.accessPasswordConfigured);
     } else {
@@ -1642,14 +1937,16 @@ function updateSecurityModeUI() {
     if (!button) return;
     if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.title || "";
     button.disabled = terminalLocked;
-    button.title = terminalLocked ? "远程收紧模式默认禁用交互式终端" : button.dataset.defaultTitle;
+    button.title = terminalLocked ? am("remoteTerminalDisabledTitle") : button.dataset.defaultTitle;
   });
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
+  renderTerminalButtonState();
+  updateRuntimeStatusButton();
 }
 
 function currentWorkspaceModel() {
-  return state.agent?.model || selectedModelValue() || currentModelValue() || "未选择模型";
+  return state.agent?.model || selectedModelValue() || currentModelValue() || am("noModelSelected");
 }
 
 function updateWorkspaceMetaPills() {
@@ -1663,12 +1960,12 @@ function updateWorkspaceMetaPills() {
   const cwd = canonicalLocalPath(state.agent?.cwd || state.project?.gitPath || "");
   const permission = effectivePermissionForDisplay(state.agent?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
   const model = currentWorkspaceModel();
-  const securityText = remoteSecurityHardeningActive() ? "隧道收紧" : "本地";
+  const securityText = remoteSecurityHardeningActive() ? t("workspace.main.remoteHardened") : t("workspace.main.local");
   el.innerHTML = `
-    <span class="workspace-pill" title="${escapeAttr(cwd)}">目录：${escapeHtml(shortPath(cwd))}</span>
-    <span class="workspace-pill">权限：${escapeHtml(permissionLabel(permission))}</span>
-    <span class="workspace-pill security-workspace-pill">模式：${escapeHtml(securityText)}</span>
-    <span class="workspace-pill" title="${escapeAttr(model)}">模型：${escapeHtml(model)}</span>
+    <span class="workspace-pill" title="${escapeAttr(cwd)}">${escapeHtml(t("workspace.main.directoryLabel", { path: shortPath(cwd) }))}</span>
+    <span class="workspace-pill">${escapeHtml(t("workspace.main.permissionLabel", { permission: permissionLabel(permission) }))}</span>
+    <span class="workspace-pill security-workspace-pill">${escapeHtml(t("workspace.main.modeLabel", { mode: securityText }))}</span>
+    <span class="workspace-pill" title="${escapeAttr(model)}">${escapeHtml(t("workspace.main.modelLabel", { model }))}</span>
   `;
   el.classList.remove("hidden");
 }
@@ -1724,6 +2021,8 @@ function renderProjects() {
     mode: state.navigationMode,
     query: state.projectQuery,
   });
+  const heading = $("navigationListHeading");
+  if (heading) heading.textContent = t(state.navigationMode === "conversations" ? "shell.filters.conversations" : "shell.filters.projects");
   el.innerHTML = renderNavigationHTML(view, {
     activeProjectId: state.project?.id || "",
     activeAgentId: state.agent?.id || "",
@@ -1748,23 +2047,23 @@ async function createProjectFromDirectory(path, options = {}) {
   hideSlashCommandPalette();
   if (state.projectCreating) return;
   const normalizedPath = canonicalLocalPath(path);
-  if (!normalizedPath) throw new Error("请先选择一个目录");
+  if (!normalizedPath) throw new Error(t("workspace.main.selectDirectory"));
   const modalOpen = elementVisible("folderModal");
   const button = options.button || (modalOpen ? $("chooseDirectoryBtn") : null);
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const existing = projects.find((project) => normalizePath(project.gitPath) === normalizePath(normalizedPath));
   const seq = ++state.projectCreateSeq;
   state.projectCreating = true;
-  const busyText = existing ? "打开中" : "创建中";
+  const busyText = existing ? t("workspace.main.opening") : t("workspace.main.creating");
   setButtonBusy(button, true, busyText);
-  setDirectoryStatus(`${existing ? "正在打开" : "正在创建"}：${normalizedPath}`, "busy");
-  showToast(`${existing ? "正在打开" : "正在创建"}资料夹：${shortPath(normalizedPath)}`, "info", { force: true });
+  setDirectoryStatus(`${busyText}：${normalizedPath}`, "busy");
+  showToast(`${busyText}：${shortPath(normalizedPath)}`, "info", { force: true });
   try {
     rememberDirectory(normalizedPath);
     if (existing) {
       if (modalOpen) closeDirectoryModal();
       await selectProject(existing.id);
-      showToast(`已打开：${shortPath(normalizedPath)}`, "success", { force: true });
+      showToast(t("workspace.main.opened", { path: shortPath(normalizedPath) }), "success", { force: true });
       return;
     }
     const name = basename(normalizedPath) || "Project";
@@ -1787,12 +2086,12 @@ async function createProjectFromDirectory(path, options = {}) {
     state.worklineAgents = created.agent ? [created.agent] : [];
     renderProjects();
     await enterAgent();
-    showToast(`已选择资料夹：${shortPath(created.project?.gitPath || normalizedPath)}`, "success", { force: true });
+    showToast(t("workspace.main.selectedDirectory", { path: shortPath(created.project?.gitPath || normalizedPath) }), "success", { force: true });
     appendTerminal(`Created project: ${created.project.name}\nPath: ${created.project.gitPath}\n`);
   } catch (err) {
     if (seq === state.projectCreateSeq) {
       const message = err.message || String(err);
-      setDirectoryStatus(`打开失败：${message}`, "error");
+      setDirectoryStatus(am("openingFailed", { message }), "error");
       throw err;
     }
   } finally {
@@ -1813,6 +2112,7 @@ function beginNavigationSelection(project) {
   state.agent = null;
   setWorkspaceExplorerAgent(null);
   syncMessageComposerBusy();
+  refreshReasoningEffortControl();
   state.currentMessages = [];
   state.messageCopyTexts = [];
   resetGitWorkflowState();
@@ -1832,12 +2132,12 @@ async function selectProject(id) {
     return;
   }
   $("currentTitle").textContent = state.project.name;
-  $("currentMeta").textContent = "正在加载项目…";
+  $("currentMeta").textContent = am("projectLoading");
   updateWorkspaceMetaPills();
   showEmptyWorkspaceState({
-    title: "正在加载项目",
-    text: "Autoto 正在准备工作线和 AI 代理。",
-    action: "选择其他资料夹",
+    title: am("projectLoadingTitle"),
+    text: am("projectLoadingDescription"),
+    action: am("chooseAnotherFolder"),
     hint: state.project.gitPath || "",
     icon: "…",
   });
@@ -1848,9 +2148,9 @@ async function selectProject(id) {
     state.workline = state.projectWorklines[0] || null;
     if (!state.workline) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "此项目还没有可用工作线";
+      $("currentMeta").textContent = am("noWorklines");
       updateWorkspaceMetaPills();
-      showEmptyWorkspaceState({ title: "此项目还没有可用工作线", text: "你可以重新选择一个资料夹，或稍后在工作线管理中创建工作线。", action: "选择其他资料夹", icon: "◇" });
+      showEmptyWorkspaceState({ title: am("noWorklines"), text: am("noWorklinesDescription"), action: am("chooseAnotherFolder"), icon: "◇" });
       return;
     }
     const worklineId = state.workline.id;
@@ -1860,9 +2160,9 @@ async function selectProject(id) {
     state.agent = state.worklineAgents.find((agent) => agent.type === "primary") || state.worklineAgents[0] || null;
     if (!state.agent) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "未选择 Agent";
+      $("currentMeta").textContent = am("noAgent");
       updateWorkspaceMetaPills();
-      showEmptyWorkspaceState({ title: "此工作线还没有可用代理", text: "你可以重新选择一个资料夹，或稍后在代理管理中创建代理。", action: "选择其他资料夹", icon: "♧" });
+      showEmptyWorkspaceState({ title: am("noAgents"), text: am("noAgentsDescription"), action: am("chooseAnotherFolder"), icon: "♧" });
       return;
     }
     await enterAgent();
@@ -1874,7 +2174,7 @@ async function selectProject(id) {
 
 async function selectNavigationConversation(target) {
   const parsed = typeof target === "string" ? parseNavigationTargetId(target) : parseNavigationTargetId(target?.targetId || "");
-  if (!parsed) throw new Error("无效的会话导航目标");
+  if (!parsed) throw new Error(am("invalidConversationTarget"));
   const navigationConversation = state.navigationConversations.find((item) => item.targetId === parsed.targetId) || null;
   const project = state.projects.find((item) => item.id === parsed.projectId) || (navigationConversation ? {
     id: navigationConversation.projectId,
@@ -1885,16 +2185,16 @@ async function selectNavigationConversation(target) {
   const seq = beginNavigationSelection(project);
   if (!state.project) {
     showEmptyWorkspaceState();
-    throw new Error("对应项目已不存在，请刷新导航后重试");
+    throw new Error(am("projectNoLongerExists"));
   }
 
   $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
-  $("currentMeta").textContent = "正在打开指定会话…";
+  $("currentMeta").textContent = am("conversationOpening");
   updateWorkspaceMetaPills();
   showEmptyWorkspaceState({
-    title: "正在打开会话",
-    text: "Autoto 正在定位指定工作线和 AI 代理。",
-    action: "选择其他资料夹",
+    title: am("conversationOpeningTitle"),
+    text: am("conversationOpeningDescription"),
+    action: am("chooseAnotherFolder"),
     hint: [navigationConversation?.worklineTitle, navigationConversation?.agentTitle].filter(Boolean).join(" / "),
     icon: "…",
   });
@@ -1911,15 +2211,15 @@ async function selectNavigationConversation(target) {
     state.agent = state.worklineAgents.find((item) => item.id === parsed.agentId) || null;
     if (!state.workline || !state.agent) {
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = "指定会话已不可用";
+      $("currentMeta").textContent = am("conversationUnavailable");
       updateWorkspaceMetaPills();
       showEmptyWorkspaceState({
-        title: "指定会话已不可用",
-        text: "工作线或 Agent 可能已被删除，请刷新导航后选择其他会话。",
-        action: "选择其他资料夹",
+        title: am("conversationUnavailable"),
+        text: am("conversationUnavailableDescription"),
+        action: am("chooseAnotherFolder"),
         icon: "◇",
       });
-      throw new Error("指定工作线或 Agent 已不存在");
+      throw new Error(am("worklineOrAgentMissing"));
     }
     await enterAgent();
     if (seq !== state.projectSelectSeq) return;
@@ -1931,14 +2231,17 @@ async function selectNavigationConversation(target) {
 
 async function enterAgent() {
   if (!state.agent) return;
+  closeConversationDetails();
   const agentId = state.agent.id;
   setWorkspaceExplorerAgent(state.agent);
+  specBoard.setAgent(state.agent);
   $("currentTitle").textContent = state.project?.name || state.agent.title;
-  $("currentMeta").textContent = state.agent.title || "AI 代理已就绪";
+  $("currentMeta").textContent = state.agent.title || am("agentReady");
   $("permissionMode").value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
   renderModelOptions();
+  refreshReasoningEffortControl();
   restoreCurrentChatDraft();
   syncMessageComposerBusy();
   clearRunSummary();
@@ -1958,11 +2261,11 @@ function showModelSetupNotice() {
   el.classList.remove("empty");
   el.innerHTML = `
     <div class="setup-notice-card">
-      <div class="setup-notice-title">当前模型尚未配置 API Key</div>
+      <div class="setup-notice-title">${escapeHtml(t("workspace.main.modelKeyMissing"))}</div>
       <p>${escapeHtml(modelSetupMessage())}</p>
       <div class="setup-notice-actions">
-        <button class="ghost-btn mini" type="button" id="openModelSettingsNoticeBtn">打开模型设置</button>
-        <button class="ghost-btn mini" type="button" id="openProviderSettingsNoticeBtn">打开提供商设置</button>
+        <button class="ghost-btn mini" type="button" id="openModelSettingsNoticeBtn">${escapeHtml(t("workspace.main.openModelSettings"))}</button>
+        <button class="ghost-btn mini" type="button" id="openProviderSettingsNoticeBtn">${escapeHtml(t("workspace.main.openProviderSettings"))}</button>
       </div>
     </div>
   `;
@@ -1991,28 +2294,31 @@ function disconnectAgentTransports() {
     badge.textContent = "ws idle";
     badge.classList.remove("ok");
   }
-  setComposerConnectionStatus("空闲");
+  state.agentStreamStatus = "idle";
+  setComposerConnectionStatus(t("workspace.main.idle"));
   setTerminalStatus("idle");
+  updateRuntimeStatusButton();
 }
 
 function connectWS() {
   if (!state.agent?.id) return;
   agentStream.connect(state.agent.id).catch((error) => {
-    if (state.agent?.id) notifyTerminal(`[warn] Agent 实时快照加载失败：${error?.message || error}\n`);
+    if (state.agent?.id) notifyTerminal(`[warn] ${am("agentLiveSnapshotFailed", { message: error?.message || error })}\n`);
   });
 }
 
 function updateAgentStreamStatus(detail = {}) {
   const badge = $("wsBadge");
   const streamStatus = detail.status || "idle";
+  state.agentStreamStatus = streamStatus;
   const labels = {
-    idle: ["ws idle", "空闲", false],
-    syncing: ["ws syncing", "同步中", false],
-    resyncing: ["ws resync", "恢复中", false],
-    connecting: ["ws connecting", "连接中", false],
-    reconnecting: ["ws reconnecting", "重连中", false],
-    connected: [detail.resume === "replayed" ? "ws replayed" : "ws connected", "已连接", true],
-    offline: ["ws offline", "离线", false],
+    idle: ["ws idle", t("workspace.main.idle"), false],
+    syncing: ["ws syncing", t("workspace.main.syncing"), false],
+    resyncing: ["ws resync", t("workspace.main.recovering"), false],
+    connecting: ["ws connecting", t("workspace.main.connecting"), false],
+    reconnecting: ["ws reconnecting", t("workspace.main.reconnecting"), false],
+    connected: [detail.resume === "replayed" ? "ws replayed" : "ws connected", t("workspace.main.connected"), true],
+    offline: ["ws offline", t("workspace.main.offline"), false],
   };
   const [badgeText, composerText, ok] = labels[streamStatus] || labels.offline;
   if (badge) {
@@ -2020,6 +2326,7 @@ function updateAgentStreamStatus(detail = {}) {
     badge.classList.toggle("ok", ok);
   }
   setComposerConnectionStatus(composerText, ok);
+  updateRuntimeStatusButton();
 }
 
 function applyAgentLiveSnapshot(snapshot) {
@@ -2034,11 +2341,12 @@ function applyAgentLiveSnapshot(snapshot) {
   if (permissionMode) permissionMode.value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
   renderModelOptions();
+  refreshReasoningEffortControl();
   updateWorkspaceMetaPills();
   syncMessageComposerBusy();
   const latestRun = snapshot.latestRun;
   if (latestRun?.id && ["completed", "failed", "interrupted"].includes(latestRun.status)) {
-    loadRunSummary(latestRun.id, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾恢复失败：${error?.message || error}\n`));
+    loadRunSummary(latestRun.id, { agentId }).catch((error) => notifyTerminal(`[warn] ${am("runSummaryRestoreFailed", { message: error?.message || error })}\n`));
   }
 }
 
@@ -2052,7 +2360,7 @@ function handleAgentStreamEvent(event) {
   if (event.type === "tool.output") appendToolOutput(event);
   if (event.type === "tool.approval_required") {
     rememberToolApproval(event);
-    showToast(event.data?.risk === "danger" ? "危险工具调用已被阻止。" : "有工具调用等待审批。", event.data?.risk === "danger" ? "error" : "warn");
+    showToast(event.data?.risk === "danger" ? t("workspace.chat.dangerousToolBlocked") : t("workspace.chat.toolApproval"), event.data?.risk === "danger" ? "error" : "warn");
   }
   if (event.type === "tool.finished") {
     clearToolApproval(event.data?.toolUseId);
@@ -2061,7 +2369,7 @@ function handleAgentStreamEvent(event) {
   if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
   if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) scheduleMessageRefresh(80, agentId);
   if (["agent.done", "agent.error", "agent.interrupted"].includes(event.type) && runId) {
-    loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] Run 回顾加载失败：${error?.message || error}\n`));
+    loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] ${am("runSummaryLoadFailed", { message: error?.message || error })}\n`));
   }
 }
 
@@ -2070,22 +2378,21 @@ async function saveAgentSettings() {
     state.agentSavePending = true;
     return;
   }
-  const button = $("saveAgentBtn");
   let agentId = "";
   state.agentSaving = true;
-  setButtonBusy(button, true, "保存中");
   try {
     const model = $("modelSelect").value.trim();
     if (model) setPreferredModel(model);
     if (!state.agent) {
       renderModelOptions();
       refreshActiveSettingsPanel();
-      notifyTerminal(model ? `[info] 已保存首选模型：${model}\n` : "[info] 尚未选择模型。\n");
+      notifyTerminal(model ? `[info] ${am("modelPreferenceSaved", { model })}\n` : `[info] ${am("noModelSelectedTerminal")}\n`);
       return;
     }
     agentId = state.agent.id;
     const id = agentId;
     const permissionMode = $("permissionMode").value;
+    const reasoningEffort = selectedReasoningEffort(model);
     const applyAgentPatch = async (path, payload) => {
       const updated = await api(`/api/agents/${id}/${path}`, { method: "PATCH", body: JSON.stringify(payload) });
       if (state.agent?.id !== id) return false;
@@ -2094,6 +2401,10 @@ async function saveAgentSettings() {
     };
     if (model && model !== state.agent.model) {
       if (!await applyAgentPatch("model", { model })) return;
+    }
+    const storedReasoningEffort = String(state.agent.reasoningEffort || "").trim().toLowerCase();
+    if ((storedReasoningEffort && storedReasoningEffort !== reasoningEffort) || (!storedReasoningEffort && reasoningEffort !== "auto")) {
+      if (!await applyAgentPatch("reasoning-effort", { reasoningEffort })) return;
     }
     if (permissionMode && permissionMode !== state.agent.permissionMode) {
       if (!await applyAgentPatch("permission-mode", { permissionMode })) return;
@@ -2106,7 +2417,6 @@ async function saveAgentSettings() {
     if (!agentId || state.agent?.id === agentId) throw err;
   } finally {
     state.agentSaving = false;
-    setButtonBusy(button, false, "保存中");
     if (state.agentSavePending) {
       state.agentSavePending = false;
       saveAgentSettings().catch(showError);
@@ -2138,7 +2448,7 @@ function showToast(message, variant = "info", options = {}) {
   if (!stack) return;
   const node = document.createElement("div");
   node.className = `toast toast-${variant}`;
-  node.innerHTML = `<span>${escapeHtml(message)}</span><button type="button" aria-label="关闭通知">×</button>`;
+  node.innerHTML = `<span>${escapeHtml(message)}</span><button type="button" aria-label="${escapeAttr(am("closeNotification"))}">×</button>`;
   const close = () => {
     node.classList.add("leaving");
     window.setTimeout(() => node.remove(), 180);
@@ -2156,18 +2466,28 @@ function showError(err) {
 
 bindWorkspaceExplorer();
 document.addEventListener("keydown", handleGlobalEscape);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!$("employeeOverviewModal")?.classList.contains("hidden")) closeEmployeeOverview();
+  if ($("appShell")?.classList.contains("details-open")) closeConversationDetails();
+});
 document.addEventListener("keydown", handleSettingsSearchShortcut);
 document.addEventListener("click", handleDirectoryShortcutClick);
 document.addEventListener("click", handleSidebarSettingsMenuDocumentClick);
 document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
   node.addEventListener("click", () => activateGlobalRailTarget(node.dataset.globalRailTarget));
 });
+$("globalThemeToggleBtn")?.addEventListener("click", () => {
+  const nextTheme = currentAppearancePreferences().theme === "dark" ? "light" : "dark";
+  setAppearancePreference("theme", nextTheme);
+  updateGlobalThemeToggle();
+});
 $("refreshBtn").addEventListener("click", () => init().catch(showError));
 $("sidebarAccountBtn")?.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleSidebarSettingsMenu();
 });
-$("settingsBtn").addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("profile"); });
+$("settingsBtn").addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("providers"); });
 $("providerSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("providers"); });
 $("modelSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("models"); });
 $("runtimeSettingsBtn")?.addEventListener("click", () => { closeSidebarSettingsMenu(); openSettingsModal("servers-system"); });
@@ -2183,8 +2503,12 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
   }
 });
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
+$("settingsIdentityBtn")?.addEventListener("click", () => selectSettingsPanel("profile"));
 $("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
+$("closeEmployeeOverviewBtn")?.addEventListener("click", closeEmployeeOverview);
+$("employeeOverviewModal")?.addEventListener("click", (event) => { if (event.target.id === "employeeOverviewModal") closeEmployeeOverview(); });
+$("closeConversationDetailsBtn")?.addEventListener("click", closeConversationDetails);
 $("settingsWizardBtn").addEventListener("click", (event) => {
   closeSettingsModal();
   openDirectoryChooser("", { trigger: event.currentTarget }).catch(showError);
@@ -2203,7 +2527,7 @@ $("mobileDrawerSearchBtn")?.addEventListener("click", focusMobileSearch);
 $("mobileSidebarSettingsBtn")?.addEventListener("click", () => {
   closeMobileSidebar();
   closeSidebarSettingsMenu();
-  openSettingsModal("profile");
+  openSettingsModal("providers");
 });
 $("mobileSidebarLogoutBtn")?.addEventListener("click", () => {
   closeMobileSidebar();
@@ -2234,6 +2558,10 @@ $("projectSearch").addEventListener("keydown", (event) => {
   }
 });
 $("copyConversationBtn")?.addEventListener("click", () => copyCurrentConversationMarkdown().catch(showError));
+$("runtimeStatusBtn")?.addEventListener("click", () => {
+  if ($("appShell")?.classList.contains("details-open")) closeConversationDetails();
+  else openConversationDetails();
+});
 $("gitWorkflowBtn")?.addEventListener("click", openGitModal);
 $("closeGitModalBtn")?.addEventListener("click", closeGitModal);
 $("gitModal")?.addEventListener("click", (event) => { if (event.target.id === "gitModal") closeGitModal(); });
@@ -2247,7 +2575,7 @@ $("nativeDirectoryBtn")?.addEventListener("click", (event) => {
   selectNativeDirectory(state.directoryPath, { trigger: event.currentTarget }).then(async (picked) => {
     if (!picked?.path) return;
     updateDirectoryPathDisplay(picked.path);
-    setDirectoryStatus(`已从 Finder 选择：${picked.path}，正在打开…`, "busy");
+    setDirectoryStatus(am("finderSelectionOpening", { path: picked.path }), "busy");
     await createProjectFromDirectory(picked.path, { button: $("chooseDirectoryBtn") });
   }).catch(showError);
 });
@@ -2269,7 +2597,7 @@ $("newFolderNameInput").addEventListener("keydown", (event) => {
   }
 });
 $("favoriteDirectoryBtn").addEventListener("click", favoriteCurrentDirectory);
-$("toggleHiddenFoldersBtn").addEventListener("click", () => notifyTerminal("[info] 隐藏文件夹当前不显示。\n"));
+$("toggleHiddenFoldersBtn").addEventListener("click", () => notifyTerminal(`[info] ${am("hiddenFoldersNotShown")}\n`));
 $("goDirectoryBtn").addEventListener("click", () => browseDirectories($("manualDirectoryPath").value.trim()).catch(showError));
 $("manualDirectoryPath").addEventListener("keydown", (event) => {
   if (isComposingInput(event)) return;
@@ -2283,6 +2611,7 @@ $("composerInputShell")?.addEventListener("dragover", handleAttachmentDragOver);
 $("composerInputShell")?.addEventListener("dragleave", handleAttachmentDragLeave);
 $("composerInputShell")?.addEventListener("drop", handleAttachmentDrop);
 $("messageText").addEventListener("input", handleMessageInput);
+$("messageText").addEventListener("paste", scheduleMessageInputResize);
 $("messageText").addEventListener("keydown", handleMessageKeydown);
 $("messageText").addEventListener("focus", updateSlashCommandPalette);
 $("messageText").addEventListener("blur", () => window.setTimeout(hideSlashCommandPalette, 120));
@@ -2293,30 +2622,63 @@ $("terminalOutput").addEventListener("paste", (event) => {
   sendTerminalInput(event.clipboardData?.getData("text") || "");
 });
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
-window.addEventListener("resize", resizeTerminal);
+window.addEventListener("resize", () => {
+  resizeTerminal();
+  autoResizeMessageInput();
+});
 window.addEventListener("beforeunload", saveCurrentChatDraft);
-$("saveAgentBtn").addEventListener("click", () => saveAgentSettings().catch(showError));
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
 $("openProviderLoginBtn").addEventListener("click", () => openSettingsModal("providers"));
 $("modelSelect").addEventListener("change", () => {
   updateModelConfiguredState();
+  refreshReasoningEffortControl({ modelValue: $("modelSelect").value });
   saveAgentSettings().catch(showError);
+});
+$("reasoningEffort")?.addEventListener("change", (event) => {
+  refreshReasoningEffortControl({ requestedValue: event.target.value });
+  saveReasoningEffort(event.target.value).catch(showError);
 });
 $("permissionMode").addEventListener("change", () => {
   updatePermissionModeDisplay();
   saveAgentSettings().catch(showError);
 });
-$("toggleTerminalBtn").addEventListener("click", () => toggleTerminal());
-$("composerTerminalBtn")?.addEventListener("click", () => toggleTerminal());
-$("collapseTerminalBtn").addEventListener("click", () => toggleTerminal(true));
-$("expandTerminalBtn").addEventListener("click", () => toggleTerminal(false));
+function toggleTerminalDock(collapsed) {
+  if (collapsed !== true) {
+    closeConversationDetails();
+    if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
+  }
+  toggleTerminal(collapsed);
+}
+$("toggleTerminalBtn").addEventListener("click", () => toggleTerminalDock());
+$("composerTerminalBtn")?.addEventListener("click", () => toggleTerminalDock());
+$("collapseTerminalBtn").addEventListener("click", () => toggleTerminalDock(true));
+$("expandTerminalBtn").addEventListener("click", () => toggleTerminalDock(false));
+$("terminalCommandForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = $("terminalCommandInput");
+  const command = String(input?.value || "").trim();
+  if (!command) return;
+  if (!sendTerminalInput(`${command}\r`)) {
+    showToast(state.agent ? am("terminalNotConnected") : am("selectAgentFirst"), "warn", { force: true });
+    return;
+  }
+  input.value = "";
+  $("terminalOutput")?.focus();
+});
+renderTerminalButtonState();
+updateRuntimeStatusButton();
 
 async function init() {
   if (state.initializing) return;
   const seq = ++state.initSeq;
   state.initializing = true;
   const refreshButton = $("refreshBtn");
-  setButtonBusy(refreshButton, true, "刷新中");
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.classList.add("loading");
+    refreshButton.setAttribute("aria-busy", "true");
+    refreshButton.title = t("common.refreshing");
+  }
   try {
     state.profile = loadProfilePreferences();
     applyProfilePreferences();
@@ -2329,6 +2691,15 @@ async function init() {
     state.promptHistory = loadPromptHistory();
     state.recentConversations = loadRecentConversations();
     applyAppearancePreferences({ applyTerminalDefault: true });
+    updateGlobalThemeToggle();
+    if (!state.agent) {
+      $("currentTitle").textContent = t("chat.noAgent");
+      $("currentMeta").textContent = t("chat.startHint");
+      $("composerStatusText").textContent = t("chat.idle");
+      const terminalOutput = $("terminalOutput");
+      if (terminalOutput && terminalOutput.textContent.startsWith("Terminal ready.")) terminalOutput.textContent = t("terminal.ready");
+    }
+    updatePermissionModeDisplay();
     autoResizeMessageInput();
     renderRecentSidebarConversations();
     renderRecentSidebarDirectories();
@@ -2341,9 +2712,24 @@ async function init() {
   } finally {
     if (seq === state.initSeq) {
       state.initializing = false;
-      setButtonBusy(refreshButton, false, "刷新中");
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.classList.remove("loading");
+        refreshButton.removeAttribute("aria-busy");
+        refreshButton.title = t("shell.refreshSessions");
+      }
     }
   }
 }
 
-init().catch(showError);
+function openRequestedInitialView() {
+  const params = new URLSearchParams(globalThis.location?.search || "");
+  const view = params.get("view") || "";
+  if (view === "settings") openSettingsModal(params.get("panel") || "providers");
+  if (view === "employees") openEmployeeOverview().catch(showError);
+  if (view === "details") openConversationDetails();
+  if (view === "browser") openWorkspace("preview");
+  if (view === "terminal") toggleTerminalDock(false);
+}
+
+init().then(openRequestedInitialView).catch(showError);

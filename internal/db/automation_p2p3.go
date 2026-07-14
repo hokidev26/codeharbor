@@ -22,22 +22,24 @@ const (
 )
 
 type Schedule struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	AgentID        string `json:"agentId"`
-	Expression     string `json:"expression"`
-	Timezone       string `json:"timezone"`
-	Prompt         string `json:"prompt"`
-	PermissionMode string `json:"permissionMode"`
-	Enabled        bool   `json:"enabled"`
-	NextRunAt      string `json:"nextRunAt,omitempty"`
-	LastRunAt      string `json:"lastRunAt,omitempty"`
-	LastRunID      string `json:"lastRunId,omitempty"`
-	LastOutcome    string `json:"lastOutcome,omitempty"`
-	LastError      string `json:"lastError,omitempty"`
-	LeaseUntil     string `json:"leaseUntil,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	AgentID         string `json:"agentId"`
+	Expression      string `json:"expression"`
+	Timezone        string `json:"timezone"`
+	Prompt          string `json:"prompt"`
+	PermissionMode  string `json:"permissionMode"`
+	EnvironmentMode string `json:"environmentMode"`
+	NarratorMode    string `json:"narratorMode"`
+	Enabled         bool   `json:"enabled"`
+	NextRunAt       string `json:"nextRunAt,omitempty"`
+	LastRunAt       string `json:"lastRunAt,omitempty"`
+	LastRunID       string `json:"lastRunId,omitempty"`
+	LastOutcome     string `json:"lastOutcome,omitempty"`
+	LastError       string `json:"lastError,omitempty"`
+	LeaseUntil      string `json:"leaseUntil,omitempty"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
 }
 
 type ScheduleListOptions struct {
@@ -56,25 +58,26 @@ type ScheduleStats struct {
 }
 
 type NotificationDelivery struct {
-	ID             string          `json:"id"`
-	DedupeKey      string          `json:"dedupeKey"`
-	SinkType       string          `json:"sinkType"`
-	SinkID         string          `json:"sinkId"`
-	EventType      string          `json:"eventType"`
-	AgentID        string          `json:"agentId,omitempty"`
-	RunID          string          `json:"runId,omitempty"`
-	ToolUseID      string          `json:"toolUseId,omitempty"`
-	PayloadJSON    json.RawMessage `json:"payload"`
-	Status         string          `json:"status"`
-	AttemptCount   int             `json:"attemptCount"`
-	MaxAttempts    int             `json:"maxAttempts"`
-	NextAttemptAt  string          `json:"nextAttemptAt"`
-	LeaseUntil     string          `json:"leaseUntil,omitempty"`
-	LastHTTPStatus int             `json:"lastHttpStatus,omitempty"`
-	LastError      string          `json:"lastError,omitempty"`
-	DeliveredAt    string          `json:"deliveredAt,omitempty"`
-	CreatedAt      string          `json:"createdAt"`
-	UpdatedAt      string          `json:"updatedAt"`
+	ID                  string          `json:"id"`
+	DedupeKey           string          `json:"dedupeKey"`
+	SinkType            string          `json:"sinkType"`
+	SinkID              string          `json:"sinkId"`
+	EventType           string          `json:"eventType"`
+	AgentID             string          `json:"agentId,omitempty"`
+	RunID               string          `json:"runId,omitempty"`
+	ToolUseID           string          `json:"toolUseId,omitempty"`
+	ExecutionGeneration int64           `json:"executionGeneration"`
+	PayloadJSON         json.RawMessage `json:"payload"`
+	Status              string          `json:"status"`
+	AttemptCount        int             `json:"attemptCount"`
+	MaxAttempts         int             `json:"maxAttempts"`
+	NextAttemptAt       string          `json:"nextAttemptAt"`
+	LeaseUntil          string          `json:"leaseUntil,omitempty"`
+	LastHTTPStatus      int             `json:"lastHttpStatus,omitempty"`
+	LastError           string          `json:"lastError,omitempty"`
+	DeliveredAt         string          `json:"deliveredAt,omitempty"`
+	CreatedAt           string          `json:"createdAt"`
+	UpdatedAt           string          `json:"updatedAt"`
 }
 
 type NotificationDeliveryListOptions struct {
@@ -209,8 +212,8 @@ type DeviceActionRequestStats struct {
 
 type p2p3Scanner func(dest ...any) error
 
-const scheduleSelectSQL = `SELECT id, name, agent_id, expression, timezone, prompt, permission_mode, enabled, COALESCE(next_run_at,''), COALESCE(last_run_at,''), COALESCE(last_run_id,''), COALESCE(last_outcome,''), COALESCE(last_error,''), COALESCE(lease_until,''), created_at, updated_at FROM schedules`
-const notificationDeliverySelectSQL = `SELECT id, dedupe_key, sink_type, sink_id, event_type, COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(tool_use_id,''), payload_json, status, attempt_count, max_attempts, next_attempt_at, COALESCE(lease_until,''), COALESCE(last_http_status,0), COALESCE(last_error,''), COALESCE(delivered_at,''), created_at, updated_at FROM notification_deliveries`
+const scheduleSelectSQL = `SELECT id, name, agent_id, expression, timezone, prompt, permission_mode, environment_mode, narrator_mode, enabled, COALESCE(next_run_at,''), COALESCE(last_run_at,''), COALESCE(last_run_id,''), COALESCE(last_outcome,''), COALESCE(last_error,''), COALESCE(lease_until,''), created_at, updated_at FROM schedules`
+const notificationDeliverySelectSQL = `SELECT id, dedupe_key, sink_type, sink_id, event_type, COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(tool_use_id,''), COALESCE(execution_generation,0), payload_json, status, attempt_count, max_attempts, next_attempt_at, COALESCE(lease_until,''), COALESCE(last_http_status,0), COALESCE(last_error,''), COALESCE(delivered_at,''), created_at, updated_at FROM notification_deliveries`
 const channelPairingSelectSQL = `SELECT id, connection_id, agent_id, status, COALESCE(code_hash,''), COALESCE(expires_at,''), COALESCE(chat_id,''), COALESCE(user_id,''), failed_attempts, COALESCE(locked_until,''), credential_revision, COALESCE(paired_at,''), COALESCE(revoked_at,''), created_at, updated_at FROM channel_pairings`
 const channelEventSelectSQL = `SELECT id, connection_id, external_event_id, event_type, COALESCE(agent_id,''), COALESCE(run_id,''), COALESCE(tool_use_id,''), COALESCE(chat_id,''), COALESCE(user_id,''), payload_json, COALESCE(occurred_at,''), COALESCE(processed_at,''), created_at FROM channel_events`
 const deviceActionRequestSelectSQL = `SELECT id, connection_id, entity_id, domain, service, payload_json, risk, status, requested_by, COALESCE(approved_by,''), expires_at, COALESCE(last_error,''), created_at, updated_at, COALESCE(completed_at,'') FROM device_action_requests`
@@ -220,7 +223,7 @@ func (s *Store) CreateSchedule(ctx context.Context, schedule Schedule) (Schedule
 	if err != nil {
 		return Schedule{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO schedules (id, name, agent_id, expression, timezone, prompt, permission_mode, enabled, next_run_at, last_run_at, last_run_id, last_outcome, last_error, lease_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, ?)`, canonical.ID, canonical.Name, canonical.AgentID, canonical.Expression, canonical.Timezone, canonical.Prompt, canonical.PermissionMode, boolInt(canonical.Enabled), canonical.NextRunAt, canonical.LastRunAt, canonical.LastRunID, canonical.LastOutcome, canonical.LastError, canonical.LeaseUntil, canonical.CreatedAt, canonical.UpdatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO schedules (id, name, agent_id, expression, timezone, prompt, permission_mode, environment_mode, narrator_mode, enabled, next_run_at, last_run_at, last_run_id, last_outcome, last_error, lease_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, ?)`, canonical.ID, canonical.Name, canonical.AgentID, canonical.Expression, canonical.Timezone, canonical.Prompt, canonical.PermissionMode, canonical.EnvironmentMode, canonical.NarratorMode, boolInt(canonical.Enabled), canonical.NextRunAt, canonical.LastRunAt, canonical.LastRunID, canonical.LastOutcome, canonical.LastError, canonical.LeaseUntil, canonical.CreatedAt, canonical.UpdatedAt)
 	if err != nil {
 		return Schedule{}, fmt.Errorf("create schedule: %w", err)
 	}
@@ -280,7 +283,7 @@ func (s *Store) UpdateSchedule(ctx context.Context, schedule Schedule) (Schedule
 		return Schedule{}, err
 	}
 	canonical.UpdatedAt = nextP2P3UpdatedAt(expectedUpdatedAt)
-	result, err := s.db.ExecContext(ctx, `UPDATE schedules SET name = ?, agent_id = ?, expression = ?, timezone = ?, prompt = ?, permission_mode = ?, enabled = ?, next_run_at = NULLIF(?,''), last_run_at = NULLIF(?,''), last_run_id = NULLIF(?,''), last_outcome = NULLIF(?,''), last_error = NULLIF(?,''), lease_until = NULLIF(?,''), updated_at = ? WHERE id = ? AND updated_at = ?`, canonical.Name, canonical.AgentID, canonical.Expression, canonical.Timezone, canonical.Prompt, canonical.PermissionMode, boolInt(canonical.Enabled), canonical.NextRunAt, canonical.LastRunAt, canonical.LastRunID, canonical.LastOutcome, canonical.LastError, canonical.LeaseUntil, canonical.UpdatedAt, canonical.ID, expectedUpdatedAt)
+	result, err := s.db.ExecContext(ctx, `UPDATE schedules SET name = ?, agent_id = ?, expression = ?, timezone = ?, prompt = ?, permission_mode = ?, environment_mode = ?, narrator_mode = ?, enabled = ?, next_run_at = NULLIF(?,''), last_run_at = NULLIF(?,''), last_run_id = NULLIF(?,''), last_outcome = NULLIF(?,''), last_error = NULLIF(?,''), lease_until = NULLIF(?,''), updated_at = ? WHERE id = ? AND updated_at = ?`, canonical.Name, canonical.AgentID, canonical.Expression, canonical.Timezone, canonical.Prompt, canonical.PermissionMode, canonical.EnvironmentMode, canonical.NarratorMode, boolInt(canonical.Enabled), canonical.NextRunAt, canonical.LastRunAt, canonical.LastRunID, canonical.LastOutcome, canonical.LastError, canonical.LeaseUntil, canonical.UpdatedAt, canonical.ID, expectedUpdatedAt)
 	if err != nil {
 		return Schedule{}, err
 	}
@@ -437,6 +440,8 @@ func canonicalSchedule(schedule Schedule, create bool) (Schedule, error) {
 	schedule.Timezone = strings.TrimSpace(schedule.Timezone)
 	schedule.Prompt = strings.TrimSpace(schedule.Prompt)
 	schedule.PermissionMode = strings.TrimSpace(schedule.PermissionMode)
+	schedule.EnvironmentMode = strings.TrimSpace(schedule.EnvironmentMode)
+	schedule.NarratorMode = strings.TrimSpace(schedule.NarratorMode)
 	schedule.NextRunAt = strings.TrimSpace(schedule.NextRunAt)
 	schedule.LastRunAt = strings.TrimSpace(schedule.LastRunAt)
 	schedule.LastRunID = strings.TrimSpace(schedule.LastRunID)
@@ -451,6 +456,12 @@ func canonicalSchedule(schedule Schedule, create bool) (Schedule, error) {
 	}
 	if schedule.PermissionMode == "" {
 		schedule.PermissionMode = "readOnly"
+	}
+	if schedule.EnvironmentMode == "" {
+		schedule.EnvironmentMode = "workline"
+	}
+	if schedule.NarratorMode == "" {
+		schedule.NarratorMode = "reuse"
 	}
 	for _, field := range []struct {
 		name     string
@@ -477,6 +488,12 @@ func canonicalSchedule(schedule Schedule, create bool) (Schedule, error) {
 	}
 	if schedule.PermissionMode != "readOnly" && schedule.PermissionMode != "acceptEdits" {
 		return Schedule{}, errors.New("invalid schedule permission mode")
+	}
+	if schedule.EnvironmentMode != "workline" && schedule.EnvironmentMode != "standalone" {
+		return Schedule{}, errors.New("invalid schedule environment mode")
+	}
+	if schedule.NarratorMode != "reuse" && schedule.NarratorMode != "new" {
+		return Schedule{}, errors.New("invalid schedule narrator mode")
 	}
 	if !validScheduleOutcome(schedule.LastOutcome) {
 		return Schedule{}, errors.New("invalid schedule last outcome")
@@ -513,7 +530,7 @@ func canonicalSchedule(schedule Schedule, create bool) (Schedule, error) {
 func scanSchedule(scan p2p3Scanner) (Schedule, error) {
 	var item Schedule
 	var enabled int
-	if err := scan(&item.ID, &item.Name, &item.AgentID, &item.Expression, &item.Timezone, &item.Prompt, &item.PermissionMode, &enabled, &item.NextRunAt, &item.LastRunAt, &item.LastRunID, &item.LastOutcome, &item.LastError, &item.LeaseUntil, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := scan(&item.ID, &item.Name, &item.AgentID, &item.Expression, &item.Timezone, &item.Prompt, &item.PermissionMode, &item.EnvironmentMode, &item.NarratorMode, &enabled, &item.NextRunAt, &item.LastRunAt, &item.LastRunID, &item.LastOutcome, &item.LastError, &item.LeaseUntil, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return Schedule{}, err
 	}
 	item.Enabled = enabled != 0
@@ -570,7 +587,12 @@ func (s *Store) CreateNotificationDelivery(ctx context.Context, delivery Notific
 	if err != nil {
 		return NotificationDelivery{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO notification_deliveries (id, dedupe_key, sink_type, sink_id, event_type, agent_id, run_id, tool_use_id, payload_json, status, attempt_count, max_attempts, next_attempt_at, lease_until, last_http_status, last_error, delivered_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,0), NULLIF(?,''), NULLIF(?,''), ?, ?)`, canonical.ID, canonical.DedupeKey, canonical.SinkType, canonical.SinkID, canonical.EventType, canonical.AgentID, canonical.RunID, canonical.ToolUseID, string(canonical.PayloadJSON), canonical.Status, canonical.AttemptCount, canonical.MaxAttempts, canonical.NextAttemptAt, canonical.LeaseUntil, canonical.LastHTTPStatus, canonical.LastError, canonical.DeliveredAt, canonical.CreatedAt, canonical.UpdatedAt)
+	if canonical.ExecutionGeneration == 0 && canonical.RunID != "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(execution_generation,0) FROM runs WHERE id = ?`, canonical.RunID).Scan(&canonical.ExecutionGeneration); err != nil {
+			return NotificationDelivery{}, err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO notification_deliveries (id, dedupe_key, sink_type, sink_id, event_type, agent_id, run_id, tool_use_id, execution_generation, payload_json, status, attempt_count, max_attempts, next_attempt_at, lease_until, last_http_status, last_error, delivered_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,0), NULLIF(?,''), NULLIF(?,''), ?, ?)`, canonical.ID, canonical.DedupeKey, canonical.SinkType, canonical.SinkID, canonical.EventType, canonical.AgentID, canonical.RunID, canonical.ToolUseID, canonical.ExecutionGeneration, string(canonical.PayloadJSON), canonical.Status, canonical.AttemptCount, canonical.MaxAttempts, canonical.NextAttemptAt, canonical.LeaseUntil, canonical.LastHTTPStatus, canonical.LastError, canonical.DeliveredAt, canonical.CreatedAt, canonical.UpdatedAt)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return NotificationDelivery{}, fmt.Errorf("%w: notification delivery dedupe key already exists", ErrConflict)
@@ -826,6 +848,9 @@ func canonicalNotificationDelivery(delivery NotificationDelivery, create bool) (
 	if !validNotificationStatus(delivery.Status) {
 		return NotificationDelivery{}, errors.New("invalid notification delivery status")
 	}
+	if delivery.ExecutionGeneration < 0 {
+		return NotificationDelivery{}, errors.New("invalid notification execution generation")
+	}
 	if delivery.AttemptCount < 0 || delivery.MaxAttempts < 1 || delivery.MaxAttempts > 100 || delivery.AttemptCount > delivery.MaxAttempts {
 		return NotificationDelivery{}, errors.New("invalid notification delivery attempt counts")
 	}
@@ -884,7 +909,7 @@ func canonicalNotificationDelivery(delivery NotificationDelivery, create bool) (
 func scanNotificationDelivery(scan p2p3Scanner) (NotificationDelivery, error) {
 	var item NotificationDelivery
 	var payload string
-	if err := scan(&item.ID, &item.DedupeKey, &item.SinkType, &item.SinkID, &item.EventType, &item.AgentID, &item.RunID, &item.ToolUseID, &payload, &item.Status, &item.AttemptCount, &item.MaxAttempts, &item.NextAttemptAt, &item.LeaseUntil, &item.LastHTTPStatus, &item.LastError, &item.DeliveredAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := scan(&item.ID, &item.DedupeKey, &item.SinkType, &item.SinkID, &item.EventType, &item.AgentID, &item.RunID, &item.ToolUseID, &item.ExecutionGeneration, &payload, &item.Status, &item.AttemptCount, &item.MaxAttempts, &item.NextAttemptAt, &item.LeaseUntil, &item.LastHTTPStatus, &item.LastError, &item.DeliveredAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return NotificationDelivery{}, err
 	}
 	item.PayloadJSON = json.RawMessage(payload)

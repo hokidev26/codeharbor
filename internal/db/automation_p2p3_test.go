@@ -16,8 +16,8 @@ func TestP2P3FreshSchemaAndV18Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fresh.Close()
-	if version := readUserVersion(t, ctx, fresh.DB()); version != 22 {
-		t.Fatalf("expected version 22, got %d", version)
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected version %d, got %d", CurrentDBVersion, version)
 	}
 	for _, table := range []string{"schedules", "notification_deliveries", "channel_pairings", "channel_events", "channel_cursors", "device_action_requests"} {
 		if !testTableExists(t, ctx, fresh.DB(), table) {
@@ -67,8 +67,8 @@ func TestP2P3FreshSchemaAndV18Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer migrated.Close()
-	if version := readUserVersion(t, ctx, migrated.DB()); version != 22 {
-		t.Fatalf("expected migrated version 22, got %d", version)
+	if version := readUserVersion(t, ctx, migrated.DB()); version != CurrentDBVersion {
+		t.Fatalf("expected migrated version %d, got %d", CurrentDBVersion, version)
 	}
 	legacyRun, err := migrated.GetRunByID(ctx, "run-v18")
 	if err != nil {

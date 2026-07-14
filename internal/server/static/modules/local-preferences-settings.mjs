@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatNumber } from "./formatters.mjs";
+import { resolveUILocale, t } from "./i18n.mjs";
 import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs";
 
 export function createLocalPreferencesSettingsController({
@@ -9,6 +10,7 @@ export function createLocalPreferencesSettingsController({
   currentIMGatewayPreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
+  currentRegionalPreferences,
   currentSearchPreferences,
   imGatewayChannelLabel,
   imGatewayPrefsExport,
@@ -24,6 +26,7 @@ export function createLocalPreferencesSettingsController({
   testServerNotification,
   saveIMGatewayPreferences,
   saveProfilePreferences,
+  saveRegionalPreferences,
   saveSearchPreferences,
   searchPrefsExport,
   searchProviderLabel,
@@ -41,58 +44,58 @@ export function createLocalPreferencesSettingsController({
         <div class="profile-hero-main">
           <div class="profile-avatar-preview">${escapeHtml(profile.avatarInitials)}</div>
           <div>
-            <div class="settings-hero-kicker">个人资料</div>
+            <div class="settings-hero-kicker">${escapeHtml(t("profile.heroKicker"))}</div>
             <div class="settings-hero-title">${escapeHtml(profileDisplayName())}</div>
             <p>${escapeHtml(profile.roleLabel)} · ${escapeHtml(profile.workspaceLabel)}</p>
           </div>
         </div>
         <div class="settings-action-row">
-          <button id="resetProfilePrefsBtn" class="settings-action-btn subtle" type="button">恢复默认</button>
+          <button id="resetProfilePrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(profile.avatarInitials)}</strong><span>头像缩写</span></div>
-        <div><strong>${escapeHtml(gitConfigured ? "已填写" : "未填写")}</strong><span>Git 身份</span></div>
-        <div><strong>${escapeHtml("本地浏览器")}</strong><span>保存位置</span></div>
+        <div><strong>${escapeHtml(profile.avatarInitials)}</strong><span>${escapeHtml(t("profile.avatarInitials"))}</span></div>
+        <div><strong>${escapeHtml(gitConfigured ? t("profile.filled") : t("profile.notFilled"))}</strong><span>${escapeHtml(t("profile.gitIdentity"))}</span></div>
+        <div><strong>${escapeHtml(t("profile.localBrowser"))}</strong><span>${escapeHtml(t("profile.saveLocation"))}</span></div>
       </div>
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">显示资料</div>
-            <div class="settings-provider-meta">这些资料只影响当前浏览器的工作台展示和复制辅助，不写入服务端用户表。</div>
+            <div class="settings-provider-title">${escapeHtml(t("profile.displaySectionTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("profile.displaySectionMeta"))}</div>
           </div>
         </div>
         <form id="profileSettingsForm" class="settings-profile-form">
           <div class="settings-provider-form-grid">
-            <label>显示名称
-              <input id="profileDisplayName" class="settings-field" value="${escapeAttr(profile.displayName)}" placeholder="例如 Ada" />
+            <label>${escapeHtml(t("profile.displayName"))}
+              <input id="profileDisplayName" class="settings-field" value="${escapeAttr(profile.displayName)}" placeholder="${escapeAttr(t("profile.displayNamePlaceholder"))}" />
             </label>
-            <label>头像缩写
-              <input id="profileAvatarInitials" class="settings-field" value="${escapeAttr(profile.avatarInitials)}" placeholder="AT" maxlength="4" />
+            <label>${escapeHtml(t("profile.avatarInitialsLabel"))}
+              <input id="profileAvatarInitials" class="settings-field" value="${escapeAttr(profile.avatarInitials)}" placeholder="${escapeAttr(t("profile.avatarInitialsPlaceholder"))}" maxlength="4" />
             </label>
-            <label>身份标签
-              <input id="profileRoleLabel" class="settings-field" value="${escapeAttr(profile.roleLabel)}" placeholder="Local developer" />
+            <label>${escapeHtml(t("profile.roleLabel"))}
+              <input id="profileRoleLabel" class="settings-field" value="${escapeAttr(profile.roleLabel)}" placeholder="${escapeAttr(t("profile.roleLabelPlaceholder"))}" />
             </label>
-            <label>工作台标签
-              <input id="profileWorkspaceLabel" class="settings-field" value="${escapeAttr(profile.workspaceLabel)}" placeholder="Autoto Local" />
+            <label>${escapeHtml(t("profile.workspaceLabel"))}
+              <input id="profileWorkspaceLabel" class="settings-field" value="${escapeAttr(profile.workspaceLabel)}" placeholder="${escapeAttr(t("profile.workspaceLabelPlaceholder"))}" />
             </label>
-            <label>Git user.name
-              <input id="profileGitName" class="settings-field" value="${escapeAttr(profile.gitName)}" placeholder="用于复制 git config 示例" />
+            <label>${escapeHtml(t("profile.gitName"))}
+              <input id="profileGitName" class="settings-field" value="${escapeAttr(profile.gitName)}" placeholder="${escapeAttr(t("profile.gitNamePlaceholder"))}" />
             </label>
-            <label>Git user.email
-              <input id="profileGitEmail" class="settings-field" value="${escapeAttr(profile.gitEmail)}" placeholder="you@example.com" />
+            <label>${escapeHtml(t("profile.gitEmail"))}
+              <input id="profileGitEmail" class="settings-field" value="${escapeAttr(profile.gitEmail)}" placeholder="${escapeAttr(t("profile.gitEmailPlaceholder"))}" />
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button id="copyProfileGitEnvBtn" class="settings-action-btn subtle" type="button">复制 Git 设置</button>
-            <button class="settings-action-btn primary" type="submit">保存个人资料</button>
+            <button id="copyProfileGitEnvBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.copyGit"))}</button>
+            <button class="settings-action-btn primary" type="submit">${escapeHtml(t("profile.save"))}</button>
           </div>
         </form>
       </section>
       <div class="profile-info-grid">
-        ${renderProfileInfoCard("本地优先", "个人资料保存在 localStorage，不会上传或写入 SQLite。")}
-        ${renderProfileInfoCard("Git 辅助", gitConfigured ? "可以复制 git config 命令，方便统一提交身份。" : "填写 Git 姓名和邮箱后可生成 git config 命令。")}
-        ${renderProfileInfoCard("账号系统", "完整头像上传、登录用户资料和角色绑定仍由后续用户系统承接。")}
+        ${renderProfileInfoCard(t("profile.infoLocalTitle"), t("profile.infoLocalDesc"))}
+        ${renderProfileInfoCard(t("profile.infoGitTitle"), gitConfigured ? t("profile.infoGitDescReady") : t("profile.infoGitDescEmpty"))}
+        ${renderProfileInfoCard(t("profile.infoAccountTitle"), t("profile.infoAccountDesc"))}
       </div>
     </div>
   `;
@@ -123,7 +126,7 @@ export function createLocalPreferencesSettingsController({
       gitName: $("profileGitName")?.value || "",
       gitEmail: $("profileGitEmail")?.value || "",
     }, { notify: true });
-    notifyTerminal?.("[info] 个人资料偏好已保存。\n");
+    notifyTerminal?.(`[info] ${t("profile.savedTerminal")}\n`);
   }
   function renderNetworkSearchSettingsContent() {
     const prefs = currentSearchPreferences();
@@ -133,75 +136,75 @@ export function createLocalPreferencesSettingsController({
     <div class="settings-live-page network-search-page">
       <section class="settings-hero-card network-search-hero-card">
         <div>
-          <div class="settings-hero-kicker">网络搜索</div>
-          <div class="settings-hero-title">${escapeHtml(prefs.enabled ? searchProviderLabel(prefs.provider) : "搜索未启用")}</div>
-          <p>配置未来接入搜索/检索服务时的默认策略。当前仅保存本地偏好，不会主动联网，也不会把查询发送到后端。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("networkSearch.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(prefs.enabled ? searchProviderLabel(prefs.provider) : t("networkSearch.disabledTitle"))}</div>
+          <p>${escapeHtml(t("networkSearch.heroDescription"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="copySearchPrefsBtn" class="settings-action-btn subtle" type="button">复制配置</button>
-          <button id="resetSearchPrefsBtn" class="settings-action-btn subtle" type="button">恢复默认</button>
+          <button id="copySearchPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("networkSearch.copyConfig"))}</button>
+          <button id="resetSearchPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("networkSearch.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.enabled ? "开启" : "关闭")}</strong><span>搜索权限</span></div>
-        <div><strong>${escapeHtml(searchProviderLabel(prefs.provider))}</strong><span>提供商</span></div>
-        <div><strong>${escapeHtml(formatNumber(prefs.maxResults))}</strong><span>默认结果数</span></div>
+        <div><strong>${escapeHtml(prefs.enabled ? t("networkSearch.on") : t("networkSearch.off"))}</strong><span>${escapeHtml(t("networkSearch.permission"))}</span></div>
+        <div><strong>${escapeHtml(searchProviderLabel(prefs.provider))}</strong><span>${escapeHtml(t("networkSearch.provider"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(prefs.maxResults))}</strong><span>${escapeHtml(t("networkSearch.maxResults"))}</span></div>
       </div>
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">搜索策略</div>
-            <div class="settings-provider-meta">为后续接入 DuckDuckGo、Brave、Tavily、SearXNG 或自定义搜索网关预留一致配置。</div>
+            <div class="settings-provider-title">${escapeHtml(t("networkSearch.strategyTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("networkSearch.strategyMeta"))}</div>
           </div>
-          <span class="settings-status-pill ${prefs.enabled ? "ok" : "muted"}">${escapeHtml(prefs.enabled ? "允许搜索" : "仅本地")}</span>
+          <span class="settings-status-pill ${prefs.enabled ? "ok" : "muted"}">${escapeHtml(prefs.enabled ? t("networkSearch.allowSearch") : t("networkSearch.localOnly"))}</span>
         </div>
         <form id="searchSettingsForm" class="settings-search-form">
           <div class="appearance-toggle-list">
-            ${renderSearchToggle("enabled", "允许网络搜索", "总开关；关闭时 Autoto/Search UI 应保持本地优先，不主动联网。", prefs.enabled)}
-            ${renderSearchToggle("confirmBeforeSearch", "搜索前确认", "建议保持开启，尤其是在查询可能包含项目路径、错误日志或业务信息时。", prefs.confirmBeforeSearch)}
-            ${renderSearchToggle("safeSearch", "安全搜索", "让兼容提供商优先返回过滤后的网页结果。", prefs.safeSearch)}
-            ${renderSearchToggle("preferGitHub", "优先 GitHub / 开源结果", "适合查找开源库、issue、README 和示例实现。", prefs.preferGitHub)}
+            ${renderSearchToggle("enabled", t("networkSearch.enabled"), t("networkSearch.enabledDesc"), prefs.enabled)}
+            ${renderSearchToggle("confirmBeforeSearch", t("networkSearch.confirmBeforeSearch"), t("networkSearch.confirmBeforeSearchDesc"), prefs.confirmBeforeSearch)}
+            ${renderSearchToggle("safeSearch", t("networkSearch.safeSearch"), t("networkSearch.safeSearchDesc"), prefs.safeSearch)}
+            ${renderSearchToggle("preferGitHub", t("networkSearch.preferGitHub"), t("networkSearch.preferGitHubDesc"), prefs.preferGitHub)}
           </div>
           <div class="settings-provider-form-grid search-form-grid">
-            <label>默认结果数
+            <label>${escapeHtml(t("networkSearch.maxResultsLabel"))}
               <select id="searchMaxResults" class="settings-field">
                 ${[3, 5, 10, 20].map((value) => `<option value="${value}" ${prefs.maxResults === value ? "selected" : ""}>${value}</option>`).join("")}
               </select>
             </label>
-            <label>自定义端点
-              <input id="searchCustomEndpoint" class="settings-field" value="${escapeAttr(prefs.customEndpoint)}" placeholder="例如 https://search.example.com/api" />
+            <label>${escapeHtml(t("networkSearch.customEndpoint"))}
+              <input id="searchCustomEndpoint" class="settings-field" value="${escapeAttr(prefs.customEndpoint)}" placeholder="${escapeAttr(t("networkSearch.customEndpointPlaceholder"))}" />
             </label>
-            <label class="settings-form-span-2">允许域名（一行一个，可选）
-              <textarea id="searchAllowedDomains" class="settings-field settings-textarea" rows="4" placeholder="github.com\nsourcegraph.com">${escapeHtml(prefs.allowedDomains)}</textarea>
+            <label class="settings-form-span-2">${escapeHtml(t("networkSearch.allowedDomains"))}
+              <textarea id="searchAllowedDomains" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("networkSearch.allowedDomainsPlaceholder"))}">${escapeHtml(prefs.allowedDomains)}</textarea>
             </label>
-            <label class="settings-form-span-2">屏蔽域名（一行一个，可选）
-              <textarea id="searchBlockedDomains" class="settings-field settings-textarea" rows="4" placeholder="example-spam.com">${escapeHtml(prefs.blockedDomains)}</textarea>
+            <label class="settings-form-span-2">${escapeHtml(t("networkSearch.blockedDomains"))}
+              <textarea id="searchBlockedDomains" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("networkSearch.blockedDomainsPlaceholder"))}">${escapeHtml(prefs.blockedDomains)}</textarea>
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button class="settings-action-btn primary" type="submit">保存搜索策略</button>
+            <button class="settings-action-btn primary" type="submit">${escapeHtml(t("networkSearch.saveStrategy"))}</button>
           </div>
         </form>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">搜索提供商</div>
-            <div class="settings-provider-meta">这里只保存策略，不安装依赖；后续可把开源搜索服务接入后端或 MCP。</div>
+            <div class="settings-provider-title">${escapeHtml(t("networkSearch.providersTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("networkSearch.providersMeta"))}</div>
           </div>
         </div>
         <div class="search-provider-grid">
-          ${renderSearchProviderChoice("duckduckgo", "DuckDuckGo", "无需账号的通用网页搜索预设。", prefs.provider)}
-          ${renderSearchProviderChoice("brave", "Brave Search", "适合正式 API key 网关接入。", prefs.provider)}
-          ${renderSearchProviderChoice("tavily", "Tavily", "偏 Autoto/RAG 工作流的搜索 API。", prefs.provider)}
-          ${renderSearchProviderChoice("searxng", "SearXNG", "适合自托管开源 metasearch。", prefs.provider)}
-          ${renderSearchProviderChoice("custom", "自定义端点", "连接内部搜索、企业网关或 MCP adapter。", prefs.provider)}
+          ${renderSearchProviderChoice("duckduckgo", t("networkSearch.providerDuckDuckGo"), t("networkSearch.providerDuckDuckGoDesc"), prefs.provider)}
+          ${renderSearchProviderChoice("brave", t("networkSearch.providerBrave"), t("networkSearch.providerBraveDesc"), prefs.provider)}
+          ${renderSearchProviderChoice("tavily", t("networkSearch.providerTavily"), t("networkSearch.providerTavilyDesc"), prefs.provider)}
+          ${renderSearchProviderChoice("searxng", t("networkSearch.providerSearXNG"), t("networkSearch.providerSearXNGDesc"), prefs.provider)}
+          ${renderSearchProviderChoice("custom", t("networkSearch.providerCustom"), t("networkSearch.providerCustomDesc"), prefs.provider)}
         </div>
       </section>
       <div class="search-policy-grid">
-        ${renderSearchPolicyCard("允许域", formatNumber(allowedCount), allowedCount ? "只优先/允许这些域名。" : "未限制允许域。")}
-        ${renderSearchPolicyCard("屏蔽域", formatNumber(blockedCount), blockedCount ? "搜索结果应排除这些域名。" : "未配置屏蔽域。")}
-        ${renderSearchPolicyCard("隐私", prefs.confirmBeforeSearch ? "先确认" : "直接搜索", "建议搜索前确认敏感查询。")}
+        ${renderSearchPolicyCard(t("networkSearch.policyAllowed"), formatNumber(allowedCount), allowedCount ? t("networkSearch.policyAllowedSet") : t("networkSearch.policyAllowedEmpty"))}
+        ${renderSearchPolicyCard(t("networkSearch.policyBlocked"), formatNumber(blockedCount), blockedCount ? t("networkSearch.policyBlockedSet") : t("networkSearch.policyBlockedEmpty"))}
+        ${renderSearchPolicyCard(t("networkSearch.policyPrivacy"), prefs.confirmBeforeSearch ? t("networkSearch.privacyConfirm") : t("networkSearch.privacyDirect"), t("networkSearch.privacyHint"))}
       </div>
     </div>
   `;
@@ -245,7 +248,7 @@ export function createLocalPreferencesSettingsController({
       allowedDomains: $("searchAllowedDomains")?.value || "",
       blockedDomains: $("searchBlockedDomains")?.value || "",
     }, { notify: true });
-    notifyTerminal?.("[info] 网络搜索策略已保存。\n");
+    notifyTerminal?.(`[info] ${t("networkSearch.savedTerminal")}\n`);
   }
   function renderIMGatewaySettingsContent() {
     const prefs = currentIMGatewayPreferences();
@@ -256,91 +259,91 @@ export function createLocalPreferencesSettingsController({
     <div class="settings-live-page im-gateway-page">
       <section class="settings-hero-card im-gateway-hero-card">
         <div>
-          <div class="settings-hero-kicker">IM 网关</div>
-          <div class="settings-hero-title">${escapeHtml(prefs.enabled ? imGatewayChannelLabel(prefs.channel) : "网关未启用")}</div>
-          <p>配置未来连接 IM、Webhook、Bot 或企业消息网关的本地策略。当前只保存浏览器偏好，不启动服务、不暴露公网端点。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("imGateway.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(prefs.enabled ? imGatewayChannelLabel(prefs.channel) : t("imGateway.disabledTitle"))}</div>
+          <p>${escapeHtml(t("imGateway.heroDescription"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="copyIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">复制配置</button>
-          <button id="resetIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">恢复默认</button>
+          <button id="copyIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("imGateway.copyConfig"))}</button>
+          <button id="resetIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("imGateway.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.enabled ? "开启" : "关闭")}</strong><span>网关权限</span></div>
-        <div><strong>${escapeHtml(imGatewayChannelLabel(prefs.channel))}</strong><span>通道</span></div>
-        <div><strong>${escapeHtml(formatNumber(enabledEvents))}</strong><span>启用事件</span></div>
+        <div><strong>${escapeHtml(prefs.enabled ? t("imGateway.on") : t("imGateway.off"))}</strong><span>${escapeHtml(t("imGateway.permission"))}</span></div>
+        <div><strong>${escapeHtml(imGatewayChannelLabel(prefs.channel))}</strong><span>${escapeHtml(t("imGateway.channel"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(enabledEvents))}</strong><span>${escapeHtml(t("imGateway.enabledEvents"))}</span></div>
       </div>
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">安全策略</div>
-            <div class="settings-provider-meta">默认要求确认和签名，避免 IM 消息直接触发本地 Autoto 操作。</div>
+            <div class="settings-provider-title">${escapeHtml(t("imGateway.securityTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("imGateway.securityMeta"))}</div>
           </div>
-          <span class="settings-status-pill ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? "需要安全网关" : "仅本地预案")}</span>
+          <span class="settings-status-pill ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? t("imGateway.needsSecureGateway") : t("imGateway.localPlanOnly"))}</span>
         </div>
         <form id="imGatewaySettingsForm" class="settings-im-form">
           <div class="appearance-toggle-list">
-            ${renderIMGatewayToggle("enabled", "启用 IM 网关策略", "只是打开本地策略开关；当前不会启动监听端口。", prefs.enabled)}
-            ${renderIMGatewayToggle("inboundConfirm", "入站消息执行前确认", "建议保持开启，防止聊天消息直接触发写文件或命令。", prefs.inboundConfirm)}
-            ${renderIMGatewayToggle("requireSignature", "要求签名校验", "后续 webhook endpoint 应验证签名或 token。", prefs.requireSignature)}
-            ${renderIMGatewayToggle("redactSecrets", "发送前脱敏", "对 API key、token、路径等敏感内容进行脱敏。", prefs.redactSecrets)}
+            ${renderIMGatewayToggle("enabled", t("imGateway.enabled"), t("imGateway.enabledDesc"), prefs.enabled)}
+            ${renderIMGatewayToggle("inboundConfirm", t("imGateway.inboundConfirm"), t("imGateway.inboundConfirmDesc"), prefs.inboundConfirm)}
+            ${renderIMGatewayToggle("requireSignature", t("imGateway.requireSignature"), t("imGateway.requireSignatureDesc"), prefs.requireSignature)}
+            ${renderIMGatewayToggle("redactSecrets", t("imGateway.redactSecrets"), t("imGateway.redactSecretsDesc"), prefs.redactSecrets)}
           </div>
           <div class="settings-provider-form-grid im-form-grid">
-            <label>最大 payload
+            <label>${escapeHtml(t("imGateway.maxPayload"))}
               <select id="imGatewayMaxPayload" class="settings-field">
                 ${[32, 64, 128, 256].map((value) => `<option value="${value}" ${prefs.maxPayloadKB === value ? "selected" : ""}>${value} KB</option>`).join("")}
               </select>
             </label>
-            <label>回调 / 网关端点
-              <input id="imGatewayEndpoint" class="settings-field" value="${escapeAttr(prefs.endpointUrl)}" placeholder="https://bot.example.com/webhook" />
+            <label>${escapeHtml(t("imGateway.endpoint"))}
+              <input id="imGatewayEndpoint" class="settings-field" value="${escapeAttr(prefs.endpointUrl)}" placeholder="${escapeAttr(t("imGateway.endpointPlaceholder"))}" />
             </label>
-            <label class="settings-form-span-2">允许来源（一行一个，可选）
-              <textarea id="imGatewayAllowedOrigins" class="settings-field settings-textarea" rows="4" placeholder="slack-team-id\ndiscord-guild-id">${escapeHtml(prefs.allowedOrigins)}</textarea>
+            <label class="settings-form-span-2">${escapeHtml(t("imGateway.allowedOrigins"))}
+              <textarea id="imGatewayAllowedOrigins" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("imGateway.allowedOriginsPlaceholder"))}">${escapeHtml(prefs.allowedOrigins)}</textarea>
             </label>
-            <label class="settings-form-span-2">屏蔽发送者（一行一个，可选）
-              <textarea id="imGatewayBlockedSenders" class="settings-field settings-textarea" rows="4" placeholder="user-id@example\nspam-bot">${escapeHtml(prefs.blockedSenders)}</textarea>
+            <label class="settings-form-span-2">${escapeHtml(t("imGateway.blockedSenders"))}
+              <textarea id="imGatewayBlockedSenders" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("imGateway.blockedSendersPlaceholder"))}">${escapeHtml(prefs.blockedSenders)}</textarea>
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button class="settings-action-btn primary" type="submit">保存网关策略</button>
+            <button class="settings-action-btn primary" type="submit">${escapeHtml(t("imGateway.saveStrategy"))}</button>
           </div>
         </form>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">通道预设</div>
-            <div class="settings-provider-meta">后续可接入开源 bot framework、n8n、SearXNG webhook、Mattermost/Matrix adapter 或自托管网关。</div>
+            <div class="settings-provider-title">${escapeHtml(t("imGateway.channelsTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("imGateway.channelsMeta"))}</div>
           </div>
         </div>
         <div class="im-channel-grid">
-          ${renderIMGatewayChannelChoice("webhook", "通用 Webhook", "适合自托管 HTTP webhook 或 n8n。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("discord", "Discord", "适合社区 bot 或项目频道。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("slack", "Slack", "适合团队工作区 slash command/event。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("telegram", "Telegram", "适合个人 bot 或轻量通知。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("lark", "飞书 / Lark", "适合企业 IM 和审批流。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("wecom", "企业微信", "适合国内企业机器人。", prefs.channel)}
-          ${renderIMGatewayChannelChoice("custom", "自定义网关", "连接内部网关或 MCP adapter。", prefs.channel)}
+          ${renderIMGatewayChannelChoice("webhook", t("imGateway.channelWebhook"), t("imGateway.channelWebhookDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("discord", t("imGateway.channelDiscord"), t("imGateway.channelDiscordDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("slack", t("imGateway.channelSlack"), t("imGateway.channelSlackDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("telegram", t("imGateway.channelTelegram"), t("imGateway.channelTelegramDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("lark", t("imGateway.channelLark"), t("imGateway.channelLarkDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("wecom", t("imGateway.channelWecom"), t("imGateway.channelWecomDesc"), prefs.channel)}
+          ${renderIMGatewayChannelChoice("custom", t("imGateway.channelCustom"), t("imGateway.channelCustomDesc"), prefs.channel)}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">事件路由</div>
-            <div class="settings-provider-meta">控制哪些事件可以进入或发出 IM 网关。真实发送逻辑后续由后端/webhook adapter 接入。</div>
+            <div class="settings-provider-title">${escapeHtml(t("imGateway.eventsTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("imGateway.eventsMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
-          ${renderIMGatewayToggle("allowInboundMessages", "允许入站消息", "允许 IM 消息进入待确认队列。", prefs.allowInboundMessages)}
-          ${renderIMGatewayToggle("notifyOnTaskDone", "任务完成通知", "Autoto 完成后可发送摘要通知。", prefs.notifyOnTaskDone)}
-          ${renderIMGatewayToggle("notifyOnErrors", "错误通知", "模型、工具或终端错误可发送提醒。", prefs.notifyOnErrors)}
-          ${renderIMGatewayToggle("notifyOnToolCalls", "工具调用通知", "高频事件，默认关闭，适合审计环境。", prefs.notifyOnToolCalls)}
+          ${renderIMGatewayToggle("allowInboundMessages", t("imGateway.allowInboundMessages"), t("imGateway.allowInboundMessagesDesc"), prefs.allowInboundMessages)}
+          ${renderIMGatewayToggle("notifyOnTaskDone", t("imGateway.notifyOnTaskDone"), t("imGateway.notifyOnTaskDoneDesc"), prefs.notifyOnTaskDone)}
+          ${renderIMGatewayToggle("notifyOnErrors", t("imGateway.notifyOnErrors"), t("imGateway.notifyOnErrorsDesc"), prefs.notifyOnErrors)}
+          ${renderIMGatewayToggle("notifyOnToolCalls", t("imGateway.notifyOnToolCalls"), t("imGateway.notifyOnToolCallsDesc"), prefs.notifyOnToolCalls)}
         </div>
       </section>
       <div class="im-policy-grid">
-        ${renderIMGatewayPolicyCard("允许来源", formatNumber(allowedCount), allowedCount ? "只接受这些来源。" : "未限制来源。")}
-        ${renderIMGatewayPolicyCard("屏蔽发送者", formatNumber(blockedCount), blockedCount ? "会拒绝这些 sender。" : "未配置屏蔽发送者。")}
-        ${renderIMGatewayPolicyCard("Payload", `${formatNumber(prefs.maxPayloadKB)} KB`, "建议对长日志做摘要后再发送。")}
+        ${renderIMGatewayPolicyCard(t("imGateway.policyAllowedOrigins"), formatNumber(allowedCount), allowedCount ? t("imGateway.policyAllowedSet") : t("imGateway.policyAllowedEmpty"))}
+        ${renderIMGatewayPolicyCard(t("imGateway.policyBlockedSenders"), formatNumber(blockedCount), blockedCount ? t("imGateway.policyBlockedSet") : t("imGateway.policyBlockedEmpty"))}
+        ${renderIMGatewayPolicyCard(t("imGateway.policyPayload"), `${formatNumber(prefs.maxPayloadKB)} KB`, t("imGateway.policyPayloadHint"))}
       </div>
     </div>
   `;
@@ -398,7 +401,7 @@ export function createLocalPreferencesSettingsController({
       allowedOrigins: $("imGatewayAllowedOrigins")?.value || "",
       blockedSenders: $("imGatewayBlockedSenders")?.value || "",
     }, { notify: true });
-    notifyTerminal?.("[info] IM 网关策略已保存。\n");
+    notifyTerminal?.(`[info] ${t("imGateway.savedTerminal")}\n`);
   }
   function renderNotificationSettingsContent() {
     const prefs = currentNotificationPreferences();
@@ -411,85 +414,85 @@ export function createLocalPreferencesSettingsController({
     <div class="settings-live-page notification-page">
       <section class="settings-hero-card notification-hero-card">
         <div>
-          <div class="settings-hero-kicker">通知</div>
-          <div class="settings-hero-title">${escapeHtml(prefs.toastEnabled ? "Toast 已启用" : "Toast 已关闭")}</div>
-          <p>控制本地工作台的弹窗提醒和 UI 操作日志。偏好只保存在当前浏览器，不影响 Autoto、PTY 终端和后端运行。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("notification.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(prefs.toastEnabled ? t("notification.toastEnabledTitle") : t("notification.toastDisabledTitle"))}</div>
+          <p>${escapeHtml(t("notification.heroDescription"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="testNotificationBtn" class="settings-action-btn primary" type="button">测试通知</button>
-          <button id="resetNotificationPrefsBtn" class="settings-action-btn subtle" type="button">恢复默认</button>
+          <button id="testNotificationBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("notification.test"))}</button>
+          <button id="resetNotificationPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("notification.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.toastEnabled ? "开启" : "关闭")}</strong><span>弹窗</span></div>
-        <div><strong>${escapeHtml(formatNumber(enabledCount))}</strong><span>启用类型</span></div>
-        <div><strong>${escapeHtml(notificationDurationLabel(prefs.duration))}</strong><span>显示时长</span></div>
+        <div><strong>${escapeHtml(prefs.toastEnabled ? t("notification.on") : t("notification.off"))}</strong><span>${escapeHtml(t("notification.toasts"))}</span></div>
+        <div><strong>${escapeHtml(formatNumber(enabledCount))}</strong><span>${escapeHtml(t("notification.enabledTypes"))}</span></div>
+        <div><strong>${escapeHtml(notificationDurationLabel(prefs.duration))}</strong><span>${escapeHtml(t("notification.duration"))}</span></div>
       </div>
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">Webhook 任务通知</div>
-            <div class="settings-provider-meta">服务端保存并发送：等待审批、任务完成、错误或中断时向外部 webhook POST 摘要。</div>
+            <div class="settings-provider-title">${escapeHtml(t("notification.webhookTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("notification.webhookMeta"))}</div>
           </div>
-          <span class="settings-status-pill ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? "加载中" : (serverSettings.enabled ? "已启用" : "未启用"))}</span>
+          <span class="settings-status-pill ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? t("notification.loading") : (serverSettings.enabled ? t("notification.enabledStatus") : t("notification.disabledStatus")))}</span>
         </div>
         ${state?.serverNotificationError ? `<div class="settings-inline-alert">${escapeHtml(state.serverNotificationError)}</div>` : ""}
         <form id="serverNotificationSettingsForm" class="settings-im-form">
           <div class="appearance-toggle-list">
-            ${renderServerNotificationToggle("enabled", "启用 Webhook 通知", "关闭后不会向外部端点发送 run 事件。", serverSettings.enabled)}
-            ${renderServerNotificationToggle("notifyOnApproval", "等待审批时通知", "工具需要你批准时主动提醒。", serverSettings.notifyOnApproval !== false)}
-            ${renderServerNotificationToggle("notifyOnDone", "任务完成/中断时通知", "completed、interrupted、superseded 会走这一类通知。", serverSettings.notifyOnDone !== false)}
-            ${renderServerNotificationToggle("notifyOnError", "错误通知", "模型、工具或 Agent loop 失败时发送。", serverSettings.notifyOnError !== false)}
+            ${renderServerNotificationToggle("enabled", t("notification.enableWebhook"), t("notification.enableWebhookDesc"), serverSettings.enabled)}
+            ${renderServerNotificationToggle("notifyOnApproval", t("notification.notifyOnApproval"), t("notification.notifyOnApprovalDesc"), serverSettings.notifyOnApproval !== false)}
+            ${renderServerNotificationToggle("notifyOnDone", t("notification.notifyOnDone"), t("notification.notifyOnDoneDesc"), serverSettings.notifyOnDone !== false)}
+            ${renderServerNotificationToggle("notifyOnError", t("notification.notifyOnError"), t("notification.notifyOnErrorDesc"), serverSettings.notifyOnError !== false)}
           </div>
           <div class="settings-provider-form-grid im-form-grid">
-            <label class="settings-form-span-2">Webhook URL
-              <input id="serverNotificationWebhookUrl" class="settings-field" value="${escapeAttr(serverSettings.webhookUrl || "")}" placeholder="https://bot.example.com/webhook" />
+            <label class="settings-form-span-2">${escapeHtml(t("notification.webhookUrl"))}
+              <input id="serverNotificationWebhookUrl" class="settings-field" value="${escapeAttr(serverSettings.webhookUrl || "")}" placeholder="${escapeAttr(t("notification.webhookUrlPlaceholder"))}" />
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button id="refreshServerNotificationSettingsBtn" class="settings-action-btn subtle" type="button">刷新服务端设置</button>
-            <button id="testServerNotificationBtn" class="settings-action-btn subtle" type="button" ${state?.serverNotificationTesting ? "disabled" : ""}>${state?.serverNotificationTesting ? "发送中…" : "发送测试 Webhook"}</button>
-            <button class="settings-action-btn primary" type="submit" ${state?.serverNotificationSaving ? "disabled" : ""}>${state?.serverNotificationSaving ? "保存中…" : "保存 Webhook 设置"}</button>
+            <button id="refreshServerNotificationSettingsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("notification.refreshServer"))}</button>
+            <button id="testServerNotificationBtn" class="settings-action-btn subtle" type="button" ${state?.serverNotificationTesting ? "disabled" : ""}>${escapeHtml(state?.serverNotificationTesting ? t("notification.sending") : t("notification.sendTestWebhook"))}</button>
+            <button class="settings-action-btn primary" type="submit" ${state?.serverNotificationSaving ? "disabled" : ""}>${escapeHtml(state?.serverNotificationSaving ? t("notification.saving") : t("notification.saveWebhook"))}</button>
           </div>
         </form>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">弹窗类型</div>
-            <div class="settings-provider-meta">关闭某类 toast 后，相关操作仍会执行，只是不再弹出右上角提示。</div>
+            <div class="settings-provider-title">${escapeHtml(t("notification.toastTypesTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("notification.toastTypesMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
-          ${renderNotificationToggle("toastEnabled", "启用右上角 Toast", "总开关；关闭后除强制系统反馈外不再弹 toast。", prefs.toastEnabled)}
-          ${renderNotificationToggle("infoToasts", "信息提示", "普通说明、复制成功和轻量操作反馈。", prefs.infoToasts)}
-          ${renderNotificationToggle("successToasts", "成功提示", "保存、添加、切换等成功反馈。", prefs.successToasts)}
-          ${renderNotificationToggle("warningToasts", "警告提示", "删除确认、刷新失败和需要注意的状态。", prefs.warningToasts)}
-          ${renderNotificationToggle("errorToasts", "错误提示", "API 错误、校验失败和运行异常。建议保持开启。", prefs.errorToasts)}
+          ${renderNotificationToggle("toastEnabled", t("notification.toastEnabled"), t("notification.toastEnabledDesc"), prefs.toastEnabled)}
+          ${renderNotificationToggle("infoToasts", t("notification.infoToasts"), t("notification.infoToastsDesc"), prefs.infoToasts)}
+          ${renderNotificationToggle("successToasts", t("notification.successToasts"), t("notification.successToastsDesc"), prefs.successToasts)}
+          ${renderNotificationToggle("warningToasts", t("notification.warningToasts"), t("notification.warningToastsDesc"), prefs.warningToasts)}
+          ${renderNotificationToggle("errorToasts", t("notification.errorToasts"), t("notification.errorToastsDesc"), prefs.errorToasts)}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">通知时长</div>
-            <div class="settings-provider-meta">影响自动消失时间；错误提示会比普通提示更久。</div>
+            <div class="settings-provider-title">${escapeHtml(t("notification.durationTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("notification.durationMeta"))}</div>
           </div>
         </div>
         <div class="appearance-choice-grid">
-          ${renderNotificationDurationChoice("short", "短", "适合熟悉流程时减少干扰。", prefs.duration)}
-          ${renderNotificationDurationChoice("normal", "标准", "默认节奏，兼顾可见性和不打断。", prefs.duration)}
-          ${renderNotificationDurationChoice("long", "长", "适合演示或需要更久阅读提示。", prefs.duration)}
+          ${renderNotificationDurationChoice("short", t("notification.durationShort"), t("notification.durationShortDesc"), prefs.duration)}
+          ${renderNotificationDurationChoice("normal", t("notification.durationNormal"), t("notification.durationNormalDesc"), prefs.duration)}
+          ${renderNotificationDurationChoice("long", t("notification.durationLong"), t("notification.durationLongDesc"), prefs.duration)}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">终端提示</div>
-            <div class="settings-provider-meta">控制 UI 操作提示是否写入右侧终端日志；真实 PTY 输出和命令回显不受影响。</div>
+            <div class="settings-provider-title">${escapeHtml(t("notification.terminalTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("notification.terminalMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
-          ${renderNotificationToggle("terminalNotices", "写入 UI 操作提示", "例如刷新统计、复制、导入凭据等 [info]/[warn]/[error] 日志。", prefs.terminalNotices)}
+          ${renderNotificationToggle("terminalNotices", t("notification.terminalNotices"), t("notification.terminalNoticesDesc"), prefs.terminalNotices)}
         </div>
       </section>
     </div>
@@ -530,9 +533,9 @@ export function createLocalPreferencesSettingsController({
   }
 
   function notificationDurationLabel(value) {
-    if (value === "short") return "短";
-    if (value === "long") return "长";
-    return "标准";
+    if (value === "short") return t("notification.durationShort");
+    if (value === "long") return t("notification.durationLong");
+    return t("notification.durationNormal");
   }
 
   function bindNotificationSettingsActions() {
@@ -549,8 +552,8 @@ export function createLocalPreferencesSettingsController({
       node.addEventListener("click", () => setNotificationPreference("duration", node.dataset.notificationDuration));
     });
     $("testNotificationBtn")?.addEventListener("click", () => {
-      showToast("这是一条测试通知。", "info", { force: true });
-      notifyTerminal?.("[info] 测试通知已触发。\n");
+      showToast(t("notification.testToast"), "info", { force: true });
+      notifyTerminal?.(`[info] ${t("notification.testTerminal")}\n`);
     });
     $("resetNotificationPrefsBtn")?.addEventListener("click", resetNotificationPreferences);
   }
@@ -568,13 +571,15 @@ export function createLocalPreferencesSettingsController({
   }
   function renderAppearanceSettingsContent() {
     const prefs = currentAppearancePreferences();
+    const regional = currentRegionalPreferences?.() || { locale: "auto", timezone: "auto" };
+    const uiLocale = resolveUILocale(regional.locale);
     return `
     <div class="settings-live-page appearance-page">
       <section class="settings-hero-card appearance-hero-card">
         <div>
-          <div class="settings-hero-kicker">外观与界面</div>
+          <div class="settings-hero-kicker">${escapeHtml(t("appearance.heroKicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(appearanceThemeLabel(prefs.theme))} · ${escapeHtml(appearanceDensityLabel(prefs.density))}</div>
-          <p>这些偏好只保存在当前浏览器，不改服务端配置，适合本地工作台快速调整阅读密度和终端呈现方式。</p>
+          <p>${escapeHtml(t("appearance.heroDescription"))}</p>
         </div>
         <div class="appearance-preview-card" aria-hidden="true">
           <div class="appearance-preview-bar"></div>
@@ -584,44 +589,61 @@ export function createLocalPreferencesSettingsController({
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(appearanceThemeLabel(prefs.theme))}</strong><span>主题</span></div>
-        <div><strong>${escapeHtml(appearanceDensityLabel(prefs.density))}</strong><span>布局密度</span></div>
-        <div><strong>${escapeHtml(prefs.terminalDefaultOpen ? "默认展开" : "默认收起")}</strong><span>终端</span></div>
+        <div><strong>${escapeHtml(appearanceThemeLabel(prefs.theme))}</strong><span>${escapeHtml(t("appearance.theme"))}</span></div>
+        <div><strong>${escapeHtml(appearanceDensityLabel(prefs.density))}</strong><span>${escapeHtml(t("appearance.density"))}</span></div>
+        <div><strong>${escapeHtml(prefs.terminalDefaultOpen ? t("appearance.terminalOpen") : t("appearance.terminalCollapsed"))}</strong><span>${escapeHtml(t("appearance.terminal"))}</span></div>
       </div>
+      <section class="settings-provider-section appearance-language-section">
+        <div class="settings-provider-section-head">
+          <div>
+            <div class="settings-provider-title">${escapeHtml(t("appearance.languageTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("appearance.languageMeta"))}</div>
+          </div>
+        </div>
+        <label class="appearance-language-field" for="appearanceLanguageSelect">
+          <span>${escapeHtml(t("language.label"))}</span>
+          <select id="appearanceLanguageSelect" class="settings-field">
+            <option value="zh-TW" ${uiLocale === "zh-TW" ? "selected" : ""}>${escapeHtml(t("language.traditionalChinese"))}</option>
+            <option value="zh-CN" ${uiLocale === "zh-CN" ? "selected" : ""}>${escapeHtml(t("language.simplifiedChinese"))}</option>
+            <option value="en-US" ${uiLocale === "en" ? "selected" : ""}>${escapeHtml(t("language.english"))}</option>
+          </select>
+          <small>${escapeHtml(t("language.description"))}</small>
+        </label>
+      </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">视觉主题</div>
-            <div class="settings-provider-meta">切换主工作台的深色 / 浅色变量；设置页仍保持高可读白底。</div>
+            <div class="settings-provider-title">${escapeHtml(t("appearance.themeSectionTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("appearance.themeSectionMeta"))}</div>
           </div>
         </div>
         <div class="appearance-choice-grid">
-          ${renderAppearanceChoice("theme", "dark", "深色工作台", "适合长时间 coding，会保留当前默认质感。", prefs.theme === "dark")}
-          ${renderAppearanceChoice("theme", "light", "浅色工作台", "适合白天演示和截图，主界面切到浅色变量。", prefs.theme === "light")}
+          ${renderAppearanceChoice("theme", "dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.theme === "dark")}
+          ${renderAppearanceChoice("theme", "light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.theme === "light")}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">布局密度</div>
-            <div class="settings-provider-meta">紧凑模式会压缩侧边栏、消息区和输入区间距，适合小屏或并排窗口。</div>
+            <div class="settings-provider-title">${escapeHtml(t("appearance.densitySectionTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("appearance.densitySectionMeta"))}</div>
           </div>
         </div>
         <div class="appearance-choice-grid">
-          ${renderAppearanceChoice("density", "comfortable", "舒适", "保持更宽松的行距和点击区域。", prefs.density === "comfortable")}
-          ${renderAppearanceChoice("density", "compact", "紧凑", "减少留白，在同屏显示更多项目和消息。", prefs.density === "compact")}
+          ${renderAppearanceChoice("density", "comfortable", t("appearance.densityComfortable"), t("appearance.densityComfortableDesc"), prefs.density === "comfortable")}
+          ${renderAppearanceChoice("density", "compact", t("appearance.densityCompact"), t("appearance.densityCompactDesc"), prefs.density === "compact")}
         </div>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">界面行为</div>
-            <div class="settings-provider-meta">控制启动时终端是否默认展开，以及 Agent WebSocket 事件是否写入终端日志。</div>
+            <div class="settings-provider-title">${escapeHtml(t("appearance.behaviorTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("appearance.behaviorMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
-          ${renderAppearanceToggle("terminalDefaultOpen", "启动后展开终端", "关闭后，下次刷新页面会默认收起右侧终端面板。", prefs.terminalDefaultOpen)}
-          ${renderAppearanceToggle("showEventLog", "显示 Agent 事件日志", "关闭后会隐藏 [event] 类型日志，但不会影响真实终端输出。", prefs.showEventLog)}
+          ${renderAppearanceToggle("terminalDefaultOpen", t("appearance.terminalDefaultOpen"), t("appearance.terminalDefaultOpenDesc"), prefs.terminalDefaultOpen)}
+          ${renderAppearanceToggle("showEventLog", t("appearance.showEventLog"), t("appearance.showEventLogDesc"), prefs.showEventLog)}
         </div>
       </section>
     </div>
@@ -650,14 +672,21 @@ export function createLocalPreferencesSettingsController({
   }
 
   function appearanceThemeLabel(value) {
-    return value === "light" ? "浅色" : "深色";
+    return value === "light" ? t("appearance.themeLightLabel") : t("appearance.themeDarkLabel");
   }
 
   function appearanceDensityLabel(value) {
-    return value === "compact" ? "紧凑" : "舒适";
+    return value === "compact" ? t("appearance.densityCompactLabel") : t("appearance.densityComfortableLabel");
   }
 
   function bindAppearanceSettingsActions() {
+    $("appearanceLanguageSelect")?.addEventListener("change", (event) => {
+      saveRegionalPreferences?.({
+        ...(currentRegionalPreferences?.() || { timezone: "auto" }),
+        locale: event.currentTarget.value,
+      }, { notify: true });
+      globalThis.setTimeout?.(() => globalThis.location?.reload?.(), 80);
+    });
     document.querySelectorAll("[data-appearance-field]").forEach((node) => {
       node.addEventListener("click", () => setAppearancePreference(node.dataset.appearanceField, node.dataset.appearanceValue));
     });

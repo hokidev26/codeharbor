@@ -50,6 +50,23 @@ test("normalizeNavigationPayload normalizes the backend contract and target ids"
   assert.equal(normalized.conversations[0].targetId, createNavigationTargetId({ projectId: "p1", worklineId: "w1", agentId: "a1" }));
 });
 
+test("project groups contain every conversation once and preserve recent ordering", () => {
+  const duplicatedPayload = {
+    ...payload,
+    conversations: [payload.conversations[1], ...payload.conversations, payload.conversations[0]],
+  };
+  const normalized = normalizeNavigationPayload(duplicatedPayload);
+  const all = buildNavigationView(duplicatedPayload, { mode: "all" });
+
+  assert.equal(normalized.conversations.length, 3);
+  assert.deepEqual(all.groups.find((group) => group.project.id === "p1").conversations.map((item) => item.agentId), ["a1", "a2"]);
+  const html = renderNavigationHTML(all, { activeProjectId: "p1", activeAgentId: "a2" });
+  assert.match(html, /data-navigation-project-group="p1" data-conversation-count="2"/);
+  assert.equal((html.match(/data-navigation-target="p1::w1::a1"/g) || []).length, 1);
+  assert.equal((html.match(/data-navigation-target="p1::w2::a2"/g) || []).length, 1);
+  assert.match(html, /navigation-conversation-row nested active/);
+});
+
 test("buildNavigationView supports all, projects, and conversations modes", () => {
   const all = buildNavigationView(payload, { mode: "all" });
   assert.equal(all.groups.length, 3);
@@ -59,7 +76,9 @@ test("buildNavigationView supports all, projects, and conversations modes", () =
 
   const projects = buildNavigationView(payload, { mode: "projects" });
   assert.deepEqual(projects.projects.map((item) => item.id), ["p1", "p2", "invalid"]);
-  assert.deepEqual(projects.groups, []);
+  assert.equal(projects.groups.length, 3);
+  assert.deepEqual(projects.groups[0].conversations.map((item) => item.agentId), ["a1", "a2"]);
+  assert.match(renderNavigationHTML(projects), /data-navigation-project-group="p1" data-conversation-count="2"/);
 
   const conversations = buildNavigationView(payload, { mode: "conversations" });
   assert.deepEqual(conversations.conversations.map((item) => item.agentId), ["a1", "a3", "a2"]);
@@ -89,6 +108,19 @@ test("recent conversations deduplicate newest targets and truncate to eight", ()
   assert.deepEqual(normalizeRecentConversations([recent[0], recent[0], { targetId: "bad" }]), [recent[0]]);
 });
 
+test("global recent conversations do not duplicate project-grouped conversations", () => {
+  const normalized = normalizeNavigationPayload(payload);
+  const recent = normalized.conversations.map((conversation) => ({
+    targetId: conversation.targetId,
+    openedAt: "2026-02-01T00:00:00Z",
+  }));
+  const html = renderRecentConversationsHTML(recent, normalized.conversations, "a1");
+
+  assert.doesNotMatch(html, /recent-conversation-item/);
+  assert.match(html, /data-recent-conversations-deduplicated="true"/);
+  assert.match(html, /data-deduplicated-count="3"/);
+});
+
 test("recent conversations are registered in local preference backups", () => {
   assert.ok(localPreferenceBackupKeys.some((entry) => entry.key === recentConversationsKey && entry.type === "json"));
 });
@@ -113,7 +145,9 @@ test("navigation rendering escapes all dynamic text and attributes", () => {
   ], normalized.conversations);
 
   assert.doesNotMatch(`${html}${recentHtml}`, /<script>|<img src=x|<svg onload|<b>/);
+  assert.match(html, /class="project-kind-badge">PROJECT<\/span>/);
   assert.match(html, /&lt;script&gt;alert\(&quot;project&quot;\)&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;agent&quot;&gt;/);
-  assert.match(recentHtml, /&quot;&gt;&lt;img src=x onerror=&quot;boom&quot;&gt;/);
+  assert.doesNotMatch(recentHtml, /recent-conversation-item|<img/);
+  assert.match(recentHtml, /data-recent-conversations-deduplicated="true"/);
 });

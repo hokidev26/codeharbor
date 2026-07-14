@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
 	"autoto/internal/runtime"
 )
 
@@ -40,5 +44,49 @@ func TestRuntimeRegistrationClosesHTTPBeforeWorkers(t *testing.T) {
 	want := []string{"http", "automation", "channels", "preview"}
 	if !reflect.DeepEqual(closed, want) {
 		t.Fatalf("unexpected close order: got %v want %v", closed, want)
+	}
+}
+
+func TestProviderConfigForRuntimeInjectsInstallationIdentity(t *testing.T) {
+	settings := db.RuntimeSettings{InstallationID: "123e4567-e89b-42d3-a456-426614174000"}
+	original := config.ProviderConfig{Name: "openai", Type: "openai", Model: "gpt-5"}
+	got := providerConfigForRuntime(original, settings)
+	if got.ClientVersion != config.Version || got.InstallationID != settings.InstallationID {
+		t.Fatalf("runtime identity was not injected: %+v", got)
+	}
+	if original.ClientVersion != "" || original.InstallationID != "" {
+		t.Fatalf("provider config input was mutated: %+v", original)
+	}
+	if _, err := providers.NewProvider(got); err != nil {
+		t.Fatalf("injected provider config should remain valid: %v", err)
+	}
+}
+
+func TestAggregateSourceFromStorePreservesMemberOrder(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	want := []string{"second:model-b", "first:model-a"}
+	if _, err := store.UpsertModelAggregate(ctx, db.ModelAggregate{Name: "fast", Mode: "priority", Members: want}, 0); err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.SetAggregateSource(aggregateSourceFromStore(store))
+	provider, model, err := registry.Resolve("aggregate:fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "fast" {
+		t.Fatalf("unexpected aggregate model name %q", model)
+	}
+	models, err := provider.ListModels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(models, want) {
+		t.Fatalf("aggregate order changed: got %v want %v", models, want)
 	}
 }

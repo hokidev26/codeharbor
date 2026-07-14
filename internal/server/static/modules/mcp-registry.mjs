@@ -1,3 +1,10 @@
+import { currentUILocale } from "./i18n.mjs";
+import { preferencesMessage } from "./messages-preferences.mjs";
+
+function mcpMessage(key, params = {}) {
+  return preferencesMessage(`mcp.${key}`, params, currentUILocale());
+}
+
 export function parseMCPWords(commandLine) {
   const matches = String(commandLine || "").trim().match(/"[^"]*"|'[^']*'|\S+/g) || [];
   return matches.map((part) => {
@@ -18,15 +25,15 @@ export function parseMCPEnvJSON(envText) {
   try {
     env = JSON.parse(trimmed);
   } catch {
-    throw new Error("env JSON 格式无效，请填写对象，例如 {\"TOKEN\":\"...\"}");
+    throw new Error(mcpMessage("invalidEnvironmentJSON"));
   }
-  if (!env || Array.isArray(env) || typeof env !== "object") throw new Error("env JSON 必须是对象");
+  if (!env || Array.isArray(env) || typeof env !== "object") throw new Error(mcpMessage("environmentMustBeObject"));
   return Object.fromEntries(Object.entries(env).filter(([key]) => String(key || "").trim() !== ""));
 }
 
 export function buildMCPRegistryPayload({ name, command, argsText, cwd, envText, enabled }) {
   const cleanCommand = String(command || "").trim();
-  if (!cleanCommand) throw new Error("请填写后端 MCP command");
+  if (!cleanCommand) throw new Error(mcpMessage("commandRequired"));
   return {
     name: String(name || "").trim() || cleanCommand,
     transport: "stdio",

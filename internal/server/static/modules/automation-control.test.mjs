@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { currentUILocale, setUILocale } from "./i18n.mjs";
+import { getRegionalPreferences, setRegionalPreferences } from "./locale-registry.mjs";
 import {
   automationLimits,
   buildConnectionPayload,
@@ -9,6 +11,8 @@ import {
   buildSchedulePayload,
   createAutomationControlController,
   normalizeConnection,
+  normalizeSchedule,
+  normalizeScheduleRun,
   readLegacyIMDraft,
   renderAutomationControl,
   requireLocalDoubleConfirmation,
@@ -57,6 +61,39 @@ test("automation rendering escapes all dynamic content and bounds rendered colle
   assert.equal((html.match(/data-schedule-card=/g) || []).length, automationLimits.schedules);
 });
 
+test("automation timestamps use the shared UTC regional formatter and explicit invalid fallback", () => {
+  const previous = getRegionalPreferences();
+  try {
+    setRegionalPreferences({ locale: "en-US", timezone: "UTC" });
+    const html = renderAutomationControl({
+      loaded: true,
+      schedules: [{
+        id: "valid",
+        name: "valid",
+        expression: "* * * * *",
+        timezone: "UTC",
+        agentId: "agent",
+        prompt: "run",
+        enabled: true,
+        nextRunAt: "2025-01-02T03:04:05Z",
+      }, {
+        id: "invalid",
+        name: "invalid",
+        expression: "* * * * *",
+        timezone: "UTC",
+        agentId: "agent",
+        prompt: "run",
+        enabled: true,
+        nextRunAt: "not-a-date",
+      }],
+    });
+    assert.match(html, /01\/02\/2025, 03:04:05/);
+    assert.match(html, /无效日期/);
+  } finally {
+    setRegionalPreferences(previous);
+  }
+});
+
 test("legacy localStorage IM draft is an explicitly disabled migration hint, never runtime authority", async () => {
   const storage = new MemoryStorage([["autoto.imGateway", JSON.stringify({ enabled: true, channel: "telegram" })]]);
   const legacy = readLegacyIMDraft(storage);
@@ -102,6 +139,8 @@ test("payload helpers send only supported normalized fields and require env refe
     timezone: "Asia/Shanghai",
     prompt: "run tests",
     permissionMode: "readOnly",
+    environmentMode: "workline",
+    narratorMode: "reuse",
     enabled: true,
   });
 
@@ -255,4 +294,43 @@ test("connection normalization and rendering never echo returned secret fields",
   assert.match(html, /\[REDACTED\]/);
   assert.doesNotMatch(html, /telegramCredentialInput[^>]+value=/);
   assert.doesNotMatch(html, /homeAssistantCredentialInput[^>]+value=/);
+});
+
+test("schedule modes normalize and run history uses the mounted endpoint", async () => {
+  assert.deepEqual(normalizeSchedule({ environmentMode: "standalone", narratorMode: "new" }), {
+    id: "", name: "", expression: "", timezone: "UTC", agentId: "", prompt: "", permissionMode: "readOnly",
+    environmentMode: "standalone", narratorMode: "new", enabled: false, status: "ready", nextRunAt: "", lastRunAt: "",
+    lastRunId: "", lastOutcome: "", lastError: "",
+  });
+  assert.deepEqual(normalizeScheduleRun({ id: "run-1", triggerType: "scheduled", durationMs: 42, status: "completed" }), {
+    id: "run-1", triggerType: "scheduled", durationMs: 42, status: "completed", createdAt: "",
+  });
+  const calls = [];
+  const controller = createAutomationControlController({
+    request: async (path) => {
+      calls.push(path);
+      if (path.includes("/runs?")) return [{ id: "run-1", triggerType: "scheduled", durationMs: 42, status: "completed" }];
+      return emptyAPI(path);
+    },
+  });
+  assert.equal(await controller.loadScheduleRuns("schedule-1"), true);
+  assert.equal(calls[0], `/api/schedules/schedule-1/runs?limit=${automationLimits.scheduleRuns}`);
+  assert.match(controller.render(), /scheduled/);
+  assert.match(controller.render(), /42 ms/);
+});
+
+test("automation renders frontend labels from each localized catalog", () => {
+  const previous = currentUILocale();
+  try {
+    for (const [locale, expected] of [["zh-CN", /受限权限后台任务/], ["zh-TW", /受限權限背景任務/], ["en", /Restricted background tasks/]]) {
+      setUILocale(locale);
+      const html = renderAutomationControl({ loaded: true });
+      assert.match(html, expected, locale);
+      assert.match(html, /placeholder="@every 15m"/, locale);
+      assert.match(html, /env:AUTOTO_TELEGRAM_BOT_TOKEN/, locale);
+      assert.match(html, /light\.living_room/, locale);
+    }
+  } finally {
+    setUILocale(previous);
+  }
 });

@@ -1,7 +1,15 @@
+import { t } from "./i18n.mjs";
+
 const navigationModes = new Set(["all", "projects", "conversations"]);
 
 function text(value) {
   return String(value ?? "").trim();
+}
+
+function compactDisplayPath(value) {
+  return text(value)
+    .replace(/^\/Users\/[^/]+(?=\/)/, "~")
+    .replace(/^\/home\/[^/]+(?=\/)/, "~");
 }
 
 function timestamp(value) {
@@ -88,10 +96,16 @@ export function normalizeNavigationPayload(payload = {}) {
     .map(normalizeProject)
     .filter(Boolean);
   const projectIds = new Set(projects.map((project) => project.id));
+  const seenConversationTargets = new Set();
   const conversations = (Array.isArray(payload.conversations) ? payload.conversations : [])
     .map(normalizeConversation)
     .filter(Boolean)
-    .sort(compareRecent);
+    .sort(compareRecent)
+    .filter((conversation) => {
+      if (seenConversationTargets.has(conversation.targetId)) return false;
+      seenConversationTargets.add(conversation.targetId);
+      return true;
+    });
 
   conversations.forEach((conversation) => {
     if (projectIds.has(conversation.projectId)) return;
@@ -166,7 +180,7 @@ export function buildNavigationView(payload = {}, options = {}) {
     totalConversationCount: normalized.conversations.length,
     projects: mode === "conversations" ? [] : projects,
     conversations: mode === "conversations" ? conversations : [],
-    groups: mode === "all" ? groups : [],
+    groups: mode === "conversations" ? [] : groups,
   };
 }
 
@@ -194,12 +208,14 @@ export function addRecentConversation(recent, target, openedAt = new Date().toIS
 function renderProject(project, activeProjectId) {
   const active = project.id === activeProjectId;
   const path = project.gitPath || project.id;
+  const displayPath = compactDisplayPath(path);
   return `
     <button class="project-card navigation-project-row ${active ? "active" : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}">
       <span class="project-active-dot" aria-hidden="true"></span>
       <span class="project-card-main">
-        <span class="project-card-top"><span class="project-name">${escapeNavigationHtml(project.name)}</span></span>
-        <span class="project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(path)}</span>
+        <span class="project-card-top"><span class="project-kind-badge">PROJECT</span></span>
+        <span class="project-name">${escapeNavigationHtml(project.name)}</span>
+        <span class="project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
       </span>
     </button>`;
 }
@@ -207,7 +223,7 @@ function renderProject(project, activeProjectId) {
 function renderConversation(conversation, activeAgentId, nested = false) {
   const active = conversation.agentId === activeAgentId;
   const breadcrumb = [conversation.projectName, conversation.worklineTitle].filter(Boolean).join(" / ");
-  const meta = [conversation.model, conversation.agentStatus, `${conversation.messageCount} 条消息`].filter(Boolean).join(" · ");
+  const meta = [conversation.model, conversation.agentStatus, t("workspace.navigation.messageCount", { count: conversation.messageCount })].filter(Boolean).join(" · ");
   return `
     <button class="navigation-conversation-row ${nested ? "nested" : ""} ${active ? "active" : ""}" type="button" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}">
       <span class="navigation-agent-icon" aria-hidden="true">☻</span>
@@ -224,42 +240,39 @@ export function renderNavigationHTML(view = {}, options = {}) {
   const activeProjectId = text(options.activeProjectId);
   const activeAgentId = text(options.activeAgentId);
   let html = "";
-  if (mode === "all") {
+  if (mode === "all" || mode === "projects") {
     html = (view.groups || []).map((group) => `
-      <section class="navigation-project-group">
+      <section class="navigation-project-group" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}">
         ${renderProject(group.project, activeProjectId)}
-        ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true)).join("")}
+        <div class="navigation-project-conversations" data-project-conversations="${escapeNavigationHtml(group.project.id)}">
+          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true)).join("")}
+        </div>
       </section>`).join("");
-  } else if (mode === "projects") {
-    html = (view.projects || []).map((project) => renderProject(project, activeProjectId)).join("");
   } else {
     html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId)).join("");
   }
   if (html) return html;
-  if (view.query) return `<div class="empty-list">没有匹配“${escapeNavigationHtml(view.query)}”的结果。</div>`;
+  if (view.query) return `<div class="empty-list">${escapeNavigationHtml(t("workspace.navigation.noResults", { query: view.query }))}</div>`;
   if (!view.totalProjectCount) {
     return `
       <button class="project-card project-card-empty" type="button" data-open-directory-shortcut="new">
         <span class="project-card-main">
-          <span class="project-name">选择资料夹开始</span>
-          <span class="project-path">点击 AI 代理右侧 ＋ 或中间按钮</span>
+          <span class="project-name">${escapeNavigationHtml(t("workspace.navigation.chooseFolder"))}</span>
+          <span class="project-path">${escapeNavigationHtml(t("workspace.navigation.chooseFolderHint"))}</span>
         </span>
       </button>`;
   }
-  return `<div class="empty-list">${mode === "conversations" ? "暂无 Agent 会话。" : "暂无可用项目。"}</div>`;
+  return `<div class="empty-list">${escapeNavigationHtml(mode === "conversations" ? t("workspace.navigation.noConversations") : t("workspace.navigation.noProjects"))}</div>`;
 }
 
 export function renderRecentConversationsHTML(recent, conversations, activeAgentId = "") {
-  const byTarget = new Map((Array.isArray(conversations) ? conversations : []).map((conversation) => [conversation.targetId, conversation]));
-  const rows = normalizeRecentConversations(recent).flatMap((entry) => {
-    const conversation = byTarget.get(entry.targetId);
-    if (!conversation) return [];
-    const breadcrumb = [conversation.projectName, conversation.worklineTitle].filter(Boolean).join(" / ");
-    return [`
-      <button class="recent-item recent-conversation-item ${conversation.agentId === activeAgentId ? "active" : ""}" type="button" data-navigation-target="${escapeNavigationHtml(entry.targetId)}">
-        <span>${escapeNavigationHtml(conversation.agentTitle)}</span>
-        <small title="${escapeNavigationHtml(breadcrumb)}">${escapeNavigationHtml(breadcrumb)}</small>
-      </button>`];
-  });
-  return rows.join("") || `<div class="recent-empty">暂无最近会话</div>`;
+  const groupedTargets = new Set((Array.isArray(conversations) ? conversations : [])
+    .map((conversation) => text(conversation?.targetId))
+    .filter(Boolean));
+  const duplicateCount = normalizeRecentConversations(recent)
+    .filter((entry) => groupedTargets.has(entry.targetId)).length;
+  // Project groups are the canonical location for every known conversation.
+  // The legacy recent container stays present for app-main compatibility, but it
+  // no longer repeats rows that are already available beneath their projects.
+  return `<div class="recent-empty recent-conversations-deduplicated" data-recent-conversations-deduplicated="true" data-deduplicated-count="${escapeNavigationHtml(String(duplicateCount))}">${escapeNavigationHtml(t("workspace.navigation.noRecentConversations"))}</div>`;
 }

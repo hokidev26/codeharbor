@@ -15,6 +15,7 @@ import (
 	"autoto/internal/audit"
 	"autoto/internal/automation"
 	"autoto/internal/channels"
+	"autoto/internal/codexauth"
 	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
@@ -80,17 +81,34 @@ func Run(options Options) int {
 		return 1
 	}
 	defer store.Close()
+	runtimeSettings, err := store.GetRuntimeSettings(context.Background())
+	if err != nil {
+		logger.Error("load runtime settings", "error", err)
+		return 1
+	}
 	if err := store.SeedBackends(context.Background(), configuredBackends(cfg.Backends.Instances)); err != nil {
 		logger.Error("seed backends", "error", err)
 		return 1
 	}
 
 	providerRegistry := providers.NewRegistry()
+	providerRegistry.SetAggregateSource(aggregateSourceFromStore(store))
 	for _, providerCfg := range cfg.Providers.Instances {
+		if providerCfg.Disabled {
+			logger.Info("skip disabled provider", "name", providerCfg.Name, "type", providerCfg.Type)
+			continue
+		}
+		providerCfg = providerConfigForRuntime(providerCfg, runtimeSettings)
+		if providerCfg.Type == config.ProviderTypeCodex {
+			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
 		provider, err := providers.NewProvider(providerCfg)
 		if err != nil {
 			logger.Warn("skip unsupported provider", "name", providerCfg.Name, "type", providerCfg.Type, "error", err)
 			continue
+		}
+		if codexProvider, ok := provider.(*providers.CodexProvider); ok {
+			codexProvider.SetAccountTelemetry(store)
 		}
 		providerRegistry.Register(provider)
 	}
@@ -103,6 +121,7 @@ func Run(options Options) int {
 
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
+	runner.SetDefaultReasoningEffort(runtimeSettings.DefaultReasoningEffort)
 	if err := runner.RecoverInterruptedRuns(context.Background()); err != nil {
 		logger.Error("recover interrupted runs", "error", err)
 		return 1
@@ -173,6 +192,26 @@ func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime
 		}
 	}
 	return nil
+}
+
+func providerConfigForRuntime(providerCfg config.ProviderConfig, settings db.RuntimeSettings) config.ProviderConfig {
+	providerCfg.ClientVersion = config.Version
+	providerCfg.InstallationID = settings.InstallationID
+	return providerCfg
+}
+
+func aggregateSourceFromStore(store *db.Store) providers.AggregateSource {
+	return providers.AggregateSourceFunc(func(ctx context.Context, name string) (providers.AggregateDefinition, error) {
+		aggregate, err := store.GetModelAggregate(ctx, name)
+		if err != nil {
+			return providers.AggregateDefinition{}, err
+		}
+		return providers.AggregateDefinition{
+			Name:    aggregate.Name,
+			Mode:    aggregate.Mode,
+			Members: append([]string(nil), aggregate.Members...),
+		}, nil
+	})
 }
 
 func configuredBackends(backends []config.BackendConfig) []db.Backend {

@@ -1,6 +1,269 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { modelVisibilityPrefsKey, preferredModelKey, relayProtocolPrefsKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
+import { formatTimestamp } from "./formatters.mjs";
+import { t } from "./i18n.mjs";
+import {
+  createProviderDraft,
+  isBuiltinProvider,
+  isProviderDeletable,
+  modelProvidersForUIUnion,
+  normalizeConsoleProvider,
+  providerConfigPayload,
+  providerConsoleRequest,
+  renderProviderConsolePage,
+} from "./model-provider-components.mjs";
+
+const providerConsoleInteractiveSelector = "button, input, select, textarea, a, details, summary, [role=\"switch\"], [contenteditable=\"true\"]";
+const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
+
+export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackType = "openai-compatible") {
+  const fields = form?.elements || {};
+  const value = (name, fallback = "") => String(fields[name]?.value ?? fallback ?? "");
+  return {
+    ...currentDraft,
+    name: value("name", currentDraft.name),
+    type: value("type", currentDraft.type || fallbackType),
+    profile: String(currentDraft.profile || ""),
+    baseUrl: value("baseUrl", currentDraft.baseUrl),
+    apiKey: value("apiKey", currentDraft.apiKey),
+    model: value("model", currentDraft.model),
+    maxTokens: Number(fields.maxTokens?.value || 0),
+    apiKeyOptional: Boolean(fields.apiKeyOptional?.checked),
+  };
+}
+
+export function syncProviderConsoleDraft(consoleState, form) {
+  if (!consoleState || !form) return null;
+  const draft = providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type);
+  consoleState.draft = draft;
+  consoleState.dirty = true;
+  return draft;
+}
+
+export function isProviderConsoleInteractiveTarget(target, card = null) {
+  const interactive = target?.closest?.(providerConsoleInteractiveSelector);
+  return Boolean(interactive && (!card || card.contains?.(interactive)));
+}
+
+export function shouldOpenProviderCardFromKeyboard(event, card) {
+  if (!card || !["Enter", " ", "Spacebar"].includes(event?.key)) return false;
+  return !isProviderConsoleInteractiveTarget(event.target, card);
+}
+
+export function providerConsoleFocusableElements(layer) {
+  return [...(layer?.querySelectorAll?.(providerConsoleFocusableSelector) || [])]
+    .filter((node) => !node.disabled && node.getAttribute?.("aria-hidden") !== "true" && node.tabIndex !== -1);
+}
+
+export function trapProviderConsoleFocus(event, layer) {
+  if (event?.key !== "Tab" || !layer) return false;
+  const focusable = providerConsoleFocusableElements(layer);
+  if (!focusable.length) {
+    event.preventDefault?.();
+    layer.focus?.();
+    return true;
+  }
+  const current = event.target;
+  const index = focusable.indexOf(current);
+  if (event.shiftKey ? index <= 0 : index === -1 || index === focusable.length - 1) {
+    event.preventDefault?.();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus?.();
+    return true;
+  }
+  return false;
+}
+
+export function restoreProviderConsoleFocus(target) {
+  target?.focus?.();
+}
+
+export function providerPreflightResult(response, translate) {
+  if (response?.errorCode === "not_configured") {
+    return {
+      message: translate("messages.currentDraftTestNeedsApiKey"),
+      tone: "warning",
+      terminalLevel: "warn",
+    };
+  }
+  if (response?.reachable === true && response?.configured !== false) {
+    return {
+      message: translate("messages.currentDraftTestSucceeded"),
+      tone: "success",
+      terminalLevel: "info",
+    };
+  }
+  return {
+    message: translate("messages.currentDraftTestFailed", { message: response?.errorCode || translate("messages.requestFailed") }),
+    tone: "attention",
+    terminalLevel: "warn",
+  };
+}
+
+export function normalizeCodexAccountList(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  for (const key of ["accounts", "files", "authFiles", "data", "items"]) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return [];
+}
+
+export function codexAccountActionRequest(action, id, values = {}) {
+  const path = `/api/providers/oauth/codex/accounts/${encodeURIComponent(String(id || ""))}`;
+  switch (action) {
+    case "save": return { path, options: { method: "PATCH", body: JSON.stringify({ alias: String(values.alias || ""), priority: Number(values.priority) }) } };
+    case "toggle": return { path, options: { method: "PATCH", body: JSON.stringify({ disabled: !Boolean(values.disabled) }) } };
+    case "sync": return { path: `${path}/refresh`, options: { method: "POST" } };
+    case "delete": return { path, options: { method: "DELETE" } };
+    default: throw new Error(`unsupported Codex account action: ${action}`);
+  }
+}
+
+export function codexMutationRefreshWarning(refreshed, message, translate = (key, params) => t(`modelProvider.${key}`, params)) {
+  return refreshed ? "" : translate("accountMutationRefreshFailed", { message: message || translate("unknown") });
+}
+
+export function codexDeleteResultWarning(result, translate = (key, params) => t(`modelProvider.${key}`, params)) {
+  return result?.status === "partial" || result?.stats_deleted === false
+    ? translate("accountDeletePartial")
+    : "";
+}
+
+export function renderCodexAccountManagementTable(accounts, { translate = (key, params) => t(`modelProvider.${key}`, params), now = Date.now() } = {}) {
+  const mt = translate;
+  if (!accounts.length) return `<div class="settings-empty-card compact">${escapeHtml(mt("noCodexCredentials"))}</div>`;
+  return `
+    <div class="codex-account-table-wrap">
+      <table class="codex-account-table">
+        <thead><tr>
+          <th>${escapeHtml(mt("accountName"))}</th><th>${escapeHtml(mt("accountId"))}</th><th>${escapeHtml(mt("priority"))}</th><th>${escapeHtml(mt("status"))}</th>
+          <th>${escapeHtml(mt("successFailure"))}</th><th>${escapeHtml(mt("usage"))}</th><th>${escapeHtml(mt("lastUsed"))}</th><th>${escapeHtml(mt("actions"))}</th>
+        </tr></thead>
+        <tbody>${accounts.map((account) => renderCodexAccountRow(account, mt, now)).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCodexAccountRow(account, mt, now) {
+  const id = String(account?.id || account?.auth_index || account?.authIndex || account?.name || "");
+  const alias = String(account?.alias || account?.email || "");
+  const priority = finiteNumber(account?.priority, 100);
+  const disabled = Boolean(account?.disabled);
+  const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
+  const plan = String(quota?.plan_type || quota?.planType || account?.plan_type || account?.planType || "").trim();
+  const limited = codexQuotaIsLimited(quota);
+  const statusClass = disabled ? "muted" : limited ? "warn" : "ok";
+  const statusText = disabled ? mt("disabled") : limited ? mt("rateLimited") : mt("available");
+  const accountLabel = String(account?.account_id || account?.accountID || id || mt("unknown"));
+  const fallbackName = String(account?.email || account?.name || mt("unknown"));
+  const success = Math.max(0, finiteNumber(stats.success_count ?? stats.successCount, 0));
+  const failure = Math.max(0, finiteNumber(stats.failure_count ?? stats.failureCount, 0));
+  const lastUsed = String(stats.last_use_at || stats.lastUseAt || stats.last_attempt_at || stats.lastAttemptAt || "");
+  const statusDetail = String(stats.last_error_code || stats.lastErrorCode || stats.last_status_code || stats.lastStatusCode || stats.last_http_status || stats.lastHTTPStatus || "");
+  return `<tr data-codex-account-row="${escapeAttr(id)}">
+    <td data-label="${escapeAttr(mt("accountName"))}">
+      <input class="codex-account-alias settings-text-input" value="${escapeAttr(alias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-codex-alias="${escapeAttr(id)}">
+      <div class="codex-account-secondary">${escapeHtml(fallbackName)}${plan ? ` <span class="codex-plan-badge">${escapeHtml(plan)}</span>` : ""}</div>
+    </td>
+    <td data-label="${escapeAttr(mt("accountId"))}"><code class="codex-account-id">${escapeHtml(accountLabel)}</code></td>
+    <td data-label="${escapeAttr(mt("priority"))}"><input class="codex-priority-input settings-text-input" type="number" min="1" max="1000000" step="1" value="${escapeAttr(priority)}" data-codex-priority="${escapeAttr(id)}"></td>
+    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill ${statusClass}">${escapeHtml(statusText)}</span>${statusDetail ? `<div class="codex-account-secondary">${escapeHtml(statusDetail)}</div>` : ""}</td>
+    <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
+    <td data-label="${escapeAttr(mt("usage"))}">${renderCodexQuota(quota, mt, now)}</td>
+    <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
+    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions">
+      <button class="settings-action-btn subtle" type="button" data-codex-save="${escapeAttr(id)}">${escapeHtml(mt("save"))}</button>
+      <button class="settings-action-btn subtle" type="button" data-codex-sync="${escapeAttr(id)}">${escapeHtml(mt("sync"))}</button>
+      <button class="settings-action-btn subtle" type="button" data-codex-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}">${escapeHtml(disabled ? mt("enable") : mt("disable"))}</button>
+      <button class="settings-action-btn danger" type="button" data-codex-delete="${escapeAttr(id)}">${escapeHtml(mt("delete"))}</button>
+    </div></td>
+  </tr>`;
+}
+
+function renderCodexQuota(quota, mt, now) {
+  if (!quota) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
+  const windows = [
+    [mt("primaryQuota"), quota.primary_window || quota.primaryWindow],
+    [mt("secondaryQuota"), quota.secondary_window || quota.secondaryWindow],
+  ].filter(([, window]) => window && typeof window === "object");
+  const credits = renderCodexCredits(quota.credits || quota.credit_balance || quota.creditBalance, mt);
+  if (!windows.length && !credits) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
+  return `<div class="codex-quota-stack">${windows.map(([label, window]) => renderCodexQuotaWindow(label, window, mt, now)).join("")}${credits}</div>`;
+}
+
+function renderCodexQuotaWindow(label, window, mt, now) {
+  const used = Math.max(0, Math.min(100, finiteNumber(window.used_percent ?? window.usedPercent, 0)));
+  const remaining = Math.max(0, 100 - used);
+  const reset = quotaResetText(window, mt, now);
+  const duration = formatWindowSeconds(finiteNumber(window.limit_window_seconds ?? window.limitWindowSeconds ?? window.windowSeconds, 0));
+  return `<div class="codex-quota-window">
+    <div class="codex-quota-label"><span>${escapeHtml(label)}</span><strong>${escapeHtml(mt("remainingPercent", { percent: formatPercent(remaining) }))}</strong></div>
+    <div class="codex-quota-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeAttr(remaining)}"><span style="width:${escapeAttr(remaining)}%"></span></div>
+    <div class="codex-quota-meta">${escapeHtml([duration, reset].filter(Boolean).join(" · "))}</div>
+  </div>`;
+}
+
+function renderCodexCredits(credits, mt) {
+  if (!credits || typeof credits !== "object") return "";
+  const unlimited = Boolean(credits.unlimited ?? credits.is_unlimited ?? credits.isUnlimited);
+  const hasCredits = Boolean(credits.has_credits ?? credits.hasCredits ?? credits.available);
+  const balance = finiteNumber(credits.balance ?? credits.amount ?? credits.remaining, 0);
+  const summary = unlimited
+    ? mt("creditsUnlimited")
+    : hasCredits
+      ? mt("creditsBalance", { balance: formatCreditBalance(balance) })
+      : mt("creditsUnavailable");
+  return `<div class="codex-credits-summary"><span>${escapeHtml(mt("credits"))}</span><strong>${escapeHtml(summary)}</strong></div>`;
+}
+
+function codexQuotaIsLimited(quota) {
+  if (!quota || typeof quota !== "object") return false;
+  if (quota.rate_limit_reached_type || quota.rateLimitReachedType) return true;
+  return [quota.primary_window, quota.primaryWindow, quota.secondary_window, quota.secondaryWindow]
+    .some((window) => window && finiteNumber(window.used_percent ?? window.usedPercent, 0) >= 100);
+}
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatCreditBalance(value) {
+  return value.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function formatPercent(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatWindowSeconds(seconds) {
+  if (!(seconds > 0)) return "";
+  if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${Math.round(seconds)}s`;
+}
+
+function quotaResetText(window, mt, now) {
+  let seconds = finiteNumber(window.reset_after_seconds ?? window.resetAfterSeconds, 0);
+  const resetAtValue = window.reset_at || window.resetAt;
+  if (!(seconds > 0) && resetAtValue) {
+    const resetAt = Date.parse(resetAtValue);
+    if (Number.isFinite(resetAt)) seconds = Math.max(0, Math.ceil((resetAt - now) / 1000));
+  }
+  if (!(seconds > 0)) return "";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const compact = days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
+  return mt("resetsIn", { time: compact });
+}
+
+function formatCodexTimestamp(value) {
+  return formatTimestamp(value, { fallback: value });
+}
 
 export function createModelProviderSettingsController({
   state,
@@ -13,14 +276,17 @@ export function createModelProviderSettingsController({
   showError,
   updateWorkspaceMetaPills,
 } = {}) {
+  const mt = (key, params) => t(`modelProvider.${key}`, params);
+  const ct = (key, params) => t(`modelProvider.console.${key}`, params);
+
   function setModelRefreshButtonsBusy(busy) {
     ["refreshModelsBtn", "settingsRefreshModelsBtn", "providerRefreshModelsBtn", "relayFetchModelsBtn"].forEach((id) => {
-      setButtonBusy($(id), busy, "刷新中");
+      setButtonBusy($(id), busy, mt("refreshing"));
     });
   }
 
   function setModelApplyButtonsBusy(busy) {
-    setButtonBusy($("settingsClearPreferredModelBtn"), busy, "处理中");
+    setButtonBusy($("settingsClearPreferredModelBtn"), busy, mt("processing"));
     document.querySelectorAll("[data-apply-model]").forEach((button) => {
       button.disabled = busy;
       if (busy) button.setAttribute("aria-busy", "true");
@@ -34,7 +300,7 @@ export function createModelProviderSettingsController({
     setModelRefreshButtonsBusy(true);
     try {
       await loadModelCatalog();
-      notifyTerminal?.("[info] 模型列表已刷新。\n");
+      notifyTerminal?.(`[info] ${mt("modelListRefreshed")}\n`);
     } finally {
       state.modelRefreshing = false;
       setModelRefreshButtonsBusy(false);
@@ -42,55 +308,116 @@ export function createModelProviderSettingsController({
   }
 
   async function loadProviderAuthFiles({ silent = false } = {}) {
-    const provider = providerAuthProvider();
-    if (!provider) {
-      state.providerAuthFiles = null;
-      state.providerAuthError = "当前没有支持凭证文件管理的 Provider。";
-      if (!silent) throw new Error(state.providerAuthError);
-      return;
-    }
     const seq = ++state.providerAuthSeq;
     const button = silent ? null : $("codexRefreshAuthBtn");
-    setButtonBusy(button, true, "刷新中");
+    let loaded = false;
+    setButtonBusy(button, true, mt("refreshing"));
     try {
-      const files = await api(`/api/providers/${encodeURIComponent(provider.name)}/auth-files`);
+      const files = await api("/api/providers/oauth/codex/accounts");
       if (seq !== state.providerAuthSeq) return;
       state.providerAuthFiles = files;
       state.providerAuthError = "";
+      state.providerAuthMutationWarning = "";
+      loaded = true;
     } catch (err) {
       if (seq !== state.providerAuthSeq) return;
-      state.providerAuthFiles = null;
       state.providerAuthError = err.message;
-      if (!silent) notifyTerminal?.(`[warn] 读取 CLIProxyAPI 账号失败：${err.message}\n`);
+      if (!silent) notifyTerminal?.(`[warn] ${mt("authAccountsLoadFailed", { message: err.message })}\n`);
     } finally {
-      if (seq === state.providerAuthSeq) setButtonBusy(button, false, "刷新中");
+      if (seq === state.providerAuthSeq) setButtonBusy(button, false, mt("refreshing"));
     }
     if (seq === state.providerAuthSeq) refreshActiveSettingsPanel?.();
+    return loaded && seq === state.providerAuthSeq;
   }
 
   async function importCodexAuthFile() {
-    const provider = providerAuthProvider();
-    if (!provider) throw new Error("当前没有支持凭证文件管理的 Provider。");
     const button = $("codexImportAuthBtn");
     if (button?.disabled) return;
     const textarea = $("codexAuthImportText");
     const content = textarea?.value.trim() || "";
-    if (!content) throw new Error("请先粘贴 JSON 或 token 内容");
-    setButtonBusy(button, true, "导入中");
+    if (!content) throw new Error(mt("importContentRequired"));
+    setButtonBusy(button, true, mt("importing"));
     if (textarea) textarea.disabled = true;
     try {
-      await api(`/api/providers/${encodeURIComponent(provider.name)}/auth-files/import`, {
+      const result = await api("/api/providers/oauth/codex/import", {
         method: "POST",
         body: JSON.stringify({ filename: "autoto-codex-auth.json", content }),
       });
-      if (textarea) textarea.value = "";
-      notifyTerminal?.("[info] 已导入 Codex 凭据，正在刷新账号和模型。\n");
+      const imported = Math.max(0, Number(result?.imported || 0));
+      const skipped = Math.max(0, Number(result?.skipped || 0));
+      const failed = Array.isArray(result?.errors) ? result.errors.length : 0;
+      if (!failed && textarea) textarea.value = "";
+      notifyTerminal?.(`[info] ${mt("importedCredentialsCount", { count: imported, skipped })}\n`);
       await loadProviderAuthFiles({ silent: true });
       await loadModelCatalog();
+      if (failed) throw new Error(mt("importedCredentialsPartial", { count: imported, failed }));
     } finally {
-      setButtonBusy(button, false, "导入中");
+      setButtonBusy(button, false, mt("importing"));
       if (textarea) textarea.disabled = false;
     }
+  }
+
+  async function runCodexAccountAction(id, button, busyLabel, action) {
+    state.codexAccountBusy ||= {};
+    if (!id || state.codexAccountBusy[id]) return;
+    state.codexAccountBusy[id] = true;
+    state.providerAuthMutationWarning = "";
+    const row = button?.closest?.("[data-codex-account-row]");
+    row?.querySelectorAll?.("button, input").forEach((node) => { node.disabled = true; });
+    setButtonBusy(button, true, busyLabel);
+    try {
+      const actionResult = await action(row);
+      const refreshed = await loadProviderAuthFiles({ silent: true });
+      const warnings = [
+        actionResult?.warning || "",
+        codexMutationRefreshWarning(refreshed, state.providerAuthError, mt),
+      ].filter(Boolean);
+      state.providerAuthMutationWarning = warnings.join(" ");
+      warnings.forEach((warning) => notifyTerminal?.(`[warn] ${warning}\n`));
+      if (warnings.length) refreshActiveSettingsPanel?.();
+    } finally {
+      delete state.codexAccountBusy[id];
+      row?.querySelectorAll?.("button, input").forEach((node) => { node.disabled = false; });
+      setButtonBusy(button, false, busyLabel);
+    }
+  }
+
+  async function saveCodexAccount(id, button) {
+    return runCodexAccountAction(id, button, mt("saving"), async (row) => {
+      const alias = row?.querySelector?.("[data-codex-alias]")?.value?.trim?.() || "";
+      const priority = Number(row?.querySelector?.("[data-codex-priority]")?.value || 0);
+      if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
+      const request = codexAccountActionRequest("save", id, { alias, priority });
+      await api(request.path, request.options);
+      notifyTerminal?.(`[info] ${mt("accountSaved")}\n`);
+    });
+  }
+
+  async function syncCodexAccount(id, button) {
+    return runCodexAccountAction(id, button, mt("syncing"), async () => {
+      const request = codexAccountActionRequest("sync", id);
+      await api(request.path, request.options);
+      notifyTerminal?.(`[info] ${mt("accountSynced")}\n`);
+    });
+  }
+
+  async function toggleCodexAccount(id, disabled, button) {
+    return runCodexAccountAction(id, button, mt("saving"), async () => {
+      const request = codexAccountActionRequest("toggle", id, { disabled });
+      await api(request.path, request.options);
+      notifyTerminal?.(`[info] ${mt(disabled ? "accountEnabled" : "accountDisabled")}\n`);
+    });
+  }
+
+  async function deleteCodexAccount(id, button) {
+    if (state.codexAccountBusy?.[id] || !globalThis.confirm?.(mt("deleteAccountConfirm"))) return;
+    return runCodexAccountAction(id, button, mt("deleting"), async () => {
+      const request = codexAccountActionRequest("delete", id);
+      const result = await api(request.path, request.options);
+      const warning = codexDeleteResultWarning(result, mt);
+      if (!warning) notifyTerminal?.(`[info] ${mt("accountDeleted")}\n`);
+      return { warning };
+    });
   }
 
   async function saveRelayProviderConfig() {
@@ -112,30 +439,30 @@ export function createModelProviderSettingsController({
       profile: spec.providerProfile || existing?.profile || "",
       apiKeyOptional: Boolean(existing?.apiKeyOptional),
     };
-    setButtonBusy(button, true, "保存中");
+    setButtonBusy(button, true, mt("saving"));
     try {
       const result = await api(`/api/providers/${encodeURIComponent(spec.providerName)}/config`, {
         method: "PUT",
         body: JSON.stringify(payload),
       });
-      state.providerConfigStatus = result.message || "中转站配置已保存。";
-      notifyTerminal?.(`[info] 已保存 ${spec.label} 配置，正在刷新模型。\n`);
+      state.providerConfigStatus = result.message || mt("relayConfigSaved");
+      notifyTerminal?.(`[info] ${mt("relayConfigSavedRefreshing", { provider: spec.label })}\n`);
       await loadSettings();
       await loadModelCatalog();
       refreshActiveSettingsPanel?.();
     } finally {
-      setButtonBusy(button, false, "保存中");
+      setButtonBusy(button, false, mt("saving"));
     }
   }
 
   function selectRelayProtocol(protocol) {
-    localStorage.setItem(relayProtocolPrefsKey, protocol);
+    globalThis.localStorage?.setItem?.(relayProtocolPrefsKey, protocol);
     state.providerConfigStatus = "";
     refreshActiveSettingsPanel?.();
   }
 
   function getRelayProtocol() {
-    const saved = localStorage.getItem(relayProtocolPrefsKey) || "completions";
+    const saved = globalThis.localStorage?.getItem?.(relayProtocolPrefsKey) || "completions";
     return relayProtocolSpec(saved).key;
   }
 
@@ -145,11 +472,10 @@ export function createModelProviderSettingsController({
 
   function relayProtocolSpecs() {
     return [
-      { key: "anthropic", label: "Anthropic兼容", providerName: "anthropic", providerType: "anthropic", help: "连接第三方 Anthropic Messages API 兼容网关。" },
-      { key: "codex", label: "Codex中转", providerName: "cliproxyapi", providerType: "openai-compatible", providerProfile: "cliproxyapi", help: "连接本机 CLIProxyAPI；Codex 账号统一使用下方凭据导入。" },
-      { key: "responses", label: "Responses兼容", providerName: "openai", providerType: "openai", help: "连接 OpenAI Responses API 兼容端点。" },
-      { key: "claude-code", label: "ClaudeCode中转", providerName: "anthropic", providerType: "anthropic", help: "按 Anthropic Messages API 兼容方式接入 Claude Code 中转。" },
-      { key: "completions", label: "Completions老旧兼容", providerName: "openai-compatible", providerType: "openai-compatible", help: "连接 OpenAI Chat Completions 兼容中转站。" },
+      { key: "anthropic", label: mt("relayProtocols.anthropic.label"), providerName: "anthropic", providerType: "anthropic", help: mt("relayProtocols.anthropic.help") },
+      { key: "responses", label: mt("relayProtocols.responses.label"), providerName: "openai", providerType: "openai", help: mt("relayProtocols.responses.help") },
+      { key: "claude-code", label: mt("relayProtocols.claudeCode.label"), providerName: "anthropic", providerType: "anthropic", help: mt("relayProtocols.claudeCode.help") },
+      { key: "completions", label: mt("relayProtocols.completions.label"), providerName: "openai-compatible", providerType: "openai-compatible", help: mt("relayProtocols.completions.help") },
     ];
   }
 
@@ -163,8 +489,9 @@ export function createModelProviderSettingsController({
     return Boolean(state.providerConfigExpanded?.[key]);
   }
 
-  function renderProviderConfigToggle(key, expanded, label = "配置") {
-    return `<button class="settings-action-btn subtle" type="button" data-toggle-provider-config="${escapeAttr(key)}" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "收起" : `展开${label}`}</button>`;
+  function renderProviderConfigToggle(key, expanded, label = mt("config")) {
+    const buttonLabel = expanded ? mt("collapse") : mt("expand", { label });
+    return `<button class="settings-action-btn subtle" type="button" data-toggle-provider-config="${escapeAttr(key)}" aria-expanded="${expanded ? "true" : "false"}">${escapeHtml(buttonLabel)}</button>`;
   }
 
   function toggleProviderConfig(key) {
@@ -189,29 +516,29 @@ export function createModelProviderSettingsController({
     const options = allModelOptions();
     const current = currentModelValue();
     const preferred = getPreferredModel();
-    const clip = cliProxyProvider();
+    const codex = codexProvider();
     return `
     <div class="settings-live-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">当前模型</div>
-          <div class="settings-hero-title">${escapeHtml(current || "尚未选择")}</div>
-          <p>${escapeHtml(preferred ? `首选模型：${preferred}` : "还没有保存首选模型；可先选模型，再创建项目。")}</p>
+          <div class="settings-hero-kicker">${escapeHtml(mt("currentModel"))}</div>
+          <div class="settings-hero-title">${escapeHtml(current || mt("noneSelected"))}</div>
+          <p>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("noPreferred"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="settingsRefreshModelsBtn" class="settings-action-btn primary" type="button">刷新模型</button>
-          <button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">凭证 / 中转站</button>
-          <button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">显示已配置模型</button>
-          <button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">清除首选</button>
+          <button id="settingsRefreshModelsBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("refreshModels"))}</button>
+          <button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button>
+          <button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button>
+          <button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(String(options.length))}</strong><span>可选模型</span></div>
-        <div><strong>${escapeHtml(clip?.error ? "需处理" : (clip ? "已就绪" : "未发现"))}</strong><span>CLIProxyAPI</span></div>
-        <div><strong>${escapeHtml(clip?.baseUrl || "默认")}</strong><span>模型来源</span></div>
+        <div><strong>${escapeHtml(String(options.length))}</strong><span>${escapeHtml(mt("availableModels"))}</span></div>
+        <div><strong>${escapeHtml(codex?.error ? mt("needsAttention") : (codex?.configured ? mt("ready") : mt("unconfigured")))}</strong><span>Codex OAuth</span></div>
+        <div><strong>${escapeHtml(codex?.baseUrl || "https://chatgpt.com/backend-api/codex")}</strong><span>${escapeHtml(mt("modelSource"))}</span></div>
       </div>
       <div class="settings-model-list">
-        ${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card">尚未加载模型。请先刷新模型。</div>`}
+        ${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card">${escapeHtml(mt("noModelsLoaded"))}</div>`}
       </div>
     </div>
   `;
@@ -244,51 +571,90 @@ export function createModelProviderSettingsController({
     const selectable = isModelSelectable(provider, model);
     const disabled = !provider.configured;
     const icon = hidden || disabled ? "⊘" : "◉";
-    const title = hidden ? "显示这个模型" : "隐藏这个模型";
+    const title = hidden ? mt("showModel") : mt("hideModel");
+    const modelMeta = `${model}${preferred ? ` · ${mt("preferred")}` : ""}${disabled ? ` · ${mt("unconfigured")}` : hidden ? ` · ${mt("hidden")}` : ""}`;
     return `
     <div class="settings-model-row ${active ? "active" : ""} ${hidden || disabled ? "muted" : ""}">
       <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}" ${selectable ? "" : "disabled"}>
         <span class="settings-model-name">${escapeHtml(value)}</span>
-        <span class="settings-model-provider">${escapeHtml(model)}${preferred ? " · 首选" : ""}${disabled ? " · 未配置" : hidden ? " · 已隐藏" : ""}</span>
+        <span class="settings-model-provider">${escapeHtml(modelMeta)}</span>
       </button>
       <button class="settings-model-icon-btn" type="button" data-toggle-model-visibility="${escapeAttr(value)}" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}" ${disabled ? "disabled" : ""}>${escapeHtml(icon)}</button>
     </div>
   `;
   }
 
+  function providerConsoleState() {
+    const fallback = {
+      search: "",
+      category: "all",
+      modal: "",
+      drawer: "",
+      mode: "",
+      type: "",
+      providerName: "",
+      draft: null,
+      dirty: false,
+      busy: {},
+      result: null,
+    };
+    if (!state.providerConsole || typeof state.providerConsole !== "object") {
+      state.providerConsole = fallback;
+    } else {
+      state.providerConsole = { ...fallback, ...state.providerConsole, busy: state.providerConsole.busy || {} };
+    }
+    return state.providerConsole;
+  }
+
+  function setProviderConsoleResult(message, tone = "info") {
+    providerConsoleState().result = message ? { message: String(message), tone } : null;
+  }
+
   function renderProviderSettingsContent() {
-    const providers = modelProvidersForUI();
-    const clip = cliProxyProvider();
-    const models = clip ? providerModelList(clip) : [];
+    const consoleState = providerConsoleState();
+    return renderProviderConsolePage({
+      providers: modelProvidersForUI(),
+      consoleState,
+      codexDrawer: renderCodexConsoleDrawer(),
+      relayDrawer: renderRelayConsoleDrawer(),
+    });
+  }
+
+  function renderCodexConsoleDrawer() {
+    const consoleState = providerConsoleState();
+    if (consoleState.mode !== "codex") return "";
     const authFiles = extractAuthFiles(state.providerAuthFiles);
-    return `
-    <div class="settings-live-page codex-provider-page">
-      <section class="settings-hero-card codex-hero-card">
-        <div>
-          <div class="settings-hero-kicker">AI 供应商</div>
-          <div class="settings-hero-title">Codex 凭证 + 中转站</div>
-          <p>Codex 统一走凭证导入；中转站在 Autoto 内填写 API Key、Base URL、协议和默认模型，保存后立即刷新模型列表。</p>
-        </div>
-        <div class="settings-action-row">
-          <button id="codexFocusImportBtn" class="settings-action-btn primary" type="button">导入 Codex 凭证</button>
-          <button id="providerRefreshModelsBtn" class="settings-action-btn subtle" type="button">刷新模型</button>
-        </div>
-      </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(String(authFiles.length))}</strong><span>Codex 凭证</span></div>
-        <div><strong>${escapeHtml(String(models.length))}</strong><span>Codex 模型</span></div>
-        <div><strong>${escapeHtml(String(providers.length))}</strong><span>Provider</span></div>
+    return `<header class="mp-drawer-head"><div><p class="mp-provider-kicker">Codex OAuth</p><h2 id="mp-drawer-title">${escapeHtml(ct("codex.title"))}</h2><p id="mp-drawer-description">${escapeHtml(ct("codex.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
+      <div class="mp-drawer-body">
+        <section class="mp-config-section" id="codexCredentialImportSection"><h3>${escapeHtml(mt("codexImportTitle"))}</h3><p>${escapeHtml(mt("codexImportDescription"))}</p>
+          <textarea id="codexAuthImportText" class="mp-textarea" placeholder="${escapeAttr(mt("codexImportPlaceholder"))}"></textarea>
+          <div class="mp-inline-actions"><button id="codexImportAuthBtn" class="mp-action primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
+        </section>
+        <section class="mp-config-section"><div class="mp-section-title"><div><h3>${escapeHtml(mt("importedCredentials"))}</h3><p>${escapeHtml(mt("importedCredentialsDescription"))}</p></div><button id="codexRefreshAuthBtn" class="mp-action" type="button" data-mp-codex-refresh>${escapeHtml(mt("refreshAccounts"))}</button></div>
+          ${state.providerAuthMutationWarning ? `<div class="mp-provider-result attention">${escapeHtml(state.providerAuthMutationWarning)}</div>` : state.providerAuthError ? `<div class="mp-provider-result attention">${escapeHtml(state.providerAuthError)}</div>` : ""}
+          ${renderCodexAccountManagementTable(authFiles, { translate: mt })}
+        </section>
       </div>
-      ${renderCodexImportCard()}
-      ${renderCodexAccountCard(authFiles)}
-      ${renderRelayProviderConfigCard()}
-      ${renderCustomProviderConfigCard()}
-      ${clip ? renderCLIProxyStatusCard(clip) : `<div class="settings-empty-card">未找到 cliproxyapi provider。</div>`}
-      <div class="settings-provider-cards">
-        ${providers.map(renderProviderCard).join("")}
+      <footer class="mp-drawer-foot"><span>${escapeHtml(ct("codex.footer"))}</span><button class="mp-action" type="button" data-mp-refresh-models>${escapeHtml(ct("actions.refreshModels"))}</button></footer>`;
+  }
+
+  function renderRelayConsoleDrawer() {
+    const consoleState = providerConsoleState();
+    if (consoleState.mode !== "relay") return "";
+    const spec = relayProtocolSpec(getRelayProtocol());
+    const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), baseUrl: "" };
+    const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
+    return `<header class="mp-drawer-head"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description">${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
+      <div class="mp-drawer-body">
+        <section class="mp-config-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p>${escapeHtml(spec.help)}</p></section>
+        <section class="mp-config-section"><h3>${escapeHtml(ct("drawer.connection"))}</h3>
+          <label>${escapeHtml(ct("fields.providerName"))}<input id="relayProviderName" value="${escapeAttr(provider.name || spec.providerName)}" readonly></label>
+          <label>${escapeHtml(ct("fields.apiKey"))}<input id="relayApiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct("fields.apiKeyBlankKeepsCurrent"))}"></label>
+          <label>${escapeHtml(ct("fields.baseUrl"))}<input id="relayBaseUrl" value="${escapeAttr(provider.baseUrl || "")}" autocomplete="url" placeholder="https://api.example.com/v1"></label>
+          <label>${escapeHtml(ct("fields.defaultModel"))}<input id="relayCustomModel" value="${escapeAttr(modelValue)}" autocomplete="off"></label>
+        </section>
       </div>
-    </div>
-  `;
+      <footer class="mp-drawer-foot"><button id="relayFetchModelsBtn" class="mp-action" type="button" data-mp-fetch-models>${escapeHtml(ct("actions.fetchModels"))}</button><div><button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.cancel"))}</button><button id="relaySaveConfigBtn" class="mp-action primary" type="button" data-mp-relay-save>${escapeHtml(ct("relay.save"))}</button></div></footer>`;
   }
 
   function renderCodexImportCard() {
@@ -296,13 +662,13 @@ export function createModelProviderSettingsController({
     <section class="settings-provider-section" id="codexCredentialImportSection">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">Codex 凭证导入</div>
-          <div class="settings-provider-meta">粘贴包含 refresh_token/access_token 的 JSON、sub2api 风格导出、逗号/换行分隔 refresh_token，或 rt_xxxxx / email----pass----at----access_token 账号行。</div>
+          <div class="settings-provider-title">${escapeHtml(mt("codexImportTitle"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(mt("codexImportDescription"))}</div>
         </div>
-        <button id="codexImportAuthBtn" class="settings-action-btn primary" type="button">导入</button>
+        <button id="codexImportAuthBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("import"))}</button>
       </div>
-      <textarea id="codexAuthImportText" class="settings-token-input" placeholder="user@example.com----password----note----rt_xxxxx----note\nuser@example.com----password----at----access_token_here"></textarea>
-      <div class="settings-inline-success">Codex 仅保留凭证导入方式；导入后会自动刷新账号和模型。</div>
+      <textarea id="codexAuthImportText" class="settings-token-input" placeholder="${escapeAttr(mt("codexImportPlaceholder"))}"></textarea>
+      <div class="settings-inline-success">${escapeHtml(mt("codexImportSuccess"))}</div>
     </section>
   `;
   }
@@ -312,14 +678,14 @@ export function createModelProviderSettingsController({
     <section class="settings-provider-section">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">已导入凭证</div>
-          <div class="settings-provider-meta">来自 CLIProxyAPI auth-dir。导入后会自动刷新；也可手动刷新凭证列表。</div>
+          <div class="settings-provider-title">${escapeHtml(mt("importedCredentials"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(mt("importedCredentialsDescription"))}</div>
         </div>
-        <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button">刷新账号</button>
+        <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshAccounts"))}</button>
       </div>
-      ${state.providerAuthError ? `<div class="settings-inline-alert">${escapeHtml(state.providerAuthError)}</div>` : ""}
+      ${state.providerAuthMutationWarning ? `<div class="settings-inline-alert">${escapeHtml(state.providerAuthMutationWarning)}</div>` : state.providerAuthError ? `<div class="settings-inline-alert">${escapeHtml(state.providerAuthError)}</div>` : ""}
       <div class="settings-auth-list">
-        ${authFiles.length ? authFiles.map(renderCodexAuthItem).join("") : `<div class="settings-empty-card compact">暂无 Codex 凭证。请在上方粘贴 JSON 或 token 后导入。</div>`}
+        ${renderCodexAccountManagementTable(authFiles, { translate: mt })}
       </div>
     </section>
   `;
@@ -334,42 +700,42 @@ export function createModelProviderSettingsController({
     <section class="settings-provider-section relay-config-section ${expanded ? "expanded" : "collapsed"}">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">中转站配置</div>
-          <div class="settings-provider-meta">当前协议：${escapeHtml(spec.help)} · 当前前缀：${escapeHtml(spec.providerName)}:${escapeHtml(modelValue)}</div>
+          <div class="settings-provider-title">${escapeHtml(mt("relayConfigTitle"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(mt("relayCurrentProtocol", { help: spec.help, provider: spec.providerName, model: modelValue }))}</div>
         </div>
         <div class="settings-action-row compact-actions">
-          ${renderProviderConfigToggle("relay", expanded, "中转配置")}
+          ${renderProviderConfigToggle("relay", expanded, mt("relayConfig"))}
         </div>
       </div>
       ${state.providerConfigStatus ? `<div class="settings-inline-success">${escapeHtml(state.providerConfigStatus)}</div>` : ""}
       ${expanded ? `
         <div class="settings-collapsible-body">
           <div class="settings-provider-actions compact-actions">
-            <button id="relayFetchModelsBtn" class="settings-action-btn subtle" type="button">获取模型列表</button>
-            <button id="relaySaveConfigBtn" class="settings-action-btn primary" type="button">保存更改</button>
+            <button id="relayFetchModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("fetchModels"))}</button>
+            <button id="relaySaveConfigBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("saveChanges"))}</button>
           </div>
           <div class="relay-form-grid">
             <label class="relay-field wide">
-              <span>供应商名称</span>
+              <span>${escapeHtml(mt("providerName"))}</span>
               <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
-              <small>当前保存到 Autoto provider：${escapeHtml(spec.providerName)}</small>
+              <small>${escapeHtml(mt("relayProviderNameHelp", { provider: spec.providerName }))}</small>
             </label>
             <label class="relay-field wide">
-              <span>供应商前缀</span>
+              <span>${escapeHtml(mt("providerPrefix"))}</span>
               <input class="settings-text-input" value="${escapeAttr((provider.name || spec.providerName) + ":")}" disabled>
-              <small>模型会以这个前缀出现在下拉框里，例如 ${escapeHtml(spec.providerName)}:${escapeHtml(modelValue)}</small>
+              <small>${escapeHtml(mt("relayProviderPrefixHelp", { provider: spec.providerName, model: modelValue }))}</small>
             </label>
             <label class="relay-field wide">
-              <span>API Key</span>
-              <input id="relayApiKey" class="settings-text-input" type="password" autocomplete="off" placeholder="sk-... / sk-ant-...；留空沿用当前运行时或环境变量">
+              <span>${escapeHtml(mt("apiKey"))}</span>
+              <input id="relayApiKey" class="settings-text-input" type="password" autocomplete="off" placeholder="${escapeAttr(mt("apiKeyPlaceholder"))}">
             </label>
             <label class="relay-field wide">
-              <span>Base URL</span>
-              <input id="relayBaseUrl" class="settings-text-input" value="${escapeAttr(provider.baseUrl || "")}" placeholder="例如 https://api.example.com/v1 或 http://127.0.0.1:8317/v1">
+              <span>${escapeHtml(mt("baseUrl"))}</span>
+              <input id="relayBaseUrl" class="settings-text-input" value="${escapeAttr(provider.baseUrl || "")}" placeholder="${escapeAttr(mt("baseUrlPlaceholder"))}">
             </label>
           </div>
           <div class="relay-field">
-            <span>API 协议</span>
+            <span>${escapeHtml(mt("apiProtocol"))}</span>
             <div class="relay-protocol-tabs">
               ${relayProtocolSpecs().map((item) => `
                 <button class="relay-protocol-tab ${item.key === spec.key ? "active" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">
@@ -381,26 +747,26 @@ export function createModelProviderSettingsController({
           </div>
           <div class="relay-form-grid">
             <label class="relay-field wide">
-              <span>HTTPS 代理</span>
-              <input class="settings-text-input" value="" placeholder="例如 http://127.0.0.1:7890、socks5://proxy:1080（当前仅作记录提示）" disabled>
+              <span>${escapeHtml(mt("httpsProxy"))}</span>
+              <input class="settings-text-input" value="" placeholder="${escapeAttr(mt("httpsProxyPlaceholder"))}" disabled>
             </label>
             <label class="relay-field wide">
-              <span>默认思考强度</span>
+              <span>${escapeHtml(mt("defaultReasoningEffort"))}</span>
               <select class="settings-text-input" disabled>
-                <option>自动</option>
-                <option>低</option>
-                <option>中</option>
-                <option>高</option>
+                <option>${escapeHtml(mt("automatic"))}</option>
+                <option>${escapeHtml(mt("low"))}</option>
+                <option>${escapeHtml(mt("medium"))}</option>
+                <option>${escapeHtml(mt("high"))}</option>
               </select>
             </label>
           </div>
           <div class="relay-field">
-            <span>自定义模型</span>
+            <span>${escapeHtml(mt("customModel"))}</span>
             <div class="relay-model-row">
-              <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="模型 ID">
-              <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="显示名称" disabled>
+              <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("modelId"))}">
+              <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("displayName"))}" disabled>
             </div>
-            <small>保存后会作为该 provider 的默认模型；点击“获取模型列表”可从 Base URL 动态拉取可用模型。</small>
+            <small>${escapeHtml(mt("customModelDescription"))}</small>
           </div>
         </div>
       ` : ""}
@@ -414,46 +780,46 @@ export function createModelProviderSettingsController({
     <section class="settings-provider-section custom-provider-section ${expanded ? "expanded" : "collapsed"}">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">新增 / 更新自定义 Provider</div>
-          <div class="settings-provider-meta">默认收起；点开后可自行填写 Provider、协议、Base URL、API Key 和默认模型。Groq 示例：groq:openai/gpt-oss-20b。</div>
+          <div class="settings-provider-title">${escapeHtml(mt("customProviderTitle"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(mt("customProviderDescription"))}</div>
         </div>
         <div class="settings-action-row compact-actions">
-          <button id="fillGroqProviderExampleBtn" class="settings-action-btn subtle" type="button">填入 Groq 示例</button>
-          ${renderProviderConfigToggle("custom-provider", expanded, "自定义配置")}
+          <button id="fillGroqProviderExampleBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("fillGroqExample"))}</button>
+          ${renderProviderConfigToggle("custom-provider", expanded, mt("customConfig"))}
         </div>
       </div>
       ${expanded ? `
         <form id="customProviderConfigForm" class="settings-provider-config-form custom-provider-config-form settings-collapsible-body">
           <div class="settings-provider-form-grid">
-            <label>Provider 名称 / 前缀
+            <label>${escapeHtml(mt("providerNamePrefix"))}
               <input id="customProviderName" class="settings-field" name="name" value="" placeholder="groq" autocomplete="off" />
             </label>
-            <label>协议
+            <label>${escapeHtml(mt("protocol"))}
               <select id="customProviderType" class="settings-field" name="type">
                 ${renderProviderTypeOptions("openai-compatible")}
               </select>
             </label>
-            <label class="settings-form-span-2">Base URL
+            <label class="settings-form-span-2">${escapeHtml(mt("baseUrl"))}
               <input id="customProviderBaseUrl" class="settings-field" name="baseUrl" value="" placeholder="https://api.groq.com/openai/v1" autocomplete="off" />
             </label>
-            <label class="settings-form-span-2">API Key
-              <input id="customProviderApiKey" class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="粘贴用户自己的 API Key（不会写入磁盘）" />
+            <label class="settings-form-span-2">${escapeHtml(mt("apiKey"))}
+              <input id="customProviderApiKey" class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${escapeAttr(mt("apiKeyUserPlaceholder"))}" />
             </label>
-            <label>默认模型
+            <label>${escapeHtml(mt("defaultModel"))}
               <input id="customProviderModel" class="settings-field" name="model" value="" placeholder="openai/gpt-oss-20b" autocomplete="off" />
             </label>
-            <label>Max tokens
-              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="" placeholder="可留空" />
+            <label>${escapeHtml(mt("maxTokens"))}
+              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="" placeholder="${escapeAttr(mt("maxTokensOptional"))}" />
             </label>
             <label class="settings-checkbox-field settings-form-span-2">
               <input name="apiKeyOptional" type="checkbox" />
-              <span>API Key 可选（本地代理或免鉴权端点）</span>
+              <span>${escapeHtml(mt("apiKeyOptional"))}</span>
             </label>
           </div>
           <div class="settings-provider-actions">
-            <button class="settings-action-btn primary" type="submit" data-provider-save>保存自定义 Provider</button>
+            <button class="settings-action-btn primary" type="submit" data-provider-save>${escapeHtml(mt("saveCustomProvider"))}</button>
           </div>
-          <div class="settings-provider-note">例如 Groq：Provider 填 groq、协议选 OpenAI-compatible、Base URL 填 https://api.groq.com/openai/v1、API Key 填 Groq 控制台生成的免费额度 Key、默认模型填 openai/gpt-oss-20b。保存后模型前缀会是 groq:。</div>
+          <div class="settings-provider-note">${escapeHtml(mt("groqNote"))}</div>
         </form>
       ` : ""}
     </section>
@@ -471,24 +837,19 @@ export function createModelProviderSettingsController({
         <div class="settings-auth-title">${escapeHtml(name)}</div>
         <div class="settings-auth-meta">${escapeHtml(provider)}${alias ? ` · ${escapeHtml(alias)}` : ""}</div>
       </div>
-      <span class="settings-status-pill ${disabled ? "muted" : "ok"}">${disabled ? "已停用" : "可用"}</span>
+      <span class="settings-status-pill ${disabled ? "muted" : "ok"}">${escapeHtml(disabled ? mt("disabled") : mt("available"))}</span>
     </div>
   `;
   }
 
   function extractAuthFiles(value) {
-    if (Array.isArray(value)) return value;
-    if (!value || typeof value !== "object") return [];
-    for (const key of ["files", "authFiles", "data", "items"]) {
-      if (Array.isArray(value[key])) return value[key];
-    }
-    return [];
+    return normalizeCodexAccountList(value);
   }
 
   function authFileName(item) {
     if (typeof item === "string") return item;
-    if (!item || typeof item !== "object") return "unknown";
-    return item.name || item.filename || item.file || item.path || item.auth_index || item.authIndex || "unknown";
+    if (!item || typeof item !== "object") return mt("unknown");
+    return item.name || item.filename || item.file || item.path || item.auth_index || item.authIndex || mt("unknown");
   }
 
   function authFileProvider(item) {
@@ -496,20 +857,21 @@ export function createModelProviderSettingsController({
     return item.provider || item.type || item.channel || "Codex";
   }
 
-  function renderCLIProxyStatusCard(provider) {
+  function renderCodexStatusCard(provider) {
     const models = providerModelList(provider);
+    const endpoint = provider.baseUrl || "https://chatgpt.com/backend-api/codex";
     return `
     <section class="settings-provider-section highlighted">
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
-          <div class="settings-provider-meta">${escapeHtml(provider.baseUrl || "http://127.0.0.1:8317/v1")}</div>
+          <div class="settings-provider-meta">${escapeHtml(endpoint)}</div>
         </div>
-        <span class="settings-status-pill ${provider.error ? "warn" : "ok"}">${escapeHtml(providerStatusText(provider))}</span>
+        <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
       </div>
-      ${provider.error ? `<div class="settings-inline-alert">${escapeHtml(provider.error)}</div>` : `<div class="settings-inline-success">已加载 ${escapeHtml(String(models.length))} 个模型。导入/切换凭证后点“刷新模型”即可更新。</div>`}
+      ${provider.error ? `<div class="settings-inline-alert">${escapeHtml(provider.error)}</div>` : provider.configured ? `<div class="settings-inline-success">${escapeHtml(mt("nativeCodexReady", { count: models.length }))}</div>` : `<div class="settings-inline-alert">${escapeHtml(mt("nativeCodexNeedsCredentials"))}</div>`}
       <div class="settings-copy-row">
-        <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(provider.baseUrl || "http://127.0.0.1:8317/v1")}">复制 Base URL</button>
+        <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(endpoint)}">${escapeHtml(mt("copyBaseUrl"))}</button>
       </div>
     </section>
   `;
@@ -530,46 +892,46 @@ export function createModelProviderSettingsController({
       <div class="settings-provider-card-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
-          <div class="settings-provider-meta">${escapeHtml(type)} · ${escapeHtml(providerCapabilitiesLabel(provider))} · ${escapeHtml(models.length + " 个模型")}</div>
+          <div class="settings-provider-meta">${escapeHtml(type)} · ${escapeHtml(providerCapabilitiesLabel(provider))} · ${escapeHtml(mt("modelCount", { count: models.length }))}</div>
         </div>
         <div class="settings-action-row compact-actions">
           <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
-          ${renderProviderConfigToggle(`provider:${provider.name}`, expanded, "配置")}
+          ${renderProviderConfigToggle(`provider:${provider.name}`, expanded, mt("config"))}
         </div>
       </div>
-      <div class="settings-provider-meta path">${escapeHtml(baseUrl || "默认官方端点 / 无 Base URL")}</div>
-      ${provider.configured ? `<div class="settings-inline-success compact">已配置：该 provider 的可见模型会出现在模型选择器。</div>` : `<div class="settings-inline-alert compact">未配置：该 provider 不会出现在模型选择器；填入 API Key 后保存即可启用。</div>`}
+      <div class="settings-provider-meta path">${escapeHtml(baseUrl || mt("defaultOfficialEndpoint"))}</div>
+      ${provider.configured ? `<div class="settings-inline-success compact">${escapeHtml(mt("configuredVisible"))}</div>` : `<div class="settings-inline-alert compact">${escapeHtml(mt("unconfiguredHidden"))}</div>`}
       ${provider.error ? `<div class="settings-inline-alert compact">${escapeHtml(provider.error)}</div>` : ""}
       ${expanded ? `
         <form class="settings-provider-config-form settings-collapsible-body" data-provider-name="${escapeAttr(provider.name)}">
           <div class="settings-provider-form-grid">
-            <label>协议
+            <label>${escapeHtml(mt("protocol"))}
               <select class="settings-field" name="type">
                 ${renderProviderTypeOptions(type)}
               </select>
             </label>
-            <label>默认模型
-              <input class="settings-field" name="model" value="${escapeAttr(model)}" placeholder="例如 gpt-4.1-mini" />
+            <label>${escapeHtml(mt("defaultModel"))}
+              <input class="settings-field" name="model" value="${escapeAttr(model)}" placeholder="${escapeAttr(mt("defaultModelPlaceholder"))}" />
             </label>
-            <label class="settings-form-span-2">Base URL
+            <label class="settings-form-span-2">${escapeHtml(mt("baseUrl"))}
               <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.profile))}" />
             </label>
-            <label class="settings-form-span-2">API Key
-              <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${provider.configured ? "留空保留当前运行时密钥" : "粘贴 API Key（不会写入磁盘）"}" />
+            <label class="settings-form-span-2">${escapeHtml(mt("apiKey"))}
+              <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${escapeAttr(provider.configured ? mt("apiKeyPreservePlaceholder") : mt("apiKeyPastePlaceholder"))}" />
             </label>
-            <label>Max tokens
-              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(maxTokens || "")}" placeholder="Anthropic 默认 4096" />
+            <label>${escapeHtml(mt("maxTokens"))}
+              <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(maxTokens || "")}" placeholder="${escapeAttr(mt("maxTokensAnthropic"))}" />
             </label>
             <label class="settings-checkbox-field">
               <input name="apiKeyOptional" type="checkbox" ${apiKeyOptional ? "checked" : ""} />
-              <span>API Key 可选（本地代理或免鉴权端点）</span>
+              <span>${escapeHtml(mt("apiKeyOptional"))}</span>
             </label>
           </div>
           <div class="settings-provider-actions">
-            <button class="settings-action-btn primary" type="submit" data-provider-save>保存配置</button>
-            <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envExample)}">复制 env 示例</button>
+            <button class="settings-action-btn primary" type="submit" data-provider-save>${escapeHtml(mt("saveConfig"))}</button>
+            <button class="settings-action-btn subtle" type="button" data-copy-text="${escapeAttr(envExample)}">${escapeHtml(mt("copyEnvExample"))}</button>
           </div>
-          <div class="settings-provider-note">保存后立即更新当前运行时和模型列表；API Key 只保存在内存，不写入 config.json。</div>
+          <div class="settings-provider-note">${escapeHtml(mt("providerConfigNote"))}</div>
         </form>
       ` : ""}
     </section>
@@ -578,17 +940,19 @@ export function createModelProviderSettingsController({
 
   function renderProviderTypeOptions(selected) {
     return [
-      { value: "openai-compatible", label: "OpenAI-compatible" },
-      { value: "openai", label: "OpenAI 官方" },
-      { value: "anthropic", label: "Anthropic 官方" },
+      { value: "codex", label: mt("typeCodexOAuth") },
+      { value: "openai-compatible", label: mt("typeOpenAICompatible") },
+      { value: "openai", label: mt("typeOpenAIOfficial") },
+      { value: "anthropic", label: mt("typeAnthropicOfficial") },
     ].map((item) => `<option value="${escapeAttr(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
   }
 
   function providerBaseURLPlaceholder(type, profile) {
+    if (type === "codex") return "https://chatgpt.com/backend-api/codex";
     if (profile === "cliproxyapi") return "http://127.0.0.1:8317/v1";
     if (type === "openai-compatible") return "https://api.example.com/v1";
-    if (type === "anthropic") return "留空使用 Anthropic 官方端点";
-    return "留空使用 OpenAI 官方端点";
+    if (type === "anthropic") return mt("anthropicOfficialEndpointPlaceholder");
+    return mt("openaiOfficialEndpointPlaceholder");
   }
 
   function providerEnvExample(provider) {
@@ -598,7 +962,7 @@ export function createModelProviderSettingsController({
       openai: [`export OPENAI_API_KEY="sk-..."`, `export OPENAI_MODEL="${model}"`],
       anthropic: [`export ANTHROPIC_API_KEY="sk-ant-..."`, `export ANTHROPIC_MODEL="${model}"`],
       groq: [`export GROQ_API_KEY="gsk_..."`, `export GROQ_MODEL="${model}"`],
-      cliproxyapi: [`export CLIPROXYAPI_BASE_URL="${baseURL}"`, `export CLIPROXYAPI_MODEL="${model}"`, `# 如果 CLIProxyAPI 启用了客户端 api-keys，再设置：`, `export CLIPROXYAPI_API_KEY="..."`],
+      cliproxyapi: [`export CLIPROXYAPI_BASE_URL="${baseURL}"`, `export CLIPROXYAPI_MODEL="${model}"`, `# ${mt("cliproxyEnvComment")}`, `export CLIPROXYAPI_API_KEY="..."`],
       "openai-compatible": [`export OPENAI_COMPATIBLE_BASE_URL="${baseURL}"`, `export OPENAI_COMPATIBLE_API_KEY="sk-..."`, `export OPENAI_COMPATIBLE_MODEL="${model}"`],
     };
     return (rowsByProvider[provider.profile] || rowsByProvider[provider.name] || rowsByProvider[provider.type] || rowsByProvider["openai-compatible"]).join("\n");
@@ -627,8 +991,8 @@ export function createModelProviderSettingsController({
     const providerName = String(form.dataset.providerName || form.elements.name?.value || "").trim();
     const saveButton = form.querySelector("[data-provider-save]");
     const maxTokens = Number(form.elements.maxTokens?.value || 0);
-    if (!providerName) throw new Error("请填写 Provider 名称");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerName)) throw new Error("Provider 名称必须以英文字母或数字开头，且只能包含英文字母、数字、点、下划线和中横线");
+    if (!providerName) throw new Error(mt("selectProviderName"));
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerName)) throw new Error(mt("invalidProviderName"));
     const payload = {
       name: providerName,
       type: form.elements.type?.value || "openai-compatible",
@@ -638,21 +1002,21 @@ export function createModelProviderSettingsController({
       maxTokens: Number.isFinite(maxTokens) ? maxTokens : 0,
       apiKeyOptional: Boolean(form.elements.apiKeyOptional?.checked),
     };
-    if (!payload.model) throw new Error("请填写默认模型");
-    if (payload.type === "openai-compatible" && !payload.baseUrl) throw new Error("OpenAI-compatible provider 需要 Base URL");
+    if (!payload.model) throw new Error(mt("selectDefaultModel"));
+    if (payload.type === "openai-compatible" && !payload.baseUrl) throw new Error(mt("missingBaseUrl"));
     form.dataset.submitting = "true";
-    setButtonBusy(saveButton, true, "保存中");
+    setButtonBusy(saveButton, true, mt("saving"));
     try {
       const response = await api(`/api/providers/${encodeURIComponent(providerName)}/config`, { method: "PUT", body: JSON.stringify(payload) });
-      state.providerConfigStatus = response.message || "Provider 配置已保存。";
+      state.providerConfigStatus = response.message || mt("providerConfigSaved");
       await loadSettings();
       await loadModelCatalog();
       renderModelOptions();
       refreshActiveSettingsPanel?.();
-      notifyTerminal?.(`[info] ${providerLabel({ name: providerName })} 配置已保存：${response.message || "已生效"}\n`);
+      notifyTerminal?.(`[info] ${mt("providerConfigSavedTerminal", { provider: providerLabel({ name: providerName }), message: response.message || mt("effective") })}\n`);
     } finally {
       delete form.dataset.submitting;
-      setButtonBusy(saveButton, false, "保存中");
+      setButtonBusy(saveButton, false, mt("saving"));
     }
   }
 
@@ -669,26 +1033,425 @@ export function createModelProviderSettingsController({
     });
   }
 
+  let providerConsoleEventRoot = null;
+  let providerConsoleFocusReturn = null;
+
+  function scheduleProviderConsoleFocus(callback) {
+    const schedule = globalThis.queueMicrotask || ((work) => Promise.resolve().then(work));
+    schedule(callback);
+  }
+
+  function providerConsoleLayer() {
+    return providerConsoleEventRoot?.querySelector?.('[role="dialog"][aria-modal="true"]') || null;
+  }
+
+  function focusProviderConsoleLayer() {
+    const layer = providerConsoleLayer();
+    if (!layer) return;
+    const [first] = providerConsoleFocusableElements(layer);
+    (first || layer).focus?.();
+  }
+
+  function rememberProviderConsoleFocus(trigger) {
+    const card = trigger?.closest?.("[data-mp-provider-card]");
+    providerConsoleFocusReturn = {
+      node: trigger || null,
+      cardName: card?.dataset?.mpProviderCard || "",
+      opensTypes: Boolean(trigger?.closest?.("[data-mp-open-types]")),
+      opensRelay: Boolean(trigger?.closest?.("[data-mp-open-relay]")),
+    };
+  }
+
+  function resolveProviderConsoleFocusReturn() {
+    const saved = providerConsoleFocusReturn;
+    if (!saved) return null;
+    if (saved.node?.isConnected !== false) return saved.node;
+    if (!providerConsoleEventRoot) return null;
+    if (saved.cardName) {
+      return [...providerConsoleEventRoot.querySelectorAll("[data-mp-provider-card]")]
+        .find((node) => node.dataset?.mpProviderCard === saved.cardName) || null;
+    }
+    if (saved.opensTypes) return providerConsoleEventRoot.querySelector("[data-mp-open-types]");
+    if (saved.opensRelay) return providerConsoleEventRoot.querySelector("[data-mp-open-relay]");
+    return null;
+  }
+
+  function restoreProviderConsoleLayerFocus() {
+    const target = resolveProviderConsoleFocusReturn();
+    providerConsoleFocusReturn = null;
+    if (target) scheduleProviderConsoleFocus(() => restoreProviderConsoleFocus(target));
+  }
+
+  function refreshProviderConsole({ focusLayer = false, restoreFocus = false } = {}) {
+    refreshActiveSettingsPanel?.();
+    if (focusLayer) scheduleProviderConsoleFocus(focusProviderConsoleLayer);
+    if (restoreFocus) restoreProviderConsoleLayerFocus();
+  }
+
+  function closeProviderConsoleLayer() {
+    const consoleState = providerConsoleState();
+    if (consoleState.modal) {
+      consoleState.modal = "";
+      refreshProviderConsole({ restoreFocus: true });
+      return true;
+    }
+    if (consoleState.drawer) {
+      consoleState.drawer = "";
+      consoleState.mode = "";
+      consoleState.type = "";
+      consoleState.providerName = "";
+      consoleState.draft = null;
+      consoleState.dirty = false;
+      refreshProviderConsole({ restoreFocus: true });
+      return true;
+    }
+    return false;
+  }
+
+  function openProviderConsoleDrawer(provider) {
+    const consoleState = providerConsoleState();
+    const normalized = normalizeConsoleProvider(provider || {});
+    consoleState.modal = "";
+    consoleState.drawer = "provider";
+    consoleState.mode = normalized.type === "codex" || normalized.name === "codex" ? "codex" : "edit";
+    consoleState.type = normalized.type;
+    consoleState.providerName = normalized.name;
+    consoleState.draft = createProviderDraft(normalized.type, normalized);
+    consoleState.dirty = false;
+    setProviderConsoleResult("");
+    refreshProviderConsole({ focusLayer: true });
+  }
+
+  function openProviderConsoleType(type) {
+    const consoleState = providerConsoleState();
+    const draft = createProviderDraft(type);
+    consoleState.modal = "";
+    consoleState.drawer = "provider";
+    consoleState.mode = type === "codex" ? "codex" : "create";
+    consoleState.type = type;
+    consoleState.providerName = draft.name;
+    consoleState.draft = draft;
+    consoleState.dirty = false;
+    setProviderConsoleResult("");
+    refreshProviderConsole({ focusLayer: true });
+  }
+
+  function openRelayConsoleDrawer() {
+    const consoleState = providerConsoleState();
+    consoleState.modal = "";
+    consoleState.drawer = "relay";
+    consoleState.mode = "relay";
+    consoleState.type = "relay";
+    consoleState.providerName = "";
+    consoleState.draft = null;
+    consoleState.dirty = false;
+    setProviderConsoleResult("");
+    refreshProviderConsole({ focusLayer: true });
+  }
+
+  function providerConsoleBusy(key) {
+    return Boolean(providerConsoleState().busy?.[key]);
+  }
+
+  async function runProviderConsoleBusy(key, work) {
+    const consoleState = providerConsoleState();
+    if (consoleState.busy?.[key]) return;
+    consoleState.busy = { ...(consoleState.busy || {}), [key]: true };
+    refreshProviderConsole();
+    try {
+      return await work();
+    } finally {
+      const nextBusy = { ...(providerConsoleState().busy || {}) };
+      delete nextBusy[key];
+      providerConsoleState().busy = nextBusy;
+      refreshProviderConsole();
+    }
+  }
+
+  async function refreshProviderDataAfterMutation(successMessage) {
+    let refreshFailed = false;
+    try {
+      await loadSettings();
+    } catch {
+      refreshFailed = true;
+    }
+    try {
+      await loadModelCatalog();
+    } catch {
+      refreshFailed = true;
+    }
+    if (state.modelCatalog?.error) refreshFailed = true;
+    renderModelOptions();
+    if (refreshFailed) {
+      const warning = ct("messages.mutationRefreshWarning", { message: ct("messages.requestFailed") });
+      setProviderConsoleResult(warning, "attention");
+      notifyTerminal?.(`[warn] ${warning}\n`);
+    } else {
+      setProviderConsoleResult(successMessage, "success");
+      notifyTerminal?.(`[info] ${successMessage}\n`);
+    }
+    refreshProviderConsole();
+  }
+
+  function consoleDraftFromForm(form) {
+    const current = providerConsoleState();
+    return providerConsoleDraftFromForm(current.draft || {}, form, current.type);
+  }
+
+  function validateConsoleDraft(draft) {
+    if (!draft.name) throw new Error(mt("selectProviderName"));
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(draft.name)) throw new Error(mt("invalidProviderName"));
+    if (!draft.model) throw new Error(mt("selectDefaultModel"));
+    if (draft.type === "openai-compatible" && !draft.baseUrl) throw new Error(mt("missingBaseUrl"));
+  }
+
+  async function toggleConsoleProvider(provider) {
+    if (!provider || providerConsoleBusy(`toggle:${provider.name}`)) return;
+    await runProviderConsoleBusy(`toggle:${provider.name}`, async () => {
+      const enabled = !provider.enabled;
+      const request = providerConsoleRequest("toggle", provider, { enabled, model: provider.defaultModel || provider.model });
+      await api(request.path, request.options);
+      await refreshProviderDataAfterMutation(ct(enabled ? "messages.providerStarted" : "messages.providerStopped", { provider: providerDisplayName(provider) }));
+    });
+  }
+
+  async function testConsoleProvider(form) {
+    const consoleState = providerConsoleState();
+    const rawDraft = consoleDraftFromForm(form);
+    const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    validateConsoleDraft(draft);
+    if (!draft.name || providerConsoleBusy(`test:${draft.name}`)) return;
+    consoleState.draft = draft;
+    await runProviderConsoleBusy(`test:${draft.name}`, async () => {
+      try {
+        const request = providerConsoleRequest("test", null, draft);
+        const response = await api(request.path, request.options);
+        const result = providerPreflightResult(response, ct);
+        setProviderConsoleResult(result.message, result.tone);
+        notifyTerminal?.(`[${result.terminalLevel}] ${result.message}\n`);
+      } catch {
+        const message = ct("messages.currentDraftTestFailed", { message: ct("messages.requestFailed") });
+        setProviderConsoleResult(message, "attention");
+        notifyTerminal?.(`[warn] ${message}\n`);
+      }
+    });
+  }
+
+  async function saveConsoleProvider(form) {
+    const consoleState = providerConsoleState();
+    const rawDraft = consoleDraftFromForm(form);
+    const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    validateConsoleDraft(draft);
+    if (providerConsoleBusy(`save:${draft.name}`)) return;
+    consoleState.draft = draft;
+    await runProviderConsoleBusy(`save:${draft.name}`, async () => {
+      let saved = false;
+      try {
+        const configRequest = providerConsoleRequest("config", { name: draft.name }, providerConfigPayload(draft));
+        await api(configRequest.path, configRequest.options);
+        saved = true;
+        consoleState.draft = { ...draft, apiKey: "" };
+        consoleState.dirty = false;
+        const enableRequest = providerConsoleRequest("toggle", { name: draft.name, defaultModel: draft.model }, { enabled: true, model: draft.model });
+        await api(enableRequest.path, enableRequest.options);
+        await refreshProviderDataAfterMutation(ct("messages.providerSavedAndEnabled", { provider: providerDisplayName(draft) }));
+      } catch {
+        const message = saved
+          ? ct("messages.providerSavedEnableFailed")
+          : ct("messages.providerSaveFailed");
+        setProviderConsoleResult(message, "attention");
+        notifyTerminal?.(`[warn] ${message}\n`);
+        refreshProviderConsole();
+      }
+    });
+  }
+
+  async function deleteConsoleProvider(name) {
+    const provider = providerByName(name);
+    if (!provider || !isProviderDeletable(provider) || providerConsoleBusy(`delete:${name}`)) return;
+    if (!globalThis.confirm?.(ct("messages.deleteProviderConfirm", { provider: providerDisplayName(provider) }))) return;
+    await runProviderConsoleBusy(`delete:${name}`, async () => {
+      const request = providerConsoleRequest("delete", provider);
+      await api(request.path, request.options);
+      const consoleState = providerConsoleState();
+      consoleState.drawer = "";
+      consoleState.mode = "";
+      consoleState.type = "";
+      consoleState.providerName = "";
+      consoleState.draft = null;
+      consoleState.dirty = false;
+      await refreshProviderDataAfterMutation(ct("messages.providerDeleted", { provider: providerDisplayName(provider) }));
+      restoreProviderConsoleLayerFocus();
+    });
+  }
+
+  function providerDisplayName(provider) {
+    if (provider?.type === "codex" || provider?.name === "codex") return "Codex OAuth";
+    if (provider?.name === "ollama") return "Ollama";
+    return provider?.name || provider?.type || ct("labels.provider");
+  }
+
+  function updateProviderConsoleDraftFromEvent(event) {
+    const target = event.target;
+    const form = target?.closest?.("[data-mp-provider-form]");
+    if (!form || !target?.name) return false;
+    const draft = syncProviderConsoleDraft(providerConsoleState(), form);
+    if (!draft) return false;
+    const example = form.querySelector?.("[data-mp-model-example]");
+    if (example) example.value = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+    return true;
+  }
+
+  function handleProviderConsoleInput(event) {
+    if (updateProviderConsoleDraftFromEvent(event)) return;
+    const target = event.target?.closest?.("[data-mp-provider-search]");
+    if (!target) return;
+    providerConsoleState().search = target.value || "";
+    refreshProviderConsole();
+  }
+
+  function handleProviderConsoleChange(event) {
+    updateProviderConsoleDraftFromEvent(event);
+  }
+
+  function handleProviderConsoleKeydown(event) {
+    const layer = event.target?.closest?.('[role="dialog"][aria-modal="true"]');
+    if (layer && trapProviderConsoleFocus(event, layer)) return;
+    if (event.key === "Escape" && closeProviderConsoleLayer()) {
+      event.preventDefault();
+      return;
+    }
+    const card = event.target?.closest?.("[data-mp-provider-card], [data-mp-open-relay]");
+    if (shouldOpenProviderCardFromKeyboard(event, card)) {
+      event.preventDefault();
+      rememberProviderConsoleFocus(card);
+      if (card.dataset.mpOpenRelay !== undefined) openRelayConsoleDrawer();
+      else openProviderConsoleDrawer(providerByName(card.dataset.mpProviderCard));
+    }
+  }
+
+  function handleProviderConsoleSubmit(event) {
+    const form = event.target?.closest?.("[data-mp-provider-form]");
+    if (!form) return;
+    event.preventDefault();
+    saveConsoleProvider(form).catch(showError);
+  }
+
+  function handleProviderConsoleClick(event) {
+    const target = event.target?.closest?.("button, [data-mp-provider-card], [data-mp-open-relay], [data-mp-backdrop]");
+    if (!target) return;
+    const consoleState = providerConsoleState();
+    if (target.dataset.mpBackdrop && event.target === target) {
+      closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.mpCloseModal !== undefined) {
+      closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.mpCloseDrawer !== undefined) {
+      closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.mpOpenTypes !== undefined) {
+      rememberProviderConsoleFocus(target);
+      consoleState.modal = "types";
+      consoleState.result = null;
+      refreshProviderConsole({ focusLayer: true });
+      return;
+    }
+    if (target.dataset.mpSelectType) {
+      openProviderConsoleType(target.dataset.mpSelectType);
+      return;
+    }
+    if (target.dataset.mpCategory) {
+      consoleState.category = target.dataset.mpCategory;
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.mpProviderToggle) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleConsoleProvider(providerByName(target.dataset.mpProviderToggle)).catch(showError);
+      return;
+    }
+    if (target.dataset.mpProviderCard) {
+      rememberProviderConsoleFocus(target);
+      openProviderConsoleDrawer(providerByName(target.dataset.mpProviderCard));
+      return;
+    }
+    if (target.dataset.mpOpenRelay !== undefined) {
+      rememberProviderConsoleFocus(target);
+      openRelayConsoleDrawer();
+      return;
+    }
+    if (target.dataset.mpRefreshModels !== undefined || target.dataset.mpFetchModels !== undefined) {
+      runProviderConsoleBusy("refresh", async () => {
+        await refreshModelCatalog();
+        setProviderConsoleResult(ct("messages.modelsRefreshed"), "success");
+      }).catch(showError);
+      return;
+    }
+    if (target.dataset.mpTestProvider !== undefined) {
+      const form = target.closest("form");
+      if (form) testConsoleProvider(form).catch(showError);
+      return;
+    }
+    if (target.dataset.mpDeleteProvider) {
+      deleteConsoleProvider(target.dataset.mpDeleteProvider).catch(showError);
+      return;
+    }
+    if (target.dataset.mpRelaySave !== undefined) {
+      saveRelayProviderConfig().catch(showError);
+      return;
+    }
+    if (target.dataset.mpCodexImport !== undefined) {
+      importCodexAuthFile().catch(showError);
+      return;
+    }
+    if (target.dataset.mpCodexRefresh !== undefined) {
+      loadProviderAuthFiles().catch(showError);
+      return;
+    }
+    if (target.dataset.codexSave) {
+      saveCodexAccount(target.dataset.codexSave, target).catch(showError);
+      return;
+    }
+    if (target.dataset.codexSync) {
+      syncCodexAccount(target.dataset.codexSync, target).catch(showError);
+      return;
+    }
+    if (target.dataset.codexToggle) {
+      toggleCodexAccount(target.dataset.codexToggle, target.dataset.disabled === "true", target).catch(showError);
+      return;
+    }
+    if (target.dataset.codexDelete) {
+      deleteCodexAccount(target.dataset.codexDelete, target).catch(showError);
+      return;
+    }
+    if (target.dataset.relayProtocol) {
+      selectRelayProtocol(target.dataset.relayProtocol);
+    }
+  }
+
   function bindProviderSettingsActions() {
-    $("codexFocusImportBtn")?.addEventListener("click", () => $("codexCredentialImportSection")?.scrollIntoView({ behavior: "smooth", block: "center" }));
-    $("codexImportAuthBtn")?.addEventListener("click", () => importCodexAuthFile().catch(showError));
-    $("codexRefreshAuthBtn")?.addEventListener("click", () => loadProviderAuthFiles().catch(showError));
-    $("providerRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
-    $("relaySaveConfigBtn")?.addEventListener("click", () => saveRelayProviderConfig().catch(showError));
-    $("relayFetchModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
-    $("fillGroqProviderExampleBtn")?.addEventListener("click", fillGroqProviderExample);
-    $("settingsContentBody").querySelectorAll("[data-toggle-provider-config]").forEach((node) => {
-      node.addEventListener("click", () => toggleProviderConfig(node.dataset.toggleProviderConfig));
-    });
-    $("settingsContentBody").querySelectorAll("[data-relay-protocol]").forEach((node) => {
-      node.addEventListener("click", () => selectRelayProtocol(node.dataset.relayProtocol));
-    });
-    $("settingsContentBody").querySelectorAll(".settings-provider-config-form").forEach((form) => {
-      form.addEventListener("submit", (event) => saveProviderConfig(event).catch(showError));
-    });
-    $("settingsContentBody").querySelectorAll("[data-copy-text]").forEach((node) => {
-      node.addEventListener("click", () => copyText?.(node.dataset.copyText || ""));
-    });
+    const root = $("settingsContentBody");
+    if (!root) return;
+    if (providerConsoleEventRoot !== root) {
+      if (providerConsoleEventRoot) {
+        providerConsoleEventRoot.removeEventListener("click", handleProviderConsoleClick);
+        providerConsoleEventRoot.removeEventListener("input", handleProviderConsoleInput);
+        providerConsoleEventRoot.removeEventListener("change", handleProviderConsoleChange);
+        providerConsoleEventRoot.removeEventListener("keydown", handleProviderConsoleKeydown);
+        providerConsoleEventRoot.removeEventListener("submit", handleProviderConsoleSubmit);
+      }
+      providerConsoleEventRoot = root;
+      root.addEventListener("click", handleProviderConsoleClick);
+      root.addEventListener("input", handleProviderConsoleInput);
+      root.addEventListener("change", handleProviderConsoleChange);
+      root.addEventListener("keydown", handleProviderConsoleKeydown);
+      root.addEventListener("submit", handleProviderConsoleSubmit);
+    }
     if (!state.providerAuthFiles && !state.providerAuthError) {
       loadProviderAuthFiles({ silent: true }).catch(showError);
     }
@@ -699,24 +1462,25 @@ export function createModelProviderSettingsController({
   }
 
   function providerLabel(provider) {
+    if (provider.type === "codex" || provider.name === "codex") return "Codex OAuth";
     if (provider.profile === "cliproxyapi") return "CLIProxyAPI";
-    if (provider.type === "openai-compatible" && provider.profile === "") return "中转站";
+    if (provider.type === "openai-compatible" && provider.profile === "") return mt("relay");
     return provider.name;
   }
 
   function providerStatusText(provider) {
-    if (provider.error) return "需配置/处理";
-    if (provider.configured) return "已就绪";
-    return "未配置";
+    if (provider.error) return mt("needsConfiguration");
+    if (provider.configured) return mt("ready");
+    return mt("unconfigured");
   }
 
   function providerCapabilitiesLabel(provider) {
     const capabilities = provider.capabilities || {};
     const labels = [];
-    if (capabilities.streaming) labels.push("流式");
-    if (capabilities.tools) labels.push("工具");
-    if (capabilities.imageInput) labels.push("图像");
-    return labels.length ? labels.join(" / ") : "基础";
+    if (capabilities.streaming) labels.push(mt("streaming"));
+    if (capabilities.tools) labels.push(mt("tools"));
+    if (capabilities.imageInput) labels.push(mt("image"));
+    return labels.length ? labels.join(" / ") : mt("basic");
   }
 
   async function applyPreferredModel(model) {
@@ -740,7 +1504,7 @@ export function createModelProviderSettingsController({
       }
       if (seq !== state.modelApplySeq) return;
       refreshActiveSettingsPanel?.();
-      notifyTerminal?.(value ? `[info] 已使用模型：${value}\n` : "[info] 已清除首选模型。\n");
+      notifyTerminal?.(value ? `[info] ${mt("usingModel", { model: value })}\n` : `[info] ${mt("clearedPreferredModel")}\n`);
     } catch (err) {
       if (!agentId || state.agent?.id === agentId) throw err;
     } finally {
@@ -800,6 +1564,7 @@ export function createModelProviderSettingsController({
 
   function isModelSelectable(provider, model) {
     const prefs = modelVisibilityPreferences();
+    if (!provider.enabled) return false;
     if (!provider.configured && !prefs.showUnconfiguredProviders) return false;
     return !prefs.hiddenModels?.[modelOptionValue(provider, model)];
   }
@@ -841,20 +1606,20 @@ export function createModelProviderSettingsController({
     const optionValues = [];
     const groups = providers.map((provider) => {
       const models = providerModelList(provider);
-      const groupLabel = `${provider.name}${provider.error ? "（需配置/刷新）" : ""}`;
+      const groupLabel = `${provider.name}${provider.error ? mt("groupNeedsRefresh") : ""}`;
       const options = models.map((model) => {
         const value = `${provider.name}:${model}`;
         optionValues.push(value);
-        const suffix = provider.configured ? "" : "（未配置）";
+        const suffix = provider.configured ? "" : mt("optionUnconfigured");
         return `<option value="${escapeAttr(value)}" data-provider="${escapeAttr(provider.name)}" data-configured="${provider.configured ? "true" : "false"}">${escapeHtml(model + suffix)}</option>`;
       }).join("");
       return `<optgroup label="${escapeAttr(groupLabel)}">${options}</optgroup>`;
     }).join("");
     const currentModel = currentModelValue();
     const currentOption = currentModel && !optionValues.includes(currentModel)
-      ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel)}（当前 / 已隐藏）</option>`
+      ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel + mt("currentHidden"))}</option>`
       : "";
-    select.innerHTML = currentOption + (groups || `<option value="" data-configured="false">尚未加载模型</option>`);
+    select.innerHTML = currentOption + (groups || `<option value="" data-configured="false">${escapeHtml(mt("modelsNotLoaded"))}</option>`);
     if (currentModel) {
       select.value = currentModel;
     }
@@ -867,34 +1632,10 @@ export function createModelProviderSettingsController({
   }
 
   function modelProvidersForUI() {
-    const catalogProviders = Array.isArray(state.modelCatalog?.providers) ? state.modelCatalog.providers : [];
-    if (catalogProviders.length) {
-      return catalogProviders.map((provider) => {
-        const setting = settingProviderByName(provider.name || provider.type || "") || {};
-        return normalizeModelProvider({
-          name: setting.name,
-          type: setting.type,
-          profile: setting.profile,
-          baseUrl: setting.baseUrl,
-          defaultModel: setting.model,
-          maxTokens: setting.maxTokens,
-          configured: setting.configured,
-          apiKeyOptional: setting.apiKeyOptional,
-          ...provider,
-        });
-      });
-    }
-    return (state.settings?.providers || []).map((provider) => normalizeModelProvider({
-      name: provider.name,
-      type: provider.type,
-      profile: provider.profile,
-      baseUrl: provider.baseUrl,
-      defaultModel: provider.model,
-      maxTokens: provider.maxTokens,
-      models: provider.model ? [provider.model] : [],
-      configured: provider.configured,
-      apiKeyOptional: provider.apiKeyOptional,
-    }));
+    return modelProvidersForUIUnion(
+      state.settings?.providers || [],
+      state.modelCatalog?.providers || [],
+    ).map(normalizeModelProvider);
   }
 
   function selectableModelProviders() {
@@ -908,6 +1649,14 @@ export function createModelProviderSettingsController({
 
   function normalizeModelProvider(provider) {
     const capabilities = provider.capabilities && typeof provider.capabilities === "object" ? provider.capabilities : {};
+    const reasoningEfforts = [
+      capabilities.reasoningEfforts,
+      capabilities.reasoningEffortValues,
+      capabilities.effortValues,
+      Array.isArray(capabilities.reasoningEffort) ? capabilities.reasoningEffort : undefined,
+      capabilities.reasoningEffort?.values,
+      capabilities.reasoningEffort?.supportedValues,
+    ].find(Array.isArray);
     const management = provider.management && typeof provider.management === "object" ? provider.management : {};
     return {
       name: provider.name || provider.type || "provider",
@@ -918,11 +1667,17 @@ export function createModelProviderSettingsController({
       maxTokens: Number(provider.maxTokens || 0),
       models: Array.isArray(provider.models) ? provider.models.filter(Boolean) : [],
       configured: Boolean(provider.configured),
+      enabled: provider.enabled === undefined ? Boolean(provider.configured) : Boolean(provider.enabled),
+      origin: String(provider.origin || (isBuiltinProvider(provider) ? "builtin" : "custom")),
       apiKeyOptional: Boolean(provider.apiKeyOptional),
       capabilities: {
         tools: Boolean(capabilities.tools),
         streaming: Boolean(capabilities.streaming),
         imageInput: Boolean(capabilities.imageInput),
+        reasoningEffort: capabilities.reasoningEffort === true || Array.isArray(reasoningEfforts),
+        reasoningEfforts: Array.isArray(reasoningEfforts)
+          ? reasoningEfforts.filter(Boolean)
+          : undefined,
       },
       management: {
         url: management.url || provider.managementUrl || "",
@@ -955,66 +1710,69 @@ export function createModelProviderSettingsController({
     const provider = currentProviderConfig(select.value);
     const configured = Boolean(provider?.configured);
     select.classList.toggle("model-unconfigured", !configured);
-    select.title = provider?.error || (configured ? "模型已配置，可以对话" : modelSetupMessage(select.value));
+    select.title = provider?.error || (configured ? mt("modelConfigured") : modelSetupMessage(select.value));
   }
 
   function modelSetupMessage(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
     const provider = currentProviderConfig(modelValue);
     const providerName = provider?.name || String(modelValue || "openai").split(":")[0] || "openai";
+    if (providerName === "codex") {
+      return mt("codexModelSetupMessage", { model: modelValue || mt("noneSelected") });
+    }
     if (provider?.error) {
-      return `${provider.error} 配置或导入凭证后点击“刷新模型”。`;
+      return `${provider.error} ${mt("configurationRefresh")}`;
     }
     const envByProvider = {
       openai: "OPENAI_API_KEY",
       anthropic: "ANTHROPIC_API_KEY",
       groq: "GROQ_API_KEY",
-      cliproxyapi: "CLIPROXYAPI_API_KEY（仅当 CLIProxyAPI 配置了 api-keys 时需要）",
-      "openai-compatible": "OPENAI_COMPATIBLE_API_KEY 或 OPENAI_API_KEY",
+      cliproxyapi: mt("envCliproxyApiKey"),
+      "openai-compatible": mt("envOpenAICompatibleApiKey"),
     };
-    const envName = envByProvider[providerName] || "对应 provider 的 API key 环境变量";
-    return `已选择模型 ${modelValue || "未选择"}，但它所属的 provider（${providerName}）尚未配置 API Key。请在“设置 → 提供商”粘贴该 provider 的 API Key 立即生效；或在启动 Autoto 前设置 ${envName} 后重启。注意：为避免把密钥写进磁盘，页面里粘贴的 API Key 只保存在当前运行时，服务重启后需要重新提供。`;
+    const envName = envByProvider[providerName] || mt("envFallback");
+    return mt("modelSetupMessage", {
+      model: modelValue || mt("noneSelected"),
+      provider: providerName,
+      envName,
+    });
   }
 
-  function providerAuthProvider() {
-    return modelProvidersForUI().find((provider) => provider.management?.authFiles)
+  function codexProvider() {
+    return modelProvidersForUI().find((provider) => provider.type === "codex" || provider.name === "codex")
       || null;
   }
 
-  function cliProxyProvider() {
-    return modelProvidersForUI().find((provider) => provider.profile === "cliproxyapi")
-      || null;
-  }
-
-  function cliProxyProviderSummary() {
-    const provider = cliProxyProvider();
-    if (!provider) return "已内置 cliproxyapi provider；启动 CLIProxyAPI 后点击刷新模型。";
+  function codexProviderSummary() {
+    const provider = codexProvider();
+    if (!provider) return mt("codexProviderMissing");
     const count = providerModelList(normalizeModelProvider(provider)).length;
-    if (provider.error) return `${provider.error} 当前保留 ${count} 个回退模型。`;
-    return `已连接 ${provider.baseUrl || "http://127.0.0.1:8317/v1"}，当前可选 ${count} 个模型；导入/切换凭证后点击刷新模型即可更新。`;
+    if (provider.error) return mt("codexProviderError", { error: provider.error, count });
+    if (!provider.configured) return mt("codexProviderNeedsCredentials", { count });
+    return mt("codexProviderConnected", { count });
   }
 
   function renderAgentModelOptions(currentModel) {
     const options = allModelOptions();
     const values = new Set(options.map((item) => item.value));
     const currentOption = currentModel && !values.has(currentModel)
-      ? `<option value="${escapeAttr(currentModel)}">${escapeHtml(currentModel)}（当前 / 已隐藏）</option>`
+      ? `<option value="${escapeAttr(currentModel)}">${escapeHtml(currentModel + mt("currentHidden"))}</option>`
       : "";
     const grouped = selectableModelProviders().map((provider) => {
       const models = providerModelList(provider);
       if (!models.length) return "";
       return `<optgroup label="${escapeAttr(providerLabel(provider))}">${models.map((model) => {
         const value = `${provider.name}:${model}`;
-        const suffix = provider.configured ? "" : "（未配置）";
+        const suffix = provider.configured ? "" : mt("optionUnconfigured");
         return `<option value="${escapeAttr(value)}" ${value === currentModel ? "selected" : ""}>${escapeHtml(model + suffix)}</option>`;
       }).join("")}</optgroup>`;
     }).join("");
-    return currentOption + (grouped || `<option value="${escapeAttr(currentModel || "")}">${escapeHtml(currentModel || "尚未加载模型")}</option>`);
+    return currentOption + (grouped || `<option value="${escapeAttr(currentModel || "")}">${escapeHtml(currentModel || mt("modelsNotLoaded"))}</option>`);
   }
 
   return {
     bindModelSettingsActions,
     bindProviderSettingsActions,
-    cliProxyProviderSummary,
+    codexProviderSummary,
     currentModelValue,
     currentProviderConfig,
     getPreferredModel,

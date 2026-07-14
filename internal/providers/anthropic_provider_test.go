@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,25 +143,16 @@ func TestAnthropicProviderStreamsTextUsageAndToolCalls(t *testing.T) {
 	}
 }
 
-func TestAnthropicProviderWithoutAPIKeyStillReturnsNotConfigured(t *testing.T) {
+func TestAnthropicProviderWithoutAPIKeyReturnsUnavailableError(t *testing.T) {
 	provider := NewAnthropicProvider(config.ProviderConfig{Model: "claude-sonnet-4-5"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !errors.Is(err, ErrProviderUnavailable) || !strings.Contains(strings.ToLower(err.Error()), "unavailable") {
+		t.Fatalf("expected explicit unavailable error, events=%v err=%v", events, err)
 	}
-	var text, stopReason string
-	for event := range events {
-		if event.Type == "text" {
-			text += event.Text
-		}
-		if event.Type == "done" {
-			stopReason = event.StopReason
-		}
-	}
-	if !strings.Contains(text, "not configured") || stopReason != "not_configured" {
-		t.Fatalf("unexpected not configured events: text=%q stop=%q", text, stopReason)
+	if events != nil {
+		t.Fatal("unconfigured provider must not return a successful event stream")
 	}
 }
 

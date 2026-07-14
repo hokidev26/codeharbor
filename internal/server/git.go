@@ -655,6 +655,9 @@ func (s *Server) resolveAgentGitRepo(ctx context.Context, agentID string) (strin
 	if err != nil {
 		return "", "", err
 	}
+	if err := requireLocalExecutionAgent(agent); err != nil {
+		return "", "", gitCommandError{Status: http.StatusConflict, Msg: "remote execution transport is disabled; local fallback is forbidden"}
+	}
 	cwd := strings.TrimSpace(agent.CWD)
 	if cwd == "" && agent.WorklineID != "" {
 		workline, err := s.store.GetWorkline(ctx, agent.WorklineID)

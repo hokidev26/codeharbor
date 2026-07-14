@@ -43,6 +43,47 @@ func captureLegacyWarnings(app *Server) *legacyWarningCapture {
 	return capture
 }
 
+func TestSensitiveProviderRoutesAlwaysRequireCanonicalLocalToken(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/providers/oauth/codex/accounts"},
+		{http.MethodPatch, "/api/providers/oauth/codex/accounts/codex_fixture"},
+		{http.MethodPost, "/api/providers/oauth/codex/accounts/codex_fixture/refresh"},
+		{http.MethodDelete, "/api/providers/oauth/codex/accounts/codex_fixture"},
+		{http.MethodPost, "/api/providers/oauth/codex/import"},
+		{http.MethodPut, "/api/providers/openai-compatible/config"},
+		{http.MethodPatch, "/api/providers/openai-compatible"},
+		{http.MethodDelete, "/api/providers/openai-compatible"},
+		{http.MethodPost, "/api/providers/openai-compatible/test"},
+		{http.MethodGet, "/api/providers/codex/auth-files"},
+		{http.MethodPost, "/api/providers/codex/auth-files/import"},
+	}
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			missing := httptest.NewRecorder()
+			app.Routes().ServeHTTP(missing, httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`)))
+			if missing.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401 without canonical token, got %d: %s", missing.Code, missing.Body.String())
+			}
+			legacy := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
+			legacy.Header.Set(legacyLocalTokenHeader, app.localToken)
+			legacyRecorder := httptest.NewRecorder()
+			app.Routes().ServeHTTP(legacyRecorder, legacy)
+			if legacyRecorder.Code != http.StatusUnauthorized {
+				t.Fatalf("expected legacy token rejection, got %d: %s", legacyRecorder.Code, legacyRecorder.Body.String())
+			}
+		})
+	}
+	health := httptest.NewRecorder()
+	app.Routes().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health route should remain available without token, got %d", health.Code)
+	}
+}
+
 func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()

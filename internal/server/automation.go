@@ -23,26 +23,41 @@ import (
 )
 
 type scheduleRequest struct {
-	Name           string `json:"name"`
-	AgentID        string `json:"agentId"`
-	Expression     string `json:"expression"`
-	Timezone       string `json:"timezone"`
-	Prompt         string `json:"prompt"`
-	PermissionMode string `json:"permissionMode"`
-	Enabled        *bool  `json:"enabled,omitempty"`
+	Name            string  `json:"name"`
+	AgentID         string  `json:"agentId"`
+	Expression      string  `json:"expression"`
+	Timezone        string  `json:"timezone"`
+	Prompt          string  `json:"prompt"`
+	PermissionMode  string  `json:"permissionMode"`
+	EnvironmentMode *string `json:"environmentMode,omitempty"`
+	NarratorMode    *string `json:"narratorMode,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
 }
 
 type schedulePatchRequest struct {
-	Name           *string `json:"name,omitempty"`
-	AgentID        *string `json:"agentId,omitempty"`
-	Expression     *string `json:"expression,omitempty"`
-	Timezone       *string `json:"timezone,omitempty"`
-	Prompt         *string `json:"prompt,omitempty"`
-	PermissionMode *string `json:"permissionMode,omitempty"`
-	Enabled        *bool   `json:"enabled,omitempty"`
+	Name            *string `json:"name,omitempty"`
+	AgentID         *string `json:"agentId,omitempty"`
+	Expression      *string `json:"expression,omitempty"`
+	Timezone        *string `json:"timezone,omitempty"`
+	Prompt          *string `json:"prompt,omitempty"`
+	PermissionMode  *string `json:"permissionMode,omitempty"`
+	EnvironmentMode *string `json:"environmentMode,omitempty"`
+	NarratorMode    *string `json:"narratorMode,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
 }
 
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
+	if err := rejectUnknownQuery(r, "agentId", "enabled", "limit"); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	agentID := strings.TrimSpace(r.URL.Query().Get("agentId"))
+	if agentID != "" {
+		if err := validateAPIIdentifier("agentId", agentID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	enabled, err := optionalBoolQuery(r, "enabled")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -53,7 +68,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	items, err := s.store.ListSchedules(r.Context(), db.ScheduleListOptions{AgentID: strings.TrimSpace(r.URL.Query().Get("agentId")), Enabled: enabled, Limit: limit})
+	items, err := s.store.ListSchedules(r.Context(), db.ScheduleListOptions{AgentID: agentID, Enabled: enabled, Limit: limit})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -63,7 +78,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 	var req scheduleRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req, 160<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -71,11 +86,29 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	schedule := db.Schedule{
-		Name: req.Name, AgentID: req.AgentID, Expression: req.Expression, Timezone: req.Timezone,
-		Prompt: req.Prompt, PermissionMode: req.PermissionMode, Enabled: enabled,
+	environmentMode := "workline"
+	if req.EnvironmentMode != nil {
+		environmentMode = strings.TrimSpace(*req.EnvironmentMode)
 	}
-	if _, err := s.store.GetAgent(r.Context(), strings.TrimSpace(req.AgentID)); err != nil {
+	narratorMode := "reuse"
+	if req.NarratorMode != nil {
+		narratorMode = strings.TrimSpace(*req.NarratorMode)
+	}
+	schedule := db.Schedule{
+		Name: strings.TrimSpace(req.Name), AgentID: strings.TrimSpace(req.AgentID), Expression: strings.TrimSpace(req.Expression), Timezone: strings.TrimSpace(req.Timezone),
+		Prompt: strings.TrimSpace(req.Prompt), PermissionMode: strings.TrimSpace(req.PermissionMode), EnvironmentMode: environmentMode, NarratorMode: narratorMode, Enabled: enabled,
+	}
+	if schedule.Timezone == "" {
+		schedule.Timezone = "UTC"
+	}
+	if schedule.PermissionMode == "" {
+		schedule.PermissionMode = "readOnly"
+	}
+	if err := validateScheduleRequest(schedule); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.store.GetAgent(r.Context(), schedule.AgentID); err != nil {
 		writeStoreError(w, err)
 		return
 	}
@@ -110,8 +143,12 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req schedulePatchRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req, 160<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Name == nil && req.AgentID == nil && req.Expression == nil && req.Timezone == nil && req.Prompt == nil && req.PermissionMode == nil && req.EnvironmentMode == nil && req.NarratorMode == nil && req.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "at least one schedule field is required")
 		return
 	}
 	if req.Name != nil {
@@ -132,10 +169,28 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	if req.PermissionMode != nil {
 		current.PermissionMode = *req.PermissionMode
 	}
+	if req.EnvironmentMode != nil {
+		current.EnvironmentMode = *req.EnvironmentMode
+	}
+	if req.NarratorMode != nil {
+		current.NarratorMode = *req.NarratorMode
+	}
 	if req.Enabled != nil {
 		current.Enabled = *req.Enabled
 	}
-	if _, err := s.store.GetAgent(r.Context(), strings.TrimSpace(current.AgentID)); err != nil {
+	current.Name = strings.TrimSpace(current.Name)
+	current.AgentID = strings.TrimSpace(current.AgentID)
+	current.Expression = strings.TrimSpace(current.Expression)
+	current.Timezone = strings.TrimSpace(current.Timezone)
+	current.Prompt = strings.TrimSpace(current.Prompt)
+	current.PermissionMode = strings.TrimSpace(current.PermissionMode)
+	current.EnvironmentMode = strings.TrimSpace(current.EnvironmentMode)
+	current.NarratorMode = strings.TrimSpace(current.NarratorMode)
+	if err := validateScheduleRequest(current); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.store.GetAgent(r.Context(), current.AgentID); err != nil {
 		writeStoreError(w, err)
 		return
 	}
@@ -201,6 +256,63 @@ func (s *Server) runSchedule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, result)
 }
 
+func (s *Server) listScheduleRuns(w http.ResponseWriter, r *http.Request) {
+	if err := rejectUnknownQuery(r, "limit"); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	scheduleID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if err := validateAPIIdentifier("schedule id", scheduleID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := queryInt(r, "limit", 50, 1, 200)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.store.GetSchedule(r.Context(), scheduleID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	runs, err := s.store.ListScheduleRuns(r.Context(), scheduleID, limit)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+func validateScheduleRequest(schedule db.Schedule) error {
+	for _, field := range []struct {
+		name      string
+		value     string
+		maximum   int
+		required  bool
+		multiline bool
+	}{
+		{"name", schedule.Name, 120, true, false},
+		{"agentId", schedule.AgentID, 128, true, false},
+		{"expression", schedule.Expression, 256, true, false},
+		{"timezone", schedule.Timezone, 128, true, false},
+		{"prompt", schedule.Prompt, db.SchedulePromptMaxBytes, true, true},
+	} {
+		if err := validateAPIText(field.name, field.value, field.maximum, field.required, field.multiline); err != nil {
+			return err
+		}
+	}
+	if schedule.PermissionMode != "readOnly" && schedule.PermissionMode != "acceptEdits" {
+		return errors.New("invalid permissionMode")
+	}
+	if schedule.EnvironmentMode != "workline" && schedule.EnvironmentMode != "standalone" {
+		return errors.New("invalid environmentMode")
+	}
+	if schedule.NarratorMode != "reuse" && schedule.NarratorMode != "new" {
+		return errors.New("invalid narratorMode")
+	}
+	return nil
+}
+
 func nextScheduleTime(schedule db.Schedule, after time.Time) (string, error) {
 	expression, err := schedules.Parse(strings.TrimSpace(schedule.Expression), defaultTimezone(schedule.Timezone))
 	if err != nil {
@@ -222,23 +334,24 @@ func defaultTimezone(value string) string {
 }
 
 type deliveryView struct {
-	ID             string          `json:"id"`
-	SinkType       string          `json:"sinkType"`
-	SinkID         string          `json:"sinkId,omitempty"`
-	EventType      string          `json:"eventType"`
-	AgentID        string          `json:"agentId,omitempty"`
-	RunID          string          `json:"runId,omitempty"`
-	ToolUseID      string          `json:"toolUseId,omitempty"`
-	Payload        json.RawMessage `json:"payload"`
-	Status         string          `json:"status"`
-	AttemptCount   int             `json:"attemptCount"`
-	MaxAttempts    int             `json:"maxAttempts"`
-	NextAttemptAt  string          `json:"nextAttemptAt"`
-	LastHTTPStatus int             `json:"lastHttpStatus,omitempty"`
-	LastError      string          `json:"lastError,omitempty"`
-	DeliveredAt    string          `json:"deliveredAt,omitempty"`
-	CreatedAt      string          `json:"createdAt"`
-	UpdatedAt      string          `json:"updatedAt"`
+	ID                  string          `json:"id"`
+	SinkType            string          `json:"sinkType"`
+	SinkID              string          `json:"sinkId,omitempty"`
+	EventType           string          `json:"eventType"`
+	AgentID             string          `json:"agentId,omitempty"`
+	RunID               string          `json:"runId,omitempty"`
+	ToolUseID           string          `json:"toolUseId,omitempty"`
+	ExecutionGeneration int64           `json:"executionGeneration"`
+	Payload             json.RawMessage `json:"payload"`
+	Status              string          `json:"status"`
+	AttemptCount        int             `json:"attemptCount"`
+	MaxAttempts         int             `json:"maxAttempts"`
+	NextAttemptAt       string          `json:"nextAttemptAt"`
+	LastHTTPStatus      int             `json:"lastHttpStatus,omitempty"`
+	LastError           string          `json:"lastError,omitempty"`
+	DeliveredAt         string          `json:"deliveredAt,omitempty"`
+	CreatedAt           string          `json:"createdAt"`
+	UpdatedAt           string          `json:"updatedAt"`
 }
 
 func publicDelivery(item db.NotificationDelivery) deliveryView {
@@ -248,7 +361,7 @@ func publicDelivery(item db.NotificationDelivery) deliveryView {
 	}
 	return deliveryView{
 		ID: item.ID, SinkType: item.SinkType, SinkID: sinkID, EventType: item.EventType,
-		AgentID: item.AgentID, RunID: item.RunID, ToolUseID: item.ToolUseID, Payload: append(json.RawMessage(nil), item.PayloadJSON...),
+		AgentID: item.AgentID, RunID: item.RunID, ToolUseID: item.ToolUseID, ExecutionGeneration: item.ExecutionGeneration, Payload: append(json.RawMessage(nil), item.PayloadJSON...),
 		Status: item.Status, AttemptCount: item.AttemptCount, MaxAttempts: item.MaxAttempts, NextAttemptAt: item.NextAttemptAt,
 		LastHTTPStatus: item.LastHTTPStatus, LastError: item.LastError, DeliveredAt: item.DeliveredAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}

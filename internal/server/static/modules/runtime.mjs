@@ -1,5 +1,6 @@
-const localAPIToken = String(window.AUTOTO_LOCAL_TOKEN || "").trim()
-  || String(window.CODEHARBOR_LOCAL_TOKEN || "").trim();
+const runtimeWindow = globalThis.window || {};
+const localAPIToken = String(runtimeWindow.AUTOTO_LOCAL_TOKEN || "").trim()
+  || String(runtimeWindow.CODEHARBOR_LOCAL_TOKEN || "").trim();
 
 export function withLocalToken(path) {
   if (!localAPIToken) return path;

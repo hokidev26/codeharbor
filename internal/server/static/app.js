@@ -1,4 +1,17 @@
 (() => {
+  const bootLocale = () => {
+    try {
+      for (const key of ["autoto.regional", "codeharbor.regional"]) {
+        const saved = JSON.parse(globalThis.localStorage?.getItem?.(key) || "null");
+        const locale = String(saved?.locale ?? saved?.language ?? saved?.lang ?? "").toLowerCase();
+        if (locale === "zh-tw" || locale === "zh-hant" || locale.startsWith("zh-hant-") || locale === "zh-hk" || locale === "zh-mo") return "zh-TW";
+        if (locale === "zh" || locale === "zh-cn" || locale === "zh-hans" || locale.startsWith("zh-hans-") || locale === "zh-sg") return "zh-CN";
+        if (locale.startsWith("en")) return "en";
+      }
+    } catch {}
+    return "zh-CN";
+  };
+
   const showBootError = (error) => {
     console.error("Failed to load Autoto frontend", error);
     const message = error && error.message ? error.message : String(error || "unknown error");
@@ -8,7 +21,11 @@
       card.className = "empty-workspace-card";
       const title = document.createElement("div");
       title.className = "empty-workspace-title";
-      title.textContent = "前端加载失败";
+      title.textContent = {
+        "zh-CN": "前端加载失败",
+        "zh-TW": "前端載入失敗",
+        en: "Frontend failed to load",
+      }[bootLocale()];
       const text = document.createElement("div");
       text.className = "empty-workspace-text";
       text.textContent = message;
@@ -17,5 +34,5 @@
     }
   };
 
-  import("./modules/app-main.mjs").catch(showBootError);
+  import("./modules/app-main.mjs?v=legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-static-2-conversation-fig2-1-scroll-skills-1-market-layout-1-native-codex-3-provider-console-1").catch(showBootError);
 })();

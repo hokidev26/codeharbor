@@ -1,7 +1,10 @@
 import { escapeAttr, escapeHtml } from "./dom.mjs";
+import { formatTimestamp as formatRegionalTimestamp } from "./formatters.mjs";
+import { t } from "./messages-automation.mjs";
 
 export const automationLimits = Object.freeze({
   schedules: 100,
+  scheduleRuns: 20,
   deliveries: 60,
   connections: 40,
   pairings: 80,
@@ -11,9 +14,12 @@ export const automationLimits = Object.freeze({
   activity: 40,
 });
 
+export const schedulePresets = Object.freeze(["@every 15m", "@hourly", "@daily"]);
 export const legacyIMDraftKeys = Object.freeze(["autoto.imGateway", "codeharbor.imGateway"]);
 const ENV_REFERENCE_PATTERN = /^env:[A-Za-z_][A-Za-z0-9_]*$/;
 const SAFE_PERMISSION_MODES = new Set(["readOnly", "acceptEdits"]);
+const ENVIRONMENT_MODES = new Set(["workline", "standalone"]);
+const NARRATOR_MODES = new Set(["reuse", "new"]);
 const HOME_ASSISTANT_KINDS = new Set(["home_assistant", "home-assistant", "homeassistant", "ha"]);
 
 function objectValue(value) {
@@ -92,11 +98,11 @@ export function redactSensitiveText(value) {
     .slice(0, 1200);
 }
 
-export function normalizeEnvReference(value, { required = true, label = "凭据" } = {}) {
+export function normalizeEnvReference(value, { required = true, label = t("automation.defaults.credential") } = {}) {
   const reference = boundedText(value, 160);
   if (!reference && !required) return "";
   if (!ENV_REFERENCE_PATTERN.test(reference)) {
-    throw new Error(`${label}只能填写 env:变量名 引用，禁止输入 token 或 secret 明文`);
+    throw new Error(t("automation.validation.envReference", { label }));
   }
   return reference;
 }
@@ -111,6 +117,8 @@ export function normalizeSchedule(value = {}) {
     agentId: boundedText(source.agentId ?? source.projectId ?? source.workspaceId, 160),
     prompt: boundedText(source.prompt ?? source.task ?? source.message, 8000),
     permissionMode: SAFE_PERMISSION_MODES.has(source.permissionMode) ? source.permissionMode : "readOnly",
+    environmentMode: ENVIRONMENT_MODES.has(source.environmentMode) ? source.environmentMode : "workline",
+    narratorMode: NARRATOR_MODES.has(source.narratorMode) ? source.narratorMode : "reuse",
     enabled: booleanValue(source.enabled, normalizeStatus(source.status) === "enabled"),
     status: normalizeStatus(source.status, source.enabled === false ? "disabled" : "ready"),
     nextRunAt: boundedText(source.nextRunAt ?? source.nextAt, 80),
@@ -118,6 +126,17 @@ export function normalizeSchedule(value = {}) {
     lastRunId: boundedText(source.lastRunId, 160),
     lastOutcome: normalizeStatus(source.lastOutcome, ""),
     lastError: redactSensitiveText(source.lastError ?? source.error),
+  };
+}
+
+export function normalizeScheduleRun(value = {}) {
+  const source = objectValue(value);
+  return {
+    id: boundedText(source.id ?? source.runId, 160),
+    triggerType: normalizeStatus(source.triggerType ?? source.source, "manual"),
+    durationMs: boundedNumber(source.durationMs ?? source.duration, 0),
+    status: normalizeStatus(source.status, "unknown"),
+    createdAt: boundedText(source.startedAt ?? source.createdAt, 80),
   };
 }
 
@@ -269,17 +288,21 @@ export function buildSchedulePayload(input = {}) {
   const timezone = boundedText(source.timezone, 128) || "UTC";
   const agentId = boundedText(source.agentId ?? source.projectId, 128);
   const prompt = boundedText(source.prompt, 8000);
-  if (!expression) throw new Error("Cron 表达式不能为空");
-  if (!agentId) throw new Error("Agent ID 不能为空");
-  if (!prompt) throw new Error("排程任务内容不能为空");
+  if (!expression) throw new Error(t("automation.validation.scheduleExpressionRequired"));
+  if (!agentId) throw new Error(t("automation.validation.agentIdRequired"));
+  if (!prompt) throw new Error(t("automation.validation.schedulePromptRequired"));
   const permissionMode = SAFE_PERMISSION_MODES.has(source.permissionMode) ? source.permissionMode : "readOnly";
+  const environmentMode = ENVIRONMENT_MODES.has(source.environmentMode) ? source.environmentMode : "workline";
+  const narratorMode = NARRATOR_MODES.has(source.narratorMode) ? source.narratorMode : "reuse";
   return {
-    name: boundedText(source.name, 120) || "未命名排程",
+    name: boundedText(source.name, 120) || t("automation.defaults.unnamedSchedule"),
     agentId,
     expression,
     timezone,
     prompt,
     permissionMode,
+    environmentMode,
+    narratorMode,
     enabled: source.enabled !== undefined ? Boolean(source.enabled) : true,
   };
 }
@@ -287,13 +310,13 @@ export function buildSchedulePayload(input = {}) {
 export function buildConnectionPayload(input = {}) {
   const source = objectValue(input);
   const kind = normalizeKind(source.kind);
-  if (!new Set(["telegram", "home-assistant"]).has(kind)) throw new Error("只支持 Telegram 或 Home Assistant 连接");
+  if (!new Set(["telegram", "home-assistant"]).has(kind)) throw new Error(t("automation.validation.unsupportedConnection"));
   const credentialRef = normalizeEnvReference(source.credentialRef, {
-    label: kind === "telegram" ? "Bot token" : "Access token",
+    label: kind === "telegram" ? t("automation.connections.credential") : t("automation.homeAssistant.credential"),
   });
   const payload = {
     kind,
-    name: boundedText(source.name, 160) || (kind === "telegram" ? "Telegram" : "Home Assistant"),
+    name: boundedText(source.name, 160) || (kind === "telegram" ? t("automation.defaults.telegram") : t("automation.defaults.homeAssistant")),
     enabled: true,
     endpoint: "",
     settings: {},
@@ -301,7 +324,7 @@ export function buildConnectionPayload(input = {}) {
   };
   if (kind === "home-assistant") {
     payload.endpoint = boundedText(source.endpoint ?? source.baseUrl, 400).replace(/\/+$/, "");
-    if (!/^https?:\/\//i.test(payload.endpoint)) throw new Error("Home Assistant URL 必须使用 http:// 或 https://");
+    if (!/^https?:\/\//i.test(payload.endpoint)) throw new Error(t("automation.validation.homeAssistantUrl"));
   }
   return payload;
 }
@@ -310,7 +333,7 @@ export function buildPairingCodePayload(input = {}) {
   const source = objectValue(input);
   const connectionId = boundedText(source.connectionId, 160);
   const agentId = boundedText(source.agentId, 160);
-  if (!connectionId || !agentId) throw new Error("生成配对码需要 connectionId 与 agentId");
+  if (!connectionId || !agentId) throw new Error(t("automation.validation.pairingCodeRequired"));
   return { connectionId, agentId };
 }
 
@@ -321,9 +344,9 @@ export function parseDeviceParameters(value) {
   try {
     parsed = JSON.parse(String(value));
   } catch {
-    throw new Error("设备动作参数必须是有效 JSON 对象");
+    throw new Error(t("automation.validation.deviceParametersJson"));
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("设备动作参数必须是 JSON 对象");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(t("automation.validation.deviceParametersObject"));
   return parsed;
 }
 
@@ -333,7 +356,7 @@ export function buildDeviceActionPayload(input = {}) {
   const entityId = boundedText(source.entityId ?? source.deviceId, 255);
   const domain = boundedText(source.domain ?? entityId.split(".")[0], 64);
   const service = boundedText(source.service ?? source.action, 64);
-  if (!connectionId || !entityId || !domain || !service) throw new Error("设备动作需要连接、实体、domain 与 service");
+  if (!connectionId || !entityId || !domain || !service) throw new Error(t("automation.validation.deviceActionRequired"));
   const inputPayload = parseDeviceParameters(source.input ?? source.parameters);
   return {
     connectionId,
@@ -366,37 +389,14 @@ export function isDeviceActionExpired(action, now = Date.now()) {
 export async function requireLocalDoubleConfirmation(confirmAction, messages = []) {
   const confirm = typeof confirmAction === "function" ? confirmAction : () => false;
   const [first, second] = messages;
-  if (!await confirm(first || "确认从本地控制台发起此危险操作？")) return false;
-  if (!await confirm(second || "最终确认：此操作可能改变真实设备状态，仍要继续？")) return false;
+  if (!await confirm(first || t("automation.confirm.dangerousFirst"))) return false;
+  if (!await confirm(second || t("automation.confirm.dangerousSecond"))) return false;
   return true;
 }
 
 function statusLabel(status) {
-  return ({
-    active: "有效",
-    approved: "已批准",
-    connected: "已连接",
-    delivered: "已投递",
-    disabled: "已停用",
-    denied: "已拒绝",
-    enabled: "已启用",
-    expired: "已过期",
-    failed: "失败",
-    healthy: "正常",
-    pending: "待本地审批",
-    pending_approval: "待本地审批",
-    queued: "排队中",
-    inflight: "投递中",
-    retry_wait: "等待重试",
-    dead: "重试耗尽",
-    executing: "执行中",
-    ready: "就绪",
-    revoked: "已撤销",
-    running: "运行中",
-    succeeded: "成功",
-    success: "成功",
-    unknown: "未知",
-  })[status] || status || "未知";
+  const normalized = normalizeStatus(status);
+  return t(`automation.status.${normalized}`) === `automation.status.${normalized}` ? (status || t("automation.defaults.unknown")) : t(`automation.status.${normalized}`);
 }
 
 function statusTone(status) {
@@ -407,15 +407,14 @@ function statusTone(status) {
 }
 
 function kindLabel(kind) {
-  return ({ telegram: "Telegram", "home-assistant": "Home Assistant" })[kind] || kind || "未知渠道";
+  return ({ telegram: t("automation.defaults.telegram"), "home-assistant": t("automation.defaults.homeAssistant") })[kind] || kind || t("automation.defaults.unknownChannel");
 }
 
 function formatTimestamp(value) {
-  const text = boundedText(value, 80);
-  if (!text) return "—";
-  const timestamp = Date.parse(text);
-  if (!Number.isFinite(timestamp)) return text;
-  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+  return formatRegionalTimestamp(boundedText(value, 80), {
+    emptyFallback: t("automation.timestamp.empty"),
+    invalidFallback: t("automation.timestamp.invalid"),
+  });
 }
 
 function renderStatusPill(status) {
@@ -423,8 +422,8 @@ function renderStatusPill(status) {
   return `<span class="automation-status ${statusTone(normalized)}">${escapeHtml(statusLabel(normalized))}</span>`;
 }
 
-function renderSectionState({ loading = false, error = "", empty = false, emptyText = "暂无数据" } = {}) {
-  if (loading) return '<div class="automation-empty" aria-busy="true">正在加载…</div>';
+function renderSectionState({ loading = false, error = "", empty = false, emptyText = t("automation.section.noData") } = {}) {
+  if (loading) return `<div class="automation-empty" aria-busy="true">${escapeHtml(t("automation.section.loading"))}</div>`;
   if (error) return `<div class="automation-inline-error" role="alert">${escapeHtml(redactSensitiveText(error))}</div>`;
   if (empty) return `<div class="automation-empty">${escapeHtml(emptyText)}</div>`;
   return "";
@@ -434,24 +433,53 @@ function renderMetric(label, value, tone = "") {
   return `<div class="automation-metric ${escapeAttr(tone)}"><strong>${escapeHtml(String(boundedNumber(value)))}</strong><span>${escapeHtml(label)}</span></div>`;
 }
 
-function renderScheduleCard(value, busy = {}) {
+function renderScheduleHistory(value = {}) {
+  const history = objectValue(value);
+  if (history.loading) return `<div class="automation-empty" aria-busy="true">${escapeHtml(t("automation.section.loadingHistory"))}</div>`;
+  if (history.error) return `<div class="automation-inline-error">${escapeHtml(redactSensitiveText(history.error))}</div>`;
+  if (!history.loaded) return "";
+  const runs = (Array.isArray(history.runs) ? history.runs : []).slice(0, automationLimits.scheduleRuns).map(normalizeScheduleRun);
+  if (!runs.length) return `<div class="automation-empty">${escapeHtml(t("automation.section.noHistory"))}</div>`;
+  return `<div class="automation-run-history">${runs.map((run) => `
+    <div class="automation-run-row">
+      <span>${escapeHtml(run.triggerType || t("automation.defaults.manual"))}</span>
+      <strong>${escapeHtml(statusLabel(run.status))}</strong>
+      <span>${escapeHtml(t("automation.schedule.runMs", { duration: run.durationMs }))}</span>
+    </div>`).join("")}</div>`;
+}
+
+function renderScheduleHistoryMode(scheduleId, schedule, history) {
+  const title = schedule?.name || scheduleId || t("automation.defaults.schedule");
+  return `<div class="automation-history-mode" data-schedule-history-mode="${escapeAttr(scheduleId)}">
+    <div class="automation-history-head">
+      <div><span>${escapeHtml(t("automation.schedule.history"))}</span><h4>${escapeHtml(title)}</h4><small>${escapeHtml(scheduleId || t("automation.defaults.unknownSchedule"))}</small></div>
+      <button class="automation-btn subtle" type="button" data-schedule-history-close>${escapeHtml(t("automation.buttons.returnSchedules"))}</button>
+    </div>
+    ${renderScheduleHistory(history) || `<div class="automation-empty">${escapeHtml(t("automation.section.selectHistory"))}</div>`}
+  </div>`;
+}
+
+function renderScheduleCard(value, busy = {}, history = {}) {
   const schedule = normalizeSchedule(value);
   const actionBusy = Boolean(busy[`schedule:${schedule.id}`]);
+  const historyBusy = Boolean(busy[`schedule-runs:${schedule.id}`]);
   const disabled = actionBusy ? " disabled" : "";
   return `
     <article class="automation-card" data-schedule-card="${escapeAttr(schedule.id)}">
       <div class="automation-card-head">
-        <div><strong>${escapeHtml(schedule.name || schedule.id || "未命名排程")}</strong><small>${escapeHtml(`${schedule.expression || "未配置 Cron"} · ${schedule.timezone}`)}</small></div>
+        <div><strong>${escapeHtml(schedule.name || schedule.id || t("automation.defaults.unnamedSchedule"))}</strong><small>${escapeHtml(`${schedule.expression || t("automation.defaults.cronUnconfigured")} · ${schedule.timezone}`)}</small></div>
         ${renderStatusPill(schedule.enabled ? "enabled" : "disabled")}
       </div>
-      <p class="automation-card-copy">${escapeHtml(schedule.prompt || "未提供任务内容")}</p>
-      <dl class="automation-kv"><div><dt>Agent</dt><dd>${escapeHtml(schedule.agentId || "—")}</dd></div><div><dt>权限</dt><dd>${escapeHtml(schedule.permissionMode)}</dd></div><div><dt>下次运行</dt><dd>${escapeHtml(formatTimestamp(schedule.nextRunAt))}</dd></div></dl>
+      <p class="automation-card-copy">${escapeHtml(schedule.prompt || t("automation.defaults.taskMissing"))}</p>
+      <dl class="automation-kv"><div><dt>${escapeHtml(t("automation.schedule.agentId"))}</dt><dd>${escapeHtml(schedule.agentId || t("automation.timestamp.empty"))}</dd></div><div><dt>${escapeHtml(t("automation.schedule.permission"))}</dt><dd>${escapeHtml(schedule.permissionMode)}</dd></div><div><dt>${escapeHtml(t("automation.schedule.environment"))}</dt><dd>${escapeHtml(schedule.environmentMode)}</dd></div><div><dt>${escapeHtml(t("automation.schedule.narrator"))}</dt><dd>${escapeHtml(schedule.narratorMode)}</dd></div><div><dt>${escapeHtml(t("automation.schedule.nextRun"))}</dt><dd>${escapeHtml(formatTimestamp(schedule.nextRunAt))}</dd></div></dl>
       ${schedule.lastError ? `<div class="automation-inline-error">${escapeHtml(schedule.lastError)}</div>` : ""}
       <div class="automation-actions">
-        <button class="automation-btn subtle" type="button" data-schedule-toggle="${escapeAttr(schedule.id)}" data-enabled="${schedule.enabled ? "true" : "false"}"${disabled}>${schedule.enabled ? "停用" : "启用"}</button>
-        <button class="automation-btn primary" type="button" data-schedule-run="${escapeAttr(schedule.id)}"${disabled}>立即运行</button>
-        <button class="automation-btn danger" type="button" data-schedule-delete="${escapeAttr(schedule.id)}"${disabled}>删除</button>
+        <button class="automation-btn subtle" type="button" data-schedule-history="${escapeAttr(schedule.id)}"${historyBusy ? " disabled" : ""}>${escapeHtml(t(historyBusy ? "automation.buttons.loading" : "automation.buttons.history"))}</button>
+        <button class="automation-btn subtle" type="button" data-schedule-toggle="${escapeAttr(schedule.id)}" data-enabled="${schedule.enabled ? "true" : "false"}"${disabled}>${escapeHtml(t(schedule.enabled ? "automation.buttons.disable" : "automation.buttons.enable"))}</button>
+        <button class="automation-btn primary" type="button" data-schedule-run="${escapeAttr(schedule.id)}"${disabled}>${escapeHtml(t("automation.buttons.runNow"))}</button>
+        <button class="automation-btn danger" type="button" data-schedule-delete="${escapeAttr(schedule.id)}"${disabled}>${escapeHtml(t("automation.buttons.delete"))}</button>
       </div>
+      ${renderScheduleHistory(history)}
     </article>`;
 }
 
@@ -459,7 +487,7 @@ function renderConnectionCard(value, busy = {}) {
   const connection = normalizeConnection(value);
   const actionBusy = Boolean(busy[`connection:${connection.id}`]);
   const disabled = actionBusy ? " disabled" : "";
-  const credential = connection.credentialConfigured ? "环境变量凭据：已配置（引用目标与 secret 均不回显）" : "环境变量凭据：未配置";
+  const credential = t(connection.credentialConfigured ? "automation.connections.credentialConfigured" : "automation.connections.credentialMissing");
   return `
     <article class="automation-card" data-connection-card="${escapeAttr(connection.id)}">
       <div class="automation-card-head">
@@ -470,9 +498,9 @@ function renderConnectionCard(value, busy = {}) {
       <p class="automation-secret-note">${escapeHtml(credential)}</p>
       ${connection.lastError ? `<div class="automation-inline-error">${escapeHtml(connection.lastError)}</div>` : ""}
       <div class="automation-actions">
-        <button class="automation-btn subtle" type="button" data-connection-toggle="${escapeAttr(connection.id)}" data-enabled="${connection.enabled ? "true" : "false"}"${disabled}>${connection.enabled ? "停用" : "启用"}</button>
-        <button class="automation-btn subtle" type="button" data-connection-test="${escapeAttr(connection.id)}"${disabled}>测试连接</button>
-        <button class="automation-btn danger" type="button" data-connection-delete="${escapeAttr(connection.id)}"${disabled}>删除</button>
+        <button class="automation-btn subtle" type="button" data-connection-toggle="${escapeAttr(connection.id)}" data-enabled="${connection.enabled ? "true" : "false"}"${disabled}>${escapeHtml(t(connection.enabled ? "automation.buttons.disable" : "automation.buttons.enable"))}</button>
+        <button class="automation-btn subtle" type="button" data-connection-test="${escapeAttr(connection.id)}"${disabled}>${escapeHtml(t("automation.buttons.testConnection"))}</button>
+        <button class="automation-btn danger" type="button" data-connection-delete="${escapeAttr(connection.id)}"${disabled}>${escapeHtml(t("automation.buttons.delete"))}</button>
       </div>
     </article>`;
 }
@@ -482,8 +510,8 @@ function renderPairingCard(value, busy = {}) {
   const actionBusy = Boolean(busy[`pairing:${pairing.id}`]);
   return `
     <article class="automation-row-card">
-      <div><strong>${escapeHtml(pairing.channelUser || pairing.agentId || pairing.id || "未知配对")}</strong><small>Agent ${escapeHtml(pairing.agentId || "—")} · ${escapeHtml(formatTimestamp(pairing.pairedAt))}</small></div>
-      <div class="automation-actions compact">${renderStatusPill(pairing.status)}${pairing.status !== "revoked" ? `<button class="automation-btn danger" type="button" data-pairing-revoke="${escapeAttr(pairing.id)}"${actionBusy ? " disabled" : ""}>撤销</button>` : ""}</div>
+      <div><strong>${escapeHtml(pairing.channelUser || pairing.agentId || pairing.id || t("automation.defaults.unknownPairing"))}</strong><small>${escapeHtml(t("automation.pairing.agentAt", { agentId: pairing.agentId || t("automation.timestamp.empty"), timestamp: formatTimestamp(pairing.pairedAt) }))}</small></div>
+      <div class="automation-actions compact">${renderStatusPill(pairing.status)}${pairing.status !== "revoked" ? `<button class="automation-btn danger" type="button" data-pairing-revoke="${escapeAttr(pairing.id)}"${actionBusy ? " disabled" : ""}>${escapeHtml(t("automation.buttons.revoke"))}</button>` : ""}</div>
     </article>`;
 }
 
@@ -492,8 +520,8 @@ function renderDeliveryRow(value, busy = {}) {
   const retryable = ["failed", "error", "dead", "dead_letter"].includes(delivery.status);
   return `
     <article class="automation-row-card">
-      <div><strong>${escapeHtml(delivery.event || "通知")}</strong><small>${escapeHtml(delivery.channel || "未知渠道")} · 尝试 ${escapeHtml(String(delivery.attempts))} 次 · ${escapeHtml(formatTimestamp(delivery.deliveredAt || delivery.createdAt))}</small>${delivery.error ? `<em>${escapeHtml(delivery.error)}</em>` : ""}</div>
-      <div class="automation-actions compact">${renderStatusPill(delivery.status)}${retryable ? `<button class="automation-btn subtle" type="button" data-delivery-retry="${escapeAttr(delivery.id)}"${busy[`delivery:${delivery.id}`] ? " disabled" : ""}>重试</button>` : ""}</div>
+      <div><strong>${escapeHtml(delivery.event || t("automation.defaults.notification"))}</strong><small>${escapeHtml(delivery.channel || t("automation.defaults.unknownChannel"))} · ${escapeHtml(t("automation.deliveries.attempts", { count: delivery.attempts }))} · ${escapeHtml(formatTimestamp(delivery.deliveredAt || delivery.createdAt))}</small>${delivery.error ? `<em>${escapeHtml(delivery.error)}</em>` : ""}</div>
+      <div class="automation-actions compact">${renderStatusPill(delivery.status)}${retryable ? `<button class="automation-btn subtle" type="button" data-delivery-retry="${escapeAttr(delivery.id)}"${busy[`delivery:${delivery.id}`] ? " disabled" : ""}>${escapeHtml(t("automation.buttons.retry"))}</button>` : ""}</div>
     </article>`;
 }
 
@@ -503,7 +531,7 @@ function renderDeviceRow(value) {
     <article class="automation-device-row">
       <div><strong>${escapeHtml(device.name || device.entityId)}</strong><small class="mono">${escapeHtml(device.entityId)}</small></div>
       <span>${escapeHtml(device.state)}</span>
-      <span class="automation-readonly">只读</span>
+      <span class="automation-readonly">${escapeHtml(t("automation.homeAssistant.readonly"))}</span>
     </article>`;
 }
 
@@ -513,13 +541,13 @@ function renderDeviceAction(value, busy = {}, now = Date.now()) {
   const pending = ["pending", "pending_approval"].includes(action.status) && !expired;
   const status = expired && ["pending", "pending_approval", "approved"].includes(action.status) ? "expired" : action.status;
   const actionBusy = Boolean(busy[`device-action:${action.id}`]);
-  const riskLabel = ({ critical: "极高风险", high: "高风险", medium: "中风险", low: "低风险", blocked: "已阻止" })[action.risk] || action.risk;
+  const riskLabel = t(`automation.risk.${action.risk}`) === `automation.risk.${action.risk}` ? action.risk : t(`automation.risk.${action.risk}`);
   return `
     <article class="automation-card ${["critical", "high", "blocked"].includes(action.risk) ? "danger-zone" : ""}">
-      <div class="automation-card-head"><div><strong>${escapeHtml([action.domain, action.service].filter(Boolean).join(".") || "设备动作")}</strong><small class="mono">${escapeHtml(action.entityId || "未知实体")}</small></div>${renderStatusPill(status)}</div>
-      <dl class="automation-kv"><div><dt>风险</dt><dd>${escapeHtml(riskLabel)}</dd></div><div><dt>过期</dt><dd>${escapeHtml(formatTimestamp(action.expiresAt))}</dd></div></dl>
+      <div class="automation-card-head"><div><strong>${escapeHtml([action.domain, action.service].filter(Boolean).join(".") || t("automation.defaults.deviceAction"))}</strong><small class="mono">${escapeHtml(action.entityId || t("automation.defaults.unknownEntity"))}</small></div>${renderStatusPill(status)}</div>
+      <dl class="automation-kv"><div><dt>${escapeHtml(t("automation.deviceActions.risk"))}</dt><dd>${escapeHtml(riskLabel)}</dd></div><div><dt>${escapeHtml(t("automation.deviceActions.expires"))}</dt><dd>${escapeHtml(formatTimestamp(action.expiresAt))}</dd></div></dl>
       ${action.error ? `<div class="automation-inline-error">${escapeHtml(action.error)}</div>` : ""}
-      ${pending ? `<div class="automation-actions"><button class="automation-btn danger" type="button" data-device-action-approve="${escapeAttr(action.id)}"${actionBusy ? " disabled" : ""}>本地双确认批准</button><button class="automation-btn subtle" type="button" data-device-action-deny="${escapeAttr(action.id)}"${actionBusy ? " disabled" : ""}>拒绝</button></div>` : ""}
+      ${pending ? `<div class="automation-actions"><button class="automation-btn danger" type="button" data-device-action-approve="${escapeAttr(action.id)}"${actionBusy ? " disabled" : ""}>${escapeHtml(t("automation.buttons.approveLocal"))}</button><button class="automation-btn subtle" type="button" data-device-action-deny="${escapeAttr(action.id)}"${actionBusy ? " disabled" : ""}>${escapeHtml(t("automation.buttons.deny"))}</button></div>` : ""}
     </article>`;
 }
 
@@ -528,7 +556,7 @@ function renderAuditRow(value) {
   return `
     <article class="automation-audit-row">
       <time>${escapeHtml(formatTimestamp(event.createdAt))}</time>
-      <div><strong>${escapeHtml(event.type || "事件")}</strong><small>${escapeHtml(event.actor || "system")}${event.summary ? ` · ${escapeHtml(event.summary)}` : ""}</small></div>
+      <div><strong>${escapeHtml(event.type || t("automation.defaults.event"))}</strong><small>${escapeHtml(event.actor || t("automation.defaults.system"))}${event.summary ? ` · ${escapeHtml(event.summary)}` : ""}</small></div>
       ${renderStatusPill(event.result)}
     </article>`;
 }
@@ -555,6 +583,10 @@ export function renderAutomationControl(value = {}) {
   const monitoring = normalizeMonitoringSnapshot(source.monitoring);
   const errors = objectValue(source.errors);
   const busy = objectValue(source.busy);
+  const scheduleRunHistory = objectValue(source.scheduleRunHistory);
+  const scheduleViewMode = source.scheduleViewMode === "history" ? "history" : "list";
+  const selectedScheduleHistoryId = boundedText(source.selectedScheduleHistoryId, 160);
+  const selectedSchedule = schedules.find((item) => item.id === selectedScheduleHistoryId);
   const loading = Boolean(source.loading);
   const loaded = Boolean(source.loaded);
   const selectedConnectionId = boundedText(source.selectedConnectionId, 160);
@@ -562,109 +594,113 @@ export function renderAutomationControl(value = {}) {
   const pairingCode = normalizePairingCode(source.latestPairingCode);
   const telegramConnections = connections.filter((item) => item.kind === "telegram");
   const homeAssistantConnections = connections.filter((item) => item.kind === "home-assistant");
-  const scheduleState = renderSectionState({ loading: loading && !loaded, error: errors.schedules, empty: !schedules.length, emptyText: "暂无排程，先创建一个受限权限任务。" });
-  const deliveryState = renderSectionState({ loading: loading && !loaded, error: errors.deliveries, empty: !deliveries.length, emptyText: "暂无通知投递记录。" });
-  const connectionState = renderSectionState({ loading: loading && !loaded, error: errors.connections, empty: !connections.length, emptyText: "暂无真实连接；旧 localStorage 草稿不会被视为运行中。" });
-  const pairingState = renderSectionState({ loading: loading && !loaded, error: errors.pairings, empty: !pairings.length, emptyText: "暂无已配对会话。" });
-  const deviceState = renderSectionState({ loading: Boolean(source.devicesLoading), error: errors.devices, empty: !devices.length, emptyText: homeAssistantConnections.length ? "该连接没有可读实体。" : "先创建 Home Assistant 连接。" });
-  const actionState = renderSectionState({ error: errors.deviceActions, empty: !deviceActions.length, emptyText: "暂无设备动作请求。" });
-  const auditState = renderSectionState({ loading: loading && !loaded, error: errors.auditEvents, empty: !auditEvents.length, emptyText: "暂无审计事件。" });
+  const scheduleState = renderSectionState({ loading: loading && !loaded, error: errors.schedules, empty: !schedules.length, emptyText: t("automation.schedule.empty") });
+  const deliveryState = renderSectionState({ loading: loading && !loaded, error: errors.deliveries, empty: !deliveries.length, emptyText: t("automation.deliveries.empty") });
+  const connectionState = renderSectionState({ loading: loading && !loaded, error: errors.connections, empty: !connections.length, emptyText: t("automation.connections.empty") });
+  const pairingState = renderSectionState({ loading: loading && !loaded, error: errors.pairings, empty: !pairings.length, emptyText: t("automation.pairing.empty") });
+  const deviceState = renderSectionState({ loading: Boolean(source.devicesLoading), error: errors.devices, empty: !devices.length, emptyText: t(homeAssistantConnections.length ? "automation.homeAssistant.noDevices" : "automation.homeAssistant.createConnectionFirst") });
+  const actionState = renderSectionState({ error: errors.deviceActions, empty: !deviceActions.length, emptyText: t("automation.deviceActions.empty") });
+  const auditState = renderSectionState({ loading: loading && !loaded, error: errors.auditEvents, empty: !auditEvents.length, emptyText: t("automation.audit.empty") });
 
   return `
     <div id="automationControlPage" class="automation-control-page" data-authority="server-api">
       <section class="automation-hero">
         <div>
-          <div class="settings-hero-kicker">P2–P3 管理控制台</div>
-          <h2>渠道、排程与家电</h2>
-          <p>运行状态只以后端 API 为准。Telegram 仅接收环境变量引用；危险设备动作只能在本地 Web UI 双确认，IM 永远不能触发。</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("automation.hero.kicker"))}</div>
+          <h2>${escapeHtml(t("automation.hero.title"))}</h2>
+          <p>${escapeHtml(t("automation.hero.description"))}</p>
         </div>
         <div class="automation-actions">
-          <button id="refreshAutomationControlBtn" class="automation-btn primary" type="button"${loading ? " disabled" : ""}>${loading ? "刷新中…" : "刷新全部"}</button>
+          <button id="refreshAutomationControlBtn" class="automation-btn primary" type="button"${loading ? " disabled" : ""}>${escapeHtml(t(loading ? "automation.buttons.refreshing" : "automation.buttons.refreshAll"))}</button>
         </div>
       </section>
-      <div class="automation-safety" role="note"><strong>明确安全边界</strong><span>排程权限仅限 readOnly / acceptEdits；不接受 token 明文；设备动作会改变真实环境，必须两次本地确认，并显示风险和过期时间。</span></div>
-      ${legacyDraft.present ? `<div class="automation-migration" role="status"><strong>旧草稿已停用</strong><span>检测到 ${escapeHtml(legacyDraft.key || "localStorage")} 中的旧 IM 配置${legacyDraft.channel ? `（${escapeHtml(legacyDraft.channel)}）` : ""}。它只用于迁移提示，不会启动渠道、排程或设备，也绝不计入运行状态。</span></div>` : ""}
+      <div class="automation-safety" role="note"><strong>${escapeHtml(t("automation.hero.safetyTitle"))}</strong><span>${escapeHtml(t("automation.hero.safetyDescription"))}</span></div>
+      ${legacyDraft.present ? `<div class="automation-migration" role="status"><strong>${escapeHtml(t("automation.hero.migrationTitle"))}</strong><span>${escapeHtml(t("automation.hero.migration", { key: legacyDraft.key || "localStorage", channel: legacyDraft.channel ? t("automation.hero.migrationChannel", { channel: legacyDraft.channel }) : "" }))}</span></div>` : ""}
       ${errors.global ? `<div class="automation-inline-error" role="alert">${escapeHtml(redactSensitiveText(errors.global))}</div>` : ""}
 
-      <section class="automation-metrics" aria-label="自动化监控快照">
-        ${renderMetric("Active runs", monitoring.activeRuns, monitoring.activeRuns ? "active" : "")}
-        ${renderMetric("Pending approvals", monitoring.pendingApprovals, monitoring.pendingApprovals ? "warn" : "")}
-        ${renderMetric("Schedules", monitoring.scheduleCount || schedules.length)}
-        ${renderMetric("Notifications", monitoring.notificationCount || deliveries.length)}
-        ${renderMetric("Channels", monitoring.channelCount || connections.length)}
-        ${renderMetric("Devices", monitoring.deviceCount || devices.length)}
+      <section class="automation-metrics" aria-label="${escapeAttr(t("automation.metrics.ariaLabel"))}">
+        ${renderMetric(t("automation.metrics.activeRuns"), monitoring.activeRuns, monitoring.activeRuns ? "active" : "")}
+        ${renderMetric(t("automation.metrics.pendingApprovals"), monitoring.pendingApprovals, monitoring.pendingApprovals ? "warn" : "")}
+        ${renderMetric(t("automation.metrics.schedules"), monitoring.scheduleCount || schedules.length)}
+        ${renderMetric(t("automation.metrics.notifications"), monitoring.notificationCount || deliveries.length)}
+        ${renderMetric(t("automation.metrics.channels"), monitoring.channelCount || connections.length)}
+        ${renderMetric(t("automation.metrics.devices"), monitoring.deviceCount || devices.length)}
       </section>
 
       <div class="automation-section-grid">
         <section class="automation-section span-2">
-          <div class="automation-section-head"><div><span>排程</span><h3>受限权限后台任务</h3><p>Cron 到点或手动立即运行；危险的 bypassPermissions 不在此提供。</p></div>${errors.monitoring ? `<small class="error">${escapeHtml(redactSensitiveText(errors.monitoring))}</small>` : ""}</div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.schedule.kicker"))}</span><h3>${escapeHtml(t("automation.schedule.title"))}</h3><p>${escapeHtml(t("automation.schedule.description"))}</p></div>${errors.monitoring ? `<small class="error">${escapeHtml(redactSensitiveText(errors.monitoring))}</small>` : ""}</div>
+          ${scheduleViewMode === "history" ? renderScheduleHistoryMode(selectedScheduleHistoryId, selectedSchedule, scheduleRunHistory[selectedScheduleHistoryId]) : `
           <form id="createScheduleForm" class="automation-form">
-            <label>名称<input id="scheduleNameInput" maxlength="120" placeholder="每晚测试" required /></label>
-            <label>Cron 表达式<input id="scheduleExpressionInput" maxlength="256" placeholder="0 2 * * *" required /></label>
-            <label>Agent ID<input id="scheduleAgentInput" maxlength="128" placeholder="agent-id" required /></label>
-            <label>时区<input id="scheduleTimezoneInput" maxlength="128" value="UTC" placeholder="Asia/Shanghai" required /></label>
-            <label>权限<select id="schedulePermissionInput"><option value="readOnly">readOnly</option><option value="acceptEdits">acceptEdits</option></select></label>
-            <label class="span-2">任务内容<textarea id="schedulePromptInput" rows="3" maxlength="8000" placeholder="运行测试并汇总失败；不要修改文件。" required></textarea></label>
-            <div class="automation-form-actions span-2"><button class="automation-btn primary" type="submit"${busy["schedule:create"] ? " disabled" : ""}>${busy["schedule:create"] ? "创建中…" : "创建排程"}</button></div>
+            <label>${escapeHtml(t("automation.schedule.name"))}<input id="scheduleNameInput" maxlength="120" placeholder="${escapeAttr(t("automation.schedule.namePlaceholder"))}" required /></label>
+            <label>${escapeHtml(t("automation.schedule.preset"))}<select id="schedulePresetInput"><option value="">${escapeHtml(t("automation.schedule.custom"))}</option>${schedulePresets.map((preset) => `<option value="${escapeAttr(preset)}">${escapeHtml(preset)}</option>`).join("")}</select></label>
+            <label>${escapeHtml(t("automation.schedule.expression"))}<input id="scheduleExpressionInput" maxlength="256" placeholder="@every 15m" required /></label>
+            <label>${escapeHtml(t("automation.schedule.agentId"))}<input id="scheduleAgentInput" maxlength="128" placeholder="agent-id" required /></label>
+            <label>${escapeHtml(t("automation.schedule.timezone"))}<input id="scheduleTimezoneInput" maxlength="128" value="UTC" placeholder="Asia/Shanghai" required /></label>
+            <label>${escapeHtml(t("automation.schedule.permission"))}<select id="schedulePermissionInput"><option value="readOnly">readOnly</option><option value="acceptEdits">acceptEdits</option></select></label>
+            <label>${escapeHtml(t("automation.schedule.environment"))}<select id="scheduleEnvironmentInput"><option value="workline">workline</option><option value="standalone">standalone</option></select></label>
+            <label>${escapeHtml(t("automation.schedule.narrator"))}<select id="scheduleNarratorInput"><option value="reuse">reuse</option><option value="new">new</option></select></label>
+            <label class="span-2">${escapeHtml(t("automation.schedule.prompt"))}<textarea id="schedulePromptInput" rows="3" maxlength="8000" placeholder="${escapeAttr(t("automation.schedule.promptPlaceholder"))}" required></textarea></label>
+            <div class="automation-form-actions span-2"><button class="automation-btn primary" type="submit"${busy["schedule:create"] ? " disabled" : ""}>${escapeHtml(t(busy["schedule:create"] ? "automation.buttons.creating" : "automation.buttons.createSchedule"))}</button></div>
           </form>
-          <div class="automation-card-grid">${scheduleState || schedules.map((item) => renderScheduleCard(item, busy)).join("")}</div>
+          <div class="automation-card-grid">${scheduleState || schedules.map((item) => renderScheduleCard(item, busy, scheduleRunHistory[item.id])).join("")}</div>`}
         </section>
 
         <section class="automation-section">
-          <div class="automation-section-head"><div><span>通知</span><h3>投递历史</h3><p>失败可见、原因脱敏，并可显式重试。</p></div></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.deliveries.kicker"))}</span><h3>${escapeHtml(t("automation.deliveries.title"))}</h3><p>${escapeHtml(t("automation.deliveries.description"))}</p></div></div>
           <div class="automation-list">${deliveryState || deliveries.map((item) => renderDeliveryRow(item, busy)).join("")}</div>
         </section>
 
         <section class="automation-section">
-          <div class="automation-section-head"><div><span>Telegram</span><h3>渠道连接</h3><p>只填写 env: 引用；页面不保存也不回显 token 明文。</p></div></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.connections.kicker"))}</span><h3>${escapeHtml(t("automation.connections.title"))}</h3><p>${escapeHtml(t("automation.connections.description"))}</p></div></div>
           <form id="createTelegramConnectionForm" class="automation-form compact">
-            <label>名称<input id="telegramNameInput" maxlength="160" placeholder="个人 Telegram" /></label>
-            <label>Bot token 环境变量引用<input id="telegramCredentialInput" maxlength="160" placeholder="env:AUTOTO_TELEGRAM_BOT_TOKEN" autocomplete="off" required /></label>
-            <div class="automation-form-actions"><button class="automation-btn primary" type="submit"${busy["connection:create:telegram"] ? " disabled" : ""}>创建 Telegram 连接</button></div>
+            <label>${escapeHtml(t("automation.connections.name"))}<input id="telegramNameInput" maxlength="160" placeholder="${escapeAttr(t("automation.connections.namePlaceholder"))}" /></label>
+            <label>${escapeHtml(t("automation.connections.credential"))}<input id="telegramCredentialInput" maxlength="160" placeholder="env:AUTOTO_TELEGRAM_BOT_TOKEN" autocomplete="off" required /></label>
+            <div class="automation-form-actions"><button class="automation-btn primary" type="submit"${busy["connection:create:telegram"] ? " disabled" : ""}>${escapeHtml(t("automation.buttons.createTelegram"))}</button></div>
           </form>
-          <div class="automation-card-grid single">${connectionState || telegramConnections.map((item) => renderConnectionCard(item, busy)).join("") || '<div class="automation-empty">暂无 Telegram 连接。</div>'}</div>
+          <div class="automation-card-grid single">${connectionState || telegramConnections.map((item) => renderConnectionCard(item, busy)).join("") || `<div class="automation-empty">${escapeHtml(t("automation.connections.emptyTelegram"))}</div>`}</div>
         </section>
 
         <section class="automation-section">
-          <div class="automation-section-head"><div><span>配对</span><h3>一次性配对码</h3><p>未配对 chat 不应获得响应；撤销后立即失效。</p></div></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.pairing.kicker"))}</span><h3>${escapeHtml(t("automation.pairing.title"))}</h3><p>${escapeHtml(t("automation.pairing.description"))}</p></div></div>
           <form id="createPairingCodeForm" class="automation-form compact">
-            <label>Telegram 连接<select id="pairingConnectionInput" required><option value="">选择连接</option>${connectionOptions(connections, "telegram")}</select></label>
-            <label>Agent ID<input id="pairingAgentInput" maxlength="160" placeholder="agent-id" required /></label>
-            <div class="automation-form-actions"><button class="automation-btn primary" type="submit"${busy["pairing:create"] ? " disabled" : ""}>生成配对码</button></div>
+            <label>${escapeHtml(t("automation.pairing.connection"))}<select id="pairingConnectionInput" required><option value="">${escapeHtml(t("automation.pairing.selectConnection"))}</option>${connectionOptions(connections, "telegram")}</select></label>
+            <label>${escapeHtml(t("automation.pairing.agentId"))}<input id="pairingAgentInput" maxlength="160" placeholder="agent-id" required /></label>
+            <div class="automation-form-actions"><button class="automation-btn primary" type="submit"${busy["pairing:create"] ? " disabled" : ""}>${escapeHtml(t("automation.buttons.createPairingCode"))}</button></div>
           </form>
-          ${pairingCode.code ? `<div class="automation-pairing-code"><span>一次性配对码</span><strong>${escapeHtml(pairingCode.code)}</strong><small>过期：${escapeHtml(formatTimestamp(pairingCode.expiresAt))}</small></div>` : ""}
+          ${pairingCode.code ? `<div class="automation-pairing-code"><span>${escapeHtml(t("automation.pairing.code"))}</span><strong>${escapeHtml(pairingCode.code)}</strong><small>${escapeHtml(t("automation.pairing.expiresAt", { timestamp: formatTimestamp(pairingCode.expiresAt) }))}</small></div>` : ""}
           <div class="automation-list">${pairingState || pairings.map((item) => renderPairingCard(item, busy)).join("")}</div>
         </section>
 
         <section class="automation-section span-2">
-          <div class="automation-section-head"><div><span>Home Assistant</span><h3>家电连接与只读实体</h3><p>实体列表只读展示；Access token 仅允许 env: 引用。</p></div></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.homeAssistant.kicker"))}</span><h3>${escapeHtml(t("automation.homeAssistant.title"))}</h3><p>${escapeHtml(t("automation.homeAssistant.description"))}</p></div></div>
           <form id="createHomeAssistantConnectionForm" class="automation-form">
-            <label>名称<input id="homeAssistantNameInput" maxlength="160" placeholder="Home Assistant" /></label>
-            <label>Base URL<input id="homeAssistantUrlInput" maxlength="400" placeholder="http://homeassistant.local:8123" required /></label>
-            <label class="span-2">Access token 环境变量引用<input id="homeAssistantCredentialInput" maxlength="160" placeholder="env:AUTOTO_HOME_ASSISTANT_TOKEN" autocomplete="off" required /></label>
-            <div class="automation-form-actions span-2"><button class="automation-btn primary" type="submit"${busy["connection:create:home-assistant"] ? " disabled" : ""}>创建 Home Assistant 连接</button></div>
+            <label>${escapeHtml(t("automation.homeAssistant.name"))}<input id="homeAssistantNameInput" maxlength="160" placeholder="Home Assistant" /></label>
+            <label>${escapeHtml(t("automation.homeAssistant.url"))}<input id="homeAssistantUrlInput" maxlength="400" placeholder="http://homeassistant.local:8123" required /></label>
+            <label class="span-2">${escapeHtml(t("automation.homeAssistant.credential"))}<input id="homeAssistantCredentialInput" maxlength="160" placeholder="env:AUTOTO_HOME_ASSISTANT_TOKEN" autocomplete="off" required /></label>
+            <div class="automation-form-actions span-2"><button class="automation-btn primary" type="submit"${busy["connection:create:home-assistant"] ? " disabled" : ""}>${escapeHtml(t("automation.buttons.createHomeAssistant"))}</button></div>
           </form>
-          <div class="automation-card-grid">${homeAssistantConnections.length ? homeAssistantConnections.map((item) => renderConnectionCard(item, busy)).join("") : '<div class="automation-empty">暂无 Home Assistant 连接。</div>'}</div>
-          <div class="automation-device-toolbar"><label>查看连接<select id="deviceConnectionSelect"><option value="">选择 Home Assistant 连接</option>${connectionOptions(connections, "home-assistant", selectedConnectionId)}</select></label><span>最多显示 ${automationLimits.devices} 个实体，DOM 有界。</span></div>
+          <div class="automation-card-grid">${homeAssistantConnections.length ? homeAssistantConnections.map((item) => renderConnectionCard(item, busy)).join("") : `<div class="automation-empty">${escapeHtml(t("automation.homeAssistant.empty"))}</div>`}</div>
+          <div class="automation-device-toolbar"><label>${escapeHtml(t("automation.homeAssistant.viewConnection"))}<select id="deviceConnectionSelect"><option value="">${escapeHtml(t("automation.homeAssistant.selectConnection"))}</option>${connectionOptions(connections, "home-assistant", selectedConnectionId)}</select></label><span>${escapeHtml(t("automation.homeAssistant.devicesLimit", { count: automationLimits.devices }))}</span></div>
           <div class="automation-device-list">${deviceState || devices.map(renderDeviceRow).join("")}</div>
         </section>
 
         <section class="automation-section span-2 danger-section">
-          <div class="automation-section-head"><div><span>真实世界动作</span><h3>设备动作请求与本地审批</h3><p>无法从 IM 发起。提交和危险批准均需本地双确认；过期请求不能批准。</p></div><span class="automation-danger-badge">高风险边界</span></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.deviceActions.kicker"))}</span><h3>${escapeHtml(t("automation.deviceActions.title"))}</h3><p>${escapeHtml(t("automation.deviceActions.description"))}</p></div><span class="automation-danger-badge">${escapeHtml(t("automation.deviceActions.riskBoundary"))}</span></div>
           <form id="createDeviceActionForm" class="automation-form">
-            <label>Home Assistant 连接<select id="deviceActionConnectionInput" required><option value="">选择连接</option>${connectionOptions(connections, "home-assistant", selectedConnectionId)}</select></label>
-            <label>实体 ID<input id="deviceActionEntityInput" maxlength="255" placeholder="light.living_room" required /></label>
-            <label>Service<input id="deviceActionServiceInput" maxlength="64" placeholder="turn_off" required /></label>
-            <label>附加 input JSON<input id="deviceActionInput" maxlength="1200" placeholder='{"brightness": 0}' /></label>
-            <div class="automation-form-actions span-2"><button class="automation-btn danger" type="submit"${busy["device-action:create"] ? " disabled" : ""}>本地双确认并请求</button></div>
+            <label>${escapeHtml(t("automation.deviceActions.connection"))}<select id="deviceActionConnectionInput" required><option value="">${escapeHtml(t("automation.deviceActions.selectConnection"))}</option>${connectionOptions(connections, "home-assistant", selectedConnectionId)}</select></label>
+            <label>${escapeHtml(t("automation.deviceActions.entityId"))}<input id="deviceActionEntityInput" maxlength="255" placeholder="light.living_room" required /></label>
+            <label>${escapeHtml(t("automation.deviceActions.service"))}<input id="deviceActionServiceInput" maxlength="64" placeholder="turn_off" required /></label>
+            <label>${escapeHtml(t("automation.deviceActions.input"))}<input id="deviceActionInput" maxlength="1200" placeholder='{"brightness": 0}' /></label>
+            <div class="automation-form-actions span-2"><button class="automation-btn danger" type="submit"${busy["device-action:create"] ? " disabled" : ""}>${escapeHtml(t("automation.buttons.requestLocal"))}</button></div>
           </form>
           <div class="automation-card-grid">${actionState || deviceActions.map((item) => renderDeviceAction(item, busy, source.now)).join("")}</div>
         </section>
 
         <section class="automation-section span-2">
-          <div class="automation-section-head"><div><span>审计</span><h3>最近 50 条事件</h3><p>动态内容转义、敏感片段脱敏；不会无界追加日志。</p></div></div>
+          <div class="automation-section-head"><div><span>${escapeHtml(t("automation.audit.kicker"))}</span><h3>${escapeHtml(t("automation.audit.title"))}</h3><p>${escapeHtml(t("automation.audit.description"))}</p></div></div>
           <div class="automation-audit-list">${auditState || auditEvents.map(renderAuditRow).join("")}</div>
-          ${activity.length ? `<details class="automation-activity"><summary>本页操作记录（最近 ${escapeHtml(String(activity.length))} 条）</summary><ol>${activity.map(renderActivityRow).join("")}</ol></details>` : ""}
+          ${activity.length ? `<details class="automation-activity"><summary>${escapeHtml(t("automation.audit.activity", { count: activity.length }))}</summary><ol>${activity.map(renderActivityRow).join("")}</ol></details>` : ""}
         </section>
       </div>
     </div>`;
@@ -686,6 +722,9 @@ export function createAutomationControlController({
     loading: false,
     devicesLoading: false,
     schedules: [],
+    scheduleRunHistory: {},
+    scheduleViewMode: "list",
+    selectedScheduleHistoryId: "",
     deliveries: [],
     connections: [],
     pairings: [],
@@ -709,6 +748,9 @@ export function createAutomationControlController({
       loading: state.loading,
       devicesLoading: state.devicesLoading,
       schedules: state.schedules.map((item) => ({ ...item })),
+      scheduleRunHistory: Object.fromEntries(Object.entries(state.scheduleRunHistory).map(([id, history]) => [id, { ...history, runs: (history.runs || []).map((item) => ({ ...item })) }])),
+      scheduleViewMode: state.scheduleViewMode,
+      selectedScheduleHistoryId: state.selectedScheduleHistoryId,
       deliveries: state.deliveries.map((item) => ({ ...item })),
       connections: state.connections.map((item) => ({ ...item })),
       pairings: state.pairings.map((item) => ({ ...item })),
@@ -738,9 +780,9 @@ export function createAutomationControlController({
   }
 
   function setError(section, error, { notify = true } = {}) {
-    const message = redactSensitiveText(error?.message || error || "请求失败");
+    const message = redactSensitiveText(error?.message || error || t("automation.validation.requestFailed"));
     state.errors[section] = message;
-    addActivity(`${section}：${message}`);
+    addActivity(t("automation.activity.error", { section, message }));
     if (notify) showError?.(new Error(message));
   }
 
@@ -811,7 +853,7 @@ export function createAutomationControlController({
     if (seq !== state.loadSeq) return false;
     state.loaded = true;
     state.loading = false;
-    addActivity("已刷新渠道、排程、设备、通知、监控与审计数据");
+    addActivity(t("automation.activity.refreshed"));
     emit();
     return true;
   }
@@ -869,6 +911,40 @@ export function createAutomationControlController({
     }
   }
 
+  function closeScheduleHistory() {
+    state.scheduleViewMode = "list";
+    state.selectedScheduleHistoryId = "";
+    emit();
+    return true;
+  }
+
+  async function loadScheduleRuns(id) {
+    const scheduleId = boundedText(id, 160);
+    if (!scheduleId || state.busy[`schedule-runs:${scheduleId}`]) return false;
+    state.scheduleViewMode = "history";
+    state.selectedScheduleHistoryId = scheduleId;
+    state.busy[`schedule-runs:${scheduleId}`] = true;
+    state.scheduleRunHistory[scheduleId] = { ...(state.scheduleRunHistory[scheduleId] || {}), loading: true, error: "" };
+    emit();
+    try {
+      const result = await request(`/api/schedules/${encodeURIComponent(scheduleId)}/runs?limit=${automationLimits.scheduleRuns}`);
+      state.scheduleRunHistory[scheduleId] = {
+        loaded: true,
+        loading: false,
+        error: "",
+        runs: boundedList(result, ["runs", "items"], automationLimits.scheduleRuns).map(normalizeScheduleRun),
+      };
+      return true;
+    } catch (error) {
+      state.scheduleRunHistory[scheduleId] = { loaded: true, loading: false, error: redactSensitiveText(error?.message || error), runs: [] };
+      showError?.(error);
+      return false;
+    } finally {
+      delete state.busy[`schedule-runs:${scheduleId}`];
+      emit();
+    }
+  }
+
   async function createSchedule(input) {
     let payload;
     try {
@@ -883,7 +959,7 @@ export function createAutomationControlController({
       section: "schedules",
       path: "/api/schedules",
       options: { method: "POST", body: JSON.stringify(payload) },
-      success: "排程已创建。",
+      success: t("automation.toast.scheduleCreated"),
     });
   }
 
@@ -894,7 +970,7 @@ export function createAutomationControlController({
       section: "schedules",
       path: `/api/schedules/${encodeURIComponent(scheduleId)}`,
       options: { method: "PATCH", body: JSON.stringify({ enabled: Boolean(enabled) }) },
-      success: enabled ? "排程已启用。" : "排程已停用。",
+      success: t(enabled ? "automation.toast.scheduleEnabled" : "automation.toast.scheduleDisabled"),
     });
   }
 
@@ -905,19 +981,19 @@ export function createAutomationControlController({
       section: "schedules",
       path: `/api/schedules/${encodeURIComponent(scheduleId)}/run`,
       options: { method: "POST" },
-      success: "已请求立即运行排程。",
+      success: t("automation.toast.scheduleRunRequested"),
     });
   }
 
   async function deleteSchedule(id) {
     const scheduleId = boundedText(id, 160);
-    if (!await confirm("确定删除此排程？此操作不可撤销。")) return false;
+    if (!await confirm(t("automation.confirm.deleteSchedule"))) return false;
     return mutate({
       key: `schedule:${scheduleId}`,
       section: "schedules",
       path: `/api/schedules/${encodeURIComponent(scheduleId)}`,
       options: { method: "DELETE" },
-      success: "排程已删除。",
+      success: t("automation.toast.scheduleDeleted"),
     });
   }
 
@@ -928,7 +1004,7 @@ export function createAutomationControlController({
       section: "deliveries",
       path: `/api/notifications/deliveries/${encodeURIComponent(deliveryId)}/retry`,
       options: { method: "POST" },
-      success: "通知已加入重试。",
+      success: t("automation.toast.deliveryRetry"),
     });
   }
 
@@ -946,7 +1022,7 @@ export function createAutomationControlController({
       section: "connections",
       path: "/api/integrations/connections",
       options: { method: "POST", body: JSON.stringify(payload) },
-      success: `${kindLabel(payload.kind)} 连接已创建；secret 未回显。`,
+      success: t("automation.toast.connectionCreated", { kind: kindLabel(payload.kind) }),
     });
   }
 
@@ -957,7 +1033,7 @@ export function createAutomationControlController({
       section: "connections",
       path: `/api/integrations/connections/${encodeURIComponent(connectionId)}`,
       options: { method: "PATCH", body: JSON.stringify({ enabled: Boolean(enabled) }) },
-      success: enabled ? "连接已启用。" : "连接已停用。",
+      success: t(enabled ? "automation.toast.connectionEnabled" : "automation.toast.connectionDisabled"),
     });
   }
 
@@ -968,19 +1044,19 @@ export function createAutomationControlController({
       section: "connections",
       path: `/api/integrations/connections/${encodeURIComponent(connectionId)}/test`,
       options: { method: "POST" },
-      success: "连接测试已完成。",
+      success: t("automation.toast.connectionTested"),
     });
   }
 
   async function deleteConnection(id) {
     const connectionId = boundedText(id, 160);
-    if (!await confirm("删除连接会停止其通知、配对或设备访问。确定继续？")) return false;
+    if (!await confirm(t("automation.confirm.deleteConnection"))) return false;
     return mutate({
       key: `connection:${connectionId}`,
       section: "connections",
       path: `/api/integrations/connections/${encodeURIComponent(connectionId)}`,
       options: { method: "DELETE" },
-      success: "连接已删除。",
+      success: t("automation.toast.connectionDeleted"),
     });
   }
 
@@ -998,20 +1074,20 @@ export function createAutomationControlController({
       section: "pairings",
       path: "/api/channels/pairing-codes",
       options: { method: "POST", body: JSON.stringify(payload) },
-      success: "一次性配对码已生成。",
+      success: t("automation.toast.pairingCodeCreated"),
       onResult: (result) => { state.latestPairingCode = normalizePairingCode({ ...objectValue(result), ...payload }); },
     });
   }
 
   async function revokePairing(id) {
     const pairingId = boundedText(id, 160);
-    if (!await confirm("确定撤销此渠道配对？撤销后该会话不能再审批。")) return false;
+    if (!await confirm(t("automation.confirm.revokePairing"))) return false;
     return mutate({
       key: `pairing:${pairingId}`,
       section: "pairings",
       path: `/api/channels/pairings/${encodeURIComponent(pairingId)}/revoke`,
       options: { method: "POST" },
-      success: "渠道配对已撤销。",
+      success: t("automation.toast.pairingRevoked"),
     });
   }
 
@@ -1025,8 +1101,8 @@ export function createAutomationControlController({
       return false;
     }
     const confirmed = await requireLocalDoubleConfirmation(confirm, [
-      `设备动作只能从本地 Web UI 发起，IM 无法触发。确认请求 ${payload.input.entity_id} → ${payload.domain}.${payload.service}？`,
-      "最终确认：此动作可能改变真实设备状态。请核对实体、service 和 input 后再继续。",
+      t("automation.confirm.requestDeviceActionFirst", { entityId: payload.input.entity_id, action: `${payload.domain}.${payload.service}` }),
+      t("automation.confirm.requestDeviceActionSecond"),
     ]);
     if (!confirmed) return false;
     return mutate({
@@ -1034,7 +1110,7 @@ export function createAutomationControlController({
       section: "deviceActions",
       path: "/api/device-actions",
       options: { method: "POST", body: JSON.stringify(payload) },
-      success: "设备动作请求已提交，等待本地审批或执行结果。",
+      success: t("automation.toast.deviceActionRequested"),
       reload: false,
       onResult: (result) => {
         const normalized = normalizeDeviceAction({ entityId: payload.input.entity_id, ...payload, ...objectValue(result) });
@@ -1048,13 +1124,13 @@ export function createAutomationControlController({
     const action = state.deviceActions.find((item) => item.id === actionId);
     if (!action) return false;
     if (isDeviceActionExpired(action, now())) {
-      setError("deviceActions", new Error("设备动作请求已过期，不能批准"));
+      setError("deviceActions", new Error(t("automation.validation.actionExpired")));
       emit();
       return false;
     }
     const confirmed = await requireLocalDoubleConfirmation(confirm, [
-      `仅本地 Web UI 可批准。确认批准 ${action.entityId} → ${action.domain}.${action.service}？`,
-      `最终确认：风险等级为 ${action.risk}，过期时间 ${action.expiresAt || "未知"}。仍要执行？`,
+      t("automation.confirm.approveDeviceActionFirst", { entityId: action.entityId, action: `${action.domain}.${action.service}` }),
+      t("automation.confirm.approveDeviceActionSecond", { risk: t(`automation.risk.${action.risk}`), expiresAt: action.expiresAt || t("automation.defaults.unknown") }),
     ]);
     if (!confirmed) return false;
     return mutate({
@@ -1062,19 +1138,19 @@ export function createAutomationControlController({
       section: "deviceActions",
       path: `/api/device-actions/${encodeURIComponent(actionId)}/approve`,
       options: { method: "POST" },
-      success: "设备动作已在本地批准。",
+      success: t("automation.toast.deviceActionApproved"),
     });
   }
 
   async function denyDeviceAction(id) {
     const actionId = boundedText(id, 160);
-    if (!await confirm("确定拒绝此设备动作请求？")) return false;
+    if (!await confirm(t("automation.confirm.denyDeviceAction"))) return false;
     return mutate({
       key: `device-action:${actionId}`,
       section: "deviceActions",
       path: `/api/device-actions/${encodeURIComponent(actionId)}/deny`,
       options: { method: "POST" },
-      success: "设备动作已拒绝。",
+      success: t("automation.toast.deviceActionDenied"),
     });
   }
 
@@ -1084,6 +1160,9 @@ export function createAutomationControlController({
     if (!root) return;
     const byId = (id) => root.querySelector(`#${id}`);
     byId("refreshAutomationControlBtn")?.addEventListener("click", () => load());
+    byId("schedulePresetInput")?.addEventListener("change", (event) => {
+      if (event.currentTarget.value && byId("scheduleExpressionInput")) byId("scheduleExpressionInput").value = event.currentTarget.value;
+    });
     byId("createScheduleForm")?.addEventListener("submit", (event) => {
       event.preventDefault();
       createSchedule({
@@ -1092,6 +1171,8 @@ export function createAutomationControlController({
         agentId: byId("scheduleAgentInput")?.value,
         timezone: byId("scheduleTimezoneInput")?.value,
         permissionMode: byId("schedulePermissionInput")?.value,
+        environmentMode: byId("scheduleEnvironmentInput")?.value,
+        narratorMode: byId("scheduleNarratorInput")?.value,
         prompt: byId("schedulePromptInput")?.value,
       });
     });
@@ -1117,6 +1198,8 @@ export function createAutomationControlController({
         input: byId("deviceActionInput")?.value,
       });
     });
+    root.querySelectorAll("[data-schedule-history]").forEach((button) => button.addEventListener("click", () => loadScheduleRuns(button.dataset.scheduleHistory)));
+    root.querySelector("[data-schedule-history-close]")?.addEventListener("click", closeScheduleHistory);
     root.querySelectorAll("[data-schedule-toggle]").forEach((button) => button.addEventListener("click", () => toggleSchedule(button.dataset.scheduleToggle, button.dataset.enabled !== "true")));
     root.querySelectorAll("[data-schedule-run]").forEach((button) => button.addEventListener("click", () => runSchedule(button.dataset.scheduleRun)));
     root.querySelectorAll("[data-schedule-delete]").forEach((button) => button.addEventListener("click", () => deleteSchedule(button.dataset.scheduleDelete)));
@@ -1133,6 +1216,7 @@ export function createAutomationControlController({
   return {
     approveDeviceAction,
     bind,
+    closeScheduleHistory,
     createConnection,
     createPairingCode,
     createSchedule,
@@ -1142,6 +1226,7 @@ export function createAutomationControlController({
     getState,
     load,
     loadDevices,
+    loadScheduleRuns,
     render: () => renderAutomationControl(getState()),
     requestDeviceAction,
     retryDelivery,

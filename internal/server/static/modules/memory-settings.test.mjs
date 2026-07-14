@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { setUILocale } from "./i18n.mjs";
 import {
   createMemorySettingsController,
   normalizeMemoryPayload,
@@ -35,6 +36,22 @@ test("memory rendering escapes content, keywords, ids, queries, and errors", () 
   assert.match(html, /&lt;script&gt;alert\(&quot;content&quot;\)&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;keyword&quot;&gt;/);
   assert.match(html, /value="&quot;&gt;&lt;img src=x onerror=&quot;boom&quot;&gt;"/);
+});
+
+test("memory settings render translated UI text while preserving escaped user content", () => {
+  setUILocale("en");
+  try {
+    const html = renderMemorySettingsContent({
+      query: '"<unsafe>',
+      items: [{ id: "memory-1", content: "<custom memory>", keywords: ["project"], pinned: true }],
+    });
+    assert.match(html, /Long-term memory/);
+    assert.match(html, />Pinned</);
+    assert.match(html, /&lt;custom memory&gt;/);
+    assert.match(html, /value="&quot;&lt;unsafe&gt;"/);
+  } finally {
+    setUILocale("zh-CN");
+  }
 });
 
 test("controller drops stale memory list responses", async () => {

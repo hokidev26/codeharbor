@@ -17,8 +17,9 @@ import (
 )
 
 type OpenAICompatible struct {
-	cfg    config.OpenAICompatibleConfig
-	client *http.Client
+	cfg       config.OpenAICompatibleConfig
+	client    *http.Client
+	configErr error
 }
 
 func NewOpenAICompatible(cfg config.OpenAICompatibleConfig) *OpenAICompatible {
@@ -28,16 +29,41 @@ func NewOpenAICompatible(cfg config.OpenAICompatibleConfig) *OpenAICompatible {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.openai.com/v1"
 	}
-	return &OpenAICompatible{cfg: cfg, client: &http.Client{Timeout: 90 * time.Second}}
+	return &OpenAICompatible{cfg: cfg, client: providerHTTPClient(90 * time.Second), configErr: validateProviderRuntimeConfig(cfg)}
 }
 
 func (p *OpenAICompatible) Name() string { return p.cfg.Name }
 
+func (p *OpenAICompatible) Configured() bool {
+	return p != nil && p.configErr == nil && (strings.TrimSpace(p.cfg.APIKey) != "" || p.cfg.APIKeyOptional)
+}
+
 func (p *OpenAICompatible) Capabilities() Capabilities {
-	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
+	capabilities := Capabilities{
+		Tools:      true,
+		Streaming:  true,
+		ImageInput: true,
+	}
+	if p.cfg.Profile == config.ProviderProfileCLIProxyAPI {
+		capabilities.ReasoningEffort = true
+		capabilities.ReasoningEfforts = []string{"low", "medium", "high"}
+	}
+	return capabilities
+}
+
+func (p *OpenAICompatible) applyRequestHeaders(req *http.Request) {
+	if client := autotoClientHeaderValue(p.cfg); client != "" {
+		req.Header.Set("X-Autoto-Client", client)
+	}
+	if p.cfg.InstallationID != "" {
+		req.Header.Set("X-Autoto-Installation-ID", p.cfg.InstallationID)
+	}
 }
 
 func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
 	if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
 		return []string{p.cfg.Model}, nil
 	}
@@ -48,6 +74,7 @@ func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 	if p.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	}
+	p.applyRequestHeaders(req)
 	res, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -208,21 +235,28 @@ func contentBlocksText(blocks []ContentBlock) string {
 }
 
 func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
+	reasoningEffort, err := normalizeReasoningEffortForCapabilities(req.ReasoningEffort, p.Capabilities(), p.cfg.Name)
+	if err != nil {
+		return nil, err
+	}
+	if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
+		return nil, providerUnavailableError(p.cfg.Name, "API key is not configured")
+	}
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-		if p.cfg.APIKey == "" && !p.cfg.APIKeyOptional {
-			text := "OpenAI-compatible provider is not configured. Set OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY to enable real model calls."
-			out <- Event{Type: "text", Text: text}
-			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
-			return
-		}
 		model := req.Model
 		if model == "" {
 			model = p.cfg.Model
 		}
 		messages := openAICompatibleMessages(req)
 		payload := map[string]any{"model": model, "messages": messages, "stream": true}
+		if reasoningEffort != "" {
+			payload["reasoning_effort"] = reasoningEffort
+		}
 		if tools := openAICompatibleTools(req.Tools); len(tools) > 0 {
 			payload["tools"] = tools
 		}
@@ -240,6 +274,7 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 		if p.cfg.APIKey != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 		}
+		p.applyRequestHeaders(httpReq)
 		res, err := p.client.Do(httpReq)
 		if err != nil {
 			out <- Event{Type: "error", Text: fmt.Sprintf("%s provider request failed: %v", p.cfg.Name, err)}

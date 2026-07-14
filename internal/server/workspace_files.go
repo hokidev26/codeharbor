@@ -53,6 +53,10 @@ func (s *Server) updateWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		writeAgentWorkspaceLookupError(w, err)
 		return
 	}
+	if err := requireLocalExecutionAgent(agent); err != nil {
+		writeExecutionGuardError(w, err)
+		return
+	}
 	if agent.PermissionMode == "readOnly" {
 		writeError(w, http.StatusForbidden, "workspace is read-only")
 		return
@@ -89,6 +93,10 @@ func (s *Server) agentWorkspace(w http.ResponseWriter, r *http.Request) (*worksp
 	agent, err := s.store.GetAgent(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeAgentWorkspaceLookupError(w, err)
+		return nil, false
+	}
+	if err := requireLocalExecutionAgent(agent); err != nil {
+		writeExecutionGuardError(w, err)
 		return nil, false
 	}
 	fs, err := workspacefs.New(agent.CWD)

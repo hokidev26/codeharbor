@@ -67,6 +67,12 @@ type ProvidersConfig struct {
 }
 
 const ProviderProfileCLIProxyAPI = "cliproxyapi"
+const ProviderTypeCodex = "codex"
+
+const (
+	ProviderOriginBuiltin = "builtin"
+	ProviderOriginCustom  = "custom"
+)
 
 type ProviderConfig struct {
 	Name           string `json:"name"`
@@ -77,6 +83,16 @@ type ProviderConfig struct {
 	Model          string `json:"model"`
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
 	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
+	// Disabled is persisted instead of Enabled so configs written before this
+	// field existed remain enabled after an upgrade.
+	Disabled bool `json:"disabled,omitempty"`
+
+	ClientVersion                  string `json:"-"`
+	InstallationID                 string `json:"-"`
+	CredentialStorePath            string `json:"-"`
+	CodexAllowInsecureTestEndpoint bool   `json:"-"`
+	CodexRefreshURLForTest         string `json:"-"`
+	CodexUsageURL                  string `json:"-"`
 }
 
 type OpenAICompatibleConfig = ProviderConfig
@@ -103,6 +119,8 @@ type ProviderSummary struct {
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
 	Configured     bool   `json:"configured"`
 	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	Origin         string `json:"origin"`
 }
 
 func Default() (Config, error) {
@@ -168,7 +186,7 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 				Model:     getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
 				MaxTokens: 4096,
 			},
-			defaultCLIProxyAPIProvider(),
+			defaultCodexProvider(),
 			{
 				Name:    "openai-compatible",
 				Type:    "openai-compatible",
@@ -415,6 +433,9 @@ func (c Config) Addr() string {
 }
 
 func (p ProviderConfig) IsConfigured() bool {
+	if p.Type == ProviderTypeCodex {
+		return false
+	}
 	return p.APIKey != "" || p.APIKeyOptional
 }
 
@@ -428,7 +449,25 @@ func (p ProviderConfig) Summary() ProviderSummary {
 		MaxTokens:      p.MaxTokens,
 		Configured:     p.IsConfigured(),
 		APIKeyOptional: p.APIKeyOptional,
+		Enabled:        !p.Disabled,
+		Origin:         ProviderOriginForName(p.Name),
 	}
+}
+
+// ProviderOriginForName determines provider ownership on the server. API
+// clients never supply this value, so a custom provider cannot self-identify
+// as built in to bypass lifecycle restrictions.
+func ProviderOriginForName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "openai", "anthropic", ProviderTypeCodex, "ollama", "openai-compatible", ProviderProfileCLIProxyAPI:
+		return ProviderOriginBuiltin
+	default:
+		return ProviderOriginCustom
+	}
+}
+
+func IsBuiltinProviderName(name string) bool {
+	return ProviderOriginForName(name) == ProviderOriginBuiltin
 }
 
 func (p ProvidersConfig) Summaries() []ProviderSummary {
@@ -494,6 +533,14 @@ func applyProviderEnvDefaults(provider *ProviderConfig) {
 		return
 	}
 	switch provider.Type {
+	case ProviderTypeCodex:
+		provider.Name = "codex"
+		if provider.BaseURL == "" {
+			provider.BaseURL = "https://chatgpt.com/backend-api/codex"
+		}
+		if provider.Model == "" {
+			provider.Model = getenv("CODEX_MODEL", "gpt-5.5")
+		}
 	case "openai":
 		if provider.APIKey == "" {
 			provider.APIKey = os.Getenv("OPENAI_API_KEY")
@@ -524,9 +571,9 @@ func applyProviderEnvDefaults(provider *ProviderConfig) {
 	}
 }
 
-func defaultCLIProxyAPIProvider() ProviderConfig {
-	provider := ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", Profile: ProviderProfileCLIProxyAPI, APIKeyOptional: true}
-	applyCLIProxyAPIEnvDefaults(&provider)
+func defaultCodexProvider() ProviderConfig {
+	provider := ProviderConfig{Name: "codex", Type: ProviderTypeCodex}
+	applyProviderEnvDefaults(&provider)
 	return provider
 }
 

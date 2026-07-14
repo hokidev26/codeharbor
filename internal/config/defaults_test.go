@@ -33,12 +33,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Security.Exposed || cfg.Security.AccessPassword != "" {
 		t.Fatalf("expected local security defaults, got %+v", cfg.Security)
 	}
-	provider := providerByName(cfg, "cliproxyapi")
+	provider := providerByName(cfg, "codex")
 	if provider == nil {
-		t.Fatal("expected CLIProxyAPI provider preset")
+		t.Fatal("expected native Codex provider preset")
 	}
-	if provider.Type != "openai-compatible" || provider.BaseURL != "http://127.0.0.1:8317/v1" || provider.Model != "gpt-5.5" || !provider.APIKeyOptional {
-		t.Fatalf("unexpected CLIProxyAPI provider preset: %+v", *provider)
+	if provider.Type != ProviderTypeCodex || provider.BaseURL != "https://chatgpt.com/backend-api/codex" || provider.Model != "gpt-5.5" || provider.APIKeyOptional {
+		t.Fatalf("unexpected native Codex provider preset: %+v", *provider)
 	}
 }
 
@@ -311,6 +311,79 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	}
 	if persisted.Security.AccessPassword != "" {
 		t.Fatal("expected persisted remote access password to be empty")
+	}
+}
+
+func TestProviderDisabledStateIsBackwardCompatibleAndSummaryIsServerDerived(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":{"instances":[{"name":"openai","type":"openai","model":"gpt-test"},{"name":"relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:8080/v1","model":"relay-test","disabled":true}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openAI := providerByName(cfg, "openai")
+	relay := providerByName(cfg, "relay")
+	if openAI == nil || openAI.Disabled {
+		t.Fatalf("legacy provider without disabled must remain enabled: %+v", openAI)
+	}
+	if relay == nil || !relay.Disabled {
+		t.Fatalf("expected disabled provider state to load: %+v", relay)
+	}
+	if got := openAI.Summary(); !got.Enabled || got.Origin != ProviderOriginBuiltin {
+		t.Fatalf("unexpected built-in summary: %+v", got)
+	}
+	if got := relay.Summary(); got.Enabled || got.Origin != ProviderOriginCustom {
+		t.Fatalf("unexpected custom summary: %+v", got)
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"disabled": true`) {
+		t.Fatalf("disabled state was not persisted: %s", data)
+	}
+	if strings.Contains(string(data), `"origin"`) {
+		t.Fatalf("provider origin must be server-derived, not persisted: %s", data)
+	}
+}
+
+func TestProviderRuntimeIdentityIsNotSerialized(t *testing.T) {
+	provider := ProviderConfig{
+		Name:           "openai",
+		Type:           "openai",
+		Model:          "gpt-5",
+		ClientVersion:  "1.2.3",
+		InstallationID: "123e4567-e89b-42d3-a456-426614174000",
+	}
+	encoded, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, forbidden := range []string{"clientVersion", "installationId", "1.2.3", provider.InstallationID} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("runtime identity leaked into provider JSON: %s", text)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Config{SchemaVersion: CurrentConfigVersion, Providers: ProvidersConfig{Instances: []ProviderConfig{provider}}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"clientVersion", "installationId", "1.2.3", provider.InstallationID} {
+		if strings.Contains(string(persisted), forbidden) {
+			t.Fatalf("runtime identity leaked into saved config: %s", persisted)
+		}
 	}
 }
 

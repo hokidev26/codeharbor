@@ -6,6 +6,7 @@ import {
   buildPreviewURL,
   buildWorkspaceSavePayload,
   createWorkspaceExplorerController,
+  normalizePreviewNavigationURL,
   renderPreviewFrameHTML,
   renderWorkspaceEntriesHTML,
   workspaceParentPath,
@@ -97,6 +98,7 @@ test("workspace entry HTML escapes all service-provided text and attributes", ()
   assert.doesNotMatch(html, /<script>|<img/);
   assert.match(html, /&lt;img src=x onerror=&quot;boom&quot;&gt;/);
   assert.match(html, /bad&#39;&quot;&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /12 B · 只读/);
 });
 
 test("stale workspace tree response is discarded after Agent switch", async () => {
@@ -140,6 +142,48 @@ test("read-only and truncated files are blocked before save request", async () =
   state.workspaceFile = { path: "large.log", modTime: "m2", readOnly: false, truncated: true };
   assert.equal(await controller.saveFile(), false);
   assert.equal(calls, 0);
+});
+
+test("opening the browser tool goes straight to Preview without loading the file tree", async () => {
+  const calls = [];
+  let opened = 0;
+  let closed = 0;
+  const state = { agent: { id: "agent-preview" } };
+  const controller = createWorkspaceExplorerController({
+    state,
+    request: async (path) => {
+      calls.push(path);
+      if (path.endsWith("/detect")) return { profiles: [{ id: "web", label: "Web" }] };
+      if (path.endsWith("/status")) return { running: false };
+      if (path.endsWith("/logs")) return { logs: "" };
+      return {};
+    },
+    getElementById: () => null,
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+    onPreviewOpen: () => { opened += 1; },
+    onPreviewClose: () => { closed += 1; },
+  });
+  controller.setAgent(state.agent);
+
+  assert.equal(controller.openWorkspace("preview"), true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(state.workspaceTab, "preview");
+  assert.equal(opened, 1);
+  assert.ok(calls.some((path) => path.endsWith("/preview/detect")));
+  assert.ok(calls.some((path) => path.endsWith("/preview/status")));
+  assert.ok(calls.some((path) => path.endsWith("/preview/logs")));
+  assert.equal(calls.some((path) => path.includes("/workspace/tree")), false);
+  controller.closeWorkspace();
+  assert.equal(closed, 1);
+});
+
+test("browser navigation accepts relative HTTP URLs and rejects unsafe schemes", () => {
+  const locationLike = { protocol: "http:", hostname: "127.0.0.1" };
+  assert.equal(normalizePreviewNavigationURL("/docs", "http://127.0.0.1:3000/app/", locationLike), "http://127.0.0.1:3000/docs");
+  assert.equal(normalizePreviewNavigationURL("https://example.com/demo", "", locationLike), "https://example.com/demo");
+  assert.equal(normalizePreviewNavigationURL("javascript:alert(1)", "http://127.0.0.1:3000/", locationLike), "");
 });
 
 test("preview URL stays cross-origin and iframe sandbox forbids origin and top navigation", () => {

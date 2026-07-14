@@ -117,6 +117,10 @@ func (s *Server) previewRequestContext(w http.ResponseWriter, r *http.Request, r
 		}
 		return nil, "", false
 	}
+	if err := requireLocalExecutionAgent(agent); err != nil {
+		writeExecutionGuardError(w, err)
+		return nil, "", false
+	}
 	if requireWorkspace && strings.TrimSpace(agent.CWD) == "" {
 		writeError(w, http.StatusConflict, "agent workspace is not configured")
 		return nil, "", false

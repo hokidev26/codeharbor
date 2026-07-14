@@ -2,7 +2,72 @@ import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes } from "./formatters.mjs";
 import { chatDraftsKey, promptHistoryKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
+import { t } from "./i18n.mjs";
 import { mergeAuthoritativeEffectiveCommands, mergeSlashCommands, slashCommandInsertion } from "./skills-commands.mjs";
+
+export const defaultReasoningEffortValues = Object.freeze(["auto", "low", "medium", "high"]);
+export const knownReasoningEffortValues = Object.freeze([...defaultReasoningEffortValues, "xhigh"]);
+
+function normalizedReasoningEffortList(values = defaultReasoningEffortValues) {
+  const source = Array.isArray(values) ? values : defaultReasoningEffortValues;
+  const normalized = source
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter((value) => knownReasoningEffortValues.includes(value));
+  return ["auto", ...normalized.filter((value, index) => value !== "auto" && normalized.indexOf(value) === index)];
+}
+
+export function normalizeReasoningEffort(value, supportedValues = defaultReasoningEffortValues) {
+  const effort = String(value || "").trim().toLowerCase();
+  const normalized = effort === "" || effort === "default" || effort === "inherit" ? "auto" : effort;
+  return normalizedReasoningEffortList(supportedValues).includes(normalized) ? normalized : "auto";
+}
+
+export function reasoningEffortValuesForCapabilities(capabilities = {}) {
+  const source = capabilities && typeof capabilities === "object" ? capabilities : {};
+  const explicit = [
+    source.reasoningEfforts,
+    source.reasoningEffortValues,
+    source.effortValues,
+    Array.isArray(source.reasoningEffort) ? source.reasoningEffort : undefined,
+    source.reasoningEffort?.values,
+    source.reasoningEffort?.supportedValues,
+  ].find(Array.isArray);
+  if (explicit) return normalizedReasoningEffortList(explicit);
+  return source.reasoningEffort === true ? [...defaultReasoningEffortValues] : ["auto"];
+}
+
+export function calculateMessageInputSize({ scrollHeight, minHeight = 0, maxHeight = 180 } = {}) {
+  const minimum = Math.max(0, Number(minHeight) || 0);
+  const maximum = Math.max(minimum, Number(maxHeight) || 180);
+  const contentHeight = Math.max(minimum, Number(scrollHeight) || 0);
+  return {
+    height: Math.min(contentHeight, maximum),
+    scrollable: contentHeight > maximum,
+  };
+}
+
+function cssPixelValue(value, fallback) {
+  const parsed = Number.parseFloat(String(value || ""));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function resizeMessageInputElement(input, computedStyle = globalThis.getComputedStyle?.(input)) {
+  if (!input) return { height: 0, scrollable: false };
+  input.style.height = "auto";
+  const minHeight = cssPixelValue(
+    computedStyle?.getPropertyValue?.("--composer-input-min-height") || computedStyle?.minHeight,
+    0,
+  );
+  const maxHeight = cssPixelValue(
+    computedStyle?.getPropertyValue?.("--composer-input-max-height") || computedStyle?.maxHeight,
+    180,
+  );
+  const size = calculateMessageInputSize({ scrollHeight: input.scrollHeight, minHeight, maxHeight });
+  input.style.height = `${size.height}px`;
+  input.style.overflowY = size.scrollable ? "auto" : "hidden";
+  input.classList?.toggle("message-input-scrollable", size.scrollable);
+  return size;
+}
 
 export function slashCommandsForEffectivePolicy(policy, localTemplates) {
   return mergeAuthoritativeEffectiveCommands(policy, localTemplates);
@@ -36,6 +101,7 @@ export function normalizePromptHistory(value = []) {
 export function createChatComposerController({
   state,
   attachmentKind,
+  currentProviderConfig,
   currentSkillsPreferences,
   getEffectiveSkillsPolicy,
   isComposingInput,
@@ -43,10 +109,15 @@ export function createChatComposerController({
   loadMessages,
   notifyTerminal,
   openDirectoryChooser,
+  request = api,
   scheduleMessageRefresh,
   showModelSetupNotice,
   showToast,
+  onMessageAccepted,
 } = {}) {
+  const pendingReasoningEfforts = new Map();
+  const savingReasoningEfforts = new Set();
+
   function loadChatDrafts() {
     try {
       return normalizeChatDrafts(JSON.parse(localStorage.getItem(chatDraftsKey) || "{}"));
@@ -96,6 +167,143 @@ export function createChatComposerController({
     saveChatDraftForKey(key, "");
   }
 
+  function reasoningEffortLabel(value) {
+    return {
+      auto: t("modelProvider.automatic"),
+      low: t("modelProvider.low"),
+      medium: t("modelProvider.medium"),
+      high: t("modelProvider.high"),
+      xhigh: t("staticExtra.chat.ultraHighEffort"),
+    }[value] || t("modelProvider.automatic");
+  }
+
+  function reasoningEffortValues(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
+    const provider = currentProviderConfig?.(modelValue) || null;
+    return reasoningEffortValuesForCapabilities(provider?.capabilities || {});
+  }
+
+  function currentReasoningEffort(modelValue) {
+    const values = reasoningEffortValues(modelValue);
+    return normalizeReasoningEffort(state.agent?.reasoningEffort, values);
+  }
+
+  function reasoningEffortSavingFor(agentId = state.agent?.id) {
+    return Boolean(agentId && savingReasoningEfforts.has(agentId));
+  }
+
+  function syncReasoningEffortSavingState() {
+    state.reasoningEffortSaving = reasoningEffortSavingFor();
+  }
+
+  function refreshReasoningEffortControl({ modelValue, requestedValue } = {}) {
+    const select = $("reasoningEffort");
+    if (!select) return "auto";
+    const values = reasoningEffortValues(modelValue);
+    const selected = requestedValue === undefined
+      ? currentReasoningEffort(modelValue)
+      : normalizeReasoningEffort(requestedValue, values);
+    const saving = reasoningEffortSavingFor();
+    syncReasoningEffortSavingState();
+    select.innerHTML = values.map((value) => `<option value="${escapeAttr(value)}">${escapeHtml(reasoningEffortLabel(value))}</option>`).join("");
+    select.value = selected;
+    select.disabled = !state.agent || values.length <= 1 || saving;
+    select.setAttribute("aria-busy", saving ? "true" : "false");
+    select.dataset.supported = values.length > 1 ? "true" : "false";
+    const display = $("reasoningEffortDisplay");
+    if (display) display.textContent = reasoningEffortLabel(selected);
+    const pill = select.closest?.(".reasoning-effort-pill");
+    pill?.classList.toggle("reasoning-effort-unsupported", values.length <= 1);
+    pill?.classList.toggle("reasoning-effort-saving", saving);
+    return selected;
+  }
+
+  function selectedReasoningEffort(modelValue) {
+    const select = $("reasoningEffort");
+    const values = reasoningEffortValues(modelValue);
+    return normalizeReasoningEffort(select?.value ?? state.agent?.reasoningEffort, values);
+  }
+
+  function agentEntityGeneration(agent = state.agent) {
+    const generation = Number(agent?.entityGeneration);
+    return Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+  }
+
+  async function saveReasoningEffort(value = $("reasoningEffort")?.value) {
+    const agentId = state.agent?.id || "";
+    if (!agentId) return null;
+    const selected = normalizeReasoningEffort(value, reasoningEffortValues());
+    const agentAtStart = state.agent;
+    const persistedAtStart = agentAtStart.reasoningEffort;
+    pendingReasoningEfforts.set(agentId, {
+      effort: selected,
+      model: String(agentAtStart.model || ""),
+      entityGeneration: agentEntityGeneration(agentAtStart),
+    });
+    state.agent = { ...agentAtStart, reasoningEffort: selected };
+    refreshReasoningEffortControl({ requestedValue: selected });
+    if (reasoningEffortSavingFor(agentId)) return null;
+
+    let updatedAgent = null;
+    let persistedEffort = persistedAtStart;
+    let lastRequest = null;
+    savingReasoningEfforts.add(agentId);
+    syncReasoningEffortSavingState();
+    try {
+      while (pendingReasoningEfforts.has(agentId)) {
+        const next = pendingReasoningEfforts.get(agentId);
+        pendingReasoningEfforts.delete(agentId);
+        const current = state.agent;
+        // A model change makes an already queued effort request stale. Do not
+        // let it mutate the new model, and do not let its eventual response
+        // replace the new model's authoritative state.
+        if (!current || current.id !== agentId || current.model !== next.model) continue;
+        if (agentEntityGeneration(current) !== next.entityGeneration) {
+          next.entityGeneration = agentEntityGeneration(current);
+        }
+        lastRequest = { ...next };
+        refreshReasoningEffortControl({ requestedValue: next.effort });
+        updatedAgent = await request(`/api/agents/${agentId}/reasoning-effort`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            reasoningEffort: next.effort,
+            model: next.model,
+            entityGeneration: next.entityGeneration,
+          }),
+        });
+        const stillCurrent = state.agent?.id === agentId
+          && state.agent.model === next.model
+          && agentEntityGeneration(state.agent) === next.entityGeneration;
+        if (!stillCurrent) continue;
+        if (updatedAgent?.id === agentId && updatedAgent.model === next.model) {
+          state.agent = updatedAgent;
+          persistedEffort = updatedAgent.reasoningEffort ?? next.effort;
+        } else {
+          state.agent = { ...state.agent, reasoningEffort: next.effort };
+          persistedEffort = next.effort;
+        }
+      }
+      return updatedAgent;
+    } catch (error) {
+      pendingReasoningEfforts.delete(agentId);
+      const current = state.agent;
+      const requestIsStillCurrent = current?.id === agentId
+        && current.model === lastRequest?.model
+        && agentEntityGeneration(current) === lastRequest?.entityGeneration;
+      if (requestIsStillCurrent) {
+        state.agent = { ...current, reasoningEffort: persistedEffort };
+      }
+      // A stale request may legitimately lose its race to a model change. It
+      // is already obsolete, so preserve the new state without surfacing it as
+      // a failed update for the current model.
+      if (!requestIsStillCurrent) return null;
+      throw error;
+    } finally {
+      savingReasoningEfforts.delete(agentId);
+      syncReasoningEffortSavingState();
+      if (state.agent?.id === agentId) refreshReasoningEffortControl();
+    }
+  }
+
   function loadPromptHistory() {
     try {
       return normalizePromptHistory(JSON.parse(localStorage.getItem(promptHistoryKey) || "[]"));
@@ -143,7 +351,7 @@ export function createChatComposerController({
     if (attachButton) attachButton.disabled = busy;
     const attachInput = $("attachFileInput");
     if (attachInput) attachInput.disabled = busy;
-    setButtonBusy($("sendMessageBtn"), busy, "发送中");
+    setButtonBusy($("sendMessageBtn"), busy, t("workspace.chat.sending"));
   }
 
   function setMessageSendingFor(agentId, sending) {
@@ -176,20 +384,22 @@ export function createChatComposerController({
     input.value = "";
     autoResizeMessageInput();
     try {
+      let accepted;
       if (attachments.length) {
         const form = new FormData();
         form.append("text", text);
         attachments.forEach((item) => form.append("files", item.file, item.file?.name || "attachment"));
-        await api(`/api/agents/${agentId}/messages`, {
+        accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
           body: form,
         });
       } else {
-        await api(`/api/agents/${agentId}/messages`, {
+        accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
           body: JSON.stringify({ text }),
         });
       }
+      await onMessageAccepted?.(accepted, agentId);
       if (text) rememberPromptHistory(text);
       clearChatDraftForKey(draftKey);
       if (attachments.length) clearPendingAttachments();
@@ -203,7 +413,7 @@ export function createChatComposerController({
         autoResizeMessageInput();
         throw err;
       }
-      notifyTerminal(`[warn] 原代理消息发送失败，草稿已保留：${err.message || err}\n`);
+      notifyTerminal(`[warn] Message delivery to the previous agent failed; the draft was kept: ${err.message || err}\n`);
     } finally {
       setMessageSendingFor(agentId, false);
       if (state.agent?.id === agentId) input.focus();
@@ -211,10 +421,14 @@ export function createChatComposerController({
   }
 
   function autoResizeMessageInput() {
-    const input = $("messageText");
-    input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    const size = resizeMessageInputElement($("messageText"));
     updatePromptHistoryHint();
+    return size;
+  }
+
+  function scheduleMessageInputResize() {
+    const schedule = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
+    schedule(() => autoResizeMessageInput());
   }
 
   function openAttachmentPicker() {
@@ -238,13 +452,13 @@ export function createChatComposerController({
     const skipped = [];
     const added = [];
     for (const file of pickedFiles) {
-      const name = file.name || "未命名文件";
+      const name = file.name || t("workspace.chat.unnamedFile");
       if (file.size > maxFileBytes) {
         skipped.push(`${name}（${formatBytes(file.size)}）`);
         continue;
       }
       if (nextTotal + file.size > maxTotalBytes) {
-        skipped.push(`${name}（总大小超过 ${formatBytes(maxTotalBytes)}）`);
+        skipped.push(`${name} (${t("workspace.chat.attachmentsSkipped", { count: 0, files: "", suffix: "" }).replace(/^.*：/, "").replace(/。$/, "")}${formatBytes(maxTotalBytes)})`);
         continue;
       }
       nextTotal += file.size;
@@ -259,11 +473,11 @@ export function createChatComposerController({
     if (added.length) {
       state.pendingAttachments = [...state.pendingAttachments, ...added];
       renderPendingAttachments();
-      showToast(`已加入 ${added.length} 个待发送附件。`, "success", { force: true });
+      showToast(t("workspace.chat.attachmentsAdded", { count: added.length }), "success", { force: true });
     }
     if (skipped.length) {
       const preview = skipped.slice(0, 3).join("、");
-      showToast(`已跳过 ${skipped.length} 个文件：${preview}${skipped.length > 3 ? " 等" : ""}。`, "warn", { force: true });
+      showToast(t("workspace.chat.attachmentsSkipped", { count: skipped.length, files: preview, suffix: skipped.length > 3 ? t("workspace.chat.more") : "" }), "warn", { force: true });
     }
   }
 
@@ -301,12 +515,12 @@ export function createChatComposerController({
 
   function pendingAttachmentCardHTML(item) {
     const file = item.file || {};
-    const name = file.name || "未命名文件";
+    const name = file.name || t("workspace.chat.unnamedFile");
     if (item.kind === "image" && item.previewUrl) {
       return `
         <div class="pending-image-card" title="${escapeAttr(name)}">
           <img class="pending-image-thumb" src="${escapeAttr(item.previewUrl)}" alt="${escapeAttr(name)}" />
-          <button class="pending-attachment-remove" type="button" title="移除附件" aria-label="移除附件" data-remove-attachment="${escapeAttr(item.id)}">×</button>
+          <button class="pending-attachment-remove" type="button" title="${escapeAttr(t("workspace.chat.removeAttachment"))}" aria-label="${escapeAttr(t("workspace.chat.removeAttachment"))}" data-remove-attachment="${escapeAttr(item.id)}">×</button>
         </div>
       `;
     }
@@ -316,7 +530,7 @@ export function createChatComposerController({
         <span class="pending-file-icon">▯</span>
         <span class="pending-file-name">${escapeHtml(name)}</span>
         <span class="pending-file-size">${escapeHtml(subtitle)}</span>
-        <button class="pending-attachment-remove" type="button" title="移除附件" aria-label="移除附件" data-remove-attachment="${escapeAttr(item.id)}">×</button>
+        <button class="pending-attachment-remove" type="button" title="${escapeAttr(t("workspace.chat.removeAttachment"))}" aria-label="${escapeAttr(t("workspace.chat.removeAttachment"))}" data-remove-attachment="${escapeAttr(item.id)}">×</button>
       </div>
     `;
   }
@@ -367,12 +581,12 @@ export function createChatComposerController({
     const commandCount = enabledSlashCommands().length;
     const active = state.promptHistoryIndex >= 0;
     hint.textContent = active
-      ? `历史 ${state.promptHistoryIndex + 1}/${count} · ↑ 更早，↓ 更新，Enter 发送，Esc 返回草稿。`
+      ? t("workspace.chat.historyActive", { index: state.promptHistoryIndex + 1, count })
       : commandCount
-        ? `输入 / 可使用 ${commandCount} 个技能命令（服务端优先）；空输入时 ↑/↓ 召回历史。`
+        ? t("workspace.chat.historyCommands", { count: commandCount })
         : count
-          ? `空输入时 ↑ 查看上一条提示，↓ 返回草稿。本地已保存 ${count}/30 条。`
-          : "输入框为空时 ↑/↓ 可召回最近提示。";
+          ? t("workspace.chat.historySaved", { count })
+          : t("workspace.chat.historyEmpty");
   }
 
   function enabledSlashCommands() {
@@ -429,7 +643,7 @@ export function createChatComposerController({
     input?.setAttribute("aria-activedescendant", slashCommandOptionId(matches[state.slashCommandIndex], state.slashCommandIndex));
     palette.classList.remove("hidden");
     palette.innerHTML = `
-      <div class="slash-command-head">技能命令（服务端优先）</div>
+      <div class="slash-command-head">${escapeHtml(t("workspace.chat.slashCommands"))}</div>
       ${matches.map((command, index) => `
         <button id="${escapeAttr(slashCommandOptionId(command, index))}" class="slash-command-item ${index === state.slashCommandIndex ? "active" : ""}" type="button" role="option" aria-selected="${index === state.slashCommandIndex ? "true" : "false"}" data-slash-command="${escapeAttr(command.id)}">
           <span class="slash-command-name">${escapeHtml(command.name)}</span>
@@ -468,7 +682,7 @@ export function createChatComposerController({
     hideSlashCommandPalette();
     resetPromptHistoryNavigation();
     input?.focus();
-    showToast(`已插入 ${command.name} 模板。`, "success");
+    showToast(t("workspace.chat.slashInserted", { name: command.name }), "success");
     return true;
   }
 
@@ -559,8 +773,12 @@ export function createChatComposerController({
     loadChatDrafts,
     loadPromptHistory,
     openAttachmentPicker,
+    refreshReasoningEffortControl,
     restoreCurrentChatDraft,
     saveCurrentChatDraft,
+    saveReasoningEffort,
+    scheduleMessageInputResize,
+    selectedReasoningEffort,
     sendMessage,
     setMessageInputValue,
     syncMessageComposerBusy,

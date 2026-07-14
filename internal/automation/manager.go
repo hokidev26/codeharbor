@@ -35,7 +35,7 @@ const (
 var ErrManagerClosed = errors.New("automation manager is closed")
 
 type ScheduleRunner interface {
-	SubmitSchedule(context.Context, db.Schedule) (db.Run, error)
+	SubmitScheduleDispatch(context.Context, db.Schedule, string) (db.Run, error)
 }
 
 type TelegramSender interface {
@@ -241,7 +241,7 @@ func (m *Manager) Notify(ctx context.Context, event agent.NotificationEvent) {
 	if shouldEnqueueWebhook(settings, event.Event) {
 		_, _, err = m.store.EnqueueNotificationDelivery(ctx, db.NotificationDelivery{
 			DedupeKey: deliveryDedupe("webhook", settings.WebhookURL, event), SinkType: "webhook", SinkID: strings.TrimSpace(settings.WebhookURL),
-			EventType: event.Event, AgentID: event.AgentID, RunID: event.RunID, ToolUseID: event.ToolUseID, PayloadJSON: payload,
+			EventType: event.Event, AgentID: event.AgentID, RunID: event.RunID, ToolUseID: event.ToolUseID, ExecutionGeneration: event.ExecutionGeneration, PayloadJSON: payload,
 		})
 		if err != nil {
 			m.report(errors.New("webhook notification enqueue failed"))
@@ -258,7 +258,7 @@ func (m *Manager) Notify(ctx context.Context, event agent.NotificationEvent) {
 		}
 		_, _, enqueueErr := m.store.EnqueueNotificationDelivery(ctx, db.NotificationDelivery{
 			DedupeKey: deliveryDedupe("telegram", pairing.ID, event), SinkType: "telegram", SinkID: pairing.ID,
-			EventType: event.Event, AgentID: event.AgentID, RunID: event.RunID, ToolUseID: event.ToolUseID, PayloadJSON: payload,
+			EventType: event.Event, AgentID: event.AgentID, RunID: event.RunID, ToolUseID: event.ToolUseID, ExecutionGeneration: event.ExecutionGeneration, PayloadJSON: payload,
 		})
 		if enqueueErr != nil {
 			m.report(errors.New("telegram notification enqueue failed"))
@@ -522,6 +522,12 @@ func (m *Manager) TriggerSchedule(ctx context.Context, id string) (TriggerResult
 }
 
 func (m *Manager) processSchedule(ctx context.Context, schedule db.Schedule) (TriggerResult, error) {
+	dispatchID, dispatchErr := scheduleDispatchID(schedule)
+	if dispatchErr != nil {
+		_ = m.store.ReleaseScheduleLease(context.Background(), schedule.ID, schedule.LeaseUntil)
+		return TriggerResult{Outcome: "error"}, dispatchErr
+	}
+
 	expression, parseErr := schedules.Parse(schedule.Expression, schedule.Timezone)
 	nextRunAt := ""
 	if parseErr == nil {
@@ -532,7 +538,7 @@ func (m *Manager) processSchedule(ctx context.Context, schedule db.Schedule) (Tr
 		}
 	}
 	if parseErr != nil {
-		run, createErr := m.terminalScheduleRun(context.Background(), schedule, "error", safeError(parseErr))
+		run, createErr := m.terminalScheduleRun(context.Background(), schedule, schedule.AgentID, dispatchID, "error", safeError(parseErr))
 		if createErr != nil {
 			_ = m.store.ReleaseScheduleLease(context.Background(), schedule.ID, schedule.LeaseUntil)
 			return TriggerResult{Outcome: "error"}, createErr
@@ -545,20 +551,36 @@ func (m *Manager) processSchedule(ctx context.Context, schedule db.Schedule) (Tr
 		return TriggerResult{Run: run, Outcome: "error"}, parseErr
 	}
 
-	run, err := m.runner.SubmitSchedule(ctx, schedule)
+	dispatchedSchedule, prepareErr := m.prepareScheduleDispatch(ctx, schedule)
+	if prepareErr != nil {
+		lastError := safeError(prepareErr)
+		run, createErr := m.terminalScheduleRun(context.Background(), schedule, schedule.AgentID, dispatchID, "error", lastError)
+		if createErr != nil {
+			_ = m.store.ReleaseScheduleLease(context.Background(), schedule.ID, schedule.LeaseUntil)
+			return TriggerResult{Outcome: "failure"}, errors.Join(prepareErr, createErr)
+		}
+		_, recordErr := m.store.RecordScheduleRun(context.Background(), schedule.ID, schedule.LeaseUntil, run.ID, "failure", lastError, nextRunAt)
+		m.auditSchedule(schedule, run, "failure", lastError)
+		if recordErr != nil {
+			return TriggerResult{Run: run, Outcome: "failure"}, errors.Join(prepareErr, recordErr)
+		}
+		return TriggerResult{Run: run, Outcome: "failure"}, prepareErr
+	}
+
+	run, err := m.runner.SubmitScheduleDispatch(ctx, dispatchedSchedule, dispatchID)
 	outcome := "success"
 	lastError := ""
 	if errors.Is(err, agent.ErrAgentBusy) {
 		outcome = "skipped"
 		lastError = agent.ErrAgentBusy.Error()
-		run, err = m.terminalScheduleRun(context.Background(), schedule, "skipped", lastError)
+		run, err = m.terminalScheduleRun(context.Background(), schedule, dispatchedSchedule.AgentID, dispatchID, "skipped", lastError)
 		if err == nil {
 			err = agent.ErrAgentBusy
 		}
 	} else if err != nil {
 		outcome = "failure"
 		lastError = safeError(err)
-		failedRun, createErr := m.terminalScheduleRun(context.Background(), schedule, "error", lastError)
+		failedRun, createErr := m.terminalScheduleRun(context.Background(), schedule, dispatchedSchedule.AgentID, dispatchID, "error", lastError)
 		if createErr == nil {
 			run = failedRun
 		} else {
@@ -578,21 +600,112 @@ func (m *Manager) processSchedule(ctx context.Context, schedule db.Schedule) (Tr
 	return TriggerResult{Run: run, Outcome: outcome}, err
 }
 
-func (m *Manager) terminalScheduleRun(ctx context.Context, schedule db.Schedule, status, message string) (db.Run, error) {
+func scheduleDispatchID(schedule db.Schedule) (string, error) {
+	id := strings.TrimSpace(schedule.ID)
+	leaseUntil := strings.TrimSpace(schedule.LeaseUntil)
+	if id == "" || leaseUntil == "" {
+		return "", errors.New("schedule dispatch requires schedule id and lease")
+	}
+	hash := sha256.Sum256([]byte(id + "\x00" + leaseUntil))
+	return "schedule:" + hex.EncodeToString(hash[:]), nil
+}
+
+func (m *Manager) prepareScheduleDispatch(ctx context.Context, schedule db.Schedule) (db.Schedule, error) {
+	if schedule.EnvironmentMode != "workline" && schedule.EnvironmentMode != "standalone" {
+		return db.Schedule{}, errors.New("invalid schedule environment mode")
+	}
+	if schedule.NarratorMode != "reuse" && schedule.NarratorMode != "new" {
+		return db.Schedule{}, errors.New("invalid schedule narrator mode")
+	}
+	template, err := m.store.GetAgent(ctx, schedule.AgentID)
+	if err != nil {
+		return db.Schedule{}, err
+	}
+	if schedule.NarratorMode == "reuse" {
+		if schedule.EnvironmentMode == "workline" && template.WorklineID == "" {
+			return db.Schedule{}, fmt.Errorf("%w: reusable agent is not attached to a workline", db.ErrConflict)
+		}
+		if schedule.EnvironmentMode == "standalone" && template.WorklineID != "" {
+			return db.Schedule{}, fmt.Errorf("%w: reusable agent is attached to a workline", db.ErrConflict)
+		}
+		return schedule, nil
+	}
+
+	worklineID := template.WorklineID
+	if schedule.EnvironmentMode == "workline" && worklineID == "" {
+		return db.Schedule{}, fmt.Errorf("%w: template agent is not attached to a workline", db.ErrConflict)
+	}
+	if schedule.EnvironmentMode == "standalone" {
+		worklineID = ""
+	}
+	title := strings.TrimSpace(schedule.Name)
+	if title == "" {
+		title = template.Title
+	}
+	created, err := m.store.CreateAgent(ctx, db.Agent{
+		WorklineID:        worklineID,
+		ParentAgentID:     template.ID,
+		Type:              "subagent",
+		SubagentType:      "scheduled",
+		Title:             title,
+		Model:             template.Model,
+		PermissionMode:    template.PermissionMode,
+		ReasoningEffort:   template.ReasoningEffort,
+		ExecutionDeviceID: template.ExecutionDeviceID,
+		Status:            "idle",
+		CWD:               template.CWD,
+	})
+	if err != nil {
+		return db.Schedule{}, err
+	}
+	schedule.AgentID = created.ID
+	return schedule, nil
+}
+
+func (m *Manager) terminalScheduleRun(ctx context.Context, schedule db.Schedule, agentID, dispatchID, status, message string) (db.Run, error) {
+	if existing, found, err := m.scheduleRunForDispatch(ctx, schedule.ID, dispatchID); err != nil {
+		return db.Run{}, err
+	} else if found {
+		return existing, nil
+	}
 	now := m.now().Format(time.RFC3339Nano)
 	return m.store.CreateRun(ctx, db.Run{
-		AgentID: schedule.AgentID, Status: status, CompletedAt: now, ErrorMessage: safeErrorText(message),
+		AgentID: agentID, Status: status, CompletedAt: now, ErrorMessage: safeErrorText(message),
 		Source: "schedule", SourceID: schedule.ID, PermissionModeCap: schedule.PermissionMode,
+		DispatchID: dispatchID, TriggerType: "scheduled",
 	})
 }
 
+func (m *Manager) scheduleRunForDispatch(ctx context.Context, scheduleID, dispatchID string) (db.Run, bool, error) {
+	var runID, agentID, sourceID string
+	err := m.store.DB().QueryRowContext(ctx, `SELECT id, agent_id, source_id FROM runs WHERE dispatch_id = ?`, dispatchID).Scan(&runID, &agentID, &sourceID)
+	if db.IsNotFound(err) {
+		return db.Run{}, false, nil
+	}
+	if err != nil {
+		return db.Run{}, false, err
+	}
+	if sourceID != scheduleID {
+		return db.Run{}, false, fmt.Errorf("%w: dispatch id belongs to another schedule", db.ErrConflict)
+	}
+	run, err := m.store.GetRun(ctx, agentID, runID)
+	if err != nil {
+		return db.Run{}, false, err
+	}
+	return run, true, nil
+}
+
 func (m *Manager) auditSchedule(schedule db.Schedule, run db.Run, outcome, lastError string) {
-	details := map[string]any{"outcome": outcome, "permissionModeCap": schedule.PermissionMode}
+	details := map[string]any{
+		"outcome": outcome, "permissionModeCap": schedule.PermissionMode,
+		"environmentMode": schedule.EnvironmentMode, "narratorMode": schedule.NarratorMode,
+		"templateAgentId": schedule.AgentID, "dispatchId": run.DispatchID,
+	}
 	if lastError != "" {
 		details["errorClass"] = "schedule_submission"
 	}
 	m.recordAudit(context.Background(), audit.Event{
-		Category: "schedule", Action: "schedule.run", Actor: "scheduler", AgentID: schedule.AgentID, RunID: run.ID,
+		Category: "schedule", Action: "schedule.run", Actor: "scheduler", AgentID: run.AgentID, RunID: run.ID,
 		SubjectType: "schedule", SubjectID: schedule.ID, Outcome: auditOutcome(outcome), Risk: "low", Details: details,
 	})
 }
@@ -624,6 +737,7 @@ func notificationPayload(event agent.NotificationEvent, now time.Time) (json.Raw
 		"kind": "run." + notificationKind(event.Event), "event": boundedText(event.Event, 96),
 		"runId": boundedText(event.RunID, 128), "agentId": boundedText(event.AgentID, 128),
 		"status": boundedText(event.Status, 96), "createdAt": now.UTC().Format(time.RFC3339Nano),
+		"executionGeneration": event.ExecutionGeneration,
 	}
 	if event.ToolUseID != "" || event.ToolName != "" {
 		payload["tool"] = map[string]any{"toolUseId": boundedText(event.ToolUseID, 256), "toolName": boundedText(event.ToolName, 128)}
@@ -671,7 +785,13 @@ func shouldEnqueueWebhook(settings db.NotificationSettings, event string) bool {
 }
 
 func deliveryDedupe(sinkType, sinkID string, event agent.NotificationEvent) string {
-	value := strings.Join([]string{sinkType, sinkID, event.Event, event.AgentID, event.RunID, event.ToolUseID, event.Status}, "\x00")
+	version := "notification:v1"
+	identity := event.RunID
+	if event.ExecutionGeneration > 0 {
+		version = "notification:v2"
+		identity = fmt.Sprintf("%d", event.ExecutionGeneration)
+	}
+	value := strings.Join([]string{version, sinkType, sinkID, event.AgentID, identity, event.Event, event.ToolUseID}, "\x00")
 	hash := sha256.Sum256([]byte(value))
 	return sinkType + ":" + hex.EncodeToString(hash[:])
 }

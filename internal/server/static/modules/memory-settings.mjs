@@ -1,4 +1,5 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
+import { t } from "./i18n.mjs";
 
 export function parseMemoryKeywords(value) {
   const values = Array.isArray(value) ? value : String(value ?? "").split(/[,\n\r]+/);
@@ -42,9 +43,9 @@ function memoryKeywordsText(keywords) {
 
 function renderMemoryStatus(item) {
   const badges = [];
-  if (item.pinned) badges.push('<span class="settings-status-pill ok">已置顶</span>');
-  if (item.archived) badges.push('<span class="settings-status-pill muted">已归档</span>');
-  if (!badges.length) badges.push('<span class="settings-status-pill">普通</span>');
+  if (item.pinned) badges.push(`<span class="settings-status-pill ok">${escapeHtml(t("memory.status.pinned"))}</span>`);
+  if (item.archived) badges.push(`<span class="settings-status-pill muted">${escapeHtml(t("memory.status.archived"))}</span>`);
+  if (!badges.length) badges.push(`<span class="settings-status-pill">${escapeHtml(t("memory.status.normal"))}</span>`);
   return badges.join(" ");
 }
 
@@ -56,25 +57,25 @@ export function renderMemoryItem(value, { saving = false } = {}) {
     <section class="settings-provider-section${item.archived ? " collapsed" : ""}" data-memory-card="${escapeAttr(item.id)}">
       <div class="settings-provider-section-head">
         <div>
-          <div class="settings-provider-title">${escapeHtml(item.content || "空记忆")}</div>
-          <div class="settings-provider-meta">${escapeHtml(timestamp ? `最近更新：${timestamp}` : `记忆 ID：${item.id || "未知"}`)}</div>
+          <div class="settings-provider-title">${escapeHtml(item.content || t("memory.emptyItem"))}</div>
+          <div class="settings-provider-meta">${escapeHtml(timestamp ? t("memory.updatedAt", { timestamp }) : t("memory.itemId", { id: item.id || t("memory.unknownId") }))}</div>
         </div>
         <div class="settings-action-row">${renderMemoryStatus(item)}</div>
       </div>
       <form class="settings-provider-config-form" data-memory-edit-form="${escapeAttr(item.id)}">
         <div class="settings-provider-form-grid">
-          <label class="settings-form-span-2">记忆内容
+          <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
             <textarea class="settings-field settings-textarea" rows="3" data-memory-content required${disabled}>${escapeHtml(item.content)}</textarea>
           </label>
-          <label class="settings-form-span-2">关键词（逗号或换行分隔）
-            <textarea class="settings-field settings-textarea" rows="2" data-memory-keywords placeholder="项目名, 技术栈, 偏好"${disabled}>${escapeHtml(memoryKeywordsText(item.keywords))}</textarea>
+          <label class="settings-form-span-2">${escapeHtml(t("memory.keywordsLabel"))}
+            <textarea class="settings-field settings-textarea" rows="2" data-memory-keywords placeholder="${escapeAttr(t("memory.keywordsPlaceholder"))}"${disabled}>${escapeHtml(memoryKeywordsText(item.keywords))}</textarea>
           </label>
         </div>
         <div class="settings-action-row settings-form-actions">
-          <button class="settings-action-btn primary" type="submit"${disabled}>保存修改</button>
-          <button class="settings-action-btn subtle" type="button" data-memory-pin="${escapeAttr(item.id)}"${disabled}>${item.pinned ? "取消置顶" : "置顶"}</button>
-          <button class="settings-action-btn subtle" type="button" data-memory-archive="${escapeAttr(item.id)}"${disabled}>${item.archived ? "恢复" : "归档"}</button>
-          <button class="settings-action-btn danger" type="button" data-memory-delete="${escapeAttr(item.id)}"${disabled}>删除</button>
+          <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("memory.saveChanges"))}</button>
+          <button class="settings-action-btn subtle" type="button" data-memory-pin="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.pinned ? "memory.unpin" : "memory.pin"))}</button>
+          <button class="settings-action-btn subtle" type="button" data-memory-archive="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.archived ? "memory.restore" : "memory.archive"))}</button>
+          <button class="settings-action-btn danger" type="button" data-memory-delete="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t("memory.delete"))}</button>
         </div>
       </form>
     </section>
@@ -95,9 +96,9 @@ export function renderMemorySettingsContent(value = {}) {
   const disabled = state.saving ? " disabled" : "";
   let list = "";
   if (state.loading) {
-    list = '<div class="settings-empty-card">正在加载记忆…</div>';
+    list = `<div class="settings-empty-card">${escapeHtml(t("memory.loading"))}</div>`;
   } else if (!state.items.length) {
-    list = `<div class="settings-empty-card">${escapeHtml(state.query ? `没有匹配“${state.query}”的记忆。` : "还没有记忆，先在上方新增一条。")}</div>`;
+    list = `<div class="settings-empty-card">${escapeHtml(state.query ? t("memory.noMatches", { query: state.query }) : t("memory.emptyList"))}</div>`;
   } else {
     list = state.items.map((item) => renderMemoryItem(item, { saving: state.saving })).join("");
   }
@@ -106,65 +107,65 @@ export function renderMemorySettingsContent(value = {}) {
     <div class="settings-live-page memory-settings-page">
       <section class="settings-hero-card">
         <div>
-          <div class="settings-hero-kicker">长期记忆</div>
-          <div class="settings-hero-title">让重要上下文跨会话保留</div>
-          <p>只有设置关键词的记忆会被动注入，每个 Agent 只注入一次</p>
+          <div class="settings-hero-kicker">${escapeHtml(t("memory.heroKicker"))}</div>
+          <div class="settings-hero-title">${escapeHtml(t("memory.heroTitle"))}</div>
+          <p>${escapeHtml(t("memory.heroDescription"))}</p>
         </div>
         <div class="settings-action-row">
-          <button id="refreshMemoriesBtn" class="settings-action-btn subtle" type="button"${disabled}>刷新</button>
+          <button id="refreshMemoriesBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("common.refresh"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(String(state.items.length))}</strong><span>当前结果</span></div>
-        <div><strong>${escapeHtml(String(pinnedCount))}</strong><span>已置顶</span></div>
-        <div><strong>${escapeHtml(String(archivedCount))}</strong><span>已归档</span></div>
+        <div><strong>${escapeHtml(String(state.items.length))}</strong><span>${escapeHtml(t("memory.currentResults"))}</span></div>
+        <div><strong>${escapeHtml(String(pinnedCount))}</strong><span>${escapeHtml(t("memory.status.pinned"))}</span></div>
+        <div><strong>${escapeHtml(String(archivedCount))}</strong><span>${escapeHtml(t("memory.status.archived"))}</span></div>
       </div>
       ${state.error ? `<div class="settings-inline-alert">${escapeHtml(state.error)}</div>` : ""}
       <section class="settings-provider-section highlighted">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">搜索记忆</div>
-            <div class="settings-provider-meta">按内容或关键词筛选，并可选择包含已归档记忆。</div>
+            <div class="settings-provider-title">${escapeHtml(t("memory.searchTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("memory.searchDescription"))}</div>
           </div>
         </div>
         <form id="memorySearchForm" class="settings-provider-config-form">
           <div class="settings-provider-form-grid">
-            <label>搜索
-              <input id="memorySearchInput" class="settings-field" value="${escapeAttr(state.query)}" placeholder="输入内容或关键词"${disabled} />
+            <label>${escapeHtml(t("memory.searchLabel"))}
+              <input id="memorySearchInput" class="settings-field" value="${escapeAttr(state.query)}" placeholder="${escapeAttr(t("memory.searchPlaceholder"))}"${disabled} />
             </label>
             <label class="settings-checkbox-field">
               <input id="memoryIncludeArchived" type="checkbox" ${state.includeArchived ? "checked" : ""}${disabled} />
-              <span>显示已归档记忆</span>
+              <span>${escapeHtml(t("memory.includeArchived"))}</span>
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button class="settings-action-btn primary" type="submit"${disabled}>搜索</button>
-            <button id="clearMemorySearchBtn" class="settings-action-btn subtle" type="button"${disabled}>清除</button>
+            <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("common.search"))}</button>
+            <button id="clearMemorySearchBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("memory.clearSearch"))}</button>
           </div>
         </form>
       </section>
       <section class="settings-provider-section">
         <div class="settings-provider-section-head">
           <div>
-            <div class="settings-provider-title">新增记忆</div>
-            <div class="settings-provider-meta">内容会长期保存；至少设置一个关键词后，记忆才会在匹配时被动注入。</div>
+            <div class="settings-provider-title">${escapeHtml(t("memory.createTitle"))}</div>
+            <div class="settings-provider-meta">${escapeHtml(t("memory.createDescription"))}</div>
           </div>
         </div>
         <form id="createMemoryForm" class="settings-provider-config-form">
           <div class="settings-provider-form-grid">
-            <label class="settings-form-span-2">记忆内容
-              <textarea id="newMemoryContent" class="settings-field settings-textarea" rows="3" required placeholder="例如：这个项目统一使用 pnpm。"${disabled}></textarea>
+            <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
+              <textarea id="newMemoryContent" class="settings-field settings-textarea" rows="3" required placeholder="${escapeAttr(t("memory.contentPlaceholder"))}"${disabled}></textarea>
             </label>
-            <label>关键词（逗号或换行分隔）
-              <textarea id="newMemoryKeywords" class="settings-field settings-textarea" rows="2" placeholder="项目名, pnpm"${disabled}></textarea>
+            <label>${escapeHtml(t("memory.keywordsLabel"))}
+              <textarea id="newMemoryKeywords" class="settings-field settings-textarea" rows="2" placeholder="${escapeAttr(t("memory.newKeywordsPlaceholder"))}"${disabled}></textarea>
             </label>
             <label class="settings-checkbox-field">
               <input id="newMemoryPinned" type="checkbox"${disabled} />
-              <span>创建后置顶</span>
+              <span>${escapeHtml(t("memory.pinAfterCreate"))}</span>
             </label>
           </div>
           <div class="settings-action-row settings-form-actions">
-            <button class="settings-action-btn primary" type="submit"${disabled}>${state.saving ? "保存中…" : "新增记忆"}</button>
+            <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t(state.saving ? "memory.saving" : "memory.create"))}</button>
           </div>
         </form>
       </section>
@@ -209,7 +210,7 @@ export function createMemorySettingsController({
   }
 
   function setError(error) {
-    state.error = error?.message || String(error || "请求失败");
+    state.error = error?.message || String(error || t("memory.requestFailed"));
     showError?.(error instanceof Error ? error : new Error(state.error));
   }
 
@@ -268,7 +269,7 @@ export function createMemorySettingsController({
   async function create(input) {
     const payload = normalizeMemoryPayload(input);
     if (!payload.content) {
-      const error = new Error("记忆内容不能为空");
+      const error = new Error(t("memory.contentRequired"));
       setError(error);
       emit();
       return false;
@@ -276,14 +277,14 @@ export function createMemorySettingsController({
     return runMutation("/api/memories", {
       method: "POST",
       body: JSON.stringify(payload),
-    }, "记忆已新增。");
+    }, t("memory.created"));
   }
 
   async function update(id, input) {
     const memoryID = String(id ?? "");
     const payload = normalizeMemoryPayload(input, { partial: true });
     if (Object.prototype.hasOwnProperty.call(payload, "content") && !payload.content) {
-      const error = new Error("记忆内容不能为空");
+      const error = new Error(t("memory.contentRequired"));
       setError(error);
       emit();
       return false;
@@ -291,16 +292,16 @@ export function createMemorySettingsController({
     return runMutation(`/api/memories/${encodeURIComponent(memoryID)}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
-    }, "记忆已更新。");
+    }, t("memory.updated"));
   }
 
   async function remove(id) {
     const memoryID = String(id ?? "");
     const confirm = confirmDelete || ((message) => typeof window === "undefined" || window.confirm(message));
-    if (!confirm("确定删除这条记忆？此操作不可撤销。")) return false;
+    if (!confirm(t("memory.deleteConfirm"))) return false;
     return runMutation(`/api/memories/${encodeURIComponent(memoryID)}`, {
       method: "DELETE",
-    }, "记忆已删除。");
+    }, t("memory.deleted"));
   }
 
   function itemByID(id) {

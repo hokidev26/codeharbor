@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -236,4 +237,99 @@ func TestOpenAIOfficialSerializesToolHistory(t *testing.T) {
 	if functionOutput["type"] != "function_call_output" || functionOutput["call_id"] != "call_1" || functionOutput["output"] != "file contents" {
 		t.Fatalf("unexpected function output history item: %+v", functionOutput)
 	}
+}
+
+func TestOpenAIOfficialSendsReasoningAndAutotoIdentity(t *testing.T) {
+	const installationID = "123e4567-e89b-42d3-a456-426614174000"
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Autoto-Client"); got != "autoto/1.2.3" {
+			t.Fatalf("unexpected Autoto client header %q", got)
+		}
+		if got := r.Header.Get("X-Autoto-Installation-ID"); got != installationID {
+			t.Fatalf("unexpected installation header %q", got)
+		}
+		if strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "codex") || strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "chatgpt") {
+			t.Fatalf("client must not impersonate Codex or ChatGPT: %q", r.Header.Get("User-Agent"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		writeOpenAICompletedStream(w)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIOfficial(config.ProviderConfig{
+		BaseURL:        server.URL,
+		APIKey:         "test-key",
+		Model:          "gpt-5",
+		ClientVersion:  "1.2.3",
+		InstallationID: installationID,
+	})
+	if !CapabilitiesFor(provider).ReasoningEffort {
+		t.Fatal("official OpenAI provider must declare reasoning effort support")
+	}
+	events, err := provider.Generate(context.Background(), GenerateRequest{
+		Messages:        []Message{{Role: "user", Content: "think"}},
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error event: %s", event.Text)
+		}
+	}
+	reasoning, ok := requestBody["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "high" {
+		t.Fatalf("unexpected official reasoning payload: %+v", requestBody["reasoning"])
+	}
+}
+
+func TestOpenAIOfficialAutoOmitsReasoning(t *testing.T) {
+	var requestBodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requestBodies = append(requestBodies, body)
+		writeOpenAICompletedStream(w)
+	}))
+	defer server.Close()
+	provider := NewOpenAIOfficial(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "gpt-5"})
+	for _, effort := range []string{"", "auto"} {
+		events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "think"}}, ReasoningEffort: effort})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range events {
+		}
+	}
+	if len(requestBodies) != 2 {
+		t.Fatalf("expected two requests, got %d", len(requestBodies))
+	}
+	for _, body := range requestBodies {
+		if _, exists := body["reasoning"]; exists {
+			t.Fatalf("auto reasoning must be omitted: %+v", body)
+		}
+	}
+}
+
+func TestOpenAIOfficialWithoutAPIKeyReturnsUnavailableError(t *testing.T) {
+	provider := NewOpenAIOfficial(config.ProviderConfig{Model: "gpt-4.1-mini"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err == nil || !errors.Is(err, ErrProviderUnavailable) || !strings.Contains(strings.ToLower(err.Error()), "unavailable") {
+		t.Fatalf("expected explicit unavailable error, events=%v err=%v", events, err)
+	}
+	if events != nil {
+		t.Fatal("unconfigured provider must not return a successful event stream")
+	}
+}
+
+func writeOpenAICompletedStream(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = w.Write([]byte("event: response.completed\n" +
+		`data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-5","status":"completed","error":null,"incomplete_details":null,"output":[],"usage":{"input_tokens":1,"output_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}` + "\n\n"))
 }
