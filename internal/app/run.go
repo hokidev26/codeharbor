@@ -20,6 +20,7 @@ import (
 	"autoto/internal/config"
 	"autoto/internal/db"
 	"autoto/internal/integrations"
+	"autoto/internal/plugins"
 	"autoto/internal/preview"
 	"autoto/internal/providers"
 	"autoto/internal/runtime"
@@ -118,15 +119,18 @@ func Run(options Options) int {
 
 	toolRegistry := tools.NewRegistry()
 	tools.RegisterCore(toolRegistry)
+	secretResolver := secrets.EnvResolver{}
+	pluginService := plugins.NewService(store, secretResolver)
 
 	hub := agent.NewHub()
 	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
+	runner.SetDynamicToolSource(pluginService)
 	runner.SetDefaultReasoningEffort(runtimeSettings.DefaultReasoningEffort)
 	if err := runner.RecoverInterruptedRuns(context.Background()); err != nil {
 		logger.Error("recover interrupted runs", "error", err)
 		return 1
 	}
-	connectionService := integrations.NewConnectionService(store, secrets.EnvResolver{})
+	connectionService := integrations.NewConnectionService(store, secretResolver)
 	auditRecorder := audit.NewRecorder(store)
 	automationManager, err := automation.NewManager(automation.Config{Store: store, Runner: runner, Audit: auditRecorder})
 	if err != nil {
@@ -146,6 +150,7 @@ func Run(options Options) int {
 	application.SetToolRegistry(toolRegistry)
 	application.SetAutomationManager(automationManager)
 	application.SetConnectionService(connectionService)
+	application.SetPluginService(pluginService)
 	application.SetAuditRecorder(auditRecorder)
 	application.SetPreviewManager(previewManager)
 	application.SetConfigPath(resolvedConfigPath)

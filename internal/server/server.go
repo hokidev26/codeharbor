@@ -60,6 +60,7 @@ type Server struct {
 	notifier             *WebhookNotifier
 	automation           *automation.Manager
 	connections          *integrations.ConnectionService
+	plugins              PluginService
 	audit                audit.Recorder
 	integrationClient    *http.Client
 	deviceAdapterFactory func(context.Context, string) (devices.Adapter, error)
@@ -175,6 +176,10 @@ func (s *Server) SetConnectionService(service *integrations.ConnectionService) {
 	s.connections = service
 }
 
+func (s *Server) SetPluginService(service PluginService) {
+	s.plugins = service
+}
+
 func (s *Server) SetAuditRecorder(recorder audit.Recorder) {
 	s.audit = recorder
 }
@@ -247,6 +252,13 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/api/providers/oauth/codex/import", s.importCodexOAuthCredentials)
 		r.Get("/api/providers/{name}/auth-files", s.listProviderAuthFiles)
 		r.Post("/api/providers/{name}/auth-files/import", s.importProviderAuthFile)
+		r.Get("/api/plugins", s.listPlugins)
+		r.Post("/api/plugins/install", s.installPlugin)
+		r.Get("/api/plugins/{id}", s.getPlugin)
+		r.Post("/api/plugins/{id}/enable", s.enablePlugin)
+		r.Post("/api/plugins/{id}/disable", s.disablePlugin)
+		r.Post("/api/plugins/{id}/discover", s.discoverPlugin)
+		r.Delete("/api/plugins/{id}", s.uninstallPlugin)
 	})
 	r.Route("/api/backends", func(r chi.Router) {
 		r.Get("/", s.listBackends)

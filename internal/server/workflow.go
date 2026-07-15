@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +17,8 @@ const (
 	maxToolPermissionDescriptionBytes = 2000
 	maxToolPermissionPriority         = 10000
 )
+
+var pluginToolPermissionNamePattern = regexp.MustCompile(`^plugin__[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?__[a-z0-9_-]{1,128}$`)
 
 type workflowPreferencesRequest struct {
 	RequireConfirmationForExec   *bool `json:"requireConfirmationForExec"`
@@ -77,7 +81,7 @@ func (s *Server) createToolPermissionRule(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rule, err := s.ruleFromRequest(req, db.ToolPermissionRule{Mode: "*", ToolName: "*", Risk: "*", Enabled: true})
+	rule, err := s.ruleFromRequest(r.Context(), req, db.ToolPermissionRule{Mode: "*", ToolName: "*", Risk: "*", Enabled: true})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -106,7 +110,7 @@ func (s *Server) updateToolPermissionRule(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rule, err := s.ruleFromRequest(req, existing)
+	rule, err := s.ruleFromRequest(r.Context(), req, existing)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -136,7 +140,7 @@ func (s *Server) deleteToolPermissionRule(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 
-func (s *Server) ruleFromRequest(req toolPermissionRuleRequest, base db.ToolPermissionRule) (db.ToolPermissionRule, error) {
+func (s *Server) ruleFromRequest(ctx context.Context, req toolPermissionRuleRequest, base db.ToolPermissionRule) (db.ToolPermissionRule, error) {
 	if req.Mode != nil {
 		base.Mode = strings.TrimSpace(*req.Mode)
 	}
@@ -167,7 +171,7 @@ func (s *Server) ruleFromRequest(req toolPermissionRuleRequest, base db.ToolPerm
 	if base.Risk == "" {
 		base.Risk = "*"
 	}
-	if err := validateToolPermissionRule(base, s.toolRegistrySnapshot()); err != nil {
+	if err := validateToolPermissionRule(ctx, base, s.toolRegistrySnapshot(), s.plugins); err != nil {
 		return db.ToolPermissionRule{}, err
 	}
 	return base, nil
@@ -185,11 +189,11 @@ func logToolPermissionRuleChange(action string, rule db.ToolPermissionRule) {
 	)
 }
 
-func validateToolPermissionRule(rule db.ToolPermissionRule, registry *tools.Registry) error {
+func validateToolPermissionRule(ctx context.Context, rule db.ToolPermissionRule, registry *tools.Registry, pluginService PluginService) error {
 	if !validRuleMode(rule.Mode) {
 		return gitCommandError{Status: http.StatusBadRequest, Msg: "invalid tool permission mode"}
 	}
-	if !validRuleToolName(rule.ToolName, registry) {
+	if !validRuleToolName(ctx, rule.ToolName, registry, pluginService) {
 		return gitCommandError{Status: http.StatusBadRequest, Msg: "invalid tool permission tool name"}
 	}
 	if !validRuleRisk(rule.Risk) {
@@ -214,15 +218,20 @@ func validRuleMode(mode string) bool {
 	return mode == "*" || validPermissionMode(mode)
 }
 
-func validRuleToolName(name string, registry *tools.Registry) bool {
+func validRuleToolName(ctx context.Context, name string, registry *tools.Registry, pluginService PluginService) bool {
 	if name == "*" {
 		return true
 	}
-	if registry == nil {
+	if registry != nil {
+		if _, ok := registry.Get(name); ok {
+			return true
+		}
+	}
+	if pluginService == nil || len(name) > 192 || !pluginToolPermissionNamePattern.MatchString(name) {
 		return false
 	}
-	_, ok := registry.Get(name)
-	return ok
+	exists, err := pluginService.HasTool(ctx, name)
+	return err == nil && exists
 }
 
 func validRuleRisk(risk string) bool {

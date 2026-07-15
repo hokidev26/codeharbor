@@ -1310,7 +1310,7 @@ func validStoredToolPermissionToolName(name string) bool {
 	if name == "*" {
 		return true
 	}
-	if len(name) == 0 || len(name) > 128 {
+	if len(name) == 0 || len(name) > 192 {
 		return false
 	}
 	for i, r := range name {

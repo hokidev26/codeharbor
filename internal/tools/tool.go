@@ -41,6 +41,27 @@ type Env struct {
 	Output  func(OutputChunk)
 }
 
+// ResolutionContext scopes dynamic tools to the agent and working directory
+// requesting them. Core registry tools remain process-wide and unscoped.
+type ResolutionContext struct {
+	AgentID string
+	CWD     string
+}
+
+// ToolSource returns a point-in-time list of dynamic tools. Callers may retain
+// the returned adapters for one agent run; adapters must validate mutable
+// backing state again when executed.
+type ToolSource interface {
+	ListTools(context.Context, ResolutionContext) ([]Tool, error)
+}
+
+// Resolver resolves a dynamic tool for an out-of-band execution request.
+// Implementations must fail closed when the backing plugin is disabled,
+// removed, or no longer matches the adapter revision.
+type Resolver interface {
+	ResolveTool(context.Context, ResolutionContext, string) (Tool, error)
+}
+
 type Tool interface {
 	Name() string
 	Description() string

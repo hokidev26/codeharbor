@@ -1,0 +1,145 @@
+package plugins
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"autoto/internal/db"
+	"autoto/internal/mcp"
+	"autoto/internal/tools"
+)
+
+type pluginTool struct {
+	service     *Service
+	pluginID    string
+	revision    int64
+	remoteName  string
+	exposedName string
+	description string
+	schema      json.RawMessage
+}
+
+func newPluginTool(service *Service, plugin db.Plugin, stored db.PluginTool) tools.Tool {
+	return &pluginTool{
+		service: service, pluginID: plugin.ID, revision: plugin.Revision,
+		remoteName: stored.RemoteName, exposedName: stored.ExposedName,
+		description: stored.Description, schema: append(json.RawMessage(nil), stored.InputSchemaJSON...),
+	}
+}
+
+func (t *pluginTool) Name() string { return t.exposedName }
+
+func (t *pluginTool) Description() string { return t.description }
+
+func (t *pluginTool) Schema() any { return append(json.RawMessage(nil), t.schema...) }
+
+func (t *pluginTool) Risk(json.RawMessage) tools.Risk { return tools.RiskExec }
+
+func (t *pluginTool) Execute(ctx context.Context, call tools.Call, _ tools.Env) (tools.Result, error) {
+	if t == nil || t.service == nil || t.service.store == nil {
+		return tools.Result{}, errors.New("plugin tool is not configured")
+	}
+	plugin, err := t.current(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if _, err := validatePersistedManifest(plugin); err != nil {
+		return tools.Result{}, err
+	}
+	environment, values, err := t.service.resolveEnvironment(ctx, plugin)
+	if err != nil {
+		return tools.Result{}, redactPluginError(err, values)
+	}
+	opCtx, cancel := context.WithTimeout(ctx, t.service.timeout)
+	defer cancel()
+	client, err := t.service.startMCP(opCtx, t.service.stdioConfig(plugin, environment, values))
+	if err != nil {
+		return tools.Result{}, redactPluginError(err, values)
+	}
+	defer client.Close()
+	if err := client.Initialize(opCtx); err != nil {
+		return tools.Result{}, redactPluginError(err, values)
+	}
+	// Revalidate immediately before delegation so adapters retained by a run
+	// fail closed after disable, uninstall, or revision changes.
+	if _, err := t.current(opCtx); err != nil {
+		return tools.Result{}, err
+	}
+	input := call.Input
+	if len(input) == 0 || strings.TrimSpace(string(input)) == "" {
+		input = json.RawMessage(`{}`)
+	}
+	result, err := client.CallTool(opCtx, t.remoteName, input)
+	if err != nil {
+		return tools.Result{}, redactPluginError(err, values)
+	}
+	output := redactText(formatPluginToolResult(result), values)
+	output, truncated := boundPluginOutput(output, t.service.outputMax)
+	meta := map[string]any{"pluginId": t.pluginID, "remoteName": t.remoteName}
+	if truncated {
+		meta["truncated"] = true
+	}
+	return tools.Result{Output: output, IsError: result.IsError, Meta: meta}, nil
+}
+
+func (t *pluginTool) current(ctx context.Context) (db.Plugin, error) {
+	plugin, err := t.service.store.GetPlugin(ctx, t.pluginID)
+	if err != nil {
+		return db.Plugin{}, fmt.Errorf("plugin tool unavailable: %w", err)
+	}
+	if !plugin.Enabled {
+		return db.Plugin{}, errors.New("plugin tool unavailable: plugin is disabled")
+	}
+	if plugin.Revision != t.revision {
+		return db.Plugin{}, errors.New("plugin tool unavailable: plugin revision changed")
+	}
+	stored, err := t.service.store.ListPluginTools(ctx, plugin.ID)
+	if err != nil {
+		return db.Plugin{}, fmt.Errorf("plugin tool unavailable: %w", err)
+	}
+	for _, candidate := range stored {
+		if candidate.ExposedName == t.exposedName && candidate.RemoteName == t.remoteName && string(candidate.InputSchemaJSON) == string(t.schema) {
+			return plugin, nil
+		}
+	}
+	return db.Plugin{}, errors.New("plugin tool unavailable: tool snapshot changed")
+}
+
+func formatPluginToolResult(result mcp.ToolCallResult) string {
+	if len(result.Content) == 0 || strings.TrimSpace(string(result.Content)) == "null" {
+		return string(result.Raw)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(result.Content, &blocks); err == nil {
+		texts := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+				texts = append(texts, strings.TrimSpace(block.Text))
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n")
+		}
+	}
+	return string(result.Content)
+}
+
+func boundPluginOutput(output string, limit int) (string, bool) {
+	if limit <= 0 || len(output) <= limit {
+		return output, false
+	}
+	const marker = "\n...[truncated]"
+	keep := limit - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	return strings.ToValidUTF8(output[:keep], "") + marker, true
+}
+
+var _ tools.Tool = (*pluginTool)(nil)

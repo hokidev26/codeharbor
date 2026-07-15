@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 36
+const CurrentDBVersion = 37
 
 type migration struct {
 	version int
@@ -54,6 +54,7 @@ var migrations = []migration{
 	{version: 34, name: "immutable message corrections", up: migrateV34MessageCorrections},
 	{version: 35, name: "project memberships", up: migrateV35ProjectMembers},
 	{version: 36, name: "api request usage history indexes", up: migrateV36APIRequestUsageIndexes},
+	{version: 37, name: "global plugins and tool snapshots", up: migrateV37Plugins},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1178,6 +1179,11 @@ CREATE INDEX IF NOT EXISTS idx_api_requests_provider_model_created ON api_reques
 	return err
 }
 
+func migrateV37Plugins(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, pluginSchemaSQL)
+	return err
+}
+
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1213,7 +1219,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 func legacyNamingSchemaSQL() string {
 	// P2-P3 tables were introduced after the agent/workline naming migration and
 	// must be created by their own migrations with modern column names.
-	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL)
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",

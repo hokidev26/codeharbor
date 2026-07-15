@@ -2918,6 +2918,7 @@ body.theme-light .composer-toolbar-icon { color: #3f3f46; }
 }
 .skill-workbench-actions { display: flex; gap: 9px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 14px; }
 .skill-command-list { display: grid; gap: 11px; margin-bottom: 16px; }
+.plugin-env-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .skill-command-card {
   border: 1px solid #e2e8f0;
   background: #f8fafc;

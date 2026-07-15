@@ -28,6 +28,10 @@ type Runner struct {
 	hub       *Hub
 	cfg       config.AgentConfig
 
+	dynamicToolsMu sync.RWMutex
+	toolSource     tools.ToolSource
+	toolResolver   tools.Resolver
+
 	reasoningMu            sync.RWMutex
 	defaultReasoningEffort string
 
@@ -50,6 +54,11 @@ type activeRun struct {
 	triggerMessageID        string
 	pendingRunID            string
 	pendingTriggerMessageID string
+}
+
+type runToolSnapshot struct {
+	tools map[string]tools.Tool
+	specs []providers.ToolSpec
 }
 
 var (
@@ -151,6 +160,39 @@ func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *too
 		}
 	}
 	return runner
+}
+
+// SetDynamicTools configures the optional dynamic listing and resolution
+// surfaces without changing the constructor used by existing callers.
+func (r *Runner) SetDynamicTools(source tools.ToolSource, resolver tools.Resolver) {
+	if r == nil {
+		return
+	}
+	r.dynamicToolsMu.Lock()
+	r.toolSource = source
+	r.toolResolver = resolver
+	r.dynamicToolsMu.Unlock()
+}
+
+// SetDynamicToolSource is a convenience for services implementing both
+// ToolSource and Resolver.
+func (r *Runner) SetDynamicToolSource(source tools.ToolSource) {
+	resolver, _ := source.(tools.Resolver)
+	r.SetDynamicTools(source, resolver)
+}
+
+// SetToolSource is a compatibility alias for SetDynamicToolSource.
+func (r *Runner) SetToolSource(source tools.ToolSource) {
+	r.SetDynamicToolSource(source)
+}
+
+func (r *Runner) dynamicTools() (tools.ToolSource, tools.Resolver) {
+	if r == nil {
+		return nil, nil
+	}
+	r.dynamicToolsMu.RLock()
+	defer r.dynamicToolsMu.RUnlock()
+	return r.toolSource, r.toolResolver
 }
 
 func (r *Runner) SetDefaultReasoningEffort(effort string) {
@@ -775,7 +817,11 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
-	toolSpecs := r.toolSpecs()
+	toolSnapshot, err := r.snapshotTools(ctx, tools.ResolutionContext{AgentID: agentID, CWD: agent.CWD})
+	if err != nil {
+		return fmt.Errorf("snapshot tools: %w", err)
+	}
+	toolSpecs := toolSnapshot.specs
 	if !providers.CapabilitiesFor(provider).Tools {
 		toolSpecs = nil
 	}
@@ -838,7 +884,7 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 				return err
 			}
 			toolCall := normalizeProviderToolCall(call)
-			toolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID)
+			toolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID, toolSnapshot.tools)
 			if err != nil {
 				toolResult = tools.Result{Output: err.Error(), IsError: true}
 			}
@@ -1795,11 +1841,100 @@ func (r *Runner) ListTools() []ToolInfo {
 	return out
 }
 
+// ListToolsForAgent returns the same core tools as ListTools plus the dynamic
+// tools currently enabled for the requested agent.
+func (r *Runner) ListToolsForAgent(ctx context.Context, agentID string) ([]ToolInfo, error) {
+	agent, err := r.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := r.snapshotTools(ctx, tools.ResolutionContext{AgentID: agent.ID, CWD: agent.CWD})
+	if err != nil {
+		return nil, err
+	}
+	registered := make([]tools.Tool, 0, len(snapshot.tools))
+	for _, tool := range snapshot.tools {
+		registered = append(registered, tool)
+	}
+	sort.Slice(registered, func(i, j int) bool { return registered[i].Name() < registered[j].Name() })
+	out := make([]ToolInfo, 0, len(registered))
+	for _, tool := range registered {
+		out = append(out, ToolInfo{Name: tool.Name(), Description: tool.Description(), Risk: tool.Risk(nil)})
+	}
+	return out, nil
+}
+
+func (r *Runner) snapshotTools(ctx context.Context, scope tools.ResolutionContext) (runToolSnapshot, error) {
+	byName := make(map[string]tools.Tool)
+	if r.tools != nil {
+		for _, tool := range r.tools.List() {
+			if tool == nil || strings.TrimSpace(tool.Name()) == "" {
+				return runToolSnapshot{}, errors.New("core tool has an empty name")
+			}
+			byName[tool.Name()] = tool
+		}
+	}
+	source, _ := r.dynamicTools()
+	if source != nil {
+		dynamic, err := source.ListTools(ctx, scope)
+		if err != nil {
+			return runToolSnapshot{}, err
+		}
+		for _, tool := range dynamic {
+			if tool == nil || strings.TrimSpace(tool.Name()) == "" {
+				return runToolSnapshot{}, errors.New("dynamic tool has an empty name")
+			}
+			if _, exists := byName[tool.Name()]; exists {
+				return runToolSnapshot{}, fmt.Errorf("duplicate tool name: %s", tool.Name())
+			}
+			byName[tool.Name()] = tool
+		}
+	}
+	registered := make([]tools.Tool, 0, len(byName))
+	for _, tool := range byName {
+		registered = append(registered, tool)
+	}
+	sort.Slice(registered, func(i, j int) bool { return registered[i].Name() < registered[j].Name() })
+	specs := make([]providers.ToolSpec, 0, len(registered))
+	for _, tool := range registered {
+		specs = append(specs, providers.ToolSpec{Name: tool.Name(), Description: tool.Description(), Schema: toolInputSchema(tool.Schema())})
+	}
+	return runToolSnapshot{tools: byName, specs: specs}, nil
+}
+
+func (r *Runner) resolveTool(ctx context.Context, scope tools.ResolutionContext, name string, snapshot map[string]tools.Tool) (tools.Tool, error) {
+	name = strings.TrimSpace(name)
+	if snapshot != nil {
+		tool, ok := snapshot[name]
+		if !ok {
+			return nil, errors.New("tool not found: " + name)
+		}
+		return tool, nil
+	}
+	if r.tools != nil {
+		if tool, ok := r.tools.Get(name); ok {
+			return tool, nil
+		}
+	}
+	_, resolver := r.dynamicTools()
+	if resolver == nil {
+		return nil, errors.New("tool not found: " + name)
+	}
+	tool, err := resolver.ResolveTool(ctx, scope, name)
+	if err != nil {
+		return nil, err
+	}
+	if tool == nil || tool.Name() != name {
+		return nil, errors.New("tool not found: " + name)
+	}
+	return tool, nil
+}
+
 func (r *Runner) ExecuteTool(ctx context.Context, agentID string, call tools.Call) (tools.Result, error) {
 	return r.executeTool(ctx, agentID, call, "")
 }
 
-func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, call tools.Call, messageID string) (tools.Result, error) {
+func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, call tools.Call, messageID string, snapshots ...map[string]tools.Tool) (tools.Result, error) {
 	call = normalizeToolCall(call)
 	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -1815,10 +1950,11 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 		}
 		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
 	}
-	if r.tools == nil {
-		return tools.Result{}, errors.New("tool registry is not initialized")
+	var snapshot map[string]tools.Tool
+	if len(snapshots) > 0 {
+		snapshot = snapshots[0]
 	}
-	tool, err := r.tools.MustGet(call.Name)
+	tool, err := r.resolveTool(ctx, tools.ResolutionContext{AgentID: agent.ID, CWD: agent.CWD}, call.Name, snapshot)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -1895,10 +2031,7 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
 		return tools.Result{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
 	}
-	if r.tools == nil {
-		return tools.Result{}, errors.New("tool registry is not initialized")
-	}
-	tool, err := r.tools.MustGet(call.Name)
+	tool, err := r.resolveTool(ctx, tools.ResolutionContext{AgentID: agent.ID, CWD: agent.CWD}, call.Name, nil)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -2523,6 +2656,9 @@ func (r *Runner) toolSpecs() []providers.ToolSpec {
 }
 
 func toolInputSchema(input any) map[string]any {
+	if schema, ok := nativeToolInputSchema(input); ok {
+		return schema
+	}
 	t := reflect.TypeOf(input)
 	if t == nil {
 		return map[string]any{"type": "object", "properties": map[string]any{}}
@@ -2532,6 +2668,36 @@ func toolInputSchema(input any) map[string]any {
 		return map[string]any{"type": "object", "properties": map[string]any{"input": schema}, "required": []string{"input"}}
 	}
 	return schema
+}
+
+func nativeToolInputSchema(input any) (map[string]any, bool) {
+	var raw []byte
+	switch schema := input.(type) {
+	case json.RawMessage:
+		raw = schema
+	case []byte:
+		raw = schema
+	case map[string]any:
+		encoded, err := json.Marshal(schema)
+		if err != nil {
+			return nil, false
+		}
+		raw = encoded
+	case *json.RawMessage:
+		if schema == nil {
+			return nil, false
+		}
+		raw = *schema
+	default:
+		return nil, false
+	}
+	var decoded map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil || decoded == nil {
+		return nil, false
+	}
+	return decoded, true
 }
 
 func jsonSchemaForType(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {

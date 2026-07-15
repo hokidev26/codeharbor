@@ -1,0 +1,143 @@
+package plugins
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLoadManifestNormalizesAndHashes(t *testing.T) {
+	root := t.TempDir()
+	writePluginCommand(t, root, "bin/plugin")
+	writeManifest(t, root, map[string]any{
+		"apiVersion":  APIVersionV1Alpha1,
+		"transport":   TransportStdio,
+		"slug":        " My_Plugin ",
+		"name":        " Demo Plugin ",
+		"version":     " 1.2.3 ",
+		"description": " demo ",
+		"command":     "bin/plugin",
+		"args":        []string{"--mode", "test"},
+		"env":         map[string]string{"LOG_LEVEL": "debug"},
+		"secretRefs":  map[string]string{"API_TOKEN": "env:DEMO_API_TOKEN"},
+	})
+	manifest, err := LoadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Slug != "my-plugin" || manifest.Name != "Demo Plugin" || manifest.Version != "1.2.3" || manifest.Command != "bin/plugin" {
+		t.Fatalf("unexpected normalized manifest: %+v", manifest)
+	}
+	if !filepath.IsAbs(manifest.RootPath) || len(manifest.Hash) != 64 || manifest.SecretRefs["API_TOKEN"] != "env:DEMO_API_TOKEN" {
+		t.Fatalf("incomplete normalized manifest: %+v", manifest)
+	}
+	firstHash := manifest.Hash
+	writeManifest(t, root, map[string]any{
+		"secretRefs": map[string]string{"API_TOKEN": "env:DEMO_API_TOKEN"},
+		"env":        map[string]string{"LOG_LEVEL": "debug"}, "args": []string{"--mode", "test"}, "command": "bin/plugin",
+		"description": "demo", "version": "1.2.3", "name": "Demo Plugin", "slug": "my-plugin",
+		"transport": TransportStdio, "apiVersion": APIVersionV1Alpha1,
+	})
+	second, err := ReadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Hash != firstHash {
+		t.Fatalf("semantic formatting changed hash: %s != %s", second.Hash, firstHash)
+	}
+}
+
+func TestManifestRejectsUnsafeCommandPaths(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, command := range map[string]string{"absolute": outside, "traversal": "../outside"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeManifest(t, root, validManifest(command))
+			if _, err := LoadManifest(root); err == nil {
+				t.Fatalf("expected unsafe command %q to fail", command)
+			}
+		})
+	}
+	t.Run("symlink escape", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(root, "plugin")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		writeManifest(t, root, validManifest("plugin"))
+		if _, err := LoadManifest(root); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("expected symlink escape rejection, got %v", err)
+		}
+	})
+}
+
+func TestManifestLimitsAndEnvironmentValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"wrong api", func(m map[string]any) { m["apiVersion"] = "v1" }},
+		{"wrong transport", func(m map[string]any) { m["transport"] = "http" }},
+		{"too many args", func(m map[string]any) { m["args"] = make([]string, MaxManifestArgs+1) }},
+		{"long arg", func(m map[string]any) { m["args"] = []string{strings.Repeat("x", MaxManifestArgBytes+1)} }},
+		{"sensitive env", func(m map[string]any) { m["env"] = map[string]string{"API_TOKEN": "raw-secret"} }},
+		{"bad secret ref", func(m map[string]any) { m["secretRefs"] = map[string]string{"API_TOKEN": "raw-secret"} }},
+		{"duplicate env key", func(m map[string]any) {
+			m["env"] = map[string]string{"VALUE": "x"}
+			m["secretRefs"] = map[string]string{"VALUE": "env:VALUE_SECRET"}
+		}},
+		{"unknown field", func(m map[string]any) { m["extra"] = true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writePluginCommand(t, root, "plugin")
+			manifest := validManifest("plugin")
+			test.mutate(manifest)
+			writeManifest(t, root, manifest)
+			if _, err := LoadManifest(root); err == nil {
+				t.Fatal("expected invalid manifest to fail")
+			}
+		})
+	}
+}
+
+func TestManifestMaximumSize(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ManifestFilename), []byte(strings.Repeat(" ", MaxManifestBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(root); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected size rejection, got %v", err)
+	}
+}
+
+func validManifest(command string) map[string]any {
+	return map[string]any{"apiVersion": APIVersionV1Alpha1, "transport": TransportStdio, "slug": "demo", "name": "Demo", "version": "1.0.0", "command": command}
+}
+
+func writePluginCommand(t *testing.T, root, relative string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeManifest(t *testing.T, root string, manifest map[string]any) {
+	t.Helper()
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ManifestFilename), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

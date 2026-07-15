@@ -216,6 +216,7 @@ export default Object.freeze({
       globalPrompts: { label: "全域提示詞", description: "附加到所有對話的使用者級提示詞。", empty: "暫無全域提示詞。", action: "新增提示詞" },
       systemPrompts: { label: "系統提示詞", description: "管理系統級提示詞範本與安全邊界。", empty: "暫無自訂系統提示詞。", action: "新增系統提示詞" },
       mcpTools: { label: "MCP 工具", description: "連線並管理 MCP server 提供的工具。", empty: "暫無 MCP 工具。", action: "新增 MCP" },
+      plugins: { label: "外掛", description: "從本機目錄安裝並管理可動態提供工具的外掛。", empty: "暫無已安裝外掛。", action: "安裝外掛" },
       hooks: { label: "鉤子", description: "設定執行前後、工具呼叫前後等自動化鉤子。", empty: "暫無鉤子。", action: "新增鉤子" },
     },
   },

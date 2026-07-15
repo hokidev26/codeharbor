@@ -55,6 +55,7 @@ export async function restoreRevisionWithCurrentRiskConfirmation(restore, confir
 export function createSkillsWorkbenchController({
   state,
   bindMCPRegistryActions,
+  bindPluginRegistryActions,
   copyText,
   createServerSkill,
   createToolPermissionRule,
@@ -72,6 +73,7 @@ export function createSkillsWorkbenchController({
   notifyTerminal,
   previewServerSkillImport,
   renderMCPRegistryList,
+  renderPluginRegistryPanel,
   resetSkillsPreferences,
   saveSkillsPreferences,
   saveWorkflowPreferences,
@@ -105,6 +107,7 @@ export function createSkillsWorkbenchController({
   function renderSkillTabPanel(active) {
     if (active.key === "commands") return renderLocalCommandSkills(active);
     if (active.key === "mcp-tools") return renderLocalMCPTools(active);
+    if (active.key === "plugins") return renderPluginRegistryPanel(active);
     if (active.key === "tool-permissions") return renderLocalToolPolicy(active);
     return renderSkillRoadmapPanel(active);
   }
@@ -449,6 +452,7 @@ export function createSkillsWorkbenchController({
       });
     });
     bindMCPRegistryActions(body);
+    if (activeKey === "plugins") bindPluginRegistryActions?.(body);
     $("refreshServerSkillsBtn")?.addEventListener("click", () => loadServerSkills?.({ notify: true }).catch(showError));
     $("refreshSkillsV2Btn")?.addEventListener("click", () => skillsPhaseB?.load(getSkillContext?.() || { scope: "global" }).catch(showError));
     $("loadMoreSkillsV2Btn")?.addEventListener("click", () => skillsPhaseB?.loadMore(getSkillContext?.() || { scope: "global" }).catch(showError));
