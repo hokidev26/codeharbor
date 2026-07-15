@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"autoto/internal/config"
 	"autoto/internal/db"
@@ -787,11 +788,12 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			return err
 		}
 		agent = updatedAgent
-		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort))
+		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort), agent.FastMode)
 		if err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
+			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
 			return err
 		}
 		if len(result.ToolCalls) == 0 {
@@ -799,10 +801,12 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			if assistantText == "" {
 				assistantText = "Done."
 			}
-			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText})
+			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, TurnUsage: result.TurnUsage})
 			if err != nil {
+				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
 				return err
 			}
+			r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
 			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
 			r.captureRunEndHead(runID)
 			if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
@@ -820,10 +824,12 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 		assistantJSON, _ := json.Marshal(assistantBlocks)
 		assistantStateJSON := providerStateForBlocks(assistantBlocks)
 		assistantText := assistantToolUseText(result.Text, result.ToolCalls)
-		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON, ProviderStateJSON: assistantStateJSON})
+		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON, ProviderStateJSON: assistantStateJSON, TurnUsage: result.TurnUsage})
 		if err != nil {
+			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
 			return err
 		}
+		r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
 		r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: mergeEventData(map[string]any{"toolCalls": len(result.ToolCalls)}, runID)})
 		messages = append(messages, assistantMsg)
 
@@ -1316,20 +1322,27 @@ func truncateRunes(text string, maxRunes int) string {
 }
 
 type modelTurnResult struct {
-	Text       string
-	ToolCalls  []providers.ToolCall
-	Usage      providers.Usage
-	StopReason string
+	Text                 string
+	ToolCalls            []providers.ToolCall
+	Usage                providers.Usage
+	TurnUsage            *db.MessageTurnUsage
+	StopReason           string
+	StartedAt            time.Time
+	FirstOutputAt        time.Time
+	CompletedAt          time.Time
+	Duration             time.Duration
+	RecordAPIRequest     bool
+	EstimatedOutputRunes int64
 }
 
-func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string) (modelTurnResult, error) {
+func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string, fastMode bool) (modelTurnResult, error) {
 	maxRetries := r.cfg.MaxTransientRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		result, err, retryable := r.runModelTurnAttempt(ctx, agentID, runID, provider, model, systemPrompt, messages, toolSpecs, reasoningEffort)
+		result, err, retryable := r.runModelTurnAttempt(ctx, agentID, runID, provider, model, systemPrompt, messages, toolSpecs, reasoningEffort, fastMode)
 		if err == nil {
 			return result, nil
 		}
@@ -1348,7 +1361,7 @@ func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provid
 	return modelTurnResult{}, lastErr
 }
 
-func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string) (modelTurnResult, error, bool) {
+func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string, provider providers.Provider, model, systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, reasoningEffort string, fastMode bool) (modelTurnResult, error, bool) {
 	started := time.Now()
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1356,60 +1369,119 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 	if !capabilities.SupportsReasoningEffort(reasoningEffort) {
 		return modelTurnResult{}, fmt.Errorf("%w: provider %q does not support requested effort %q", providers.ErrReasoningEffortUnsupported, provider.Name(), reasoningEffort), false
 	}
-	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort}
+	fastModeAllowed := false
+	if modelProvider, ok := provider.(providers.ModelCapabilityProvider); ok && fastMode {
+		modelCapabilities := modelProvider.ModelCapabilities(model)
+		fastModeAllowed = !modelCapabilities.FastModeKnown || modelCapabilities.FastMode
+	}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort, FastMode: fastModeAllowed}
 	if !capabilities.Tools {
 		request.Tools = nil
 	}
 	if capabilities.Reasoning {
 		request.ReasoningEffort = agentReasoningEffort(ctx, r.store, agentID)
 	}
+	requestID := db.NewID()
+	r.publish(Event{Type: "model.started", AgentID: agentID, Data: mergeEventData(map[string]any{
+		"requestId": requestID,
+		"provider":  provider.Name(),
+		"model":     model,
+		"startedAt": started.UTC().Format(time.RFC3339Nano),
+	}, runID)})
 	events, err := provider.Generate(attemptCtx, request)
 	if err != nil {
-		r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), providers.Usage{}, err.Error())
+		r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), 0, providers.Usage{}, err.Error())
 		return modelTurnResult{}, err, isTransientProviderError(err)
 	}
 
 	var result modelTurnResult
 	var builder strings.Builder
+	var firstOutputAt time.Time
+	var outputRunes int64
 	modelOutputStarted := false
-	firstEventReceived := false
 	firstEventTimer, stopFirstEventTimer := firstEventTimeoutTimer(r.cfg.FirstTokenTimeoutMs)
 	defer stopFirstEventTimer()
+	markModelOutput := func(outputAt time.Time) {
+		if firstOutputAt.IsZero() {
+			firstOutputAt = outputAt
+			stopFirstEventTimer()
+		}
+	}
+	publishStreamingUsage := func() {
+		pending := modelTurnUsage(providers.Usage{}, outputRunes, started, firstOutputAt, time.Since(started))
+		r.publish(Event{Type: "model.streaming", AgentID: agentID, Data: mergeEventData(map[string]any{
+			"requestId":         requestID,
+			"provider":          provider.Name(),
+			"model":             model,
+			"firstOutputAt":     firstOutputAt.UTC().Format(time.RFC3339Nano),
+			"pendingThroughput": pending,
+		}, runID)})
+	}
+	finalize := func(record bool) modelTurnResult {
+		completedAt := time.Now()
+		duration := completedAt.Sub(started)
+		result.Text = builder.String()
+		result.StartedAt = started
+		result.FirstOutputAt = firstOutputAt
+		result.CompletedAt = completedAt
+		result.Duration = duration
+		result.RecordAPIRequest = record
+		result.EstimatedOutputRunes = outputRunes
+		result.TurnUsage = modelTurnUsage(result.Usage, outputRunes, started, firstOutputAt, duration)
+		data := map[string]any{
+			"requestId":   requestID,
+			"provider":    provider.Name(),
+			"model":       model,
+			"startedAt":   started.UTC().Format(time.RFC3339Nano),
+			"completedAt": completedAt.UTC().Format(time.RFC3339Nano),
+			"throughput":  result.TurnUsage,
+			"ttftMs":      result.TurnUsage.TTFTMS,
+		}
+		if !firstOutputAt.IsZero() {
+			data["firstOutputAt"] = firstOutputAt.UTC().Format(time.RFC3339Nano)
+		}
+		r.publish(Event{Type: "model.completed", AgentID: agentID, Data: mergeEventData(data, runID)})
+		return result
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+			r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
 			return modelTurnResult{}, err, false
 		case <-firstEventTimer:
 			err := &ProviderError{Message: fmt.Sprintf("provider first token timeout after %dms", r.cfg.FirstTokenTimeoutMs)}
 			cancel()
-			r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+			r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), 0, result.Usage, err.Error())
 			return modelTurnResult{}, err, true
 		case event, ok := <-events:
-			if !firstEventReceived {
-				firstEventReceived = true
-				stopFirstEventTimer()
-			}
 			if !ok {
-				result.Text = builder.String()
-				r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
-				return result, nil, false
+				return finalize(true), nil, false
 			}
 			switch event.Type {
 			case "text":
+				if event.Text == "" {
+					continue
+				}
+				markModelOutput(time.Now())
 				modelOutputStarted = true
+				outputRunes += int64(utf8.RuneCountInString(event.Text))
 				builder.WriteString(event.Text)
-				r.publish(Event{Type: "agent.text", AgentID: agentID, Text: event.Text})
+				r.publish(Event{Type: "agent.text", AgentID: agentID, Text: event.Text, Data: mergeEventData(map[string]any{"requestId": requestID}, runID)})
+				publishStreamingUsage()
 			case "tool_call":
 				if !capabilities.Tools {
 					err := &ProviderError{Message: "provider emitted a tool call without declaring tool capability"}
-					r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, err.Error())
+					r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
 					return modelTurnResult{}, err, false
 				}
 				if event.ToolCall != nil {
+					markModelOutput(time.Now())
 					modelOutputStarted = true
-					result.ToolCalls = append(result.ToolCalls, normalizeProviderToolCall(*event.ToolCall))
+					toolCall := normalizeProviderToolCall(*event.ToolCall)
+					result.ToolCalls = append(result.ToolCalls, toolCall)
+					outputRunes += estimatedToolCallOutputRunes(toolCall)
+					publishStreamingUsage()
 				}
 			case "usage":
 				if event.Usage != nil {
@@ -1417,18 +1489,80 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 				}
 			case "error":
 				err := &ProviderError{Message: event.Text}
-				r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, event.Text)
+				r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, event.Text)
 				return modelTurnResult{}, err, !modelOutputStarted && isTransientProviderError(err)
 			case "done":
-				result.Text = builder.String()
 				result.StopReason = event.StopReason
-				if shouldRecordAPIRequest(result.StopReason) {
-					r.recordAPIRequest(agentID, runID, provider.Name(), model, time.Since(started), result.Usage, "")
-				}
-				return result, nil, false
+				return finalize(shouldRecordAPIRequest(result.StopReason)), nil, false
 			}
 		}
 	}
+}
+
+func estimatedToolCallOutputRunes(call providers.ToolCall) int64 {
+	return int64(utf8.RuneCountInString(call.Name) + utf8.RuneCount(call.Input))
+}
+
+func modelTurnUsage(usage providers.Usage, outputRunes int64, started, firstOutputAt time.Time, duration time.Duration) *db.MessageTurnUsage {
+	durationMS := duration.Milliseconds()
+	if duration > 0 && durationMS == 0 {
+		durationMS = 1
+	}
+	if durationMS < 0 {
+		durationMS = 0
+	}
+	ttftMS := modelTurnTTFTMS(started, firstOutputAt)
+	if ttftMS > durationMS {
+		ttftMS = durationMS
+	}
+	outputTokens := usage.OutputTokens
+	estimated := false
+	if outputTokens <= 0 && outputRunes > 0 {
+		outputTokens = (outputRunes + 3) / 4
+		estimated = true
+	}
+	generationDuration := time.Duration(0)
+	if !started.IsZero() && !firstOutputAt.IsZero() && !firstOutputAt.Before(started) {
+		elapsedToFirstOutput := firstOutputAt.Sub(started)
+		if duration > elapsedToFirstOutput {
+			generationDuration = duration - elapsedToFirstOutput
+		}
+	}
+	tokensPerSecond := 0.0
+	if outputTokens > 0 && generationDuration > 0 {
+		tokensPerSecond = float64(outputTokens) / generationDuration.Seconds()
+		if tokensPerSecond > 1_000_000 {
+			tokensPerSecond = 1_000_000
+		}
+	}
+	return &db.MessageTurnUsage{
+		InputTokens:       maxInt64(usage.InputTokens, 0),
+		OutputTokens:      maxInt64(outputTokens, 0),
+		CachedInputTokens: maxInt64(usage.CachedInputTokens, 0),
+		ReasoningTokens:   maxInt64(usage.ReasoningTokens, 0),
+		TTFTMS:            ttftMS,
+		DurationMS:        durationMS,
+		TokensPerSecond:   tokensPerSecond,
+		Estimated:         estimated,
+	}
+}
+
+func modelTurnTTFTMS(started, firstOutputAt time.Time) int64 {
+	if started.IsZero() || firstOutputAt.IsZero() || firstOutputAt.Before(started) {
+		return 0
+	}
+	ttftMS := firstOutputAt.Sub(started).Milliseconds()
+	if firstOutputAt.After(started) && ttftMS == 0 {
+		return 1
+	}
+	return ttftMS
+}
+
+func maxInt64(value, minimum int64) int64 {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 func firstEventTimeoutTimer(timeoutMS int) (<-chan time.Time, func()) {
@@ -1491,13 +1625,38 @@ func shouldRecordAPIRequest(stopReason string) bool {
 	return stopReason != "not_configured"
 }
 
-func (r *Runner) recordAPIRequest(agentID, runID, providerName, model string, duration time.Duration, usage providers.Usage, errorMessage string) {
+func (r *Runner) recordCompletedModelTurn(agentID, runID, messageID, providerName, model string, result modelTurnResult) {
+	if !result.RecordAPIRequest {
+		return
+	}
+	ttftMS := int64(0)
+	if result.TurnUsage != nil {
+		ttftMS = result.TurnUsage.TTFTMS
+	}
+	r.recordAPIRequest(agentID, runID, messageID, providerName, model, result.Duration, ttftMS, result.Usage, "")
+}
+
+func (r *Runner) recordAPIRequest(agentID, runID, messageID, providerName, model string, duration time.Duration, ttftMS int64, usage providers.Usage, errorMessage string) {
 	if r.store == nil {
 		return
+	}
+	durationMS := duration.Milliseconds()
+	if duration > 0 && durationMS == 0 {
+		durationMS = 1
+	}
+	if durationMS < 0 {
+		durationMS = 0
+	}
+	if ttftMS < 0 {
+		ttftMS = 0
+	}
+	if ttftMS > durationMS {
+		ttftMS = durationMS
 	}
 	_, err := r.store.AddAPIRequest(context.Background(), db.APIRequest{
 		AgentID:           agentID,
 		RunID:             runID,
+		MessageID:         messageID,
 		Kind:              "model",
 		Provider:          providerName,
 		Model:             model,
@@ -1505,7 +1664,8 @@ func (r *Runner) recordAPIRequest(agentID, runID, providerName, model string, du
 		OutputTokens:      usage.OutputTokens,
 		CachedInputTokens: usage.CachedInputTokens,
 		ReasoningTokens:   usage.ReasoningTokens,
-		DurationMS:        duration.Milliseconds(),
+		TTFTMS:            ttftMS,
+		DurationMS:        durationMS,
 		CostUSD:           estimateUsageCostUSD(providerName, model, usage),
 		ErrorMessage:      errorMessage,
 	})

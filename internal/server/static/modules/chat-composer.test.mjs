@@ -8,6 +8,7 @@ const {
   calculateMessageInputSize,
   clipboardFiles,
   createChatComposerController,
+  fastModeSupportedForModel,
   interfaceLocale,
   maxChatDraftCharacters,
   mentionTrigger,
@@ -94,6 +95,19 @@ test("reasoning effort normalizes legacy and unknown values against backend capa
   assert.deepEqual(reasoningEffortValuesForCapabilities({ reasoningEffort: ["low", "xhigh"] }), ["auto", "low", "xhigh"]);
   assert.equal(normalizeReasoningEffort("xhigh", ["auto", "low", "xhigh"]), "xhigh");
   assert.equal(normalizeReasoningEffort("xhigh", ["auto", "low", "high"]), "auto");
+});
+
+test("Fast mode support comes from the selected model capability only", () => {
+  const provider = {
+    modelCapabilities: {
+      "gpt-fast": { fastMode: true },
+      "gpt-basic": { fastMode: false },
+    },
+  };
+  assert.equal(fastModeSupportedForModel(provider, "codex:gpt-fast"), true);
+  assert.equal(fastModeSupportedForModel(provider, "codex:gpt-basic"), false);
+  assert.equal(fastModeSupportedForModel(provider, "codex:unknown"), false);
+  assert.equal(fastModeSupportedForModel(null, "codex:gpt-fast"), false);
 });
 
 test("message textarea autosize clamps to bounds and toggles internal scrolling", () => {
@@ -202,6 +216,62 @@ test("reasoning effort control persists the selected Agent override", async () =
     assert.equal(state.agent.reasoningEffort, "high");
     assert.equal(elements.reasoningEffortDisplay.textContent, "高");
     assert.ok(pillClasses.some(([name]) => name === "reasoning-effort-saving"));
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("Fast mode button follows model support and persists the Agent override", async () => {
+  const classes = new Set(["hidden"]);
+  const attributes = new Map();
+  const elements = {
+    openProviderLoginBtn: {
+      classList: {
+        toggle(name, active) {
+          if (active) classes.add(name);
+          else classes.delete(name);
+        },
+      },
+      dataset: {},
+      disabled: false,
+      title: "",
+      setAttribute(name, value) { attributes.set(name, value); },
+    },
+    modelSelect: { value: "codex:gpt-fast" },
+  };
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById(id) { return elements[id] || null; } };
+  const requests = [];
+  const state = { agent: { id: "agent-fast", model: "codex:gpt-fast", fastMode: false, entityGeneration: 3 } };
+  try {
+    const controller = createChatComposerController({
+      state,
+      currentProviderConfig: () => ({ modelCapabilities: { "gpt-fast": { fastMode: true } } }),
+      request: async (path, options) => {
+        requests.push({ path, options });
+        return { ...state.agent, fastMode: JSON.parse(options.body).fastMode, entityGeneration: 4 };
+      },
+    });
+
+    assert.equal(controller.refreshFastModeControl(), false);
+    assert.equal(classes.has("hidden"), false);
+    assert.equal(attributes.get("aria-pressed"), "false");
+    await controller.saveFastMode(true);
+    assert.equal(requests[0].path, "/api/agents/agent-fast/fast-mode");
+    assert.deepEqual(JSON.parse(requests[0].options.body), {
+      fastMode: true,
+      model: "codex:gpt-fast",
+      entityGeneration: 3,
+    });
+    assert.equal(state.agent.fastMode, true);
+    assert.equal(classes.has("fast-mode-active"), true);
+    assert.equal(attributes.get("aria-pressed"), "true");
+
+    state.agent = { ...state.agent, model: "codex:gpt-basic", fastMode: true };
+    elements.modelSelect.value = "codex:gpt-basic";
+    controller.refreshFastModeControl();
+    assert.equal(classes.has("hidden"), true);
+    assert.equal(classes.has("fast-mode-active"), false);
   } finally {
     globalThis.document = previousDocument;
   }

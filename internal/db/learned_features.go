@@ -376,7 +376,7 @@ func (s *Store) CreateAgent(ctx context.Context, agent Agent) (Agent, error) {
 	}
 	now := Now()
 	agent.CreatedAt, agent.UpdatedAt = now, now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, subagent_type, title, inherit_mode, parent_agent_id, fork_message_id, model, system_prompt, permission_mode, reasoning_effort, execution_device_id, status, plan_mode, cwd, created_at, updated_at) VALUES (?, NULLIF(?,''), ?, NULLIF(?,''), ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, NULLIF(?,''), ?, NULLIF(?,''), ?, ?, ?, NULLIF(?,''), ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.SubagentType, agent.Title, agent.InheritMode, agent.ParentAgentID, agent.ForkMessageID, agent.Model, agent.SystemPrompt, agent.PermissionMode, agent.ReasoningEffort, agent.ExecutionDeviceID, agent.Status, boolInt(agent.PlanMode), agent.CWD, agent.CreatedAt, agent.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, subagent_type, title, inherit_mode, parent_agent_id, fork_message_id, model, system_prompt, permission_mode, reasoning_effort, fast_mode, execution_device_id, status, plan_mode, cwd, created_at, updated_at) VALUES (?, NULLIF(?,''), ?, NULLIF(?,''), ?, NULLIF(?,''), NULLIF(?,''), NULLIF(?,''), ?, NULLIF(?,''), ?, NULLIF(?,''), ?, ?, ?, ?, NULLIF(?,''), ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.SubagentType, agent.Title, agent.InheritMode, agent.ParentAgentID, agent.ForkMessageID, agent.Model, agent.SystemPrompt, agent.PermissionMode, agent.ReasoningEffort, boolInt(agent.FastMode), agent.ExecutionDeviceID, agent.Status, boolInt(agent.PlanMode), agent.CWD, agent.CreatedAt, agent.UpdatedAt)
 	if err != nil {
 		return Agent{}, err
 	}

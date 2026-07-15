@@ -3,6 +3,7 @@ import messagesEN from "./messages-en.mjs";
 import preferencesMessages from "./messages-preferences.mjs";
 import staticExtraMessages from "./messages-static-extra.mjs";
 import systemSettingsMessages from "./messages-system-settings.mjs";
+import usageHistoryMessages from "./messages-usage-history.mjs";
 import workspaceSettingsMessages from "./messages-workspace-settings.mjs";
 import messagesZhCN from "./messages-zh-CN.mjs";
 import messagesZhTW from "./messages-zh-TW.mjs";
@@ -26,6 +27,7 @@ function createMergedCatalog(locale, base) {
     preferencesMessages,
     staticExtraMessages,
     systemSettingsMessages,
+    usageHistoryMessages,
     workspaceSettingsMessages,
   ].reduce((catalog, pack) => mergeMessageTree(catalog, pack?.[locale]), mergeMessageTree({}, base));
 }

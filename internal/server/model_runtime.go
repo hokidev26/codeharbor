@@ -60,6 +60,24 @@ func (value *strictInt64) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+type strictBool struct {
+	set   bool
+	value bool
+}
+
+func (value *strictBool) UnmarshalJSON(raw []byte) error {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return errors.New("value must be a boolean")
+	}
+	var decoded bool
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return errors.New("value must be a boolean")
+	}
+	value.set = true
+	value.value = decoded
+	return nil
+}
+
 type strictStrings struct {
 	set    bool
 	values []string
@@ -100,6 +118,12 @@ type runtimeModelSettingsRequest struct {
 
 type agentReasoningRequest struct {
 	ReasoningEffort  strictString `json:"reasoningEffort"`
+	Model            strictString `json:"model"`
+	EntityGeneration strictInt64  `json:"entityGeneration"`
+}
+
+type agentFastModeRequest struct {
+	FastMode         strictBool   `json:"fastMode"`
 	Model            strictString `json:"model"`
 	EntityGeneration strictInt64  `json:"entityGeneration"`
 }
@@ -328,6 +352,56 @@ func (s *Server) updateAgentReasoningEffort(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	agent, err := s.store.UpdateAgentReasoningEffort(r.Context(), agentID, effort)
+	if err != nil {
+		writeModelRuntimeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
+}
+
+func (s *Server) updateAgentFastMode(w http.ResponseWriter, r *http.Request) {
+	var request agentFastModeRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !request.FastMode.set {
+		writeError(w, http.StatusBadRequest, "fastMode is required")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if agentID == "" {
+		agentID = strings.TrimSpace(chi.URLParam(r, "agentId"))
+	}
+	if agentID == "" || len(agentID) > 128 {
+		writeError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	if s.store == nil {
+		writeError(w, http.StatusInternalServerError, "agent store is unavailable")
+		return
+	}
+	unlock := s.lockAgentMutation(agentID)
+	defer unlock()
+
+	current, err := s.store.GetAgent(r.Context(), agentID)
+	if err != nil {
+		writeModelRuntimeError(w, err)
+		return
+	}
+	if request.Model.set && strings.TrimSpace(request.Model.value) != current.Model {
+		writeModelRuntimeError(w, fmt.Errorf("%w: agent model changed", db.ErrConflict))
+		return
+	}
+	if request.EntityGeneration.set && request.EntityGeneration.value != current.EntityGeneration {
+		writeModelRuntimeError(w, fmt.Errorf("%w: agent settings changed", db.ErrConflict))
+		return
+	}
+	if request.FastMode.value && !s.modelCapabilitiesForAgentModel(current.Model).FastMode {
+		writeError(w, http.StatusBadRequest, "fastMode is not supported by the current model")
+		return
+	}
+	agent, err := s.store.UpdateAgentFastMode(r.Context(), agentID, request.FastMode.value)
 	if err != nil {
 		writeModelRuntimeError(w, err)
 		return

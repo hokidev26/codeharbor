@@ -311,14 +311,32 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 login page, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "AUTOTO_ACCESS_PASSWORD") || strings.Contains(recorder.Body.String(), "CODEHARBOR_ACCESS_PASSWORD") {
-		t.Fatalf("expected canonical password configuration guidance, got %s", recorder.Body.String())
+	body := recorder.Body.String()
+	if !strings.Contains(body, "AUTOTO_ACCESS_PASSWORD") || strings.Contains(body, "CODEHARBOR_ACCESS_PASSWORD") {
+		t.Fatalf("expected canonical password configuration guidance, got %s", body)
 	}
-	if !strings.Contains(recorder.Body.String(), "Autoto 远程访问保护") || strings.Contains(recorder.Body.String(), "NarraFork") {
-		t.Fatalf("expected Autoto remote access branding, got %s", recorder.Body.String())
+	if !strings.Contains(body, "Autoto 远程访问保护") || strings.Contains(body, "NarraFork") {
+		t.Fatalf("expected Autoto remote access branding, got %s", body)
 	}
-	if strings.Contains(recorder.Body.String(), "window.CODEHARBOR_LOCAL_TOKEN=") {
-		t.Fatal("remote login page must not leak local token")
+	for _, fragment := range []string{
+		`color-scheme: light`,
+		`--page:#f4f6fb`,
+		`class="remote-access-shell remote-access-card"`,
+		`class="card-content"`,
+		`.remote-access-card { position: relative; z-index: 1; width: min(100%, 488px)`,
+		`background: linear-gradient(150deg, rgba(255,255,255,.99)`,
+		`form method="post" action="/auth/remote-access"`,
+		`id="remoteAccessPassword" name="password"`,
+		`autocomplete="current-password"`,
+		`@media (max-width: 520px)`,
+		`bypassPermissions 自动禁用`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected redesigned responsive login page fragment %q, got %s", fragment, body)
+		}
+	}
+	if strings.Contains(body, "<script") || strings.Contains(body, "window.CODEHARBOR_LOCAL_TOKEN=") {
+		t.Fatal("remote login page must remain script-free and must not leak local token")
 	}
 }
 

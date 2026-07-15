@@ -4,16 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoto</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1" />
   </head>
   <body class="theme-light white-shell ui-density-comfortable">
     <main id="appShell" class="app-shell terminal-collapsed">
       <header class="mobile-topbar">
-        <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单" data-i18n-title="staticExtra.shell.mobileMenu">☰</button>
+        <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单" data-i18n-title="staticExtra.shell.mobileMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
         <div class="mobile-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon">♙</span><span id="mobileVersionChip">更新: v0.1.0 → …</span></div>
         <div class="mobile-brand">Autoto</div>
-        <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端" data-i18n-title="terminal.title">▣</button>
-        <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索" data-i18n-title="staticExtra.shell.search">⌕</button>
+        <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端" data-i18n-title="terminal.title"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
+        <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索" data-i18n-title="staticExtra.shell.search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m15.5 15.5 4.2 4.2"></path></svg></button>
       </header>
       <button id="mobileSidebarBackdrop" class="mobile-backdrop hidden" type="button" aria-label="关闭菜单" data-i18n-aria-label="staticExtra.shell.closeMenu"></button>
       <aside class="global-rail" aria-label="全局导航" data-i18n-aria-label="shell.globalNavigation">
@@ -143,6 +143,8 @@
         </div>
       </aside>
 
+      <div id="sidebarResizeHandle" class="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整会话栏宽度" data-i18n-aria-label="shell.resizeSidebar" aria-valuemin="220" aria-valuemax="420" aria-valuenow="296" tabindex="0"><span aria-hidden="true"></span></div>
+
       <section class="chat-panel">
         <header class="chat-header">
           <div class="header-left">
@@ -209,34 +211,34 @@
               <div class="composer-controls" aria-label="模型和权限设置" data-i18n-aria-label="chat.modelPermissions">
                 <div class="composer-field composer-model-field">
                   <label class="composer-field-label" for="modelSelect" data-i18n="chat.model">模型</label>
-                  <span class="select-pill model-pill toolbar-model-pill"><select id="modelSelect" class="select compact-select" title="模型" aria-label="模型" data-i18n-title="chat.model" data-i18n-aria-label="chat.model"></select></span>
+                  <span class="select-pill model-pill toolbar-model-pill"><select id="modelSelect" class="select compact-select composer-native-select" title="模型" aria-label="模型" data-i18n-title="chat.model" data-i18n-aria-label="chat.model"></select><button class="composer-select-trigger" type="button" data-composer-select="modelSelect" aria-haspopup="listbox" aria-expanded="false"><span id="modelSelectDisplay" class="composer-select-value">模型</span><span class="composer-select-chevron" aria-hidden="true">⌃</span></button></span>
                 </div>
                 <div class="composer-field composer-effort-field">
                   <label class="composer-field-label" for="reasoningEffort" data-i18n="chat.reasoningEffort">思考强度</label>
                   <span class="select-pill mode-pill effort-pill reasoning-effort-pill">
-                    <span id="reasoningEffortDisplay" class="mode-display effort-display" aria-hidden="true">自动</span>
-                    <select id="reasoningEffort" class="select permission-select reasoning-effort-select" title="思考强度" aria-label="思考强度" data-i18n-title="chat.reasoningEffort" data-i18n-aria-label="chat.reasoningEffort">
+                    <select id="reasoningEffort" class="select permission-select reasoning-effort-select composer-native-select" title="思考强度" aria-label="思考强度" data-i18n-title="chat.reasoningEffort" data-i18n-aria-label="chat.reasoningEffort">
                       <option value="auto" data-i18n="modelProvider.automatic">自动</option>
                     </select>
+                    <button class="composer-select-trigger" type="button" data-composer-select="reasoningEffort" aria-haspopup="listbox" aria-expanded="false"><span id="reasoningEffortDisplay" class="mode-display effort-display composer-select-value" aria-hidden="true">自动</span><span class="composer-select-chevron" aria-hidden="true">⌃</span></button>
                   </span>
                 </div>
-                <button id="openProviderLoginBtn" class="model-tool-btn icon-only toolbar-lightning-btn" type="button" title="打开凭证导入和中转站配置" aria-label="凭证和中转站" data-i18n-title="chat.credentials" data-i18n-aria-label="chat.credentials">⚡</button>
+                <button id="openProviderLoginBtn" class="model-tool-btn icon-only toolbar-lightning-btn hidden" type="button" title="Fast 模式（点击开启）" aria-label="Fast 模式（点击开启）" aria-pressed="false" data-i18n-title="chat.fastModeDisabled" data-i18n-aria-label="chat.fastModeDisabled"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-8 12h7l-1 8 8-12h-7z"></path></svg></button>
                 <div class="composer-field composer-permission-field">
                   <label class="composer-field-label" for="permissionMode" data-i18n="chat.permissionMode">权限模式</label>
-                  <span class="select-pill mode-pill permission-toolbar-pill"><span class="mode-display" aria-hidden="true">可编辑</span><select id="permissionMode" class="select permission-select" title="权限模式" aria-label="权限模式" data-i18n-title="chat.permissionMode" data-i18n-aria-label="chat.permissionMode">
+                  <span class="select-pill mode-pill permission-toolbar-pill"><select id="permissionMode" class="select permission-select composer-native-select" title="权限模式" aria-label="权限模式" data-i18n-title="chat.permissionMode" data-i18n-aria-label="chat.permissionMode">
                     <option value="readOnly" data-i18n="chat.permission.readOnly">只读</option>
                     <option value="acceptEdits" data-i18n="chat.permission.editable">可编辑</option>
                     <option value="bypassPermissions" data-i18n="chat.permission.allowAll">全部允许</option>
                     <option value="default" data-i18n="chat.permission.automatic">自动</option>
                     <option value="dontAsk" data-i18n="chat.permission.dontAsk">不询问</option>
-                  </select></span>
+                  </select><button class="composer-select-trigger" type="button" data-composer-select="permissionMode" aria-haspopup="listbox" aria-expanded="false"><span class="mode-display composer-select-value" aria-hidden="true">可编辑</span><span class="composer-select-chevron" aria-hidden="true">⌃</span></button></span>
                 </div>
                 <span class="permission-safety-indicator" title="权限保护" data-i18n-title="chat.permissionGuard" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 6v5c0 4.5-2.5 7.8-7 10-4.5-2.2-7-5.5-7-10V6z"></path><path d="M9 12.2 11 14l4-4"></path></svg></span>
                 <span id="permissionRiskBadge" class="permission-risk-badge">可编辑</span>
               </div>
               <div class="composer-actions" aria-label="工作区快捷操作" data-i18n-aria-label="chat.workspaceShortcuts">
-                <button id="composerFolderBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-i18n-title="chat.switchDirectory" data-i18n-aria-label="chat.switchDirectory" data-open-directory-shortcut="current">▱＋</button>
-                <button id="composerTerminalBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="收起/展开终端" aria-label="收起/展开终端" data-i18n-title="chat.toggleTerminal" data-i18n-aria-label="chat.toggleTerminal">›_</button>
+                <button id="composerFolderBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-i18n-title="chat.switchDirectory" data-i18n-aria-label="chat.switchDirectory" data-open-directory-shortcut="current"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path><path d="M15.5 12.5v5M13 15h5"></path></svg></button>
+                <button id="composerTerminalBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="收起/展开终端" aria-label="收起/展开终端" data-i18n-title="chat.toggleTerminal" data-i18n-aria-label="chat.toggleTerminal"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
               </div>
             </div>
             <div id="pendingAttachments" class="pending-attachments hidden" aria-live="polite"></div>
@@ -537,6 +539,6 @@
       </div>
     </div>
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1"></script>
+    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1"></script>
   </body>
 </html>

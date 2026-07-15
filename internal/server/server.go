@@ -231,6 +231,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/runtime/summary", s.runtimeSummary)
 	r.Get("/api/storage/summary", s.storageSummary)
 	r.Get("/api/usage/summary", s.usageSummary)
+	r.Get("/api/usage/history", s.usageHistory)
 	r.Get("/api/navigation", s.navigation)
 	r.Group(func(r chi.Router) {
 		r.Use(s.sensitiveLocalTokenGuard)
@@ -364,6 +365,7 @@ func (s *Server) Routes() http.Handler {
 		r.Patch("/{id}/cwd", s.updateAgentCWD)
 		r.Patch("/{id}/model", s.updateAgentModel)
 		r.Patch("/{id}/reasoning-effort", s.updateAgentReasoningEffort)
+		r.Patch("/{id}/fast-mode", s.updateAgentFastMode)
 		r.Patch("/{id}/permission-mode", s.updateAgentPermissionMode)
 		r.Post("/{id}/interrupt", s.interruptAgent)
 		r.Get("/{id}/messages", s.listMessages)

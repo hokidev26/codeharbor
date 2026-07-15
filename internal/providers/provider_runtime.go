@@ -14,6 +14,7 @@ import (
 var (
 	ErrProviderUnavailable        = errors.New("provider unavailable")
 	ErrReasoningEffortUnsupported = errors.New("reasoning effort is not supported")
+	ErrFastModeUnsupported        = errors.New("fast mode is not supported")
 )
 
 var clientVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)

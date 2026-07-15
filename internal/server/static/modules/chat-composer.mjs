@@ -36,6 +36,16 @@ export function reasoningEffortValuesForCapabilities(capabilities = {}) {
   return source.reasoningEffort === true ? [...defaultReasoningEffortValues] : ["auto"];
 }
 
+export function fastModeSupportedForModel(provider, modelValue) {
+  const value = String(modelValue || "").trim();
+  const separator = value.indexOf(":");
+  const model = separator >= 0 ? value.slice(separator + 1).trim() : value;
+  const modelCapabilities = provider?.modelCapabilities && typeof provider.modelCapabilities === "object"
+    ? provider.modelCapabilities
+    : {};
+  return Boolean(model && modelCapabilities[model]?.fastMode === true);
+}
+
 export function calculateMessageInputSize({ scrollHeight, minHeight = 0, maxHeight = 180 } = {}) {
   const minimum = Math.max(0, Number(minHeight) || 0);
   const maximum = Math.max(minimum, Number(maxHeight) || 180);
@@ -153,6 +163,8 @@ export function createChatComposerController({
 } = {}) {
   const pendingReasoningEfforts = new Map();
   const savingReasoningEfforts = new Set();
+  const pendingFastModes = new Map();
+  const savingFastModes = new Set();
 
   function loadChatDrafts() {
     try {
@@ -414,6 +426,112 @@ export function createChatComposerController({
       syncReasoningEffortSavingState();
       if (state.agent?.id === agentId) refreshReasoningEffortControl();
     }
+  }
+
+  function fastModeSupported(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
+    return fastModeSupportedForModel(currentProviderConfig?.(modelValue) || null, modelValue);
+  }
+
+  function fastModeSavingFor(agentId = state.agent?.id) {
+    return Boolean(agentId && savingFastModes.has(agentId));
+  }
+
+  function syncFastModeSavingState() {
+    state.fastModeSaving = fastModeSavingFor();
+  }
+
+  function refreshFastModeControl({ modelValue, requestedValue } = {}) {
+    const button = $("openProviderLoginBtn");
+    if (!button) return false;
+    const supported = Boolean(state.agent) && fastModeSupported(modelValue);
+    const active = supported && Boolean(requestedValue === undefined ? state.agent?.fastMode : requestedValue);
+    const saving = fastModeSavingFor();
+    syncFastModeSavingState();
+    button.classList.toggle("hidden", !supported);
+    button.classList.toggle("fast-mode-active", active);
+    button.disabled = !supported || saving;
+    button.dataset.supported = supported ? "true" : "false";
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.setAttribute("aria-busy", saving ? "true" : "false");
+    const label = active ? t("chat.fastModeEnabled") : t("chat.fastModeDisabled");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    return active;
+  }
+
+  async function saveFastMode(value) {
+    const agentId = state.agent?.id || "";
+    if (!agentId) return null;
+    const agentAtStart = state.agent;
+    const selected = Boolean(value) && fastModeSupported(agentAtStart.model);
+    const persistedAtStart = Boolean(agentAtStart.fastMode);
+    pendingFastModes.set(agentId, {
+      fastMode: selected,
+      model: String(agentAtStart.model || ""),
+      entityGeneration: agentEntityGeneration(agentAtStart),
+    });
+    state.agent = { ...agentAtStart, fastMode: selected };
+    refreshFastModeControl({ requestedValue: selected });
+    if (fastModeSavingFor(agentId)) return null;
+
+    let updatedAgent = null;
+    let persistedFastMode = persistedAtStart;
+    let lastRequest = null;
+    savingFastModes.add(agentId);
+    syncFastModeSavingState();
+    try {
+      while (pendingFastModes.has(agentId)) {
+        const next = pendingFastModes.get(agentId);
+        pendingFastModes.delete(agentId);
+        const current = state.agent;
+        if (!current || current.id !== agentId || current.model !== next.model) continue;
+        if (agentEntityGeneration(current) !== next.entityGeneration) {
+          next.entityGeneration = agentEntityGeneration(current);
+        }
+        lastRequest = { ...next };
+        refreshFastModeControl({ requestedValue: next.fastMode });
+        updatedAgent = await request(`/api/agents/${agentId}/fast-mode`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            fastMode: next.fastMode,
+            model: next.model,
+            entityGeneration: next.entityGeneration,
+          }),
+        });
+        const stillCurrent = state.agent?.id === agentId
+          && state.agent.model === next.model
+          && agentEntityGeneration(state.agent) === next.entityGeneration;
+        if (!stillCurrent) continue;
+        if (updatedAgent?.id === agentId && updatedAgent.model === next.model) {
+          state.agent = updatedAgent;
+          persistedFastMode = Boolean(updatedAgent.fastMode);
+        } else {
+          state.agent = { ...state.agent, fastMode: next.fastMode };
+          persistedFastMode = next.fastMode;
+        }
+      }
+      return updatedAgent;
+    } catch (error) {
+      pendingFastModes.delete(agentId);
+      const current = state.agent;
+      const requestIsStillCurrent = current?.id === agentId
+        && current.model === lastRequest?.model
+        && agentEntityGeneration(current) === lastRequest?.entityGeneration;
+      if (requestIsStillCurrent) {
+        state.agent = { ...current, fastMode: persistedFastMode };
+      }
+      if (!requestIsStillCurrent) return null;
+      throw error;
+    } finally {
+      savingFastModes.delete(agentId);
+      syncFastModeSavingState();
+      if (state.agent?.id === agentId) refreshFastModeControl();
+    }
+  }
+
+  function toggleFastMode() {
+    if (!state.agent || !fastModeSupported()) return Promise.resolve(null);
+    return saveFastMode(!Boolean(state.agent.fastMode));
   }
 
   function loadPromptHistory() {
@@ -1002,15 +1120,18 @@ export function createChatComposerController({
     loadChatDrafts,
     loadPromptHistory,
     openAttachmentPicker,
+    refreshFastModeControl,
     refreshReasoningEffortControl,
     restoreCurrentChatDraft,
     saveCurrentChatDraft,
+    saveFastMode,
     saveReasoningEffort,
     scheduleMessageInputResize,
     selectedReasoningEffort,
     sendMessage,
     setMessageInputValue,
     syncMessageComposerBusy,
+    toggleFastMode,
     updateDraftLimitHint,
     updateMentionPalette,
     updatePromptHistoryHint,

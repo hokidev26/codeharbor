@@ -1,5 +1,5 @@
 import { $, escapeHtml, setButtonBusy } from "./dom.mjs";
-import { formatBytes, formatDuration, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
+import { formatBytes, formatDuration, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { currentUILocale, t as baseT } from "./i18n.mjs";
 import systemSettingsMessages from "./messages-system-settings.mjs";
 import { localPreferenceBackupVersion } from "./preferences-data.mjs";
@@ -32,7 +32,6 @@ export function createSystemSettingsController({
   loadRuntimeSummary,
   loadStorageSummary,
   loadUpdateStatus,
-  loadUsageSummary,
   localPreferencesBackupSummary,
   localPreferencesBackupText,
   notifyTerminal,
@@ -656,83 +655,6 @@ export function createSystemSettingsController({
     }
   }
 
-  function renderUsageSettingsContent() {
-    const summary = state.usageSummary;
-    const counts = summary?.counts || {};
-    const generatedAt = summary?.generatedAt ? formatTimestamp(summary.generatedAt) : t("systemSettings.usage.notGenerated");
-    return `
-    <div class="settings-live-page usage-page">
-      <section class="settings-hero-card">
-        <div>
-          <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.usage.kicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(t("systemSettings.usage.heroTitle"))}</div>
-          <p>${escapeHtml(t("systemSettings.usage.description"))}</p>
-        </div>
-        <div class="settings-action-row">
-          <button id="refreshUsageSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.usage.refresh"))}</button>
-        </div>
-      </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(counts.messages || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.messages"))}</span></div>
-        <div><strong>${escapeHtml(formatNumber(counts.toolCalls || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.toolCalls"))}</span></div>
-        <div><strong>${escapeHtml(generatedAt)}</strong><span>${escapeHtml(t("systemSettings.usage.generatedAt"))}</span></div>
-      </div>
-      ${state.usageError ? `<div class="settings-inline-alert">${escapeHtml(state.usageError)}</div>` : ""}
-      ${summary ? renderUsageSummary(summary) : `<div class="settings-empty-card">${escapeHtml(t("systemSettings.usage.loading"))}</div>`}
-    </div>
-  `;
-  }
-
-  function renderUsageSummary(summary) {
-    const counts = summary.counts || {};
-    const api = summary.apiRequests || {};
-    const toolCalls = summary.toolCalls || {};
-    const backends = summary.backends || {};
-    return `
-    <div class="usage-summary-grid">
-      ${renderUsageMetricCard(t("systemSettings.usage.projects"), counts.projects, t("systemSettings.usage.projectsHint"))}
-      ${renderUsageMetricCard(t("systemSettings.usage.worklines"), counts.worklines, t("systemSettings.usage.worklinesHint"))}
-      ${renderUsageMetricCard(t("systemSettings.usage.agents"), counts.agents, t("systemSettings.usage.agentsHint"))}
-      ${renderUsageMetricCard(t("systemSettings.usage.messages"), counts.messages, t("systemSettings.usage.latest", { timestamp: formatTimestamp(summary.messages?.latestAt) }))}
-      ${renderUsageMetricCard(t("systemSettings.usage.toolCalls"), counts.toolCalls, t("systemSettings.usage.avgDuration", { duration: formatDuration(toolCalls.averageDurationMs || 0) }))}
-      ${renderUsageMetricCard(t("systemSettings.usage.apiRequests"), counts.apiRequests, t("systemSettings.usage.cost", { amount: formatMoney(api.totalCostUsd || 0) }))}
-      ${renderUsageMetricCard(t("systemSettings.usage.backends"), counts.backends, t("systemSettings.usage.backendsDetail", { active: formatNumber(backends.active || 0), keys: formatNumber(backends.apiKeyConfigured || 0) }))}
-    </div>
-    <div class="usage-detail-grid">
-      <section class="settings-info-card">
-        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.messageRoles"))}</div>
-        ${renderUsageCountMap(summary.messages?.byRole)}
-      </section>
-      <section class="settings-info-card">
-        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.toolStatus"))}</div>
-        ${renderUsageCountMap(toolCalls.byStatus)}
-      </section>
-      <section class="settings-info-card">
-        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.topTools"))}</div>
-        ${renderUsageTopTools(toolCalls.topTools)}
-      </section>
-      <section class="settings-info-card">
-        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.modelRequests"))}</div>
-        <div class="usage-token-grid">
-          <div><strong>${escapeHtml(formatNumber(api.inputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.inputTokens"))}</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.outputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.outputTokens"))}</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.reasoningTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.reasoningTokens"))}</span></div>
-          <div><strong>${escapeHtml(formatNumber(api.cachedInputTokens || 0))}</strong><span>${escapeHtml(t("systemSettings.usage.cachedInput"))}</span></div>
-        </div>
-        <div class="settings-info-text">${escapeHtml(t("systemSettings.usage.apiSummary", {
-          duration: formatDuration(api.averageDurationMs || 0),
-          errors: formatNumber(api.errors || 0),
-          latest: formatTimestamp(api.latestAt),
-        }))}</div>
-      </section>
-      <section class="settings-info-card">
-        <div class="settings-info-title">${escapeHtml(t("systemSettings.usage.requestProviders"))}</div>
-        ${renderUsageCountMap(api.byProvider)}
-      </section>
-    </div>
-  `;
-  }
-
   function renderUsageMetricCard(title, value, subtitle) {
     return `
     <section class="usage-metric-card">
@@ -750,36 +672,16 @@ export function createSystemSettingsController({
     return String(value);
   }
 
-  function renderUsageCountMap(value) {
-    const entries = Object.entries(value || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    if (!entries.length) return `<div class="settings-info-text">${escapeHtml(t("systemSettings.usage.noData"))}</div>`;
-    return `<div class="usage-map-list">${entries.map(([name, count]) => `<div class="usage-map-row"><span>${escapeHtml(name)}</span><strong>${escapeHtml(formatNumber(count))}</strong></div>`).join("")}</div>`;
-  }
-
-  function renderUsageTopTools(tools) {
-    if (!Array.isArray(tools) || !tools.length) return `<div class="settings-info-text">${escapeHtml(t("systemSettings.usage.noToolCalls"))}</div>`;
-    return `<div class="usage-map-list">${tools.map((tool) => `<div class="usage-map-row"><span>${escapeHtml(tool.name)}</span><strong>${escapeHtml(formatNumber(tool.count))}</strong></div>`).join("")}</div>`;
-  }
-
-  function bindUsageSettingsActions() {
-    $("refreshUsageSummaryBtn")?.addEventListener("click", () => loadUsageSummary({ notify: true }).catch(showError));
-    if (!state.usageSummary && !state.usageError) {
-      loadUsageSummary().catch(showError);
-    }
-  }
-
   return {
     bindAboutSettingsActions,
     bindRuntimeSettingsActions,
     bindStorageSettingsActions,
-    bindUsageSettingsActions,
     bindUserSettingsActions,
     renderAboutSettingsContent,
     renderRuntimeSettingsContent,
     renderServerSystemSettingsContent,
     renderStorageSettingsContent,
     renderUsageMetricCard,
-    renderUsageSettingsContent,
     renderUserSettingsContent,
   };
 }

@@ -230,6 +230,7 @@ test("model catalog preserves reasoning effort capabilities for composer control
           models: ["gpt-5"],
           configured: true,
           capabilities: { reasoningEffortValues: ["low", "medium", "high", "xhigh"] },
+          modelCapabilities: { "gpt-5": { fastMode: true } },
         }],
       },
       settings: { providers: [] },
@@ -243,6 +244,9 @@ test("model catalog preserves reasoning effort capabilities for composer control
     imageInput: false,
     reasoningEffort: true,
     reasoningEfforts: ["low", "medium", "high", "xhigh"],
+  });
+  assert.deepEqual(controller.currentProviderConfig("openai:gpt-5").modelCapabilities, {
+    "gpt-5": { fastMode: true },
   });
 });
 

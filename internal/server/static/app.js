@@ -34,5 +34,5 @@
     }
   };
 
-  import("./modules/app-main.mjs?v=legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-static-2-conversation-fig2-1-scroll-skills-1-market-layout-1-native-codex-3-provider-console-1").catch(showBootError);
+  import("./modules/app-main.mjs?v=legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-static-2-conversation-fig2-1-scroll-skills-1-market-layout-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1").catch(showBootError);
 })();

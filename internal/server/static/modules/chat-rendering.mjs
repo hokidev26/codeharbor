@@ -1,10 +1,50 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
+import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
 import { t as cr } from "./messages-chat-rendering-extra.mjs";
 
 const userMessageRoles = new Set(["user", "human"]);
+const maxTokenCount = 1_000_000_000;
+const maxDurationMs = 7 * 24 * 60 * 60 * 1000;
+const maxTokensPerSecond = 1_000_000;
+
+function normalizePositiveMetric(value, maximum, { integer = false, allowZero = false } = {}) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0 || (!allowZero && number === 0) || number > maximum) return null;
+  return integer ? Math.round(number) : number;
+}
+
+export function normalizeTurnUsage(turnUsage = {}) {
+  const source = turnUsage && typeof turnUsage === "object" ? turnUsage : {};
+  return {
+    inputTokens: normalizePositiveMetric(source.inputTokens, maxTokenCount, { integer: true }),
+    outputTokens: normalizePositiveMetric(source.outputTokens, maxTokenCount, { integer: true }),
+    cachedInputTokens: normalizePositiveMetric(source.cachedInputTokens, maxTokenCount, { integer: true }),
+    reasoningTokens: normalizePositiveMetric(source.reasoningTokens, maxTokenCount, { integer: true }),
+    ttftMs: normalizePositiveMetric(source.ttftMs, maxDurationMs, { allowZero: true }),
+    durationMs: normalizePositiveMetric(source.durationMs, maxDurationMs, { allowZero: true }),
+    tokensPerSecond: normalizePositiveMetric(source.tokensPerSecond, maxTokensPerSecond),
+    estimated: source.estimated === true,
+  };
+}
+
+export function formatTurnUsagePerformance(turnUsage = {}, options = {}) {
+  const usage = normalizeTurnUsage(turnUsage);
+  const locale = options.locale;
+  const parts = [];
+  if (usage.tokensPerSecond !== null) {
+    const value = formatNumber(usage.tokensPerSecond, { locale, minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    parts.push(`${usage.estimated ? "≈" : ""}${t("chat.throughput", {}, locale)} ${value} tok/s`);
+  }
+  if (usage.ttftMs !== null) {
+    const seconds = formatNumber(usage.ttftMs / 1000, { locale, minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    parts.push(`${t("chat.ttft", {}, locale)} ${seconds}s`);
+  }
+  return parts.join(" | ");
+}
 
 export function chatMessagePresentation(message = {}) {
   const role = String(message.role || "message").trim() || "message";
@@ -116,16 +156,29 @@ export function createChatRenderingController({
     return true;
   }
 
+  function renderPerformanceHTML(turnUsage, { live = false } = {}) {
+    const text = formatTurnUsagePerformance(turnUsage);
+    if (!text) return "";
+    const usage = normalizeTurnUsage(turnUsage);
+    return `<div class="message-performance${live ? " message-performance-live" : ""}${usage.estimated ? " is-estimated" : ""}" aria-label="${escapeAttr(text)}">${escapeHtml(text)}</div>`;
+  }
+
   function renderLiveAssistantCardHTML() {
     const text = String(state.liveAssistantText || "");
-    if (!text) return "";
+    if (!state.liveAssistantActive && !text) return "";
+    const content = text
+      ? `<div class="message-content">${renderMarkdown(text)}</div>`
+      : `<div class="live-assistant-waiting">${escapeHtml(cr("performance.waitingFirstToken"))}</div>`;
     return `
-      <div class="message assistant live-assistant-message" data-live-assistant data-run-id="${escapeAttr(state.liveAssistantRunId || "")}">
+      <div class="message assistant live-assistant-message chat-message chat-flow-item chat-flow-left" data-chat-alignment="left" data-live-assistant data-run-id="${escapeAttr(state.liveAssistantRunId || "")}" data-request-id="${escapeAttr(state.liveAssistantRequestId || "")}" data-started-at="${escapeAttr(state.liveAssistantStartedAt || "")}">
         <div class="message-head">
-          <div class="message-role">assistant</div>
-          <span class="live-assistant-status">正在生成</span>
+          <div class="live-assistant-head-left">
+            <div class="message-role">assistant</div>
+            <span class="live-assistant-status">${escapeHtml(cr("performance.generating"))}</span>
+          </div>
+          ${renderPerformanceHTML(state.liveAssistantPerformance, { live: true })}
         </div>
-        <div class="message-content">${renderMarkdown(text)}</div>
+        ${content}
       </div>
     `;
   }
@@ -143,6 +196,7 @@ export function createChatRenderingController({
           <div class="message-head-actions">${actions}</div>
         </div>
         ${message.id && state.editingMessageId === message.id ? renderCorrectionEditor(message) : `<div class="message-content">${renderMarkdown(friendlyMessageText(visibleMessageText(message)))}</div>${renderMessageAttachments(message)}`}
+        ${presentation.normalizedRole === "assistant" ? renderPerformanceHTML(message.turnUsage) : ""}
       </div>
     `;
   }
@@ -167,18 +221,65 @@ export function createChatRenderingController({
     el.scrollTop = el.scrollHeight;
   }
 
-  function appendLiveAssistantText(text, runId = "") {
-    const delta = String(text || "");
-    if (!delta) return;
-    if (runId && state.liveAssistantRunId && state.liveAssistantRunId !== runId) state.liveAssistantText = "";
-    if (runId) state.liveAssistantRunId = runId;
-    state.liveAssistantText = `${state.liveAssistantText || ""}${delta}`;
+  function liveAssistantEventMatches(detail = {}) {
+    const requestId = String(detail.requestId || "");
+    const runId = String(detail.runId || "");
+    if (requestId && state.liveAssistantRequestId && requestId !== state.liveAssistantRequestId) return false;
+    if (runId && state.liveAssistantRunId && runId !== state.liveAssistantRunId) return false;
+    return true;
+  }
+
+  function beginLiveAssistantGeneration(detail = {}) {
+    state.liveAssistantActive = true;
+    state.liveAssistantText = "";
+    state.liveAssistantRequestId = String(detail.requestId || "");
+    state.liveAssistantRunId = String(detail.runId || "");
+    state.liveAssistantProvider = String(detail.provider || "");
+    state.liveAssistantModel = String(detail.model || "");
+    state.liveAssistantStartedAt = String(detail.startedAt || "");
+    state.liveAssistantPerformance = normalizeTurnUsage(detail.performance);
     renderLiveAssistantCard();
   }
 
+  function appendLiveAssistantText(text, detail = {}) {
+    const delta = String(text || "");
+    if (typeof detail === "string") detail = { runId: detail };
+    if (!state.liveAssistantActive) {
+      beginLiveAssistantGeneration(detail);
+    } else if (!liveAssistantEventMatches(detail)) {
+      return false;
+    }
+    if (detail.requestId && !state.liveAssistantRequestId) state.liveAssistantRequestId = String(detail.requestId);
+    if (detail.runId && !state.liveAssistantRunId) state.liveAssistantRunId = String(detail.runId);
+    if (detail.performance && typeof detail.performance === "object") {
+      state.liveAssistantPerformance = normalizeTurnUsage({ ...(state.liveAssistantPerformance || {}), ...detail.performance });
+    }
+    if (delta) state.liveAssistantText = `${state.liveAssistantText || ""}${delta}`;
+    renderLiveAssistantCard();
+    return true;
+  }
+
+  function updateLiveAssistantPerformance(performance, detail = {}) {
+    if (!state.liveAssistantActive || !liveAssistantEventMatches(detail)) return false;
+    if (detail.requestId && !state.liveAssistantRequestId) state.liveAssistantRequestId = String(detail.requestId);
+    if (detail.runId && !state.liveAssistantRunId) state.liveAssistantRunId = String(detail.runId);
+    state.liveAssistantPerformance = normalizeTurnUsage({
+      ...(detail.replace === true ? {} : state.liveAssistantPerformance || {}),
+      ...(performance && typeof performance === "object" ? performance : {}),
+    });
+    renderLiveAssistantCard();
+    return true;
+  }
+
   function clearLiveAssistantText() {
+    state.liveAssistantActive = false;
     state.liveAssistantText = "";
+    state.liveAssistantRequestId = "";
     state.liveAssistantRunId = "";
+    state.liveAssistantProvider = "";
+    state.liveAssistantModel = "";
+    state.liveAssistantStartedAt = "";
+    state.liveAssistantPerformance = null;
     renderLiveAssistantCard();
   }
 
@@ -1226,6 +1327,7 @@ export function createChatRenderingController({
     appendLiveAssistantText,
     appendToolOutput,
     applyMessageSnapshot,
+    beginLiveAssistantGeneration,
     clearCurrentAgentApprovals,
     clearLiveAssistantText,
     clearMessageRefreshTimer,
@@ -1242,5 +1344,6 @@ export function createChatRenderingController({
     replacePendingApprovals,
     scheduleMessageRefresh,
     updateConversationCopyButton,
+    updateLiveAssistantPerformance,
   };
 }

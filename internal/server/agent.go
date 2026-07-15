@@ -170,11 +170,12 @@ func (s *Server) updateAgentModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	// Persist the model and compatible effort in one SQL UPDATE. A model switch
-	// must never leave an old concrete effort attached to a provider that rejects
-	// it; auto is the safe fallback when the target cannot support it.
+	// Persist the model and compatible runtime controls in one SQL UPDATE. A
+	// model switch must not leave reasoning or Fast settings attached to a model
+	// that cannot honor them.
 	effort := s.safeReasoningEffortForCapabilities(r.Context(), current.ReasoningEffort, s.capabilitiesForAgentModel(model))
-	agent, err := s.store.UpdateAgentModel(r.Context(), agentID, model, effort)
+	fastMode := current.FastMode && s.modelCapabilitiesForAgentModel(model).FastMode
+	agent, err := s.store.UpdateAgentModelRuntime(r.Context(), agentID, model, effort, fastMode)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -197,6 +198,17 @@ func (s *Server) capabilitiesForAgentModel(model string) providers.Capabilities 
 		return providers.Capabilities{}
 	}
 	return providers.CapabilitiesFor(provider)
+}
+
+func (s *Server) modelCapabilitiesForAgentModel(model string) providers.ModelCapabilities {
+	if s == nil || s.providers == nil {
+		return providers.ModelCapabilities{}
+	}
+	provider, resolvedModel, err := s.providers.Resolve(model)
+	if err != nil {
+		return providers.ModelCapabilities{}
+	}
+	return providers.ModelCapabilitiesFor(provider, resolvedModel)
 }
 
 func (s *Server) safeReasoningEffortForCapabilities(ctx context.Context, effort string, capabilities providers.Capabilities) string {

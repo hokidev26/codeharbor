@@ -248,6 +248,60 @@ func TestAgentReasoningAndClientIdentityHandlers(t *testing.T) {
 	}
 }
 
+func TestAgentFastModeRequiresModelCapabilityAndDisablesOnModelSwitch(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "codex:gpt-fast", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(fakeModelProvider{name: "codex", modelCapabilities: map[string]providers.ModelCapabilities{"gpt-fast": {FastMode: true}}})
+	registry.Register(fakeModelProvider{name: "basic"})
+	app := New(config.Config{}, store, nil, nil, registry)
+	handler := modelRuntimeTestHandler(app)
+
+	enabled := modelRuntimeRequest(handler, http.MethodPatch, "/agents/"+agent.ID+"/fast-mode", `{"fastMode":true,"model":"codex:gpt-fast","entityGeneration":1}`)
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable Fast mode: %d %s", enabled.Code, enabled.Body.String())
+	}
+	var updated db.Agent
+	if err := json.NewDecoder(enabled.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if !updated.FastMode || updated.EntityGeneration != 2 {
+		t.Fatalf("Fast mode did not persist: %+v", updated)
+	}
+
+	stale := modelRuntimeRequest(handler, http.MethodPatch, "/agents/"+agent.ID+"/fast-mode", `{"fastMode":false,"model":"codex:gpt-fast","entityGeneration":1}`)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("expected stale Fast update conflict, got %d: %s", stale.Code, stale.Body.String())
+	}
+
+	switched := httptest.NewRecorder()
+	switchRequest := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/model", strings.NewReader(`{"model":"basic:model"}`))
+	switchRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(switched, switchRequest)
+	if switched.Code != http.StatusOK {
+		t.Fatalf("switch to basic model: %d %s", switched.Code, switched.Body.String())
+	}
+	if err := json.NewDecoder(switched.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.FastMode {
+		t.Fatalf("model switch should disable unsupported Fast mode: %+v", updated)
+	}
+
+	unsupported := modelRuntimeRequest(handler, http.MethodPatch, "/agents/"+agent.ID+"/fast-mode", `{"fastMode":true,"model":"basic:model"}`)
+	if unsupported.Code != http.StatusBadRequest {
+		t.Fatalf("expected unsupported Fast rejection, got %d: %s", unsupported.Code, unsupported.Body.String())
+	}
+}
+
 func TestAgentReasoningEffortAPIPersistsXHigh(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -310,6 +364,7 @@ func modelRuntimeTestHandler(app *Server) http.Handler {
 	router.Delete("/aggregates/{name}", app.deleteModelAggregate)
 	router.Patch("/runtime/model-settings", app.updateRuntimeModelSettings)
 	router.Patch("/agents/{id}/reasoning", app.updateAgentReasoningEffort)
+	router.Patch("/agents/{id}/fast-mode", app.updateAgentFastMode)
 	router.Get("/client/identity", app.clientIdentity)
 	router.Post("/client/identity/rotate", app.rotateClientIdentity)
 	return router

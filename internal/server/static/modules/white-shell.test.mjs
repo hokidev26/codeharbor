@@ -10,13 +10,27 @@ import {
 } from "./preferences-data.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
+import {
+  createUIShellController,
+  defaultSidebarWidth,
+  maxSidebarWidth,
+  minSidebarWidth,
+  normalizeSidebarWidth,
+  orderPermissionMenuOptions,
+  permissionMenuPrimaryValues,
+  permissionMenuSecondaryValues,
+  sidebarWidthFromPointer,
+  sidebarWidthPreferenceKey,
+} from "./ui-shell.mjs";
 
 const staticRoot = new URL("../", import.meta.url);
 const indexURL = new URL("index.html", staticRoot);
+const appURL = new URL("app.js", staticRoot);
 const appMainURL = new URL("modules/app-main.mjs", staticRoot);
 const chatRenderingURL = new URL("modules/chat-rendering.mjs", staticRoot);
 const settingsPreferencesURL = new URL("modules/settings-preferences.mjs", staticRoot);
 const stylesURL = new URL("styles.css", staticRoot);
+const uiShellURL = new URL("modules/ui-shell.mjs", staticRoot);
 
 class MemoryStorage {
   constructor(entries = []) {
@@ -106,6 +120,17 @@ test("white shell adds the global rail before the conversation sidebar with the 
   assert.equal(new Set(ids).size, ids.length, "white shell must not introduce duplicate IDs");
 });
 
+test("static entry points share throughput and usage-history cache stamps", async () => {
+  const [html, app] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+  ]);
+  assert.equal((html.match(/-fast-mode-1-throughput-1-usage-history-1/g) || []).length, 2);
+  assert.equal((app.match(/-fast-mode-1-throughput-1-usage-history-1/g) || []).length, 1);
+  assert.doesNotMatch(html, /-throughput-1["']/);
+  assert.doesNotMatch(app, /-throughput-1["']/);
+});
+
 test("conversation sidebar keeps navigation content and moves its existing actions into the title bar", async () => {
   const html = await readFile(indexURL, "utf8");
   const header = html.slice(html.indexOf('<header class="session-sidebar-header">'), html.indexOf("</header>", html.indexOf('<header class="session-sidebar-header">')));
@@ -149,6 +174,19 @@ test("composer toolbar precedes the input row while preserving all event IDs", a
   assert.match(composer, /id="sendMessageBtn"[^>]*data-i18n="chat\.send"[^>]*>发送<\/button>/);
 });
 
+test("lightning control is a capability-gated Fast mode toggle", async () => {
+  const [html, styles, appMain] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+  ]);
+  assert.match(html, /id="openProviderLoginBtn"[^>]*class="[^"]*toolbar-lightning-btn[^"]*hidden[^"]*"[^>]*aria-pressed="false"[^>]*data-i18n-title="chat\.fastModeDisabled"/);
+  assert.match(appMain, /openProviderLoginBtn"\)\?\.addEventListener\("click", \(\) => toggleFastMode\(\)\.catch\(showError\)\)/);
+  assert.doesNotMatch(appMain, /openProviderLoginBtn"\)\.addEventListener\("click", \(\) => openSettingsModal\("providers"\)\)/);
+  assert.match(styles, /\.toolbar-lightning-btn\.fast-mode-active\s*\{[\s\S]*?background:\s*#edf0ff/);
+  assert.match(styles, /\.toolbar-lightning-btn\.fast-mode-active svg\s*\{[\s\S]*?fill:\s*currentColor/);
+});
+
 test("permission mode display targets only the permission toolbar pill", async () => {
   const appMain = await readFile(appMainURL, "utf8");
   assert.match(appMain, /querySelector\("\.permission-toolbar-pill \.mode-display"\)/);
@@ -177,20 +215,185 @@ test("chat header exposes the legacy six-tool order with real SVG icons", async 
   assert.match(html, /id="terminalCommandInput"/);
 });
 
-test("desktop conversation layout follows the compact figure-two geometry", async () => {
-  const [styles, chatRendering] = await Promise.all([readFile(stylesURL, "utf8"), readFile(chatRenderingURL, "utf8")]);
-  assert.match(styles, /grid-template-columns:\s*76px 296px minmax\(420px, 1fr\)/);
+test("desktop conversation layout follows the compact resizable geometry", async () => {
+  const [html, styles, appMain, chatRendering] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(chatRenderingURL, "utf8"),
+  ]);
+  assert.match(styles, /grid-template-columns:\s*76px var\(--session-sidebar-width\) minmax\(420px, 1fr\)/);
+  assert.match(styles, /body\.white-shell\.theme-light \.sidebar-resize-handle\s*\{[\s\S]*?position:\s*fixed[\s\S]*?left:\s*calc\(68px \+ var\(--session-sidebar-width\) - 3px\)/);
+  assert.match(styles, /body\.white-shell\.theme-light \.chat-panel\s*\{[\s\S]*?grid-column:\s*3/);
+  assert.match(styles, /body\.white-shell\.theme-light \.terminal-panel\s*\{[\s\S]*?grid-column:\s*4/);
   assert.match(styles, /\.session-sidebar-header\s*\{[\s\S]*?height:\s*62px/);
-  assert.match(styles, /\.composer-wrap\s*\{[\s\S]*?min-height:\s*148px/);
-  assert.match(styles, /\.composer-send-btn,[\s\S]*?width:\s*68px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.composer-wrap\s*\{[\s\S]*?padding:\s*6px 12px 8px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.message-input\s*\{[\s\S]*?min-height:\s*40px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.composer-send-btn\s*\{[\s\S]*?width:\s*34px/);
+  assert.match(styles, /\.sidebar-resize-handle\s*\{[\s\S]*?cursor:\s*col-resize/);
+  assert.match(html, /id="sidebarResizeHandle"[^>]*role="separator"[^>]*aria-valuemin="220"[^>]*aria-valuemax="420"/);
+  assert.match(appMain, /bindSidebarResizer\(\)/);
   assert.match(styles, /\.sidebar-search-wrap\.hidden\s*\{[\s\S]*?display:\s*block !important/);
   assert.match(chatRendering, /class="empty-conversation-state"/);
+});
+
+test("composer selects hide external labels and open titled menus upward", async () => {
+  const [html, styles, uiShell] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(uiShellURL, "utf8"),
+  ]);
+  for (const id of ["modelSelect", "reasoningEffort", "permissionMode"]) {
+    assert.match(html, new RegExp(`data-composer-select="${id}"`));
+  }
+  assert.match(styles, /\.composer-native-select\s*\{[\s\S]*?clip-path:\s*inset\(50%\)/);
+  assert.match(styles, /\.composer-select-popover\s*\{[\s\S]*?position:\s*fixed/);
+  assert.match(styles, /\.composer-select-popover-title\s*\{/);
+  assert.match(styles, /\.composer-select-popover\.composer-permission-popover\s*\{/);
+  assert.match(styles, /\.composer-permission-option-icon svg\s*\{/);
+  assert.match(styles, /\.composer-permission-safety-status\s*\{/);
+  assert.match(uiShell, /heading\.textContent = binding\.label\?\.textContent/);
+  assert.match(uiShell, /menu\.classList\.toggle\("composer-permission-popover", isPermissionMenu\)/);
+  assert.match(uiShell, /appendPermissionSafetyStatus\(\)/);
+  assert.match(uiShell, /menu\.style\.bottom = `\$\{Math\.max\(8,[\s\S]*?- rect\.top \+ 6\)\}px`/);
+  assert.match(uiShell, /binding\.select\.dispatchEvent\(new EventConstructor\("change"/);
+});
+
+test("permission menu groups the real modes in figure-two order", () => {
+  const options = [
+    { value: "readOnly" },
+    { value: "acceptEdits" },
+    { value: "bypassPermissions" },
+    { value: "default" },
+    { value: "dontAsk" },
+  ];
+  assert.deepEqual(permissionMenuPrimaryValues, ["default", "acceptEdits", "bypassPermissions"]);
+  assert.deepEqual(permissionMenuSecondaryValues, ["readOnly", "dontAsk"]);
+  assert.deepEqual(orderPermissionMenuOptions(options).map((option) => option.value), [
+    "default",
+    "acceptEdits",
+    "bypassPermissions",
+    "readOnly",
+    "dontAsk",
+  ]);
+});
+
+test("desktop composer uses the full chat width without centered side gutters", async () => {
+  const styles = await readFile(stylesURL, "utf8");
+  const marker = "/* Final desktop full-width composer override. */";
+  const desktopComposerStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Compact mobile composer", styles.indexOf(marker)));
+  assert.ok(desktopComposerStyles.startsWith(marker));
+  assert.match(desktopComposerStyles, /\[class~="composer-wrap"\][\s\S]*?padding:\s*6px 10px 8px/);
+  assert.match(desktopComposerStyles, /\[class~="composer-toolbar"\][\s\S]*?justify-content:\s*flex-end/);
+  assert.match(desktopComposerStyles, /\[class~="composer-card"\][\s\S]*?width:\s*100%[\s\S]*?max-width:\s*none[\s\S]*?margin:\s*0/);
+  assert.match(desktopComposerStyles, /\[class~="composer-model-field"\][\s\S]*?flex:\s*0 1 300px[\s\S]*?max-width:\s*300px/);
+  assert.match(desktopComposerStyles, /\[class~="toolbar-lightning-btn"\],[\s\S]*?\[class~="composer-actions"\][\s\S]*?display:\s*flex/);
+  assert.match(desktopComposerStyles, /textarea#messageText[\s\S]*?--composer-input-min-height:\s*40px/);
+  assert.match(desktopComposerStyles, /#sendMessageBtn[\s\S]*?width:\s*56px/);
+});
+
+test("mobile header and composer use compact icon-first layouts", async () => {
+  const [html, styles] = await Promise.all([readFile(indexURL, "utf8"), readFile(stylesURL, "utf8")]);
+  const marker = "/* Compact mobile composer: one utility row plus one message row. */";
+  const mobileComposerStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Model provider settings.", styles.indexOf(marker)));
+  assert.ok(mobileComposerStyles.startsWith(marker));
+  assert.match(html, /id="mobileTerminalBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
+  assert.match(html, /id="mobileSearchBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
+  assert.match(html, /id="composerFolderBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
+  assert.match(html, /id="composerTerminalBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
+  assert.match(mobileComposerStyles, /\[class~="mobile-update-pill"\][\s\S]*?display:\s*none !important/);
+  assert.match(mobileComposerStyles, /\[class~="mobile-topbar"\][\s\S]*?height:\s*56px/);
+  assert.match(mobileComposerStyles, /\[class~="composer-card"\][\s\S]*?gap:\s*6px[\s\S]*?border:\s*0/);
+  assert.match(mobileComposerStyles, /\[class~="composer-model-field"\][\s\S]*?flex:\s*1 1 72px/);
+  assert.match(mobileComposerStyles, /\[class~="permission-safety-indicator"\],[\s\S]*?display:\s*none !important/);
+  assert.match(mobileComposerStyles, /textarea#messageText[\s\S]*?--composer-input-min-height:\s*44px/);
+  assert.match(mobileComposerStyles, /#sendMessageBtn[\s\S]*?width:\s*62px[\s\S]*?height:\s*44px/);
+  assert.match(mobileComposerStyles, /\[class~="composer-hints"\][\s\S]*?display:\s*none/);
+});
+
+test("sidebar resize width clamps pointer values and keeps a stable preference key", () => {
+  assert.equal(sidebarWidthPreferenceKey, "autoto.ui.sessionSidebarWidth");
+  assert.equal(normalizeSidebarWidth(undefined), defaultSidebarWidth);
+  assert.equal(normalizeSidebarWidth(100), minSidebarWidth);
+  assert.equal(normalizeSidebarWidth(900), maxSidebarWidth);
+  assert.equal(normalizeSidebarWidth("333.6"), 334);
+  assert.equal(sidebarWidthFromPointer(510, 180), 330);
+  assert.equal(sidebarWidthFromPointer(120, 180), minSidebarWidth);
+});
+
+test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
+  const elementListeners = new Map();
+  const windowListeners = new Map();
+  const classes = new Set();
+  const bodyClasses = new Set();
+  const styleValues = new Map();
+  const attributes = new Map();
+  const storage = new MemoryStorage([[sidebarWidthPreferenceKey, "340"]]);
+  const separator = {
+    classList: {
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+    },
+    addEventListener(name, handler) { elementListeners.set(name, handler); },
+    removeEventListener(name) { elementListeners.delete(name); },
+    setAttribute(name, value) { attributes.set(name, value); },
+    setPointerCapture() {},
+    releasePointerCapture() {},
+  };
+  const shell = { style: { setProperty(name, value) { styleValues.set(name, value); } } };
+  const sidebar = { getBoundingClientRect() { return { left: 100 }; } };
+  const fakeDocument = {
+    body: { classList: { add(name) { bodyClasses.add(name); }, remove(name) { bodyClasses.delete(name); } } },
+    getElementById(id) { return { appShell: shell, sidebarResizeHandle: separator }[id] || null; },
+    querySelector(selector) { return selector === ".sidebar" ? sidebar : null; },
+  };
+  const fakeWindow = {
+    matchMedia() { return { matches: false }; },
+    addEventListener(name, handler) { windowListeners.set(name, handler); },
+    removeEventListener(name) { windowListeners.delete(name); },
+  };
+  const restoreDocument = replaceGlobal("document", fakeDocument);
+  const restoreWindow = replaceGlobal("window", fakeWindow);
+  const restoreRAF = replaceGlobal("requestAnimationFrame", (callback) => callback());
+  try {
+    const controller = createUIShellController({ state: {}, resizeTerminal() {} });
+    const cleanup = controller.bindSidebarResizer({ storage });
+    assert.equal(styleValues.get("--session-sidebar-width"), "340px");
+    assert.equal(attributes.get("aria-valuenow"), "340");
+
+    let prevented = false;
+    elementListeners.get("keydown")({ key: "ArrowRight", shiftKey: false, preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(styleValues.get("--session-sidebar-width"), "348px");
+    assert.equal(storage.getItem(sidebarWidthPreferenceKey), "348");
+
+    elementListeners.get("pointerdown")({ button: 0, pointerId: 1, clientX: 450, preventDefault() {} });
+    assert.equal(classes.has("is-dragging"), true);
+    assert.equal(bodyClasses.has("sidebar-resizing"), true);
+    windowListeners.get("pointermove")({ clientX: 500, preventDefault() {} });
+    windowListeners.get("pointerup")({ pointerId: 1 });
+    assert.equal(styleValues.get("--session-sidebar-width"), "400px");
+    assert.equal(storage.getItem(sidebarWidthPreferenceKey), "400");
+    assert.equal(classes.has("is-dragging"), false);
+
+    elementListeners.get("dblclick")();
+    assert.equal(styleValues.get("--session-sidebar-width"), `${defaultSidebarWidth}px`);
+    cleanup();
+    assert.equal(elementListeners.size, 0);
+    assert.equal(windowListeners.size, 0);
+  } finally {
+    restoreRAF();
+    restoreWindow();
+    restoreDocument();
+  }
 });
 
 test("legacy chat alignment keeps the composer untouched and flattens the transcript", async () => {
   const [styles, chatRendering] = await Promise.all([readFile(stylesURL, "utf8"), readFile(chatRenderingURL, "utf8")]);
   const marker = "/* Legacy chat transcript alignment. Intentionally excludes every composer/input selector. */";
-  const legacyChatStyles = styles.slice(styles.indexOf(marker));
+  const legacyStart = styles.indexOf(marker);
+  const legacyEnd = styles.indexOf("/* Codex account management", legacyStart);
+  const legacyChatStyles = styles.slice(legacyStart, legacyEnd);
 
   assert.ok(legacyChatStyles.startsWith(marker));
   assert.match(legacyChatStyles, /\.chat-header\s*\{[\s\S]*?height:\s*64px/);

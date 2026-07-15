@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 35
+const CurrentDBVersion = 36
 
 type migration struct {
 	version int
@@ -53,6 +53,7 @@ var migrations = []migration{
 	{version: 33, name: "per-user agent message drafts", up: migrateV33MessageDrafts},
 	{version: 34, name: "immutable message corrections", up: migrateV34MessageCorrections},
 	{version: 35, name: "project memberships", up: migrateV35ProjectMembers},
+	{version: 36, name: "api request usage history indexes", up: migrateV36APIRequestUsageIndexes},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1162,6 +1163,18 @@ JOIN (
   SELECT id FROM users WHERE TRIM(id) <> '' ORDER BY created_at ASC, id ASC LIMIT 1
 ) u
 WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id)`)
+	return err
+}
+
+func migrateV36APIRequestUsageIndexes(ctx context.Context, tx *sql.Tx) error {
+	exists, err := tableExists(ctx, tx, "api_requests")
+	if err != nil || !exists {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_api_requests_created ON api_requests(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_api_requests_provider_model_created ON api_requests(provider, model, created_at DESC, id DESC);
+`)
 	return err
 }
 

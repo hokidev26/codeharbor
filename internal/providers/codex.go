@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"autoto/internal/codexauth"
@@ -25,18 +26,25 @@ const (
 	codexAccessTokenRefreshAhead = 5 * time.Minute
 	codexUnknownExpiryRefreshAge = 8 * 24 * time.Hour
 	codexMaxResponseBytes        = 4 << 20
+
+	// Snapshot of explicit Fast tiers from OpenAI's public Codex model catalog.
+	// It is used only for the canonical Codex endpoint when the authenticated
+	// model catalog is unavailable; unknown model names are never inferred.
+	codexFallbackFastModelCatalog = `{"models":[{"slug":"gpt-5.6-sol","additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","additional_speed_tiers":["fast"]},{"slug":"gpt-5.5","additional_speed_tiers":["fast"]},{"slug":"gpt-5.4","additional_speed_tiers":["fast"]}]}`
 )
 
 type CodexProvider struct {
-	cfg             config.ProviderConfig
-	store           *codexauth.Store
-	client          *http.Client
-	refreshClient   *http.Client
-	refreshEndpoint string
-	clock           func() time.Time
-	telemetry       AccountTelemetry
-	endpointErr     error
-	refreshGate     chan struct{}
+	cfg                 config.ProviderConfig
+	store               *codexauth.Store
+	client              *http.Client
+	refreshClient       *http.Client
+	refreshEndpoint     string
+	clock               func() time.Time
+	telemetry           AccountTelemetry
+	endpointErr         error
+	refreshGate         chan struct{}
+	modelCapabilitiesMu sync.RWMutex
+	modelCapabilities   map[string]ModelCapabilities
 }
 
 func NewCodexProvider(cfg config.ProviderConfig) *CodexProvider {
@@ -54,14 +62,15 @@ func NewCodexProvider(cfg config.ProviderConfig) *CodexProvider {
 		refreshEndpoint = configuredEndpoint
 	}
 	return &CodexProvider{
-		cfg:             cfg,
-		store:           codexauth.NewStore(cfg.CredentialStorePath),
-		client:          &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRedirectPolicy},
-		refreshClient:   &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRefreshRedirectPolicy},
-		refreshEndpoint: refreshEndpoint,
-		clock:           time.Now,
-		endpointErr:     ValidateCodexProviderConfig(cfg),
-		refreshGate:     make(chan struct{}, 1),
+		cfg:               cfg,
+		store:             codexauth.NewStore(cfg.CredentialStorePath),
+		client:            &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRedirectPolicy},
+		refreshClient:     &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRefreshRedirectPolicy},
+		refreshEndpoint:   refreshEndpoint,
+		clock:             time.Now,
+		endpointErr:       ValidateCodexProviderConfig(cfg),
+		refreshGate:       make(chan struct{}, 1),
+		modelCapabilities: fallbackCodexModelCapabilities(cfg.BaseURL),
 	}
 }
 
@@ -77,6 +86,27 @@ func (p *CodexProvider) Capabilities() Capabilities {
 	}
 }
 
+func (p *CodexProvider) ModelCapabilities(model string) ModelCapabilities {
+	if p == nil {
+		return ModelCapabilities{}
+	}
+	p.modelCapabilitiesMu.RLock()
+	defer p.modelCapabilitiesMu.RUnlock()
+	return p.modelCapabilities[strings.TrimSpace(model)]
+}
+
+func (p *CodexProvider) replaceModelCapabilities(capabilities map[string]ModelCapabilities) {
+	if p == nil {
+		return
+	}
+	if capabilities == nil {
+		capabilities = make(map[string]ModelCapabilities)
+	}
+	p.modelCapabilitiesMu.Lock()
+	p.modelCapabilities = capabilities
+	p.modelCapabilitiesMu.Unlock()
+}
+
 func (p *CodexProvider) Configured() bool {
 	return p != nil && p.endpointErr == nil && p.store != nil && p.store.Configured()
 }
@@ -87,6 +117,7 @@ func (p *CodexProvider) ListModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	if len(credentials) == 0 {
+		p.replaceModelCapabilities(fallbackCodexModelCapabilities(p.cfg.BaseURL))
 		return fallbackCodexModels(p.cfg.Model), nil
 	}
 	var lastErr error
@@ -118,7 +149,7 @@ func (p *CodexProvider) ListModels(ctx context.Context) ([]string, error) {
 			}
 			return nil, lastErr
 		}
-		models, parseErr := parseCodexModels(response.Body)
+		models, modelCapabilities, parseErr := parseCodexModelCatalog(response.Body)
 		response.Body.Close()
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -128,8 +159,10 @@ func (p *CodexProvider) ListModels(ctx context.Context) ([]string, error) {
 			continue
 		}
 		if len(models) == 0 {
+			p.replaceModelCapabilities(fallbackCodexModelCapabilities(p.cfg.BaseURL))
 			return fallbackCodexModels(p.cfg.Model), nil
 		}
+		p.replaceModelCapabilities(modelCapabilities)
 		return models, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -156,6 +189,14 @@ func (p *CodexProvider) Generate(ctx context.Context, req GenerateRequest) (<-ch
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
 		model = p.cfg.Model
+	}
+	if req.FastMode && !p.ModelCapabilities(model).FastMode {
+		if _, listErr := p.ListModels(ctx); listErr != nil {
+			return nil, listErr
+		}
+		if !p.ModelCapabilities(model).FastMode {
+			return nil, fmt.Errorf("%w by %s provider model %q", ErrFastModeUnsupported, p.cfg.Name, model)
+		}
 	}
 	payload, err := buildCodexResponsesPayload(req, model, reasoningEffort, p.cfg.InstallationID, p.cfg.ClientVersion)
 	if err != nil {
@@ -545,6 +586,9 @@ func buildCodexResponsesPayload(req GenerateRequest, model, reasoningEffort, ins
 	if reasoningEffort != "" {
 		payload["reasoning"] = map[string]any{"effort": reasoningEffort}
 	}
+	if req.FastMode {
+		payload["service_tier"] = "priority"
+	}
 	metadata := map[string]string{}
 	if installationID != "" {
 		metadata["x-codex-installation-id"] = installationID
@@ -819,48 +863,132 @@ func emitProviderEvent(ctx context.Context, out chan<- Event, event Event) bool 
 	}
 }
 
+type codexModelCatalogEntry struct {
+	Slug                  string          `json:"slug"`
+	ID                    string          `json:"id"`
+	FastMode              *bool           `json:"fast_mode"`
+	SupportsFastMode      *bool           `json:"supports_fast_mode"`
+	ServiceTier           json.RawMessage `json:"service_tier"`
+	ServiceTiers          json.RawMessage `json:"service_tiers"`
+	SupportedServiceTiers json.RawMessage `json:"supported_service_tiers"`
+	AdditionalSpeedTiers  json.RawMessage `json:"additional_speed_tiers"`
+	SupportedSpeedTiers   json.RawMessage `json:"supported_speed_tiers"`
+}
+
 func parseCodexModels(reader io.Reader) ([]string, error) {
+	models, _, err := parseCodexModelCatalog(reader)
+	return models, err
+}
+
+func parseCodexModelCatalog(reader io.Reader) ([]string, map[string]ModelCapabilities, error) {
 	var body struct {
-		Models []struct {
-			Slug string `json:"slug"`
-			ID   string `json:"id"`
-		} `json:"models"`
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Models []codexModelCatalogEntry `json:"models"`
+		Data   []codexModelCatalogEntry `json:"data"`
 	}
 	if err := decodeLimitedJSON(reader, codexMaxResponseBytes, &body); err != nil {
-		return nil, errors.New("Codex 模型列表响应无效")
+		return nil, nil, errors.New("Codex 模型列表响应无效")
 	}
 	seen := map[string]struct{}{}
+	capabilities := make(map[string]ModelCapabilities)
 	models := make([]string, 0, len(body.Models)+len(body.Data))
-	for _, item := range body.Models {
+	appendEntry := func(item codexModelCatalogEntry) {
 		model := strings.TrimSpace(item.Slug)
 		if model == "" {
 			model = strings.TrimSpace(item.ID)
 		}
 		if model == "" {
-			continue
+			return
+		}
+		if supportsFastMode, known := codexModelEntryFastModeCapability(item); known {
+			current := capabilities[model]
+			current.FastMode = current.FastMode || supportsFastMode
+			current.FastModeKnown = true
+			capabilities[model] = current
 		}
 		if _, exists := seen[model]; exists {
-			continue
+			return
 		}
 		seen[model] = struct{}{}
 		models = append(models, model)
+	}
+	for _, item := range body.Models {
+		appendEntry(item)
 	}
 	for _, item := range body.Data {
-		model := strings.TrimSpace(item.ID)
-		if model == "" {
-			continue
-		}
-		if _, exists := seen[model]; exists {
-			continue
-		}
-		seen[model] = struct{}{}
-		models = append(models, model)
+		appendEntry(item)
 	}
 	sort.Strings(models)
-	return models, nil
+	return models, capabilities, nil
+}
+
+func codexModelEntryFastModeCapability(item codexModelCatalogEntry) (bool, bool) {
+	supported := false
+	known := false
+	for _, value := range []*bool{item.FastMode, item.SupportsFastMode} {
+		if value == nil {
+			continue
+		}
+		known = true
+		supported = supported || *value
+	}
+	for _, value := range []json.RawMessage{
+		item.ServiceTier,
+		item.ServiceTiers,
+		item.SupportedServiceTiers,
+		item.AdditionalSpeedTiers,
+		item.SupportedSpeedTiers,
+	} {
+		fieldSupportsFastMode, fieldKnown := codexSpeedTierCapability(value)
+		known = known || fieldKnown
+		supported = supported || fieldSupportsFastMode
+	}
+	return supported, known
+}
+
+func codexSpeedTierCapability(value json.RawMessage) (bool, bool) {
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 || bytes.Equal(value, []byte("null")) {
+		return false, false
+	}
+	var decoded any
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return false, false
+	}
+	return codexSpeedTierSupportsFastMode(decoded), true
+}
+
+func codexSpeedTierSupportsFastMode(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "fast", "priority":
+			return true
+		default:
+			return false
+		}
+	case []any:
+		for _, item := range typed {
+			if codexSpeedTierSupportsFastMode(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range typed {
+			normalizedKey := strings.ToLower(strings.TrimSpace(key))
+			if normalizedKey == "fast_mode" || normalizedKey == "supports_fast_mode" {
+				if enabled, ok := item.(bool); ok && enabled {
+					return true
+				}
+			}
+			switch normalizedKey {
+			case "service_tier", "service_tiers", "tier", "name", "id", "slug", "value", "speed", "mode", "additional_speed_tiers", "supported_speed_tiers":
+				if codexSpeedTierSupportsFastMode(item) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func decodeLimitedJSON(reader io.Reader, limit int64, dst any) error {
@@ -869,6 +997,17 @@ func decodeLimitedJSON(reader io.Reader, limit int64, dst any) error {
 		return errors.New("response too large")
 	}
 	return json.Unmarshal(data, dst)
+}
+
+func fallbackCodexModelCapabilities(baseURL string) map[string]ModelCapabilities {
+	if strings.TrimRight(strings.TrimSpace(baseURL), "/") != codexauth.DefaultBaseURL {
+		return make(map[string]ModelCapabilities)
+	}
+	_, capabilities, err := parseCodexModelCatalog(strings.NewReader(codexFallbackFastModelCatalog))
+	if err != nil {
+		return make(map[string]ModelCapabilities)
+	}
+	return capabilities
 }
 
 func fallbackCodexModels(model string) []string {

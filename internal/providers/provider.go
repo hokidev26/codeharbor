@@ -63,6 +63,7 @@ type GenerateRequest struct {
 	Messages        []Message
 	Tools           []ToolSpec
 	ReasoningEffort string
+	FastMode        bool
 }
 
 type Event struct {
@@ -95,6 +96,17 @@ type CapabilityProvider interface {
 	Capabilities() Capabilities
 }
 
+// ModelCapabilities are optional features that can differ between models of
+// the same provider. Unknown models default to no optional model features.
+type ModelCapabilities struct {
+	FastMode      bool `json:"fastMode"`
+	FastModeKnown bool `json:"-"`
+}
+
+type ModelCapabilityProvider interface {
+	ModelCapabilities(model string) ModelCapabilities
+}
+
 // ConfigurationProvider reports whether a runtime provider currently has the
 // credentials required to serve requests. It is intentionally optional so API
 // key providers can continue using config-derived readiness.
@@ -114,6 +126,13 @@ func CapabilitiesFor(provider Provider) Capabilities {
 		return canonicalCapabilities(provider.Capabilities())
 	}
 	return Capabilities{}
+}
+
+func ModelCapabilitiesFor(provider Provider, model string) ModelCapabilities {
+	if provider, ok := provider.(ModelCapabilityProvider); ok {
+		return provider.ModelCapabilities(strings.TrimSpace(model))
+	}
+	return ModelCapabilities{}
 }
 
 // NewProvider constructs a provider adapter from a normalized provider config.

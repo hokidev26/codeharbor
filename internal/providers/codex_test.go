@@ -32,6 +32,52 @@ func newCodexRefreshTestProvider(upstreamURL, storeDir string) *CodexProvider {
 	})
 }
 
+func TestCodexFallbackFastCapabilitiesUseExplicitOfficialCatalogEntries(t *testing.T) {
+	provider := NewCodexProvider(config.ProviderConfig{
+		Name:    "codex",
+		Type:    config.ProviderTypeCodex,
+		BaseURL: codexauth.DefaultBaseURL,
+		Model:   "gpt-5.5",
+	})
+	fast := ModelCapabilitiesFor(provider, "gpt-5.5")
+	if !fast.FastModeKnown || !fast.FastMode {
+		t.Fatalf("expected official gpt-5.5 Fast fallback capability, got %+v", fast)
+	}
+	if unknown := ModelCapabilitiesFor(provider, "gpt-5.2"); unknown.FastModeKnown || unknown.FastMode {
+		t.Fatalf("unexpected inferred Fast capability for unmarked model: %+v", unknown)
+	}
+
+	custom := NewCodexProvider(config.ProviderConfig{
+		Name:                           "codex",
+		Type:                           config.ProviderTypeCodex,
+		BaseURL:                        "http://127.0.0.1:7789",
+		Model:                          "gpt-5.5",
+		CodexAllowInsecureTestEndpoint: true,
+	})
+	if capability := ModelCapabilitiesFor(custom, "gpt-5.5"); capability.FastModeKnown || capability.FastMode {
+		t.Fatalf("custom Codex endpoints must not inherit the official fallback catalog: %+v", capability)
+	}
+}
+
+func TestParseCodexModelCatalogMarksFastModeKnownOnlyForExplicitFields(t *testing.T) {
+	models, capabilities, err := parseCodexModelCatalog(strings.NewReader(`{"models":[{"slug":"unknown"},{"slug":"standard","additional_speed_tiers":[]},{"slug":"fast","service_tiers":[{"id":"priority"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(models, ",") != "fast,standard,unknown" {
+		t.Fatalf("unexpected models: %v", models)
+	}
+	if capability := capabilities["unknown"]; capability.FastModeKnown || capability.FastMode {
+		t.Fatalf("missing Fast fields must stay unknown: %+v", capability)
+	}
+	if capability := capabilities["standard"]; !capability.FastModeKnown || capability.FastMode {
+		t.Fatalf("explicit empty speed tiers must be known unsupported: %+v", capability)
+	}
+	if capability := capabilities["fast"]; !capability.FastModeKnown || !capability.FastMode {
+		t.Fatalf("priority tier must be known supported: %+v", capability)
+	}
+}
+
 func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 	var responseRequests int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,14 +96,14 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 				t.Fatalf("unexpected client_version query: %q", got)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-z"},{"slug":"gpt-a"}]}`))
+			_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-z","additional_speed_tiers":[]},{"slug":"gpt-a","service_tiers":[{"service_tier":"priority","name":"Fast"}]}]}`))
 		case "/responses":
 			responseRequests++
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["model"] != "gpt-a" || body["stream"] != true || body["store"] != false || body["tool_choice"] != "auto" {
+			if body["model"] != "gpt-a" || body["stream"] != true || body["store"] != false || body["tool_choice"] != "auto" || body["service_tier"] != "priority" {
 				t.Fatalf("unexpected Codex request body: %+v", body)
 			}
 			reasoning, _ := body["reasoning"].(map[string]any)
@@ -100,13 +146,18 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 	if strings.Join(models, ",") != "gpt-a,gpt-z" {
 		t.Fatalf("unexpected models: %v", models)
 	}
+	if !ModelCapabilitiesFor(provider, "gpt-a").FastMode || ModelCapabilitiesFor(provider, "gpt-z").FastMode {
+		t.Fatalf("unexpected model Fast capabilities: gpt-a=%+v gpt-z=%+v", ModelCapabilitiesFor(provider, "gpt-a"), ModelCapabilitiesFor(provider, "gpt-z"))
+	}
 
 	events, err := provider.Generate(context.Background(), GenerateRequest{
+
 		Model:           "gpt-a",
 		SystemPrompt:    "be useful",
 		Messages:        []Message{{Role: "user", Content: "hello"}},
 		Tools:           []ToolSpec{{Name: "lookup", Description: "lookup", Schema: map[string]any{"type": "object"}}},
 		ReasoningEffort: "xhigh",
+		FastMode:        true,
 	})
 	if err != nil {
 		t.Fatal(err)

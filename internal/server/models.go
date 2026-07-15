@@ -25,24 +25,25 @@ type providerManagementResponse struct {
 }
 
 type modelProviderResponse struct {
-	Name           string                      `json:"name"`
-	Type           string                      `json:"type"`
-	Profile        string                      `json:"profile,omitempty"`
-	BaseURL        string                      `json:"baseUrl,omitempty"`
-	DefaultModel   string                      `json:"defaultModel"`
-	MaxTokens      int64                       `json:"maxTokens,omitempty"`
-	Models         []string                    `json:"models"`
-	ModelsSource   string                      `json:"modelsSource"`
-	Available      bool                        `json:"available"`
-	Discovered     bool                        `json:"discovered"`
-	Configured     bool                        `json:"configured"`
-	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
-	Enabled        bool                        `json:"enabled"`
-	Origin         string                      `json:"origin"`
-	Capabilities   providers.Capabilities      `json:"capabilities"`
-	Management     *providerManagementResponse `json:"management,omitempty"`
-	ManagementURL  string                      `json:"managementUrl,omitempty"`
-	Error          string                      `json:"error,omitempty"`
+	Name              string                                 `json:"name"`
+	Type              string                                 `json:"type"`
+	Profile           string                                 `json:"profile,omitempty"`
+	BaseURL           string                                 `json:"baseUrl,omitempty"`
+	DefaultModel      string                                 `json:"defaultModel"`
+	MaxTokens         int64                                  `json:"maxTokens,omitempty"`
+	Models            []string                               `json:"models"`
+	ModelsSource      string                                 `json:"modelsSource"`
+	Available         bool                                   `json:"available"`
+	Discovered        bool                                   `json:"discovered"`
+	Configured        bool                                   `json:"configured"`
+	APIKeyOptional    bool                                   `json:"apiKeyOptional,omitempty"`
+	Enabled           bool                                   `json:"enabled"`
+	Origin            string                                 `json:"origin"`
+	Capabilities      providers.Capabilities                 `json:"capabilities"`
+	ModelCapabilities map[string]providers.ModelCapabilities `json:"modelCapabilities,omitempty"`
+	Management        *providerManagementResponse            `json:"management,omitempty"`
+	ManagementURL     string                                 `json:"managementUrl,omitempty"`
+	Error             string                                 `json:"error,omitempty"`
 }
 
 // providerSettingsMetadata is ready for the settings response to compose with
@@ -105,13 +106,31 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	if err != nil {
 		response.ModelsSource = "fallback"
 		response.Error = friendlyModelListError(provider, err)
+		attachFastModelCapabilities(&response, registered)
 		return response
 	}
 	response.Models = normalizeModelNames(models, provider.Model)
+	attachFastModelCapabilities(&response, registered)
 	response.ModelsSource = "remote"
 	response.Discovered = len(response.Models) > 0
 	response.Available = response.Configured && response.Discovered
 	return response
+}
+
+func attachFastModelCapabilities(response *modelProviderResponse, provider providers.Provider) {
+	if response == nil || provider == nil {
+		return
+	}
+	for _, model := range response.Models {
+		capabilities := providers.ModelCapabilitiesFor(provider, model)
+		if !capabilities.FastModeKnown || !capabilities.FastMode {
+			continue
+		}
+		if response.ModelCapabilities == nil {
+			response.ModelCapabilities = make(map[string]providers.ModelCapabilities)
+		}
+		response.ModelCapabilities[model] = capabilities
+	}
 }
 
 func (s *Server) providerConfigured(provider config.ProviderSummary) bool {

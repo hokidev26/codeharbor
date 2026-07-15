@@ -130,7 +130,7 @@ func (p *AggregateProvider) Generate(ctx context.Context, req GenerateRequest) (
 				return
 			}
 
-			candidateReq := aggregateRequestForCapabilities(req, CapabilitiesFor(candidate))
+			candidateReq := aggregateRequestForCapabilities(req, CapabilitiesFor(candidate), ModelCapabilitiesFor(candidate, model))
 			candidateReq.Model = model
 			events, generateErr := candidate.Generate(ctx, candidateReq)
 			if generateErr != nil {
@@ -264,9 +264,12 @@ func (p *AggregateProvider) resolveCandidate(member string) (Provider, string, e
 	return provider, modelName, nil
 }
 
-func aggregateRequestForCapabilities(req GenerateRequest, capabilities Capabilities) GenerateRequest {
+func aggregateRequestForCapabilities(req GenerateRequest, capabilities Capabilities, modelCapabilities ModelCapabilities) GenerateRequest {
 	if !capabilities.Tools {
 		req.Tools = nil
+	}
+	if !modelCapabilities.FastMode {
+		req.FastMode = false
 	}
 	// Aggregate definitions can change between catalog reads and dispatch. Keep
 	// a direct aggregate caller safe as well by downgrading a now-unsupported

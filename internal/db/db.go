@@ -124,6 +124,7 @@ type Agent struct {
 	PermissionGeneration   int64  `json:"permissionGeneration"`
 	ExecutionGeneration    int64  `json:"executionGeneration"`
 	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
+	FastMode               bool   `json:"fastMode"`
 	ExecutionDeviceID      string `json:"executionDeviceId"`
 	Status                 string `json:"status"`
 	PlanMode               bool   `json:"planMode"`
@@ -157,20 +158,32 @@ type NavigationConversation struct {
 	LastActivityAt    string `json:"lastActivityAt"`
 }
 
+type MessageTurnUsage struct {
+	InputTokens       int64   `json:"inputTokens,omitempty"`
+	OutputTokens      int64   `json:"outputTokens,omitempty"`
+	CachedInputTokens int64   `json:"cachedInputTokens,omitempty"`
+	ReasoningTokens   int64   `json:"reasoningTokens,omitempty"`
+	TTFTMS            int64   `json:"ttftMs,omitempty"`
+	DurationMS        int64   `json:"durationMs,omitempty"`
+	TokensPerSecond   float64 `json:"tokensPerSecond,omitempty"`
+	Estimated         bool    `json:"estimated,omitempty"`
+}
+
 type Message struct {
-	ID                    string          `json:"id"`
-	AgentID               string          `json:"agentId"`
-	RunID                 string          `json:"runId,omitempty"`
-	Role                  string          `json:"role"`
-	ContentJSON           json.RawMessage `json:"contentJson,omitempty"`
-	ProviderStateJSON     json.RawMessage `json:"-"`
-	ContentText           string          `json:"contentText"`
-	ParentToolID          string          `json:"parentToolUseId,omitempty"`
-	CommandText           string          `json:"commandText,omitempty"`
-	CorrectionOfMessageID string          `json:"correctionOfMessageId,omitempty"`
-	CreatedBy             string          `json:"createdBy,omitempty"`
-	CreatedAt             string          `json:"createdAt"`
-	Attachments           []Attachment    `json:"attachments,omitempty"`
+	ID                    string            `json:"id"`
+	AgentID               string            `json:"agentId"`
+	RunID                 string            `json:"runId,omitempty"`
+	Role                  string            `json:"role"`
+	ContentJSON           json.RawMessage   `json:"contentJson,omitempty"`
+	ProviderStateJSON     json.RawMessage   `json:"-"`
+	ContentText           string            `json:"contentText"`
+	TurnUsage             *MessageTurnUsage `json:"turnUsage,omitempty"`
+	ParentToolID          string            `json:"parentToolUseId,omitempty"`
+	CommandText           string            `json:"commandText,omitempty"`
+	CorrectionOfMessageID string            `json:"correctionOfMessageId,omitempty"`
+	CreatedBy             string            `json:"createdBy,omitempty"`
+	CreatedAt             string            `json:"createdAt"`
+	Attachments           []Attachment      `json:"attachments,omitempty"`
 }
 
 type MessagePage struct {
@@ -2170,14 +2183,15 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 	return s.GetWorkline(ctx, sourceWorklineID)
 }
 
-const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
+const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(fast_mode,0), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
 
 type agentScanner func(dest ...any) error
 
 func scanAgent(scan agentScanner) (Agent, error) {
 	var agent Agent
-	var planMode int
-	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &agent.ExecutionDeviceID, &agent.Status, &planMode, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	var fastMode, planMode int
+	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &fastMode, &agent.ExecutionDeviceID, &agent.Status, &planMode, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	agent.FastMode = fastMode != 0
 	agent.PlanMode = planMode != 0
 	return agent, err
 }
@@ -2237,12 +2251,50 @@ func (s *Store) UpdateAgentModel(ctx context.Context, id, model string, reasonin
 	return s.GetAgent(ctx, id)
 }
 
+func (s *Store) UpdateAgentModelRuntime(ctx context.Context, id, model, reasoningEffort string, fastMode bool) (Agent, error) {
+	id = strings.TrimSpace(id)
+	model = strings.TrimSpace(model)
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if err := validateP2P3Text("agent id", id, 128, true, false); err != nil {
+		return Agent{}, err
+	}
+	if err := validateP2P3Text("agent model", model, 256, true, false); err != nil {
+		return Agent{}, err
+	}
+	if !validAgentReasoningEffort(reasoningEffort, true) {
+		return Agent{}, errors.New("invalid agent reasoning effort")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = NULLIF(?,''), fast_mode = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, model, reasoningEffort, boolInt(fastMode), Now(), id)
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, sql.ErrNoRows
+	}
+	return s.GetAgent(ctx, id)
+}
+
 func (s *Store) UpdateAgentReasoningEffort(ctx context.Context, id, reasoningEffort string) (Agent, error) {
 	reasoningEffort = strings.TrimSpace(reasoningEffort)
 	if !validAgentReasoningEffort(reasoningEffort, true) {
 		return Agent{}, errors.New("invalid agent reasoning effort")
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE agents SET reasoning_effort = NULLIF(?,''), entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, reasoningEffort, Now(), strings.TrimSpace(id))
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, sql.ErrNoRows
+	}
+	return s.GetAgent(ctx, id)
+}
+
+func (s *Store) UpdateAgentFastMode(ctx context.Context, id string, fastMode bool) (Agent, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET fast_mode = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, boolInt(fastMode), Now(), strings.TrimSpace(id))
 	if err != nil {
 		return Agent{}, err
 	}
@@ -2323,6 +2375,14 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 		content, _ := json.Marshal([]map[string]string{{"type": "text", "text": msg.ContentText}})
 		msg.ContentJSON = content
 	}
+	turnUsageJSON := ""
+	if msg.TurnUsage != nil {
+		encoded, err := json.Marshal(msg.TurnUsage)
+		if err != nil {
+			return Message{}, err
+		}
+		turnUsageJSON = string(encoded)
+	}
 	createdBy := msg.CreatedBy
 	if createdBy == "api" {
 		createdBy = ""
@@ -2332,7 +2392,7 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 		return Message{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, provider_state_json, content_text, command_text, correction_of_message_id, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), string(msg.ProviderStateJSON), msg.ContentText, nullEmpty(msg.CommandText), msg.CorrectionOfMessageID, createdBy, msg.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, provider_state_json, content_text, turn_usage_json, command_text, correction_of_message_id, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), string(msg.ProviderStateJSON), msg.ContentText, turnUsageJSON, nullEmpty(msg.CommandText), msg.CorrectionOfMessageID, createdBy, msg.CreatedAt); err != nil {
 		return Message{}, err
 	}
 	storedAttachments := make([]Attachment, 0, len(attachments))
@@ -2470,7 +2530,7 @@ func (s *Store) ListMessagesPage(ctx context.Context, agentID, before string, li
 	if err != nil {
 		return MessagePage{}, err
 	}
-	query := `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ?`
+	query := `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ?`
 	args := []any{agentID}
 	if cursor.ID != "" {
 		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
@@ -2546,7 +2606,7 @@ func decodeMessageCursor(value string) (messageCursor, error) {
 }
 
 func (s *Store) listMessages(ctx context.Context, agentID string) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC, id ASC`, agentID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC, id ASC`, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -2558,8 +2618,8 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	messages := make([]Message, 0)
 	for rows.Next() {
 		var m Message
-		var raw, providerState string
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &providerState, &m.ContentText, &m.ParentToolID, &m.CommandText, &m.CorrectionOfMessageID, &m.CreatedBy, &m.CreatedAt); err != nil {
+		var raw, providerState, turnUsage string
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &providerState, &m.ContentText, &turnUsage, &m.ParentToolID, &m.CommandText, &m.CorrectionOfMessageID, &m.CreatedBy, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if raw != "" {
@@ -2567,6 +2627,12 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		}
 		if providerState != "" {
 			m.ProviderStateJSON = json.RawMessage(providerState)
+		}
+		if turnUsage != "" {
+			var usage MessageTurnUsage
+			if json.Unmarshal([]byte(turnUsage), &usage) == nil {
+				m.TurnUsage = &usage
+			}
 		}
 		messages = append(messages, m)
 	}

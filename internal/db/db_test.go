@@ -173,19 +173,44 @@ func TestAddAPIRequestPersistsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(map[string]any{"id": "raw"})
-	request, err := store.AddAPIRequest(ctx, APIRequest{AgentID: agent.ID, MessageID: message.ID, Provider: "openai", Model: "gpt-test", InputTokens: 10, OutputTokens: 4, CachedInputTokens: 2, ReasoningTokens: 1, DurationMS: 123, ErrorMessage: "", RawDumpJSON: raw})
+	request, err := store.AddAPIRequest(ctx, APIRequest{AgentID: agent.ID, MessageID: message.ID, Provider: "openai", Model: "gpt-test", InputTokens: 10, OutputTokens: 4, CachedInputTokens: 2, ReasoningTokens: 1, TTFTMS: 23, DurationMS: 123, ErrorMessage: "", RawDumpJSON: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if request.ID == "" || request.Kind != "model" || request.CreatedAt == "" {
 		t.Fatalf("unexpected request metadata: %+v", request)
 	}
-	var count, inputTokens, outputTokens int64
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM api_requests WHERE agent_id = ? AND message_id = ?`, agent.ID, message.ID).Scan(&count, &inputTokens, &outputTokens); err != nil {
+	var count, inputTokens, outputTokens, ttftMS int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(MAX(ttft_ms),0) FROM api_requests WHERE agent_id = ? AND message_id = ?`, agent.ID, message.ID).Scan(&count, &inputTokens, &outputTokens, &ttftMS); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || inputTokens != 10 || outputTokens != 4 {
-		t.Fatalf("unexpected stored api request stats: count=%d input=%d output=%d", count, inputTokens, outputTokens)
+	if count != 1 || inputTokens != 10 || outputTokens != 4 || ttftMS != 23 {
+		t.Fatalf("unexpected stored api request stats: count=%d input=%d output=%d ttft=%d", count, inputTokens, outputTokens, ttftMS)
+	}
+}
+
+func TestAddMessageRoundTripsTurnUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := &MessageTurnUsage{InputTokens: 12, OutputTokens: 40, CachedInputTokens: 3, ReasoningTokens: 2, TTFTMS: 250, DurationMS: 2250, TokensPerSecond: 20}
+	message, err := store.AddMessage(ctx, Message{AgentID: agent.ID, Role: "assistant", ContentText: "hello", TurnUsage: usage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ListMessagesPage(ctx, agent.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 1 || page.Messages[0].ID != message.ID || page.Messages[0].TurnUsage == nil || *page.Messages[0].TurnUsage != *usage {
+		t.Fatalf("unexpected turn usage round trip: %+v", page.Messages)
 	}
 }
 

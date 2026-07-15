@@ -18,16 +18,21 @@ import (
 )
 
 type fakeModelProvider struct {
-	name         string
-	models       []string
-	err          error
-	capabilities providers.Capabilities
-	listCalls    *int
+	name              string
+	models            []string
+	err               error
+	capabilities      providers.Capabilities
+	modelCapabilities map[string]providers.ModelCapabilities
+	listCalls         *int
 }
 
 func (p fakeModelProvider) Name() string { return p.name }
 
 func (p fakeModelProvider) Capabilities() providers.Capabilities { return p.capabilities }
+
+func (p fakeModelProvider) ModelCapabilities(model string) providers.ModelCapabilities {
+	return p.modelCapabilities[model]
+}
 
 func (p fakeModelProvider) ListModels(ctx context.Context) ([]string, error) {
 	if p.listCalls != nil {
@@ -311,8 +316,9 @@ func TestModelsRouteExposesCanonicalReasoningEfforts(t *testing.T) {
 func TestModelsRouteExposesXHighForCodexCapability(t *testing.T) {
 	registry := providers.NewRegistry()
 	registry.Register(fakeModelProvider{
-		name:   "codex",
-		models: []string{"gpt-5"},
+		name:              "codex",
+		models:            []string{"gpt-5", "gpt-5-mini"},
+		modelCapabilities: map[string]providers.ModelCapabilities{"gpt-5": {FastMode: true, FastModeKnown: true}},
 		capabilities: providers.Capabilities{
 			ReasoningEffort:  true,
 			ReasoningEfforts: []string{"xhigh", "high", "medium", "low"},
@@ -335,11 +341,24 @@ func TestModelsRouteExposesXHighForCodexCapability(t *testing.T) {
 	if !got.ReasoningEffort || strings.Join(got.ReasoningEfforts, ",") != "low,medium,high,xhigh" {
 		t.Fatalf("model catalog did not expose canonical Codex xhigh capability: %+v", got)
 	}
+	modelCapabilities := body.Providers[0].ModelCapabilities
+	if !modelCapabilities["gpt-5"].FastMode {
+		t.Fatalf("model catalog did not expose per-model Fast capability: %+v", modelCapabilities)
+	}
+	if _, exists := modelCapabilities["gpt-5-mini"]; exists {
+		t.Fatalf("unsupported model should not expose Fast capability: %+v", modelCapabilities)
+	}
 }
 
 func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 	registry := providers.NewRegistry()
-	registry.Register(fakeModelProvider{name: "cliproxyapi", err: errors.New("connection refused")})
+	registry.Register(fakeModelProvider{
+		name: "cliproxyapi",
+		err:  errors.New("connection refused"),
+		modelCapabilities: map[string]providers.ModelCapabilities{
+			"fallback-model": {FastMode: true, FastModeKnown: true},
+		},
+	})
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
 		Name:           "cliproxyapi",
 		Type:           "openai-compatible",
@@ -365,6 +384,9 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 	}
 	if provider.Error == "" {
 		t.Fatal("expected provider error message")
+	}
+	if capability, exists := provider.ModelCapabilities["fallback-model"]; !exists || !capability.FastMode {
+		t.Fatalf("fallback model must retain its explicit Fast capability: %+v", provider.ModelCapabilities)
 	}
 }
 

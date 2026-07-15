@@ -301,6 +301,8 @@ CREATE TABLE IF NOT EXISTS api_requests (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_api_requests_run ON api_requests(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_api_requests_created ON api_requests(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_api_requests_provider_model_created ON api_requests(provider, model, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS agent_backends (
   id TEXT PRIMARY KEY,

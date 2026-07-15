@@ -42,7 +42,8 @@ import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs";
 import { createTerminalController } from "./terminal.mjs";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1";
+import { createUsageHistoryController } from "./usage-history.mjs";
 import { createWorkspaceSettingsController } from "./workspace-settings.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 
@@ -103,9 +104,7 @@ const state = {
   updateStatus: null,
   updateError: "",
   updateSeq: 0,
-  usageSummary: null,
-  usageError: "",
-  usageSeq: 0,
+  usageHistory: null,
   runtimeSummary: null,
   runtimeError: "",
   runtimeSeq: 0,
@@ -169,8 +168,14 @@ const state = {
   runRollbackBusy: false,
   runSummarySeq: 0,
   liveToolOutputs: {},
+  liveAssistantActive: false,
   liveAssistantText: "",
+  liveAssistantRequestId: "",
   liveAssistantRunId: "",
+  liveAssistantProvider: "",
+  liveAssistantModel: "",
+  liveAssistantStartedAt: "",
+  liveAssistantPerformance: null,
   pendingToolApprovals: {},
   gitStatus: null,
   gitDiff: null,
@@ -315,6 +320,7 @@ const {
   appendLiveAssistantText,
   appendToolOutput,
   applyMessageSnapshot,
+  beginLiveAssistantGeneration,
   clearCurrentAgentApprovals,
   clearLiveAssistantText,
   clearMessageRefreshTimer,
@@ -331,6 +337,7 @@ const {
   replacePendingApprovals,
   scheduleMessageRefresh,
   updateConversationCopyButton,
+  updateLiveAssistantPerformance,
 } = chatRendering;
 
 const agentStream = createAgentStreamController({
@@ -400,9 +407,12 @@ const uiShell = createUIShellController({
   renderProjects,
   resizeTerminal,
   showError,
+  translate: t,
 });
 
 const {
+  bindComposerSelectMenus,
+  bindSidebarResizer,
   closeMobileSidebar,
   closeProjectSearch,
   closeSidebarSettingsMenu,
@@ -416,6 +426,9 @@ const {
   toggleProjectSearch,
   toggleSidebarSettingsMenu,
 } = uiShell;
+
+bindSidebarResizer();
+bindComposerSelectMenus();
 
 const modelProviderSettings = createModelProviderSettingsController({
   state,
@@ -497,6 +510,7 @@ const {
   loadChatDrafts,
   loadPromptHistory,
   openAttachmentPicker,
+  refreshFastModeControl,
   refreshReasoningEffortControl,
   restoreCurrentChatDraft,
   saveCurrentChatDraft,
@@ -506,6 +520,7 @@ const {
   sendMessage,
   setMessageInputValue,
   syncMessageComposerBusy,
+  toggleFastMode,
   updateDraftLimitHint,
   updatePromptHistoryHint,
   updateSlashCommandPalette,
@@ -636,7 +651,6 @@ const systemSettings = createSystemSettingsController({
   loadRuntimeSummary,
   loadStorageSummary,
   loadUpdateStatus,
-  loadUsageSummary,
   localPreferencesBackupSummary,
   localPreferencesBackupText,
   notifyTerminal,
@@ -650,14 +664,12 @@ const {
   bindAboutSettingsActions,
   bindRuntimeSettingsActions,
   bindStorageSettingsActions,
-  bindUsageSettingsActions,
   bindUserSettingsActions,
   renderAboutSettingsContent,
   renderRuntimeSettingsContent,
   renderServerSystemSettingsContent,
   renderStorageSettingsContent,
   renderUsageMetricCard,
-  renderUsageSettingsContent,
   renderUserSettingsContent,
 } = systemSettings;
 
@@ -822,6 +834,14 @@ const automationControl = createAutomationControlController({
   showToast,
 });
 
+const usageHistory = createUsageHistoryController({
+  state,
+  request: api,
+  onChange: () => {
+    if (state.activeSettingsPanel === "usage") refreshActiveSettingsPanel();
+  },
+});
+
 const settingsPanelRegistry = createSettingsPanelRegistry();
 [
   ["profile", { render: renderProfileSettingsContent, bind: bindProfileSettingsActions }],
@@ -837,7 +857,7 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["agent-admin", { render: renderAgentAdminSettingsContent, bind: bindAgentAdminSettingsActions }],
   ["worklines-containers", { render: renderWorklinesSettingsContent, bind: bindWorklinesSettingsActions }],
   ["storage", { render: renderStorageSettingsContent, bind: bindStorageSettingsActions }],
-  ["usage", { render: renderUsageSettingsContent, bind: bindUsageSettingsActions }],
+  ["usage", { render: usageHistory.render, bind: usageHistory.bind }],
   ["servers-system", { render: renderServerSystemSettingsContent, bind: bindRuntimeSettingsActions }],
   ["runtime", { render: renderRuntimeSettingsContent, bind: bindRuntimeSettingsActions }],
   ["users", { render: renderUserSettingsContent, bind: bindUserSettingsActions }],
@@ -973,6 +993,7 @@ async function loadSettings() {
     updateSidebarAccountSummary();
     renderModelOptions();
     refreshReasoningEffortControl();
+    refreshFastModeControl();
   } catch (err) {
     if (seq === state.settingsLoadSeq) throw err;
   }
@@ -1293,6 +1314,7 @@ async function loadModelCatalog() {
   }
   renderModelOptions();
   refreshReasoningEffortControl();
+  refreshFastModeControl();
   refreshActiveSettingsPanel();
 }
 
@@ -1357,27 +1379,6 @@ async function loadUpdateStatus({ notify = false } = {}) {
     if (seq === state.updateSeq) setButtonBusy(button, false, am("checking"));
   }
   if (seq === state.updateSeq && state.activeSettingsPanel === "about") refreshActiveSettingsPanel();
-}
-
-async function loadUsageSummary({ notify = false } = {}) {
-  const seq = ++state.usageSeq;
-  const button = $("refreshUsageSummaryBtn");
-  setButtonBusy(button, true, am("refreshing"));
-  try {
-    const summary = await api("/api/usage/summary");
-    if (seq !== state.usageSeq) return;
-    state.usageSummary = summary;
-    state.usageError = "";
-    if (notify) notifyTerminal(`[info] ${am("usageRefreshed")}\n`);
-  } catch (err) {
-    if (seq !== state.usageSeq) return;
-    state.usageSummary = null;
-    state.usageError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] ${am("usageRefreshFailed", { message: state.usageError })}\n`);
-  } finally {
-    if (seq === state.usageSeq) setButtonBusy(button, false, am("refreshing"));
-  }
-  if (seq === state.usageSeq && state.activeSettingsPanel === "usage") refreshActiveSettingsPanel();
 }
 
 async function loadWorklineContainerData({ notify = false } = {}) {
@@ -1471,7 +1472,6 @@ function warmSettingsData() {
   const tasks = [];
   if (!state.runtimeSummary && !state.runtimeError) tasks.push(loadRuntimeSummary());
   if (!state.storageSummary && !state.storageError) tasks.push(loadStorageSummary());
-  if (!state.usageSummary && !state.usageError) tasks.push(loadUsageSummary());
   if (!state.authStatus && !state.authError) tasks.push(loadAuthStatus());
   if (!state.licenseSummary && !state.licenseError) tasks.push(loadLicenseSummary());
   if (!state.providerAuthFiles && !state.providerAuthError) tasks.push(loadProviderAuthFiles({ silent: true }));
@@ -2137,6 +2137,7 @@ function beginNavigationSelection(project) {
   setWorkspaceExplorerAgent(null);
   syncMessageComposerBusy();
   refreshReasoningEffortControl();
+  refreshFastModeControl();
   state.currentMessages = [];
   state.messageCopyTexts = [];
   state.messageHasMoreBefore = false;
@@ -2269,6 +2270,7 @@ async function enterAgent() {
   updateWorkspaceMetaPills();
   renderModelOptions();
   refreshReasoningEffortControl();
+  refreshFastModeControl();
   await restoreCurrentChatDraft();
   syncMessageComposerBusy();
   clearRunSummary();
@@ -2373,6 +2375,7 @@ function applyAgentLiveSnapshot(snapshot) {
   enforcePermissionSelectCap();
   renderModelOptions();
   refreshReasoningEffortControl();
+  refreshFastModeControl();
   updateWorkspaceMetaPills();
   syncMessageComposerBusy();
   const latestRun = snapshot.latestRun;
@@ -2386,11 +2389,31 @@ function handleAgentStreamEvent(event) {
   if (!agentId || (event.agentId && event.agentId !== agentId)) return;
   if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
   const runId = event.data?.runId || "";
+  const requestId = event.data?.requestId || "";
   if (event.type === "agent.started") {
     clearRunSummary();
     clearLiveAssistantText();
   }
-  if (event.type === "agent.text") appendLiveAssistantText(event.text || event.data?.text || "", runId);
+  if (event.type === "model.started") {
+    beginLiveAssistantGeneration({
+      requestId,
+      runId,
+      provider: event.data?.provider,
+      model: event.data?.model,
+      startedAt: event.data?.startedAt,
+    });
+  }
+  if (event.type === "agent.text") {
+    appendLiveAssistantText(event.text || event.data?.text || "", { requestId, runId });
+  }
+  if (event.type === "model.streaming") {
+    updateLiveAssistantPerformance(event.data?.pendingThroughput, { requestId, runId });
+  }
+  if (event.type === "model.completed") {
+    const throughput = event.data?.throughput && typeof event.data.throughput === "object" ? { ...event.data.throughput } : {};
+    if (throughput.ttftMs == null && event.data?.ttftMs != null) throughput.ttftMs = event.data.ttftMs;
+    updateLiveAssistantPerformance(throughput, { requestId, runId, replace: true });
+  }
   if (event.type === "tool.started") rememberToolStarted(event);
   if (event.type === "tool.output") appendToolOutput(event);
   if (event.type === "tool.approval_required") {
@@ -2402,9 +2425,11 @@ function handleAgentStreamEvent(event) {
     finishToolOutput(event);
   }
   if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
-  if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) clearLiveAssistantText();
-  if (["message.created", "agent.done", "agent.error", "agent.interrupted"].includes(event.type)) scheduleMessageRefresh(80, agentId);
-  if (["agent.done", "agent.error", "agent.interrupted"].includes(event.type) && runId) {
+  const completedMessageEvents = ["message.created", "message.completed"];
+  const terminalAgentEvents = ["agent.done", "agent.error", "agent.interrupted"];
+  if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) clearLiveAssistantText();
+  if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) scheduleMessageRefresh(80, agentId);
+  if (terminalAgentEvents.includes(event.type) && runId) {
     loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] ${am("runSummaryLoadFailed", { message: error?.message || error })}\n`));
   }
 }
@@ -2672,10 +2697,11 @@ window.addEventListener("autoto:auth-changed", () => {
 });
 window.addEventListener("beforeunload", saveCurrentChatDraft);
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
-$("openProviderLoginBtn").addEventListener("click", () => openSettingsModal("providers"));
+$("openProviderLoginBtn")?.addEventListener("click", () => toggleFastMode().catch(showError));
 $("modelSelect").addEventListener("change", () => {
   updateModelConfiguredState();
   refreshReasoningEffortControl({ modelValue: $("modelSelect").value });
+  refreshFastModeControl({ modelValue: $("modelSelect").value });
   saveAgentSettings().catch(showError);
 });
 $("reasoningEffort")?.addEventListener("change", (event) => {

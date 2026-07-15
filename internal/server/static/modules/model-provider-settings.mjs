@@ -1665,6 +1665,12 @@ export function createModelProviderSettingsController({
       capabilities.reasoningEffort?.supportedValues,
     ].find(Array.isArray);
     const management = provider.management && typeof provider.management === "object" ? provider.management : {};
+    const rawModelCapabilities = provider.modelCapabilities && typeof provider.modelCapabilities === "object" && !Array.isArray(provider.modelCapabilities)
+      ? provider.modelCapabilities
+      : {};
+    const modelCapabilities = Object.fromEntries(Object.entries(rawModelCapabilities)
+      .map(([model, value]) => [String(model || "").trim(), { fastMode: Boolean(value?.fastMode) }])
+      .filter(([model]) => Boolean(model)));
     return {
       name: provider.name || provider.type || "provider",
       type: provider.type || provider.name || "provider",
@@ -1686,6 +1692,7 @@ export function createModelProviderSettingsController({
           ? reasoningEfforts.filter(Boolean)
           : undefined,
       },
+      modelCapabilities,
       management: {
         url: management.url || provider.managementUrl || "",
         authFiles: Boolean(management.authFiles),
