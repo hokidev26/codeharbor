@@ -210,6 +210,7 @@ export default Object.freeze({
       globalPrompts: { label: "全局提示词", description: "对所有会话追加的用户级提示词。", empty: "暂无全局提示词。", action: "添加提示词" },
       systemPrompts: { label: "系统提示词", description: "管理系统级提示词模板与安全边界。", empty: "暂无自定义系统提示词。", action: "添加系统提示词" },
       mcpTools: { label: "MCP 工具", description: "连接和管理 MCP server 暴露的工具。", empty: "暂无 MCP 工具。", action: "添加 MCP" },
+      plugins: { label: "插件", description: "从本地目录安装并管理可动态提供工具的插件。", empty: "暂无已安装插件。", action: "安装插件" },
       hooks: { label: "钩子", description: "配置运行前后、工具调用前后等自动化钩子。", empty: "暂无钩子。", action: "添加钩子" },
     },
   },

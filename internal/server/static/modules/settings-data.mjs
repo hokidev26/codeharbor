@@ -53,6 +53,7 @@ export const skillTabs = [
   { key: "global-prompts", messageKey: "globalPrompts" },
   { key: "system-prompts", messageKey: "systemPrompts" },
   { key: "mcp-tools", messageKey: "mcpTools" },
+  { key: "plugins", messageKey: "plugins" },
   { key: "hooks", messageKey: "hooks" },
 ].map(({ messageKey, ...tab }) => ({
   ...tab,

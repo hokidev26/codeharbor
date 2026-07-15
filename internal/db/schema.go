@@ -462,7 +462,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -505,6 +505,63 @@ CREATE TABLE IF NOT EXISTS integration_connections (
 );
 CREATE INDEX IF NOT EXISTS idx_integration_connections_enabled ON integration_connections(enabled);
 CREATE INDEX IF NOT EXISTS idx_integration_connections_kind ON integration_connections(kind);
+`
+
+const pluginSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS plugins (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  manifest_version TEXT NOT NULL,
+  root_path TEXT NOT NULL,
+  command TEXT NOT NULL,
+  args_json TEXT NOT NULL DEFAULT '[]',
+  env_json TEXT NOT NULL DEFAULT '{}',
+  secret_refs_json TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  revision INTEGER NOT NULL DEFAULT 1,
+  manifest_hash TEXT NOT NULL,
+  last_checked_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (enabled IN (0, 1)),
+  CHECK (revision >= 1),
+  CHECK (length(CAST(slug AS BLOB)) BETWEEN 1 AND 63),
+  CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 120),
+  CHECK (length(CAST(version AS BLOB)) BETWEEN 1 AND 64),
+  CHECK (length(CAST(description AS BLOB)) <= 1000),
+  CHECK (length(CAST(manifest_version AS BLOB)) BETWEEN 1 AND 64),
+  CHECK (length(CAST(root_path AS BLOB)) BETWEEN 1 AND 4096),
+  CHECK (length(CAST(command AS BLOB)) BETWEEN 1 AND 1024),
+  CHECK (length(CAST(status AS BLOB)) BETWEEN 1 AND 64),
+  CHECK (length(CAST(manifest_hash AS BLOB)) = 64),
+  CHECK (last_error IS NULL OR length(CAST(last_error AS BLOB)) <= 4096),
+  CHECK (json_valid(args_json) AND json_type(args_json) = 'array'),
+  CHECK (json_valid(env_json) AND json_type(env_json) = 'object'),
+  CHECK (json_valid(secret_refs_json) AND json_type(secret_refs_json) = 'object')
+);
+CREATE INDEX IF NOT EXISTS idx_plugins_enabled_status ON plugins(enabled, status, slug, id);
+
+CREATE TABLE IF NOT EXISTS plugin_tools (
+  plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
+  remote_name TEXT NOT NULL,
+  exposed_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  input_schema_json TEXT NOT NULL DEFAULT '{}',
+  discovered_at TEXT NOT NULL,
+  PRIMARY KEY (plugin_id, remote_name),
+  CHECK (length(CAST(remote_name AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (length(CAST(exposed_name AS BLOB)) BETWEEN 1 AND 192),
+  CHECK (length(CAST(description AS BLOB)) <= 2048),
+  CHECK (length(CAST(input_schema_json AS BLOB)) <= 65536),
+  CHECK (json_valid(input_schema_json) AND json_type(input_schema_json) = 'object')
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_tools_plugin_exposed ON plugin_tools(plugin_id, exposed_name COLLATE NOCASE);
 `
 
 const memorySchemaSQL = `

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,18 @@ type StdioConfig struct {
 	CWD     string
 	Env     map[string]string
 	Timeout time.Duration
+
+	// CleanEnv opts out of inheriting the parent process environment. The child
+	// receives only Env plus a small set of process-launch essentials.
+	CleanEnv bool
+	// StderrLimit bounds captured stderr. Zero preserves the historical 64 KiB
+	// default.
+	StderrLimit int
+	// RedactValues are exact resolved secret values removed from MCP error text.
+	RedactValues []string
+	// ResponseLimit bounds bytes read from stdout. Zero preserves the historical
+	// unbounded protocol stream for existing MCP registrations.
+	ResponseLimit int64
 }
 
 type Tool struct {
@@ -37,14 +50,16 @@ type ToolCallResult struct {
 }
 
 type Client struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	dec    *json.Decoder
-	stderr *limitedBuffer
-	cancel context.CancelFunc
-	done   chan error
-	mu     sync.Mutex
-	nextID int64
+	ctx          context.Context
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	dec          *json.Decoder
+	stderr       *limitedBuffer
+	cancel       context.CancelFunc
+	done         chan error
+	redactValues []string
+	mu           sync.Mutex
+	nextID       int64
 }
 
 func StartStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
@@ -52,18 +67,18 @@ func StartStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 	if command == "" {
 		return nil, errors.New("mcp command is required")
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if cfg.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
 	cmd := exec.CommandContext(runCtx, command, cfg.Args...)
 	if strings.TrimSpace(cfg.CWD) != "" {
 		cmd.Dir = cfg.CWD
 	}
-	cmd.Env = os.Environ()
-	for key, value := range cfg.Env {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = stdioEnvironment(cfg)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -74,15 +89,103 @@ func StartStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 		cancel()
 		return nil, err
 	}
-	stderr := &limitedBuffer{max: 64 << 10}
+	stderrLimit := cfg.StderrLimit
+	if stderrLimit <= 0 {
+		stderrLimit = 64 << 10
+	}
+	stderr := &limitedBuffer{max: stderrLimit}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, err
+		return nil, redactError(err, cfg.RedactValues)
 	}
-	client := &Client{cmd: cmd, stdin: stdin, dec: json.NewDecoder(stdout), stderr: stderr, cancel: cancel, done: make(chan error, 1), nextID: 1}
+	stdoutReader := io.Reader(stdout)
+	if cfg.ResponseLimit > 0 {
+		stdoutReader = io.LimitReader(stdout, cfg.ResponseLimit)
+	}
+	client := &Client{
+		ctx: runCtx, cmd: cmd, stdin: stdin, dec: json.NewDecoder(stdoutReader), stderr: stderr,
+		cancel: cancel, done: make(chan error, 1), redactValues: normalizedRedactValues(cfg.RedactValues), nextID: 1,
+	}
 	go func() { client.done <- cmd.Wait() }()
 	return client, nil
+}
+
+func stdioEnvironment(cfg StdioConfig) []string {
+	values := make(map[string]string)
+	if cfg.CleanEnv {
+		for _, entry := range os.Environ() {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok && essentialEnvironmentKey(key) {
+				values[key] = value
+			}
+		}
+	} else {
+		for _, entry := range os.Environ() {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok && key != "" {
+				values[key] = value
+			}
+		}
+	}
+	for rawKey, value := range cfg.Env {
+		key := strings.TrimSpace(rawKey)
+		if key != "" && !strings.ContainsAny(key, "=\x00") {
+			values[key] = value
+		}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
+func essentialEnvironmentKey(key string) bool {
+	switch key {
+	case "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LANGUAGE":
+		return true
+	default:
+		return strings.HasPrefix(key, "LC_")
+	}
+}
+
+func normalizedRedactValues(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+func redactText(text string, values []string) string {
+	for _, value := range values {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, "[REDACTED]")
+		}
+	}
+	return text
+}
+
+func redactError(err error, values []string) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(redactText(err.Error(), normalizedRedactValues(values)))
 }
 
 func (c *Client) Initialize(ctx context.Context) error {
@@ -160,7 +263,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 			continue
 		}
 		if response.Error != nil {
-			return nil, fmt.Errorf("mcp %s failed: %s", method, response.Error.Message)
+			return nil, fmt.Errorf("mcp %s failed: %s", method, redactText(response.Error.Message, c.redactValues))
 		}
 		return response.Result, nil
 	}
@@ -203,15 +306,20 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) withProcessError(err error) error {
+	if c.ctx != nil && c.ctx.Err() != nil {
+		return c.ctx.Err()
+	}
 	select {
 	case procErr := <-c.done:
-		stderr := strings.TrimSpace(c.stderr.String())
+		stderr := redactText(strings.TrimSpace(c.stderr.String()), c.redactValues)
+		procText := redactText(fmt.Sprint(procErr), c.redactValues)
+		base := redactText(err.Error(), c.redactValues)
 		if stderr != "" {
-			return fmt.Errorf("%w; process exited: %v; stderr: %s", err, procErr, stderr)
+			return fmt.Errorf("%s; process exited: %s; stderr: %s", base, procText, stderr)
 		}
-		return fmt.Errorf("%w; process exited: %v", err, procErr)
+		return fmt.Errorf("%s; process exited: %s", base, procText)
 	default:
-		return err
+		return redactError(err, c.redactValues)
 	}
 }
 

@@ -28,6 +28,7 @@ import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
+import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-1";
 import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs";
@@ -549,6 +550,18 @@ const {
   renderMCPRegistryList,
 } = mcpRegistryUI;
 
+const pluginRegistryUI = createPluginRegistryUIController({
+  state,
+  refreshActiveSettingsPanel,
+  showError,
+  showToast,
+});
+
+const {
+  bindPluginRegistryActions,
+  renderPluginRegistryPanel,
+} = pluginRegistryUI;
+
 const {
   applyAppearancePreferences,
   applyProfilePreferences,
@@ -770,6 +783,7 @@ function invalidateAndRefreshEffectiveSkillsPolicy() {
 const skillsWorkbench = createSkillsWorkbenchController({
   state,
   bindMCPRegistryActions,
+  bindPluginRegistryActions,
   copyText,
   createServerSkill,
   createToolPermissionRule,
@@ -787,6 +801,7 @@ const skillsWorkbench = createSkillsWorkbenchController({
   notifyTerminal,
   previewServerSkillImport,
   renderMCPRegistryList,
+  renderPluginRegistryPanel,
   resetSkillsPreferences,
   saveSkillsPreferences,
   saveWorkflowPreferences,

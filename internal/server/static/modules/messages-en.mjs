@@ -210,6 +210,7 @@ export default Object.freeze({
       globalPrompts: { label: "Global prompts", description: "User-level prompts appended to every conversation.", empty: "No global prompts.", action: "Add prompt" },
       systemPrompts: { label: "System prompts", description: "Manage system-level prompt templates and safety boundaries.", empty: "No custom system prompts.", action: "Add system prompt" },
       mcpTools: { label: "MCP tools", description: "Connect to and manage tools exposed by MCP servers.", empty: "No MCP tools.", action: "Add MCP" },
+      plugins: { label: "Plugins", description: "Install local plugins that can dynamically provide tools.", empty: "No plugins installed.", action: "Install plugin" },
       hooks: { label: "Hooks", description: "Configure automation hooks before and after runs and tool calls.", empty: "No hooks.", action: "Add hook" },
     },
   },

@@ -164,6 +164,12 @@ func TestToolPermissionRulesAPIUsesConfiguredRegistry(t *testing.T) {
 	tools.RegisterCore(registry)
 	app := New(config.Config{}, store, nil, nil)
 	app.SetToolRegistry(registry)
+	app.SetPluginService(&fakePluginService{
+		plugins: map[string]db.Plugin{
+			"plugin-1": {ID: "plugin-1", Slug: "safe-plugin", Enabled: true, Status: "healthy"},
+		},
+		configured: map[string]map[string]bool{},
+	})
 	routes := app.Routes()
 
 	registry.Register(workflowTestTool{name: "DynamicTool"})
@@ -175,6 +181,24 @@ func TestToolPermissionRulesAPIUsesConfiguredRegistry(t *testing.T) {
 	var created db.ToolPermissionRule
 	if err := json.NewDecoder(recorder.Body).Decode(&created); err != nil {
 		t.Fatal(err)
+	}
+
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__safe-plugin__echo","risk":"exec","decision":"ask"}`)))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected namespaced plugin tool rule create 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__missing__echo","risk":"exec","decision":"ask"}`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown plugin tool rule rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__bad path__echo","risk":"exec","decision":"ask"}`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed plugin tool rule rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()

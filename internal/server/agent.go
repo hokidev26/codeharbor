@@ -450,7 +450,16 @@ func (s *Server) getMessageAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTools(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.runner.ListTools())
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
+		return
+	}
+	items, err := s.runner.ListToolsForAgent(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 type executeToolRequest struct {
