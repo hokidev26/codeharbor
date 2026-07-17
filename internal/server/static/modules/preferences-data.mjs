@@ -175,12 +175,13 @@ export const defaultNotificationPrefs = {
 };
 
 export const appearanceStyleVersion = 3;
-export const appearanceThemePresets = Object.freeze(["light", "dark", "cyber", "cream"]);
+export const appearanceThemePresets = Object.freeze(["light", "dark", "cyber", "cream", "apple"]);
 export const appearanceThemePresetTheme = Object.freeze({
   light: "light",
   dark: "dark",
   cyber: "dark",
   cream: "light",
+  apple: "light",
 });
 
 export function normalizeAppearanceThemePreset(value) {

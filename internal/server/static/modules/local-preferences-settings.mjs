@@ -1,7 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatNumber } from "./formatters.mjs";
-import { resolveUILocale, t } from "./i18n.mjs";
-import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs";
+import { resolveUILocale, t } from "./i18n.mjs?v=apple-theme-1";
+import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs?v=apple-theme-1";
 
 export function createLocalPreferencesSettingsController({
   state,
@@ -555,7 +555,7 @@ export function createLocalPreferencesSettingsController({
       </section>
       <section class="compact-settings-section">
         <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.themeSectionTitle"))}</h2><p>${escapeHtml(t("appearance.themeSectionMeta"))}</p></div>
-        <div class="compact-settings-section-controls"><div class="appearance-theme-grid compact-settings-choice-grid four-column" role="radiogroup" aria-label="${escapeAttr(t("appearance.themeSectionTitle"))}">${renderThemePresetChoice("light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.themePreset === "light")}${renderThemePresetChoice("dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.themePreset === "dark")}${renderThemePresetChoice("cyber", t("appearance.themeCyber"), t("appearance.themeCyberDesc"), prefs.themePreset === "cyber")}${renderThemePresetChoice("cream", t("appearance.themeCream"), t("appearance.themeCreamDesc"), prefs.themePreset === "cream")}</div></div>
+        <div class="compact-settings-section-controls"><div class="appearance-theme-grid compact-settings-choice-grid four-column" role="radiogroup" aria-label="${escapeAttr(t("appearance.themeSectionTitle"))}">${renderThemePresetChoice("light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.themePreset === "light")}${renderThemePresetChoice("dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.themePreset === "dark")}${renderThemePresetChoice("cyber", t("appearance.themeCyber"), t("appearance.themeCyberDesc"), prefs.themePreset === "cyber")}${renderThemePresetChoice("cream", t("appearance.themeCream"), t("appearance.themeCreamDesc"), prefs.themePreset === "cream")}${renderThemePresetChoice("apple", t("appearance.themeApple"), t("appearance.themeAppleDesc"), prefs.themePreset === "apple")}</div></div>
       </section>
       <section class="compact-settings-section">
         <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.densitySectionTitle"))}</h2><p>${escapeHtml(t("appearance.densitySectionMeta"))}</p></div>
@@ -605,6 +605,7 @@ export function createLocalPreferencesSettingsController({
       dark: t("appearance.themeDarkLabel"),
       cyber: t("appearance.themeCyberLabel"),
       cream: t("appearance.themeCreamLabel"),
+      apple: t("appearance.themeAppleLabel"),
     }[value] || t("appearance.themeLightLabel");
   }
 

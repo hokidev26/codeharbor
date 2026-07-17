@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import {
   appearancePrefsKey,
   appearanceStyleVersion,
+  appearanceThemePresets,
   defaultAppearancePrefs,
   defaultPrimaryModePreference,
   defaultRegionalPrefs,
@@ -272,6 +273,7 @@ test("regional preferences default to auto and import legacy field names", () =>
 
 test("appearance presets default to light and migrate version 2 and unversioned preferences", () => {
   assert.equal(appearanceStyleVersion, 3);
+  assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
   assert.deepEqual(defaultAppearancePrefs, {
     styleVersion: 3,
     themePreset: "light",
@@ -329,6 +331,12 @@ test("appearance preset derives the palette, rejects unknown values, and updates
     assert.equal(body.dataset.themePreset, "cream");
     assert.equal(body.classList.contains("theme-dark"), false);
     assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)).themePreset, "cream");
+
+    controller.setAppearancePreference("themePreset", "apple");
+    assert.equal(body.dataset.themePreset, "apple");
+    assert.equal(body.classList.contains("theme-dark"), false);
+    assert.equal(JSON.parse(localStorage.getItem(appearancePrefsKey)).themePreset, "apple");
+    assert.equal(JSON.parse(localStorage.getItem(appearancePrefsKey)).theme, "light");
   });
 });
 
@@ -339,19 +347,19 @@ test("appearance backup retains the normalized theme preset", () => {
       kind: localPreferenceBackupKind,
       version: 1,
       preferences: {
-        [appearancePrefsKey]: { styleVersion: 3, themePreset: "cyber", density: "compact" },
+        [appearancePrefsKey]: { styleVersion: 3, themePreset: "apple", density: "compact" },
       },
     }));
 
     assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)), {
       styleVersion: 3,
-      themePreset: "cyber",
-      theme: "dark",
+      themePreset: "apple",
+      theme: "light",
       density: "compact",
       terminalDefaultOpen: false,
       showEventLog: true,
     });
-    assert.equal(controller.createLocalPreferencesBackup().preferences[appearancePrefsKey].themePreset, "cyber");
+    assert.equal(controller.createLocalPreferencesBackup().preferences[appearancePrefsKey].themePreset, "apple");
   });
 });
 
@@ -369,9 +377,9 @@ test("network search settings render one compact strategy form without summary c
   assert.doesNotMatch(markup, /settings-stat-grid|settings-stat-card|settings-hero-card|appearance-choice/);
 });
 
-test("appearance settings render a flat compact form with four accessible preset previews", async () => {
+test("appearance settings render a flat compact form with five accessible preset previews", async () => {
   const settings = createLocalPreferencesSettingsController({
-    currentAppearancePreferences: () => ({ ...defaultAppearancePrefs, themePreset: "cream" }),
+    currentAppearancePreferences: () => ({ ...defaultAppearancePrefs, themePreset: "apple" }),
     currentRegionalPreferences: () => ({ locale: "en-US", timezone: "auto" }),
   });
   const markup = settings.renderAppearanceSettingsContent();
@@ -382,22 +390,48 @@ test("appearance settings render a flat compact form with four accessible preset
   assert.match(markup, /compact-settings-choice-grid four-column/);
   assert.doesNotMatch(markup, /settings-stat-grid|settings-stat-card|settings-hero-card/);
   assert.match(markup, /role="radiogroup" aria-label=/);
-  for (const preset of ["light", "dark", "cyber", "cream"]) {
+  for (const preset of ["light", "dark", "cyber", "cream", "apple"]) {
     assert.match(markup, new RegExp(`data-appearance-field="themePreset" data-appearance-value="${preset}"`));
     assert.match(markup, new RegExp(`theme-preset-preview-${preset}`));
   }
-  assert.match(markup, /theme-preset-preview-cream[\s\S]*?aria-checked="true"|aria-checked="true"[\s\S]*?theme-preset-preview-cream/);
+  assert.match(markup, /theme-preset-preview-apple[\s\S]*?aria-checked="true"|aria-checked="true"[\s\S]*?theme-preset-preview-apple/);
   assert.match(styles, /data-theme-preset="cyber"[\s\S]*?--ws-primary: #a7ff32/);
   assert.match(styles, /data-theme-preset="cream"[\s\S]*?--ws-canvas: #fff9ee/);
+  assert.match(styles, /data-theme-preset="apple"[\s\S]*?--ws-primary: #007aff/);
   assert.match(styles, /\.theme-preset-preview-cyber/);
   assert.match(styles, /\.theme-preset-preview-cream/);
+  assert.match(styles, /\.theme-preset-preview-apple/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?data-theme-preset="apple"/);
+  assert.match(styles, /@media \(prefers-reduced-transparency: reduce\) \{[\s\S]*?data-theme-preset="apple"/);
+  assert.match(styles, /@media \(prefers-contrast: more\), \(forced-colors: active\) \{[\s\S]*?data-theme-preset="apple"/);
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?#settingsContentBody \.appearance-theme-grid \{ grid-template-columns: 1fr; \}/);
 });
 
-test("global theme toggle returns cyber and cream presets to the binary themes", async () => {
+test("apple theme cache stamps reach the static entry and updated modules", async () => {
+  const [html, app, appMain, i18n, localPreferences, settingsPreferences] = await Promise.all([
+    readFile(new URL("../index.html", import.meta.url), "utf8"),
+    readFile(new URL("../app.js", import.meta.url), "utf8"),
+    readFile(new URL("./app-main.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./i18n.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./local-preferences-settings.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./settings-preferences.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.equal((html.match(/apple-theme-1/g) || []).length, 2);
+  assert.equal((app.match(/apple-theme-1/g) || []).length, 1);
+  assert.match(appMain, /local-preferences-settings\.mjs\?v=[^"\n]*apple-theme-1/);
+  assert.match(appMain, /settings-preferences\.mjs\?v=apple-theme-1/);
+  assert.match(localPreferences, /i18n\.mjs\?v=apple-theme-1/);
+  assert.match(localPreferences, /preferences-data\.mjs\?v=apple-theme-1/);
+  assert.match(settingsPreferences, /preferences-data\.mjs\?v=apple-theme-1/);
+  assert.equal((i18n.match(/messages-(?:en|zh-CN|zh-TW)\.mjs\?v=[^"\n]*apple-theme-1/g) || []).length, 3);
+});
+
+test("global theme toggle returns custom presets to the binary themes", async () => {
   const appMain = await readFile(new URL("./app-main.mjs", import.meta.url), "utf8");
 
   assert.match(appMain, /updateGlobalThemeToggle,/);
+  assert.match(appMain, /themePreset === "apple"\s*\? "dark"/);
   assert.match(appMain, /themePreset === "cream"\s*\? "dark"/);
   assert.match(appMain, /themePreset === "cyber"\s*\? "light"/);
   assert.match(appMain, /setAppearancePreference\("themePreset", nextPreset\)/);

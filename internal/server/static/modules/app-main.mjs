@@ -26,18 +26,18 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-apple-theme-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
-import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1";
+import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-1-codex-browser-login-1";
 import { createPageLifecycleController } from "./page-lifecycle.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
-import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs";
+import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=apple-theme-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
@@ -45,7 +45,7 @@ import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
 import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1";
 import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
-import { createSettingsPreferencesController } from "./settings-preferences.mjs";
+import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
@@ -3203,11 +3203,13 @@ document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
 });
 $("globalThemeToggleBtn")?.addEventListener("click", () => {
   const { themePreset, theme } = currentAppearancePreferences();
-  const nextPreset = themePreset === "cream"
+  const nextPreset = themePreset === "apple"
     ? "dark"
-    : themePreset === "cyber"
-      ? "light"
-      : theme === "dark" ? "light" : "dark";
+    : themePreset === "cream"
+      ? "dark"
+      : themePreset === "cyber"
+        ? "light"
+        : theme === "dark" ? "light" : "dark";
   setAppearancePreference("themePreset", nextPreset);
 });
 $("refreshBtn").addEventListener("click", () => refreshPrimaryMode().catch(showError));

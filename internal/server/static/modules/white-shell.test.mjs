@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import {
   appearancePrefsKey,
   appearanceStyleVersion,
+  appearanceThemePresets,
   defaultAppearancePrefs,
   localPreferenceBackupKind,
 } from "./preferences-data.mjs";
@@ -864,6 +865,7 @@ test("initial shell and default appearance use the versioned light theme", async
   assert.equal(defaultAppearancePrefs.theme, "light");
   assert.equal(defaultAppearancePrefs.styleVersion, appearanceStyleVersion);
   assert.equal(appearanceStyleVersion, 3);
+  assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
 });
 
 test("dark appearance keeps the legacy white-shell geometry and layers colors only", async () => {

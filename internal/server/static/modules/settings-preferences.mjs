@@ -37,7 +37,7 @@ import {
   searchPrefsKey,
   skillsPrefsKey,
   terminalPrefsKey,
-} from "./preferences-data.mjs";
+} from "./preferences-data.mjs?v=apple-theme-1";
 import { preferencesMessage } from "./messages-preferences.mjs";
 
 export function createSettingsPreferencesController({
