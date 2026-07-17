@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { currentUILocale, setUILocale } from "./i18n.mjs";
-import { isCurrentRestoreReviewConflict, renderSkillRevisionDrawer, renderSkillScopeBadge, restoreRevisionWithCurrentRiskConfirmation, skillContextLabel, skillScopeShadowHint } from "./skills-workbench.mjs";
+import { createSkillsWorkbenchController, isCurrentRestoreReviewConflict, renderSkillRevisionDrawer, renderSkillScopeBadge, restoreRevisionWithCurrentRiskConfirmation, skillContextLabel, skillScopeShadowHint } from "./skills-workbench.mjs";
 
 test("scope labels, badges, and owner shadow hints describe v2 ownership", () => {
   assert.equal(skillContextLabel({ scope: "global" }), "全局作用域");
@@ -10,6 +10,25 @@ test("scope labels, badges, and owner shadow hints describe v2 ownership", () =>
   assert.match(renderSkillScopeBadge({ scope: "workspace" }), /工作线/);
   assert.equal(skillScopeShadowHint({ scope: "global" }, { scope: "workspace", worklineId: "w-1" }), "由全局作用域 owner 生效");
   assert.equal(skillScopeShadowHint({ shadowedBy: "workspace" }, { scope: "global" }), "已被更具体作用域的服务端 Skill 覆盖");
+});
+
+test("skills tabs expose a single selected tab and keyboard-friendly tab semantics", () => {
+  const controller = createSkillsWorkbenchController({
+    state: {
+      activeSkillTab: "commands",
+      serverSkills: [],
+      serverSkillsSaving: false,
+      serverSkillsStatus: "ready",
+    },
+    currentSkillsPreferences: () => ({ commands: [], mcpServers: [], toolPolicy: {} }),
+  });
+  const markup = controller.renderSkillSettingsContent("commands");
+  assert.equal((markup.match(/role="tab"/g) || []).length, 11);
+  assert.equal((markup.match(/aria-selected="true"/g) || []).length, 1);
+  assert.equal((markup.match(/aria-controls="skill-tab-panel-/g) || []).length, 1);
+  assert.match(markup, /aria-controls="skill-tab-panel-commands"/);
+  assert.match(markup, /role="tabpanel"/);
+  assert.match(markup, /settings-toolbar/);
 });
 
 test("scope labels, badges, and revision controls follow the active UI locale", () => {
@@ -40,6 +59,9 @@ test("revision drawer renders revision actions and selected detail safely", () =
   assert.match(markup, /data-skill-v2-revision-id="2"/);
   assert.match(markup, /reviewed prompt/);
   assert.match(markup, /项目作用域/);
+  assert.match(markup, /settings-sheet/);
+  assert.match(markup, /role="region"/);
+  assert.doesNotMatch(markup, /aria-modal="true"/);
 });
 
 test("restore displays the structured current scan and retries with its content hash", async () => {

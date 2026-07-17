@@ -172,6 +172,26 @@ CREATE TABLE IF NOT EXISTS runs (
   duration_ms INTEGER,
   trigger_type TEXT NOT NULL DEFAULT 'manual',
   execution_device_id TEXT NOT NULL DEFAULT 'local',
+  execution_mode TEXT NOT NULL DEFAULT 'execute',
+  plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+  policy_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  agent_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  tool_catalog_digest TEXT NOT NULL DEFAULT '',
+  workspace_fingerprint TEXT NOT NULL DEFAULT '',
+  auto_continuation_mode TEXT NOT NULL DEFAULT 'off',
+  continuation_count INTEGER NOT NULL DEFAULT 0,
+  continuation_segment_turns INTEGER NOT NULL DEFAULT 0,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  max_total_turns INTEGER NOT NULL DEFAULT 0,
+  max_continuations INTEGER NOT NULL DEFAULT 0,
+  max_total_tokens INTEGER NOT NULL DEFAULT 0,
+  consumed_input_tokens INTEGER NOT NULL DEFAULT 0,
+  consumed_output_tokens INTEGER NOT NULL DEFAULT 0,
+  deadline_at TEXT,
+  resume_after_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
+  last_stop_reason TEXT,
+  continuation_reason TEXT,
+  waiting_background_task_id TEXT REFERENCES background_tasks(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (permission_mode_cap IN ('', 'readOnly', 'acceptEdits')),
@@ -179,13 +199,39 @@ CREATE TABLE IF NOT EXISTS runs (
   CHECK (dispatch_id IS NULL OR length(CAST(dispatch_id AS BLOB)) BETWEEN 1 AND 256),
   CHECK (duration_ms IS NULL OR duration_ms >= 0),
   CHECK (trigger_type IN ('manual', 'scheduled', 'goal', 'internal')),
-  CHECK (length(CAST(execution_device_id AS BLOB)) BETWEEN 1 AND 128)
+  CHECK (length(CAST(execution_device_id AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (execution_mode IN ('plan', 'execute')),
+  CHECK (execution_mode = 'execute' OR plan_id IS NULL),
+  CHECK (policy_generation_snapshot >= 0),
+  CHECK (agent_generation_snapshot >= 0),
+  CHECK (length(CAST(tool_catalog_digest AS BLOB)) <= 512),
+  CHECK (length(CAST(workspace_fingerprint AS BLOB)) <= 512),
+  CHECK (auto_continuation_mode IN ('off', 'safe')),
+  CHECK (continuation_count >= 0),
+  CHECK (continuation_segment_turns >= 0),
+  CHECK (turn_count >= 0),
+  CHECK (max_total_turns >= 0),
+  CHECK (max_continuations >= 0),
+  CHECK (max_total_tokens >= 0),
+  CHECK (consumed_input_tokens >= 0),
+  CHECK (consumed_output_tokens >= 0),
+  CHECK (length(CAST(COALESCE(last_stop_reason, '') AS BLOB)) <= 256),
+  CHECK (length(CAST(COALESCE(continuation_reason, '') AS BLOB)) <= 4096)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent_started ON runs(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_plan ON runs(plan_id, execution_generation DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_agent_execution_generation ON runs(agent_id, execution_generation) WHERE execution_generation > 0;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_id ON runs(dispatch_id) WHERE dispatch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_runs_agent_execution_after ON runs(agent_id, execution_generation, id);
+CREATE TRIGGER IF NOT EXISTS trg_runs_auto_continuation_mode_insert
+BEFORE INSERT ON runs FOR EACH ROW
+WHEN NEW.auto_continuation_mode NOT IN ('off', 'safe')
+BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
+CREATE TRIGGER IF NOT EXISTS trg_runs_auto_continuation_mode_update
+BEFORE UPDATE OF auto_continuation_mode ON runs FOR EACH ROW
+WHEN NEW.auto_continuation_mode NOT IN ('off', 'safe')
+BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
 
 CREATE TABLE IF NOT EXISTS run_git_changes (
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -220,6 +266,8 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   command_text TEXT,
   correction_of_message_id TEXT REFERENCES agent_messages(id) ON DELETE RESTRICT,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  completion_state TEXT,
+  stop_reason TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_time ON agent_messages(agent_id, created_at);
@@ -298,7 +346,12 @@ CREATE TABLE IF NOT EXISTS api_requests (
   meter_unit TEXT,
   error_message TEXT,
   raw_dump_json TEXT,
-  created_at TEXT NOT NULL
+  stop_reason TEXT,
+  turn_index INTEGER NOT NULL DEFAULT 0,
+  continuation_index INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  CHECK (turn_index >= 0),
+  CHECK (continuation_index >= 0)
 );
 CREATE INDEX IF NOT EXISTS idx_api_requests_run ON api_requests(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_api_requests_created ON api_requests(created_at DESC, id DESC);
@@ -464,7 +517,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -564,6 +617,154 @@ CREATE TABLE IF NOT EXISTS plugin_tools (
   CHECK (json_valid(input_schema_json) AND json_type(input_schema_json) = 'object')
 );
 CREATE INDEX IF NOT EXISTS idx_plugin_tools_plugin_exposed ON plugin_tools(plugin_id, exposed_name COLLATE NOCASE);
+`
+
+const backgroundTaskSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS background_tasks (
+  id TEXT PRIMARY KEY,
+  owner_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  parent_tool_use_id TEXT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  revision INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  public_summary_json TEXT NOT NULL DEFAULT '{}',
+  permission_mode_cap TEXT NOT NULL DEFAULT '',
+  permission_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  policy_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  agent_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  tool_catalog_digest TEXT NOT NULL DEFAULT '',
+  workspace_fingerprint TEXT NOT NULL DEFAULT '',
+  child_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  child_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  resume_parent INTEGER NOT NULL DEFAULT 0,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  worker_instance_id TEXT,
+  cancel_requested_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_code TEXT,
+  error_message TEXT,
+  exit_code INTEGER,
+  last_output_sequence INTEGER NOT NULL DEFAULT 0,
+  output_bytes INTEGER NOT NULL DEFAULT 0,
+  output_truncated INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (kind IN ('shell', 'agent')),
+  CHECK (status IN ('queued', 'waiting_approval', 'running', 'cancel_requested', 'succeeded', 'failed', 'canceled', 'interrupted')),
+  CHECK (revision >= 1),
+  CHECK (priority BETWEEN -1000000 AND 1000000),
+  CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+  CHECK (json_valid(public_summary_json) AND json_type(public_summary_json) = 'object'),
+  CHECK (json_valid(result_json) AND json_type(result_json) IN ('object', 'array')),
+  CHECK (length(CAST(payload_json AS BLOB)) <= 262144),
+  CHECK (length(CAST(public_summary_json AS BLOB)) <= 32768),
+  CHECK (length(CAST(result_json AS BLOB)) <= 32768),
+  CHECK (permission_mode_cap IN ('', 'readOnly', 'acceptEdits')),
+  CHECK (permission_generation_snapshot >= 0),
+  CHECK (policy_generation_snapshot >= 0),
+  CHECK (agent_generation_snapshot >= 0),
+  CHECK (resume_parent IN (0, 1)),
+  CHECK (attempt_count >= 0),
+  CHECK (max_attempts BETWEEN 1 AND 100),
+  CHECK (last_output_sequence >= 0),
+  CHECK (output_bytes >= 0),
+  CHECK (output_truncated IN (0, 1)),
+  CHECK (error_code IS NULL OR length(CAST(error_code AS BLOB)) <= 128),
+  CHECK (error_message IS NULL OR length(CAST(error_message AS BLOB)) <= 4096),
+  CHECK (length(CAST(tool_catalog_digest AS BLOB)) <= 512),
+  CHECK (length(CAST(workspace_fingerprint AS BLOB)) <= 512)
+);
+CREATE INDEX IF NOT EXISTS idx_background_tasks_claim ON background_tasks(status, priority DESC, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_background_tasks_owner ON background_tasks(owner_agent_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_background_tasks_parent_run ON background_tasks(parent_run_id, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_background_tasks_worker ON background_tasks(worker_instance_id, status, updated_at ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS background_task_output (
+  task_id TEXT NOT NULL REFERENCES background_tasks(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,
+  stream TEXT NOT NULL,
+  chunk_blob BLOB NOT NULL,
+  byte_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, sequence),
+  CHECK (sequence >= 1),
+  CHECK (stream IN ('stdout', 'stderr', 'system', 'truncated')),
+  CHECK (byte_count >= 0),
+  CHECK (length(chunk_blob) = byte_count),
+  CHECK (byte_count <= 16384)
+);
+CREATE INDEX IF NOT EXISTS idx_background_task_output_page ON background_task_output(task_id, sequence ASC);
+`
+
+const planSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  source_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  revision INTEGER NOT NULL DEFAULT 1,
+  content_json TEXT NOT NULL DEFAULT '{}',
+  summary TEXT NOT NULL DEFAULT '',
+  policy_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  agent_generation_snapshot INTEGER NOT NULL DEFAULT 0,
+  tool_catalog_digest TEXT NOT NULL DEFAULT '',
+  workspace_fingerprint TEXT NOT NULL DEFAULT '',
+  stale_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (status IN ('draft', 'in_review', 'approved', 'rejected', 'stale', 'executing', 'executed', 'cancelled')),
+  CHECK (revision >= 1),
+  CHECK (policy_generation_snapshot >= 0),
+  CHECK (agent_generation_snapshot >= 0),
+  CHECK (length(CAST(content_json AS BLOB)) BETWEEN 2 AND 262144),
+  CHECK (json_valid(content_json) AND json_type(content_json) IN ('object', 'array')),
+  CHECK (length(CAST(summary AS BLOB)) <= 4096),
+  CHECK (length(CAST(tool_catalog_digest AS BLOB)) <= 512),
+  CHECK (length(CAST(workspace_fingerprint AS BLOB)) <= 512),
+  CHECK (stale_reason IS NULL OR length(CAST(stale_reason AS BLOB)) BETWEEN 1 AND 4096)
+);
+CREATE INDEX IF NOT EXISTS idx_plans_agent_updated ON plans(agent_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_plans_agent_status_updated ON plans(agent_id, status, updated_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_source_run ON plans(source_run_id) WHERE source_run_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS plan_reviews (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  plan_revision INTEGER NOT NULL,
+  reviewer_id TEXT NOT NULL,
+  decision TEXT NOT NULL DEFAULT 'comment',
+  comment TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  CHECK (plan_revision >= 1),
+  CHECK (decision IN ('comment', 'approved', 'changes_requested')),
+  CHECK (length(CAST(reviewer_id AS BLOB)) BETWEEN 1 AND 200),
+  CHECK (length(CAST(comment AS BLOB)) <= 16384)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_reviews_plan_created ON plan_reviews(plan_id, plan_revision, created_at ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS plan_approvals (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  plan_revision INTEGER NOT NULL,
+  approver_id TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  comment TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(plan_id, plan_revision, approver_id),
+  CHECK (plan_revision >= 1),
+  CHECK (decision IN ('approved', 'rejected')),
+  CHECK (length(CAST(approver_id AS BLOB)) BETWEEN 1 AND 200),
+  CHECK (length(CAST(comment AS BLOB)) <= 16384)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_approvals_plan_created ON plan_approvals(plan_id, plan_revision, created_at ASC, id ASC);
 `
 
 const memorySchemaSQL = `

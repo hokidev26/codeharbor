@@ -21,6 +21,7 @@ type AgentLiveSnapshot struct {
 	MessageNextBefore    string                `json:"messageNextBefore,omitempty"`
 	PendingApprovals     []ToolCall            `json:"pendingApprovals"`
 	LatestRun            *Run                  `json:"latestRun,omitempty"`
+	LatestPlan           *Plan                 `json:"latestPlan,omitempty"`
 	Generations          PermissionGenerations `json:"generations"`
 }
 
@@ -156,6 +157,14 @@ func (s *Store) ReadAgentLiveSnapshot(ctx context.Context, agentID string) (Agen
 	})
 	if err == nil {
 		snapshot.LatestRun = &run
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return AgentLiveSnapshot{}, err
+	}
+	plan, err := scanPlan(func(dest ...any) error {
+		return tx.QueryRowContext(ctx, `SELECT `+planColumns+` FROM plans WHERE agent_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`, agentID).Scan(dest...)
+	})
+	if err == nil {
+		snapshot.LatestPlan = &plan
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return AgentLiveSnapshot{}, err
 	}

@@ -6,12 +6,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 
+	"autoto/internal/anthropicauth"
 	"autoto/internal/config"
 )
 
@@ -229,5 +233,400 @@ func TestAnthropicToolsMarshalSchemaAndDescription(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected marshaled Anthropic tools to contain %q: %s", want, text)
 		}
+	}
+}
+
+type recordingAnthropicTelemetry struct {
+	mu       sync.Mutex
+	attempts []ProviderAccountAttempt
+	quotas   []ProviderAccountQuotaSnapshot
+}
+
+func (r *recordingAnthropicTelemetry) RecordProviderAccountAttempt(_ context.Context, attempt ProviderAccountAttempt) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.attempts = append(r.attempts, attempt)
+	return nil
+}
+
+func (r *recordingAnthropicTelemetry) UpdateProviderAccountQuota(_ context.Context, provider, accountID string, quota any, fetchedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot, ok := quota.(ProviderAccountQuotaSnapshot)
+	if !ok {
+		return errors.New("unexpected quota type")
+	}
+	if snapshot.Provider != provider || snapshot.AccountID != accountID || !snapshot.FetchedAt.Equal(fetchedAt) {
+		return errors.New("quota metadata mismatch")
+	}
+	r.quotas = append(r.quotas, snapshot)
+	return nil
+}
+
+func createAnthropicAPIKeyAccount(t *testing.T, store *anthropicauth.Store, apiKey string, priority int, disabled bool) anthropicauth.StoredCredential {
+	t.Helper()
+	item, err := store.Create(anthropicauth.CreateRequest{AuthType: anthropicauth.AuthTypeAPIKey, APIKey: apiKey, Priority: priority, Disabled: disabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return item
+}
+
+func writeAnthropicSuccessStream(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = w.Write([]byte(strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(mustJSON(text)) + `}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":3,"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n") + "\n\n"))
+}
+
+func mustJSON(value string) []byte {
+	data, _ := json.Marshal(value)
+	return data
+}
+
+func collectAnthropicEvents(t *testing.T, events <-chan Event) (string, []Event) {
+	t.Helper()
+	var text string
+	var collected []Event
+	for event := range events {
+		collected = append(collected, event)
+		if event.Type == "text" {
+			text += event.Text
+		}
+	}
+	return text, collected
+}
+
+func TestAnthropicProviderUsesPriorityIDOrderSkipsDisabledAndFallsBackLast(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "environment-secret-must-not-be-used")
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	_ = createAnthropicAPIKeyAccount(t, store, "disabled-key", 1, true)
+	lowA := createAnthropicAPIKeyAccount(t, store, "priority-100-a", 100, false)
+	lowB := createAnthropicAPIKeyAccount(t, store, "priority-100-b", 100, false)
+	high := createAnthropicAPIKeyAccount(t, store, "priority-200", 200, false)
+	keysByID := map[string]string{lowA.Credential.ID: lowA.Credential.APIKey, lowB.Credential.ID: lowB.Credential.APIKey}
+	ids := []string{lowA.Credential.ID, lowB.Credential.ID}
+	sort.Strings(ids)
+	expected := []string{keysByID[ids[0]], keysByID[ids[1]], high.Credential.APIKey, "legacy-fallback"}
+
+	var mu sync.Mutex
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-Api-Key")
+		mu.Lock()
+		seen = append(seen, key)
+		mu.Unlock()
+		if key != "legacy-fallback" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`))
+			return
+		}
+		writeAnthropicSuccessStream(w, "fallback-ok")
+	}))
+	defer server.Close()
+
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, Model: "claude-test", CredentialStorePath: storeDir, APIKey: "legacy-fallback"})
+	if !provider.Configured() {
+		t.Fatal("provider with enabled stored accounts should be configured")
+	}
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, collected := collectAnthropicEvents(t, events)
+	if text != "fallback-ok" {
+		t.Fatalf("unexpected text %q events=%+v", text, collected)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(seen, ",") != strings.Join(expected, ",") {
+		t.Fatalf("unexpected account order: got %v want %v", seen, expected)
+	}
+	for _, forbidden := range []string{"disabled-key", "environment-secret-must-not-be-used"} {
+		if strings.Contains(strings.Join(seen, ","), forbidden) {
+			t.Fatalf("forbidden credential was used: %s", forbidden)
+		}
+	}
+}
+
+func TestAnthropicProviderDisabledOnlyIsNotConfigured(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	_ = createAnthropicAPIKeyAccount(t, store, "disabled-only", 10, true)
+	provider := NewAnthropicProvider(config.ProviderConfig{CredentialStorePath: storeDir, Model: "claude-test"})
+	if provider.Configured() {
+		t.Fatal("disabled-only store must not configure provider")
+	}
+	if events, err := provider.Generate(context.Background(), GenerateRequest{}); err == nil || events != nil || !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected unavailable provider, events=%v err=%v", events, err)
+	}
+}
+
+func TestAnthropicProviderSyncAccountReturnsModelsAndQuotaWithoutMessage(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	account := createAnthropicAPIKeyAccount(t, store, "sync-secret", 10, false)
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("sync must only list models, got %s", r.URL.Path)
+		}
+		if r.Header.Get("X-Api-Key") != "sync-secret" {
+			t.Fatalf("unexpected credential header %q", r.Header.Get("X-Api-Key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("anthropic-ratelimit-requests-limit", "100")
+		w.Header().Set("anthropic-ratelimit-requests-remaining", "91")
+		w.Header().Set("anthropic-ratelimit-requests-reset", "2026-07-16T12:00:00Z")
+		w.Header().Set("anthropic-ratelimit-input-tokens-limit", "10000")
+		w.Header().Set("anthropic-ratelimit-input-tokens-remaining", "9000")
+		w.Header().Set("anthropic-ratelimit-input-tokens-reset", "2026-07-16T12:00:01Z")
+		w.Header().Set("anthropic-ratelimit-output-tokens-limit", "2000")
+		w.Header().Set("anthropic-ratelimit-output-tokens-remaining", "1800")
+		w.Header().Set("anthropic-ratelimit-output-tokens-reset", "2026-07-16T12:00:02Z")
+		w.Header().Set("retry-after", "2")
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-a","type":"model","display_name":"Claude A","created_at":"2026-07-01T00:00:00Z"}],"has_more":false,"first_id":"claude-a","last_id":"claude-a"}`))
+	}))
+	defer server.Close()
+
+	telemetry := &recordingAnthropicTelemetry{}
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	provider.clock = func() time.Time { return time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC) }
+	provider.SetAccountTelemetry(telemetry)
+	summary, models, quota, err := provider.SyncAccount(context.Background(), account.Credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ID != account.Credential.ID || len(models) != 1 || models[0] != "claude-a" {
+		t.Fatalf("unexpected sync result summary=%+v models=%v", summary, models)
+	}
+	if quota.Requests.Limit != "100" || quota.Requests.Remaining != "91" || quota.InputTokens.Limit != "10000" || quota.OutputTokens.Remaining != "1800" || quota.RetryAfter != "2" || quota.FetchedAt.IsZero() {
+		t.Fatalf("unexpected quota snapshot: %+v", quota)
+	}
+	encodedSummary, _ := json.Marshal(summary)
+	encodedQuota, _ := json.Marshal(quota)
+	if strings.Contains(string(encodedSummary), "sync-secret") || strings.Contains(string(encodedQuota), "sync-secret") {
+		t.Fatal("sync response leaked API key")
+	}
+	if len(paths) != 1 || paths[0] != "/v1/models" {
+		t.Fatalf("unexpected sync requests: %v", paths)
+	}
+	telemetry.mu.Lock()
+	defer telemetry.mu.Unlock()
+	if len(telemetry.attempts) != 0 || len(telemetry.quotas) != 1 {
+		t.Fatalf("sync should record quota only: attempts=%v quotas=%v", telemetry.attempts, telemetry.quotas)
+	}
+}
+
+func TestAnthropicProviderGenerateRecordsAttemptAndQuotaHeaders(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	account := createAnthropicAPIKeyAccount(t, store, "quota-key", 10, false)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("anthropic-ratelimit-requests-limit", "50")
+		w.Header().Set("anthropic-ratelimit-requests-remaining", "49")
+		w.Header().Set("anthropic-ratelimit-input-tokens-limit", "5000")
+		w.Header().Set("anthropic-ratelimit-output-tokens-limit", "1000")
+		writeAnthropicSuccessStream(w, "ok")
+	}))
+	defer server.Close()
+	telemetry := &recordingAnthropicTelemetry{}
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	provider.SetAccountTelemetry(telemetry)
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, collected := collectAnthropicEvents(t, events)
+	for _, event := range collected {
+		if event.Type == "error" {
+			t.Fatalf("unexpected error: %s", event.Text)
+		}
+	}
+	telemetry.mu.Lock()
+	defer telemetry.mu.Unlock()
+	if len(telemetry.attempts) != 1 || !telemetry.attempts[0].Success || telemetry.attempts[0].HTTPStatus != http.StatusOK || telemetry.attempts[0].AccountID != account.Credential.ID {
+		t.Fatalf("unexpected attempt telemetry: %+v", telemetry.attempts)
+	}
+	if len(telemetry.quotas) != 1 || telemetry.quotas[0].Requests.Limit != "50" || telemetry.quotas[0].InputTokens.Limit != "5000" || telemetry.quotas[0].OutputTokens.Limit != "1000" {
+		t.Fatalf("unexpected quota telemetry: %+v", telemetry.quotas)
+	}
+}
+
+func TestAnthropicProviderDoesNotReplayAfterOutput(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	_ = createAnthropicAPIKeyAccount(t, store, "first-key", 10, false)
+	_ = createAnthropicAPIKeyAccount(t, store, "second-key", 20, false)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("X-Api-Key") == "second-key" {
+			writeAnthropicSuccessStream(w, "replayed")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"try another\"}}\n\n"))
+	}))
+	defer server.Close()
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, collected := collectAnthropicEvents(t, events)
+	if text != "partial" || requests.Load() != 1 {
+		t.Fatalf("stream was replayed after output: text=%q requests=%d events=%+v", text, requests.Load(), collected)
+	}
+	if len(collected) == 0 || collected[len(collected)-1].Type != "error" {
+		t.Fatalf("expected terminal error event: %+v", collected)
+	}
+}
+
+func TestAnthropicProviderContextCancellationDoesNotFailOver(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	_ = createAnthropicAPIKeyAccount(t, store, "cancel-first", 10, false)
+	_ = createAnthropicAPIKeyAccount(t, store, "cancel-second", 20, false)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancel()
+	_, _ = collectAnthropicEvents(t, events)
+	close(release)
+	if requests.Load() != 1 {
+		t.Fatalf("canceled request failed over to another account: requests=%d", requests.Load())
+	}
+}
+
+func TestAnthropicProviderSuppressesDuplicateConfiguredAPIKey(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	secret := "duplicate-configured-key"
+	account := createAnthropicAPIKeyAccount(t, store, secret, 10, false)
+	var requests atomic.Int32
+	telemetry := &recordingAnthropicTelemetry{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`))
+	}))
+	defer server.Close()
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, APIKey: secret, Model: "claude-test"})
+	provider.SetAccountTelemetry(telemetry)
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, collected := collectAnthropicEvents(t, events)
+	if requests.Load() != 1 {
+		t.Fatalf("duplicate configured API key was retried as a second account: requests=%d", requests.Load())
+	}
+	if len(collected) != 1 || collected[0].Type != "error" {
+		t.Fatalf("unexpected terminal events: %+v", collected)
+	}
+	telemetry.mu.Lock()
+	defer telemetry.mu.Unlock()
+	if len(telemetry.attempts) != 1 || telemetry.attempts[0].AccountID != account.Credential.ID {
+		t.Fatalf("duplicate fallback changed telemetry identity: %+v", telemetry.attempts)
+	}
+}
+
+func TestAnthropicProviderListModelsUsesAllAccountsAndDeduplicatesWithoutGenerationTelemetry(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	_ = createAnthropicAPIKeyAccount(t, store, "models-first", 10, false)
+	_ = createAnthropicAPIKeyAccount(t, store, "models-second", 20, false)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("X-Api-Key") == "models-first" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-a","type":"model"},{"id":"claude-shared","type":"model"}],"has_more":false}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-shared","type":"model"},{"id":"claude-b","type":"model"}],"has_more":false}`))
+	}))
+	defer server.Close()
+	telemetry := &recordingAnthropicTelemetry{}
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	provider.SetAccountTelemetry(telemetry)
+	models, err := provider.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(models, ",") != "claude-a,claude-shared,claude-b" {
+		t.Fatalf("unexpected deduplicated models: %v", models)
+	}
+	telemetry.mu.Lock()
+	defer telemetry.mu.Unlock()
+	if len(telemetry.attempts) != 0 || len(telemetry.quotas) != 0 {
+		t.Fatalf("ListModels recorded generation telemetry: attempts=%v quotas=%v", telemetry.attempts, telemetry.quotas)
+	}
+}
+
+func TestAnthropicProviderErrorsAreRedactedAndNonRetryableErrorsStop(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	secret := "sk-ant-secret-never-leak"
+	_ = createAnthropicAPIKeyAccount(t, store, secret, 10, false)
+	_ = createAnthropicAPIKeyAccount(t, store, "unused-second-key", 20, false)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad key ` + secret + `"}}`))
+	}))
+	defer server.Close()
+	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, CredentialStorePath: storeDir, Model: "claude-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, collected := collectAnthropicEvents(t, events)
+	if requests.Load() != 1 {
+		t.Fatalf("non-retryable error rotated accounts: requests=%d", requests.Load())
+	}
+	if len(collected) != 1 || collected[0].Type != "error" || !strings.Contains(collected[0].Text, "HTTP 400") {
+		t.Fatalf("unexpected error events: %+v", collected)
+	}
+	if strings.Contains(collected[0].Text, secret) || strings.Contains(collected[0].Text, "bad key") {
+		t.Fatalf("error leaked upstream secret/body: %q", collected[0].Text)
 	}
 }

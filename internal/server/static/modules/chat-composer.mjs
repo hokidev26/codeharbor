@@ -46,6 +46,12 @@ export function fastModeSupportedForModel(provider, modelValue) {
   return Boolean(model && modelCapabilities[model]?.fastMode === true);
 }
 
+export function normalizeMessageMode(value, fallback = "execute") {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "plan" || mode === "execute") return mode;
+  return fallback === "plan" ? "plan" : "execute";
+}
+
 export function calculateMessageInputSize({ scrollHeight, minHeight = 0, maxHeight = 180 } = {}) {
   const minimum = Math.max(0, Number(minHeight) || 0);
   const maximum = Math.max(minimum, Number(maxHeight) || 180);
@@ -301,6 +307,16 @@ export function createChatComposerController({
     }[value] || t("modelProvider.automatic");
   }
 
+  function reasoningEffortMobileLabel(value) {
+    return {
+      auto: "Auto",
+      low: "Low",
+      medium: "Med",
+      high: "High",
+      xhigh: "XH",
+    }[value] || "Auto";
+  }
+
   function reasoningEffortValues(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
     const provider = currentProviderConfig?.(modelValue) || null;
     return reasoningEffortValuesForCapabilities(provider?.capabilities || {});
@@ -334,7 +350,10 @@ export function createChatComposerController({
     select.setAttribute("aria-busy", saving ? "true" : "false");
     select.dataset.supported = values.length > 1 ? "true" : "false";
     const display = $("reasoningEffortDisplay");
-    if (display) display.textContent = reasoningEffortLabel(selected);
+    if (display) {
+      display.textContent = reasoningEffortLabel(selected);
+      (display.dataset ||= {}).mobileLabel = reasoningEffortMobileLabel(selected);
+    }
     const pill = select.closest?.(".reasoning-effort-pill");
     pill?.classList.toggle("reasoning-effort-unsupported", values.length <= 1);
     pill?.classList.toggle("reasoning-effort-saving", saving);
@@ -569,6 +588,32 @@ export function createChatComposerController({
     state.promptHistoryDraft = "";
   }
 
+  function messageModeFor(agentId = state.agent?.id) {
+    const saved = agentId ? state.messageModes?.[agentId] : "";
+    return normalizeMessageMode(saved, state.agent?.planMode === true ? "plan" : "execute");
+  }
+
+  function refreshMessageModeControl({ requestedMode } = {}) {
+    const mode = normalizeMessageMode(requestedMode ?? messageModeFor(), state.agent?.planMode === true ? "plan" : "execute");
+    const toggle = $("messageModeToggle");
+    toggle?.querySelectorAll?.("[data-message-mode]").forEach((button) => {
+      const active = button.dataset.messageMode === mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.disabled = isMessageSendingFor();
+    });
+    if (toggle) toggle.dataset.mode = mode;
+    return mode;
+  }
+
+  function setMessageMode(value) {
+    const agentId = state.agent?.id;
+    const mode = normalizeMessageMode(value, state.agent?.planMode === true ? "plan" : "execute");
+    if (agentId) state.messageModes = { ...(state.messageModes || {}), [agentId]: mode };
+    refreshMessageModeControl({ requestedMode: mode });
+    return mode;
+  }
+
   function isMessageSendingFor(agentId = state.agent?.id) {
     return Boolean(agentId && state.messageSendingByAgent?.[agentId]);
   }
@@ -581,6 +626,7 @@ export function createChatComposerController({
     if (attachButton) attachButton.disabled = busy;
     const attachInput = $("attachFileInput");
     if (attachInput) attachInput.disabled = busy;
+    refreshMessageModeControl();
     setButtonBusy($("sendMessageBtn"), busy, t("workspace.chat.sending"));
   }
 
@@ -604,6 +650,7 @@ export function createChatComposerController({
     const draftKey = currentChatDraftKey();
     const input = $("messageText");
     const text = input.value.trim();
+    const mode = messageModeFor(agentId);
     const attachments = [...(state.pendingAttachments || [])];
     if (!text && !attachments.length) return;
     if (!isCurrentModelConfigured()) {
@@ -618,6 +665,7 @@ export function createChatComposerController({
       if (attachments.length) {
         const form = new FormData();
         form.append("text", text);
+        form.append("mode", mode);
         attachments.forEach((item) => form.append("files", item.file, item.file?.name || "attachment"));
         accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
@@ -626,7 +674,7 @@ export function createChatComposerController({
       } else {
         accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, mode }),
         });
       }
       await onMessageAccepted?.(accepted, agentId);
@@ -1121,12 +1169,14 @@ export function createChatComposerController({
     loadPromptHistory,
     openAttachmentPicker,
     refreshFastModeControl,
+    refreshMessageModeControl,
     refreshReasoningEffortControl,
     restoreCurrentChatDraft,
     saveCurrentChatDraft,
     saveFastMode,
     saveReasoningEffort,
     scheduleMessageInputResize,
+    setMessageMode,
     selectedReasoningEffort,
     sendMessage,
     setMessageInputValue,

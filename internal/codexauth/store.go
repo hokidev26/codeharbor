@@ -329,6 +329,25 @@ func (s *Store) GetByID(id string) (StoredCredential, error) {
 	return StoredCredential{}, os.ErrNotExist
 }
 
+// ExportByID returns a complete re-importable credential document. The content
+// contains token material and must only be sent through an explicitly guarded
+// download path; callers must never log it or include it in list responses.
+func (s *Store) ExportByID(id string) (ImportDocument, error) {
+	item, err := s.GetByID(id)
+	if err != nil {
+		return ImportDocument{}, err
+	}
+	data, err := json.MarshalIndent(item.Credential, "", "  ")
+	if err != nil {
+		return ImportDocument{}, errors.New("序列化 Codex 凭据失败")
+	}
+	data = append(data, '\n')
+	if len(data) > maxCredentialBytes {
+		return ImportDocument{}, errors.New("Codex 凭据导出内容过大")
+	}
+	return ImportDocument{Filename: item.Filename, Content: data}, nil
+}
+
 func (s *Store) UpdateMetadata(id string, update MetadataUpdate) (StoredCredential, error) {
 	if s == nil || strings.TrimSpace(s.dir) == "" {
 		return StoredCredential{}, errors.New("Codex 本地凭据库路径未配置")

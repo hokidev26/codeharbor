@@ -61,13 +61,15 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":          cfg.Server,
-		"paths":           cfg.Paths,
-		"agent":           cfg.Agent,
-		"providers":       providerResponses,
-		"runtimeSettings": runtimeSettings,
-		"tierOrder":       subscriptionTierOrderSnapshot(),
-		"version":         config.Version,
+		"server":                       cfg.Server,
+		"paths":                        cfg.Paths,
+		"agent":                        cfg.Agent,
+		"agentModelSettingsEndpoint":   "/api/runtime/agent-model-settings",
+		"continuationSettingsEndpoint": "/api/runtime/continuation-settings",
+		"providers":                    providerResponses,
+		"runtimeSettings":              runtimeSettings,
+		"tierOrder":                    subscriptionTierOrderSnapshot(),
+		"version":                      config.Version,
 	})
 }
 
@@ -91,7 +93,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	writeJSON(w, http.StatusOK, s.filterProjectsForRequest(r, projects))
 }
 
 type createProjectRequest struct {
@@ -112,12 +114,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if gitPath == "" {
 		gitPath = filepath.Join(cfg.Paths.DefaultProjectDir, slugify(req.Name))
 	}
-	absGitPath, err := filepath.Abs(gitPath)
+	resolvedGitPath, err := s.resolveCWDForRequest(r, gitPath)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	gitPath = absGitPath
+	gitPath = resolvedGitPath
 	if err := os.MkdirAll(gitPath, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -147,6 +149,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if cfg.Agent.DefaultStartInPlanMode {
+		agent, err = s.updatePersistedAgentPlanMode(r.Context(), agent.ID, true)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "project was created but its default plan mode could not be applied")
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "workline": workline, "agent": agent})
 }
@@ -189,7 +198,7 @@ func (s *Server) listProjectWorklines(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, worklines)
+	writeJSON(w, http.StatusOK, s.filterWorklinesForRequest(r, worklines))
 }
 
 func (s *Server) getWorkline(w http.ResponseWriter, r *http.Request) {
@@ -211,5 +220,5 @@ func (s *Server) listWorklineAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+	writeJSON(w, http.StatusOK, s.filterAgentsForRequest(r, agents))
 }

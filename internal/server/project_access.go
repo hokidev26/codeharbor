@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 	"strings"
+
+	"autoto/internal/db"
 )
 
 type projectAccessTarget struct {
@@ -27,48 +29,103 @@ func (s *Server) projectAccessGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		hasUsers, err := s.store.HasUsers(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !hasUsers {
-			next.ServeHTTP(w, r)
-			return
-		}
-		user, ok, err := s.currentUser(r)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "login required")
-			return
-		}
-		if target.kind == projectAccessCollection {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		var allowed bool
-		switch target.kind {
-		case projectAccessProject:
-			allowed, err = s.store.CanAccessProject(r.Context(), user.ID, target.id)
-		case projectAccessWorkline:
-			allowed, err = s.store.CanAccessWorkline(r.Context(), user.ID, target.id)
-		case projectAccessAgent:
-			allowed, err = s.store.CanAccessAgent(r.Context(), user.ID, target.id)
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !allowed {
-			writeError(w, http.StatusNotFound, "resource not found")
+		if !s.requireProjectResourceAccess(w, r, target) {
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requireProjectResourceAccess applies membership for installed users and the
+// restricted remote project's filesystem boundary to a single resource. It is
+// also used by handlers whose collection route has no ID in its URL.
+func (s *Server) requireProjectResourceAccess(w http.ResponseWriter, r *http.Request, target projectAccessTarget) bool {
+	if s.store == nil {
+		return true
+	}
+	if !s.requireRemoteResourceScope(w, r, target) {
+		return false
+	}
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !hasUsers || target.kind == projectAccessCollection {
+		return true
+	}
+	user, ok, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "login required")
+		return false
+	}
+	var allowed bool
+	switch target.kind {
+	case projectAccessProject:
+		allowed, err = s.store.CanAccessProject(r.Context(), user.ID, target.id)
+	case projectAccessWorkline:
+		allowed, err = s.store.CanAccessWorkline(r.Context(), user.ID, target.id)
+	case projectAccessAgent:
+		allowed, err = s.store.CanAccessAgent(r.Context(), user.ID, target.id)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !allowed {
+		writeError(w, http.StatusNotFound, "resource not found")
+		return false
+	}
+	return true
+}
+
+func (s *Server) requireRemoteResourceScope(w http.ResponseWriter, r *http.Request, target projectAccessTarget) bool {
+	if s.capabilitiesForRequest(r).FilesystemScope != "project" || target.kind == projectAccessCollection {
+		return true
+	}
+	path := ""
+	switch target.kind {
+	case projectAccessProject:
+		project, err := s.store.GetProject(r.Context(), target.id)
+		if err != nil {
+			writeStoreError(w, err)
+			return false
+		}
+		path = project.GitPath
+	case projectAccessWorkline:
+		workline, err := s.store.GetWorkline(r.Context(), target.id)
+		if err != nil {
+			writeStoreError(w, err)
+			return false
+		}
+		path = workline.WorktreePath
+		if strings.TrimSpace(path) == "" {
+			project, projectErr := s.store.GetProject(r.Context(), workline.ProjectID)
+			if projectErr != nil {
+				writeStoreError(w, projectErr)
+				return false
+			}
+			path = project.GitPath
+		}
+	case projectAccessAgent:
+		agent, err := s.store.GetAgent(r.Context(), target.id)
+		if err != nil {
+			writeStoreError(w, err)
+			return false
+		}
+		path = agent.CWD
+	default:
+		return true
+	}
+	if !s.filesystemPathWithinProjectRoot(path) {
+		writeError(w, http.StatusNotFound, "resource not found")
+		return false
+	}
+	return true
 }
 
 func projectAccessTargetForRequest(r *http.Request) (projectAccessTarget, bool) {
@@ -108,6 +165,41 @@ func projectAccessTargetForRequest(r *http.Request) (projectAccessTarget, bool) 
 		}
 	}
 	return projectAccessTarget{}, false
+}
+
+func (s *Server) filterAgentsByMembership(w http.ResponseWriter, r *http.Request, agents []db.Agent) ([]db.Agent, bool) {
+	if s.store == nil {
+		return agents, true
+	}
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !hasUsers {
+		return agents, true
+	}
+	user, ok, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "login required")
+		return nil, false
+	}
+	filtered := make([]db.Agent, 0, len(agents))
+	for _, agent := range agents {
+		allowed, accessErr := s.store.CanAccessAgent(r.Context(), user.ID, agent.ID)
+		if accessErr != nil {
+			writeError(w, http.StatusInternalServerError, accessErr.Error())
+			return nil, false
+		}
+		if allowed {
+			filtered = append(filtered, agent)
+		}
+	}
+	return filtered, true
 }
 
 func (s *Server) requireAgentAccess(w http.ResponseWriter, r *http.Request, agentID string) bool {

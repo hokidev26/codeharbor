@@ -6,17 +6,31 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	ProtocolVersion          = 2
-	DefaultRingSize          = 512
-	DefaultReplayLimit       = 256
-	DefaultSubscriberBuffer  = 64
-	DefaultMaxStreams        = 256
-	DefaultStreamIdleTimeout = 15 * time.Minute
+	ProtocolVersion                   = 2
+	DefaultRingSize                   = 512
+	DefaultRingBytes                  = 512 * 1024
+	DefaultMaxEventBytes              = 32 * 1024
+	DefaultToolOutputSnapshotBytes    = 48 * 1024
+	DefaultReplayLimit                = 256
+	DefaultSubscriberBuffer           = 64
+	DefaultMaxStreams                 = 256
+	DefaultStreamIdleTimeout          = 15 * time.Minute
+	hubEventTextSoftLimitBytes        = 16 * 1024
+	hubEventDataStringSoftLimitBytes  = 4 * 1024
+	hubEventDataStringTightLimitBytes = 512
+	hubEventCriticalStringLimitBytes  = 256
+	hubEventDataMaxFields             = 32
+	hubEventDataMaxItems              = 16
+	hubEventDataTightMaxFields        = 16
+	hubEventDataTightMaxItems         = 8
 )
 
 type Event struct {
@@ -52,6 +66,8 @@ const (
 
 type HubConfig struct {
 	RingSize         int
+	RingBytes        int
+	MaxEventBytes    int
 	ReplayLimit      int
 	SubscriberBuffer int
 	MaxStreams       int
@@ -90,6 +106,7 @@ type stream struct {
 	session      string
 	sequence     uint64
 	ring         []Event
+	ringBytes    int
 	subscribers  map[*hubSubscriber]struct{}
 	lastActivity time.Time
 }
@@ -104,6 +121,11 @@ type StreamWatermark struct {
 	StreamSession  string `json:"streamSession"`
 	OldestSequence uint64 `json:"oldestSequence"`
 	LatestSequence uint64 `json:"latestSequence"`
+}
+
+type ToolOutputSnapshot struct {
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 func (h *Hub) Watermark(agentID string) StreamWatermark {
@@ -122,6 +144,38 @@ func (h *Hub) Watermark(agentID string) StreamWatermark {
 	return watermark
 }
 
+func (h *Hub) ToolOutputSnapshots(agentID string) map[string]ToolOutputSnapshot {
+	now := h.now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.collectGarbageLocked(now)
+	current := h.streams[agentID]
+	if current == nil || len(current.ring) == 0 {
+		return nil
+	}
+	result := make(map[string]ToolOutputSnapshot)
+	for _, event := range current.ring {
+		if event.Type != "tool.output" || event.Text == "" {
+			continue
+		}
+		toolUseID, _ := event.Data["toolUseId"].(string)
+		toolUseID = strings.TrimSpace(toolUseID)
+		if toolUseID == "" {
+			continue
+		}
+		snapshot := result[toolUseID]
+		snapshot.Text, snapshot.Truncated = appendToolOutputSnapshot(snapshot.Text, event.Text, snapshot.Truncated)
+		if truncated, _ := event.Data["truncated"].(bool); truncated {
+			snapshot.Truncated = true
+		}
+		result[toolUseID] = snapshot
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func NewHub() *Hub {
 	return NewHubWithConfig(HubConfig{})
 }
@@ -129,6 +183,15 @@ func NewHub() *Hub {
 func NewHubWithConfig(config HubConfig) *Hub {
 	if config.RingSize <= 0 {
 		config.RingSize = DefaultRingSize
+	}
+	if config.RingBytes <= 0 {
+		config.RingBytes = DefaultRingBytes
+	}
+	if config.MaxEventBytes <= 0 {
+		config.MaxEventBytes = DefaultMaxEventBytes
+	}
+	if config.RingBytes < config.MaxEventBytes {
+		config.RingBytes = config.MaxEventBytes
 	}
 	if config.ReplayLimit <= 0 {
 		config.ReplayLimit = DefaultReplayLimit
@@ -253,6 +316,7 @@ func replayAfter(events []Event, after uint64) []Event {
 // delivering the event. Slow subscribers are explicitly marked for resync.
 func (h *Hub) Publish(event Event) {
 	now := h.now()
+	event = boundedHubEvent(event, h.config.MaxEventBytes)
 	h.mu.Lock()
 	h.collectGarbageLocked(now)
 	current := h.ensureStreamLocked(event.AgentID, now)
@@ -265,6 +329,7 @@ func (h *Hub) Publish(event Event) {
 		current.session = h.config.NewSession()
 		current.sequence = 0
 		current.ring = nil
+		current.ringBytes = 0
 	}
 	current.sequence++
 	event.Protocol = ProtocolVersion
@@ -273,10 +338,17 @@ func (h *Hub) Publish(event Event) {
 	if event.CreatedAt == "" {
 		event.CreatedAt = now.UTC().Format(time.RFC3339Nano)
 	}
+	event = boundedHubEvent(event, h.config.MaxEventBytes)
+	eventBytes := hubEventSize(event)
 	current.ring = append(current.ring, event)
-	if overflow := len(current.ring) - h.config.RingSize; overflow > 0 {
-		copy(current.ring, current.ring[overflow:])
-		current.ring = current.ring[:len(current.ring)-overflow]
+	current.ringBytes += eventBytes
+	for len(current.ring) > h.config.RingSize || current.ringBytes > h.config.RingBytes {
+		current.ringBytes -= hubEventSize(current.ring[0])
+		copy(current.ring, current.ring[1:])
+		current.ring = current.ring[:len(current.ring)-1]
+	}
+	if current.ringBytes < 0 {
+		current.ringBytes = 0
 	}
 	current.lastActivity = now
 	for sub := range current.subscribers {
@@ -287,6 +359,234 @@ func (h *Hub) Publish(event Event) {
 		}
 	}
 	h.mu.Unlock()
+}
+
+func boundedHubEvent(event Event, maximum int) Event {
+	if maximum <= 0 {
+		maximum = DefaultMaxEventBytes
+	}
+	event.Type, _ = truncateHubString(event.Type, 128)
+	event.AgentID, _ = truncateHubString(event.AgentID, 512)
+	event.MessageID, _ = truncateHubString(event.MessageID, 512)
+	var truncated bool
+	event.Text, truncated = truncateHubString(event.Text, min(maximum/2, hubEventTextSoftLimitBytes))
+	if truncated {
+		event.Data = markHubEventTruncated(event.Data)
+	}
+	if hubEventSize(event) <= maximum {
+		return event
+	}
+	event.Data = boundedHubEventData(event.Data, hubEventDataStringSoftLimitBytes, hubEventDataMaxFields, hubEventDataMaxItems, 4)
+	event.Data = markHubEventTruncated(event.Data)
+	if hubEventSize(event) <= maximum {
+		return event
+	}
+	event.Data = boundedHubEventData(event.Data, hubEventDataStringTightLimitBytes, hubEventDataTightMaxFields, hubEventDataTightMaxItems, 3)
+	event.Data = markHubEventTruncated(event.Data)
+	if hubEventSize(event) <= maximum {
+		return event
+	}
+	event.Data = criticalHubEventData(event.Data)
+	event.Text = hubEventTextThatFits(event, maximum)
+	if hubEventSize(event) <= maximum {
+		return event
+	}
+	event.Data = map[string]any{"truncated": true}
+	event.Text = hubEventTextThatFits(event, maximum)
+	return event
+}
+
+func boundedHubEventData(data map[string]any, stringLimit, maxFields, maxItems, maxDepth int) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make(map[string]any, min(len(keys), maxFields)+1)
+	truncated := len(keys) > maxFields
+	for index, key := range keys {
+		if index >= maxFields {
+			break
+		}
+		boundedKey, keyTruncated := truncateHubString(key, 128)
+		if boundedKey == "" {
+			truncated = true
+			continue
+		}
+		value, valueTruncated := boundedHubEventValue(data[key], stringLimit, maxFields, maxItems, maxDepth, 0)
+		if _, exists := result[boundedKey]; exists && boundedKey != key {
+			truncated = true
+			continue
+		}
+		result[boundedKey] = value
+		truncated = truncated || keyTruncated || valueTruncated
+	}
+	if truncated {
+		result["truncated"] = true
+	}
+	return result
+}
+
+func boundedHubEventValue(value any, stringLimit, maxFields, maxItems, maxDepth, depth int) (any, bool) {
+	if depth >= maxDepth {
+		return nil, true
+	}
+	switch typed := value.(type) {
+	case nil, bool, float32, float64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+		return typed, false
+	case string:
+		return truncateHubString(typed, stringLimit)
+	case json.RawMessage:
+		if len(typed) == 0 {
+			return json.RawMessage(`null`), false
+		}
+		var normalized any
+		if !utf8.Valid(typed) || json.Unmarshal(typed, &normalized) != nil {
+			return map[string]any{"bytes": len(typed), "truncated": true}, true
+		}
+		return boundedHubEventValue(normalized, stringLimit, maxFields, maxItems, maxDepth, depth+1)
+	case []any:
+		result := make([]any, 0, min(len(typed), maxItems))
+		truncated := len(typed) > maxItems
+		for index, item := range typed {
+			if index >= maxItems {
+				break
+			}
+			bounded, itemTruncated := boundedHubEventValue(item, stringLimit, maxFields, maxItems, maxDepth, depth+1)
+			result = append(result, bounded)
+			truncated = truncated || itemTruncated
+		}
+		return result, truncated
+	case map[string]any:
+		return boundedHubEventDataAtDepth(typed, stringLimit, maxFields, maxItems, maxDepth, depth+1)
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil || len(encoded) > max(stringLimit*maxItems, stringLimit) || !utf8.Valid(encoded) {
+			return nil, true
+		}
+		var normalized any
+		if json.Unmarshal(encoded, &normalized) != nil {
+			return nil, true
+		}
+		return boundedHubEventValue(normalized, stringLimit, maxFields, maxItems, maxDepth, depth+1)
+	}
+}
+
+func boundedHubEventDataAtDepth(data map[string]any, stringLimit, maxFields, maxItems, maxDepth, depth int) (map[string]any, bool) {
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make(map[string]any, min(len(keys), maxFields)+1)
+	truncated := len(keys) > maxFields
+	for index, key := range keys {
+		if index >= maxFields {
+			break
+		}
+		boundedKey, keyTruncated := truncateHubString(key, 128)
+		if boundedKey == "" {
+			truncated = true
+			continue
+		}
+		bounded, valueTruncated := boundedHubEventValue(data[key], stringLimit, maxFields, maxItems, maxDepth, depth)
+		if _, exists := result[boundedKey]; exists && boundedKey != key {
+			truncated = true
+			continue
+		}
+		result[boundedKey] = bounded
+		truncated = truncated || keyTruncated || valueTruncated
+	}
+	if truncated {
+		result["truncated"] = true
+	}
+	return result, truncated
+}
+
+func criticalHubEventData(data map[string]any) map[string]any {
+	result := map[string]any{"truncated": true}
+	for _, key := range []string{"runId", "requestId", "toolUseId", "toolName", "status", "risk", "executionDeviceId", "durationMs", "stream", "inputTruncated", "resultTruncated"} {
+		value, ok := data[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			result[key], _ = truncateHubString(typed, hubEventCriticalStringLimitBytes)
+		case nil, bool, float32, float64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+			result[key] = typed
+		}
+	}
+	return result
+}
+
+func markHubEventTruncated(data map[string]any) map[string]any {
+	result := make(map[string]any, len(data)+1)
+	for key, value := range data {
+		result[key] = value
+	}
+	result["truncated"] = true
+	return result
+}
+
+func hubEventTextThatFits(event Event, maximum int) string {
+	original := event.Text
+	best := ""
+	low, high := 0, len(original)
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate, _ := truncateHubString(original, middle)
+		event.Text = candidate
+		if hubEventSize(event) <= maximum {
+			best = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return best
+}
+
+func hubEventSize(event Event) int {
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return math.MaxInt
+	}
+	return len(encoded)
+}
+
+func truncateHubString(value string, maximum int) (string, bool) {
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "�")
+	}
+	if maximum < 0 {
+		maximum = 0
+	}
+	if len(value) <= maximum {
+		return value, false
+	}
+	value = value[:maximum]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value, true
+}
+
+func appendToolOutputSnapshot(current, next string, alreadyTruncated bool) (string, bool) {
+	current = strings.ToValidUTF8(current, "�")
+	next = strings.ToValidUTF8(next, "�")
+	combined := current + next
+	if len(combined) <= DefaultToolOutputSnapshotBytes {
+		return combined, alreadyTruncated
+	}
+	start := len(combined) - DefaultToolOutputSnapshotBytes
+	for start < len(combined) && !utf8.RuneStart(combined[start]) {
+		start++
+	}
+	return combined[start:], true
 }
 
 // CollectGarbage removes inactive streams immediately when the configured

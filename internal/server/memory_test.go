@@ -214,7 +214,7 @@ func memoryAPIRawCall(handler http.Handler, method, target, body string) *httpte
 
 func memoryAPIRequest(handler http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(method, target, bytes.NewReader(body))
+	request := newTestRequest(method, target, bytes.NewReader(body))
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

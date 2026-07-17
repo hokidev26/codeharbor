@@ -36,6 +36,9 @@ test("memory rendering escapes content, keywords, ids, queries, and errors", () 
   assert.match(html, /&lt;script&gt;alert\(&quot;content&quot;\)&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;keyword&quot;&gt;/);
   assert.match(html, /value="&quot;&gt;&lt;img src=x onerror=&quot;boom&quot;&gt;"/);
+  assert.match(html, /settings-page-section/);
+  assert.match(html, /settings-stat-grid/);
+  assert.match(html, /settings-data-list/);
 });
 
 test("memory settings render translated UI text while preserving escaped user content", () => {

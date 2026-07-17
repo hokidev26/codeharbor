@@ -10,7 +10,9 @@ import (
 	"autoto/internal/config"
 	"autoto/internal/db"
 	"autoto/internal/providers"
+	"autoto/internal/review"
 	"autoto/internal/runtime"
+	"autoto/internal/server"
 )
 
 type orderedService struct {
@@ -32,7 +34,7 @@ func TestRuntimeRegistrationClosesHTTPBeforeWorkers(t *testing.T) {
 	closed := []string{}
 	service := func(name string) orderedService { return orderedService{name: name, mu: &mu, closed: &closed} }
 	supervisor := runtime.NewSupervisor()
-	if err := registerRuntimeServices(supervisor, service("preview"), service("channels"), service("automation"), service("http")); err != nil {
+	if err := registerRuntimeServices(supervisor, service("preview"), service("channels"), service("automation"), service("background"), service("http")); err != nil {
 		t.Fatal(err)
 	}
 	if err := supervisor.Start(context.Background()); err != nil {
@@ -41,7 +43,7 @@ func TestRuntimeRegistrationClosesHTTPBeforeWorkers(t *testing.T) {
 	if err := supervisor.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"http", "automation", "channels", "preview"}
+	want := []string{"http", "background", "automation", "channels", "preview"}
 	if !reflect.DeepEqual(closed, want) {
 		t.Fatalf("unexpected close order: got %v want %v", closed, want)
 	}
@@ -59,6 +61,43 @@ func TestProviderConfigForRuntimeInjectsInstallationIdentity(t *testing.T) {
 	}
 	if _, err := providers.NewProvider(got); err != nil {
 		t.Fatalf("injected provider config should remain valid: %v", err)
+	}
+}
+
+type reviewRegistrationProvider struct {
+	request providers.GenerateRequest
+}
+
+func (p *reviewRegistrationProvider) Name() string { return "review" }
+func (p *reviewRegistrationProvider) Capabilities() providers.Capabilities {
+	return providers.Capabilities{Streaming: true}
+}
+func (p *reviewRegistrationProvider) ListModels(context.Context) ([]string, error) {
+	return []string{"dedicated"}, nil
+}
+func (p *reviewRegistrationProvider) Generate(_ context.Context, request providers.GenerateRequest) (<-chan providers.Event, error) {
+	p.request = request
+	out := make(chan providers.Event, 2)
+	out <- providers.Event{Type: "text", Text: `{"verdict":"pass","reason":"looks good"}`}
+	out <- providers.Event{Type: "done", Done: true, StopReason: "end_turn"}
+	close(out)
+	return out, nil
+}
+
+func TestConfiguredReviewServiceUsesDedicatedModelWithoutTools(t *testing.T) {
+	provider := &reviewRegistrationProvider{}
+	registry := providers.NewRegistry()
+	registry.Register(provider)
+	service := server.NewReviewService(registry, "review:dedicated")
+	result, err := service.Review(context.Background(), review.Request{
+		Subject: "review planned change",
+		Draft:   review.PlanDraft{Goal: "change", Assumptions: []string{}, Steps: []string{"edit"}, Risks: []string{}, Tests: []string{"test"}, Rollback: []string{}},
+	})
+	if err != nil || result.Verdict != review.VerdictPass {
+		t.Fatalf("unexpected review service result: result=%+v err=%v", result, err)
+	}
+	if provider.request.Model != "dedicated" || provider.request.Tools != nil {
+		t.Fatalf("review service must use configured dedicated model without tools: %+v", provider.request)
 	}
 }
 

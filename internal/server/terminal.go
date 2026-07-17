@@ -24,8 +24,8 @@ type terminalMessage struct {
 }
 
 func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
-	if s.remoteHardeningActive(r) && !s.configSnapshot().Security.AllowRemoteTerminal {
-		writeError(w, http.StatusForbidden, "remote terminal is disabled while remote access hardening is active")
+	if !s.capabilitiesForRequest(r).TerminalAllowed {
+		writeError(w, http.StatusForbidden, "terminal requires a full remote session")
 		return
 	}
 	agentID := r.URL.Query().Get("agentId")
@@ -48,26 +48,35 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 	if !s.validateWebSocketRequest(w, r) {
 		return
 	}
-	conn, err := websocket.Accept(w, r, nil)
+	wsCtx, releaseAuthorization, authorized := s.remoteWebSocketContext(r.Context(), r)
+	if !authorized {
+		writeError(w, http.StatusUnauthorized, "remote websocket authorization expired")
+		return
+	}
+	defer releaseAuthorization()
+	// validateWebSocketRequest already applies the trusted forwarded-origin
+	// policy; the library's raw Host comparison cannot account for that proxy
+	// metadata.
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
-	cmd := exec.CommandContext(r.Context(), terminalShell())
+	cmd := exec.CommandContext(wsCtx, terminalShell())
 	if agent.CWD != "" {
 		cmd.Dir = agent.CWD
 	}
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	ptyFile, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 28})
 	if err != nil {
-		writeTerminalJSON(r.Context(), conn, terminalMessage{Type: "error", Data: err.Error()})
+		writeTerminalJSON(wsCtx, conn, terminalMessage{Type: "error", Data: err.Error()})
 		return
 	}
 	defer ptyFile.Close()
 	defer func() { _ = cmd.Process.Kill() }()
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(wsCtx)
 	defer cancel()
 	go readPTY(ctx, conn, ptyFile, cancel)
 	readTerminalInput(ctx, conn, ptyFile, cancel)

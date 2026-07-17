@@ -47,7 +47,7 @@ func TestStorageSummaryRouteReturnsConfiguredPathStats(t *testing.T) {
 	app.SetConfigPath(configPath)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/storage/summary", nil)
+	request := newTestRequest(http.MethodGet, "/api/storage/summary", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

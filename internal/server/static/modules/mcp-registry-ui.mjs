@@ -184,10 +184,10 @@ export function createMCPRegistryUIController({
   }
 
   function renderMCPRegistryList() {
-    if (state.mcpRegistryLoading && !state.mcpRegistryLoaded) return `<div class="settings-empty-card compact">${escapeHtml(t("mcp.loading"))}</div>`;
-    if (state.mcpRegistryError) return `<div class="settings-empty-card compact danger">${escapeHtml(t("mcp.loadFailed", { message: state.mcpRegistryError }))}</div>`;
-    if (!state.mcpRegistryServers.length) return `<div class="settings-empty-card compact">${escapeHtml(t("mcp.emptyList"))}</div>`;
-    return `<div class="skill-command-list">${state.mcpRegistryServers.map(renderMCPRegistryServerCard).join("")}</div>`;
+    if (state.mcpRegistryLoading && !state.mcpRegistryLoaded) return `<div class="settings-empty-card settings-empty-state settings-skeleton compact" aria-busy="true">${escapeHtml(t("mcp.loading"))}</div>`;
+    if (state.mcpRegistryError) return `<div class="settings-empty-card settings-empty-state settings-alert compact danger" role="alert">${escapeHtml(t("mcp.loadFailed", { message: state.mcpRegistryError }))}</div>`;
+    if (!state.mcpRegistryServers.length) return `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("mcp.emptyList"))}</div>`;
+    return `<div class="skill-command-list settings-data-list" aria-live="polite" aria-busy="${state.mcpRegistryLoading ? "true" : "false"}">${state.mcpRegistryServers.map(renderMCPRegistryServerCard).join("")}</div>`;
   }
 
   function renderMCPRegistryServerCard(server) {
@@ -199,20 +199,20 @@ export function createMCPRegistryUIController({
     const args = Array.isArray(server.args) && server.args.length ? ` ${server.args.join(" ")}` : "";
     const envText = Array.isArray(server.envKeys) && server.envKeys.length ? t("mcp.environmentWithKeys", { keys: server.envKeys.join(", ") }) : t("mcp.noEnvironment");
     return `
-    <div class="skill-command-card ${server.enabled ? "" : "disabled"}">
+    <div class="skill-command-card settings-card settings-data-list-row ${server.enabled ? "" : "disabled"}" aria-busy="${discovering || toggling || deleting ? "true" : "false"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(server.name || t("mcp.defaultServerName"))} <span class="settings-status-pill ${server.enabled ? "ok" : "muted"}">${escapeHtml(status)}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(t("mcp.serverId"))}: <code>${escapeHtml(server.id)}</code></div>
-        <div class="settings-provider-meta">${escapeHtml(server.transport || "stdio")} · ${escapeHtml((server.command || "") + args)}</div>
-        <div class="settings-provider-meta">${escapeHtml(envText)}${server.cwd ? ` · ${escapeHtml(t("mcp.cwd", { cwd: server.cwd }))}` : ""}</div>
+        <div class="skill-command-title settings-card-title">${escapeHtml(server.name || t("mcp.defaultServerName"))} <span class="settings-status-pill settings-badge ${server.enabled ? "ok" : "muted"}">${escapeHtml(status)}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(t("mcp.serverId"))}: <code>${escapeHtml(server.id)}</code></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(server.transport || "stdio")} · ${escapeHtml((server.command || "") + args)}</div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(envText)}${server.cwd ? ` · ${escapeHtml(t("mcp.cwd", { cwd: server.cwd }))}` : ""}</div>
         ${tools ? renderMCPRegistryToolsResult(tools) : ""}
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-tools="${escapeAttr(server.id)}" ${discovering || !server.enabled ? "disabled" : ""}>${escapeHtml(t(discovering ? "mcp.discovering" : "mcp.discoverTools"))}</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-edit="${escapeAttr(server.id)}" ${discovering || toggling || deleting ? "disabled" : ""}>${escapeHtml(t("mcp.edit"))}</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-toggle="${escapeAttr(server.id)}" ${toggling || deleting ? "disabled" : ""}>${escapeHtml(t(toggling ? "mcp.toggling" : (server.enabled ? "mcp.disable" : "mcp.enable")))}</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-registry-copy="${escapeAttr(server.id)}">${escapeHtml(t("mcp.copyServerId"))}</button>
-        <button class="settings-action-btn danger" type="button" data-mcp-registry-delete="${escapeAttr(server.id)}" ${deleting ? "disabled" : ""}>${escapeHtml(t(deleting ? "mcp.deleting" : "mcp.delete"))}</button>
+        <button class="settings-action-btn danger destructive" type="button" data-mcp-registry-delete="${escapeAttr(server.id)}" ${deleting ? "disabled" : ""}>${escapeHtml(t(deleting ? "mcp.deleting" : "mcp.delete"))}</button>
       </div>
     </div>
   `;
@@ -220,11 +220,11 @@ export function createMCPRegistryUIController({
 
   function renderMCPRegistryToolsResult(result) {
     const tools = Array.isArray(result.tools) ? result.tools : [];
-    if (!tools.length) return `<div class="settings-provider-meta">${escapeHtml(t("mcp.noToolsReturned"))}</div>`;
+    if (!tools.length) return `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("mcp.noToolsReturned"))}</div>`;
     return `
-    <div class="settings-empty-card compact">
+    <div class="settings-empty-card settings-card settings-empty-state compact" aria-live="polite">
       <strong>${escapeHtml(t("mcp.toolsListCount", { count: tools.length }))}</strong>
-      <div class="settings-provider-meta">${tools.map((tool) => escapeHtml(tool.name || t("mcp.unnamedTool"))).join(" · ")}</div>
+      <div class="settings-provider-meta settings-card-description">${tools.map((tool) => escapeHtml(tool.name || t("mcp.unnamedTool"))).join(" · ")}</div>
     </div>
   `;
   }

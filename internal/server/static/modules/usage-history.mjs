@@ -254,11 +254,11 @@ function formatCompactCount(value) {
 }
 
 function renderSummaryCard(title, value, subtitle = "") {
-  return `<section class="uh-summary-card"><div class="uh-summary-label">${escapeHtml(title)}</div><strong>${escapeHtml(value)}</strong><small>${escapeHtml(subtitle || "—")}</small></section>`;
+  return `<section class="uh-summary-card settings-stat-card"><div class="uh-summary-label">${escapeHtml(title)}</div><strong>${escapeHtml(value)}</strong><small>${escapeHtml(subtitle || "—")}</small></section>`;
 }
 
-function renderSummary(summary) {
-  return `<div class="uh-summary-grid">
+function renderSummary(summary, className = "uh-summary-grid") {
+  return `<div class="${className}">
     ${renderSummaryCard(t("usageHistory.summary.requests"), formatCompactCount(summary.requestCount), t("usageHistory.summary.exact", { value: formatNumber(summary.requestCount) }))}
     ${renderSummaryCard(t("usageHistory.summary.totalTokens"), formatCompactCount(summary.totalTokens), t("usageHistory.summary.inputOutput", { input: formatNumber(summary.inputTokens), output: formatNumber(summary.outputTokens) }))}
     ${renderSummaryCard(t("usageHistory.summary.averageTTFT"), formatOptionalDuration(summary.averageTTFTMs))}
@@ -275,7 +275,7 @@ function renderBucketControls(bucket) {
 }
 
 function renderMetricSelect(metric) {
-  return `<label class="uh-metric-field"><span>${escapeHtml(t("usageHistory.trend.metricLabel"))}</span><select id="usageHistoryMetric">${usageHistoryMetrics.map((value) => `<option value="${escapeAttr(value)}"${value === metric ? " selected" : ""}>${escapeHtml(t(`usageHistory.trend.metrics.${value}`))}</option>`).join("")}</select></label>`;
+  return `<label class="uh-metric-field settings-form-field" for="usageHistoryMetric"><span>${escapeHtml(t("usageHistory.trend.metricLabel"))}</span><select id="usageHistoryMetric">${usageHistoryMetrics.map((value) => `<option value="${escapeAttr(value)}"${value === metric ? " selected" : ""}>${escapeHtml(t(`usageHistory.trend.metrics.${value}`))}</option>`).join("")}</select></label>`;
 }
 
 function renderOptions(values, selected, emptyLabel) {
@@ -285,13 +285,13 @@ function renderOptions(values, selected, emptyLabel) {
 
 function renderFilters(state) {
   const { filters, options } = state;
-  return `<section class="uh-panel uh-filter-panel"><div class="uh-section-head"><div><h3>${escapeHtml(t("usageHistory.filters.title"))}</h3></div></div><form id="usageHistoryFilters" class="uh-filter-form">
-    <label><span>${escapeHtml(t("usageHistory.filters.provider"))}</span><select id="usageHistoryProvider">${renderOptions(options.providers, filters.provider, t("usageHistory.filters.allProviders"))}</select></label>
-    <label><span>${escapeHtml(t("usageHistory.filters.model"))}</span><select id="usageHistoryModel">${renderOptions(options.models, filters.model, t("usageHistory.filters.allModels"))}</select></label>
-    <label><span>${escapeHtml(t("usageHistory.filters.kind"))}</span><select id="usageHistoryKind">${renderOptions(options.kinds, filters.kind, t("usageHistory.filters.allKinds"))}</select></label>
-    <label><span>${escapeHtml(t("usageHistory.filters.from"))}</span><input id="usageHistoryFrom" type="date" value="${escapeAttr(filters.from)}"></label>
-    <label><span>${escapeHtml(t("usageHistory.filters.to"))}</span><input id="usageHistoryTo" type="date" value="${escapeAttr(filters.to)}"></label>
-    <div class="uh-filter-actions"><button class="uh-button primary" type="submit">${escapeHtml(t("usageHistory.filters.apply"))}</button><button id="usageHistoryReset" class="uh-button" type="button">${escapeHtml(t("usageHistory.filters.reset"))}</button></div>
+  return `<section class="uh-panel uh-filter-panel settings-card" aria-labelledby="usageHistoryFiltersTitle"><div class="uh-section-head settings-card-header"><div><h3 id="usageHistoryFiltersTitle" class="settings-card-title">${escapeHtml(t("usageHistory.filters.title"))}</h3></div></div><form id="usageHistoryFilters" class="uh-filter-form settings-form-grid">
+    <label class="settings-form-field" for="usageHistoryProvider"><span>${escapeHtml(t("usageHistory.filters.provider"))}</span><select id="usageHistoryProvider">${renderOptions(options.providers, filters.provider, t("usageHistory.filters.allProviders"))}</select></label>
+    <label class="settings-form-field" for="usageHistoryModel"><span>${escapeHtml(t("usageHistory.filters.model"))}</span><select id="usageHistoryModel">${renderOptions(options.models, filters.model, t("usageHistory.filters.allModels"))}</select></label>
+    <label class="settings-form-field" for="usageHistoryKind"><span>${escapeHtml(t("usageHistory.filters.kind"))}</span><select id="usageHistoryKind">${renderOptions(options.kinds, filters.kind, t("usageHistory.filters.allKinds"))}</select></label>
+    <label class="settings-form-field" for="usageHistoryFrom"><span>${escapeHtml(t("usageHistory.filters.from"))}</span><input id="usageHistoryFrom" type="date" value="${escapeAttr(filters.from)}"></label>
+    <label class="settings-form-field" for="usageHistoryTo"><span>${escapeHtml(t("usageHistory.filters.to"))}</span><input id="usageHistoryTo" type="date" value="${escapeAttr(filters.to)}"></label>
+    <div class="uh-filter-actions settings-inline-actions"><button class="uh-button primary" type="submit">${escapeHtml(t("usageHistory.filters.apply"))}</button><button id="usageHistoryReset" class="uh-button" type="button">${escapeHtml(t("usageHistory.filters.reset"))}</button></div>
   </form></section>`;
 }
 
@@ -341,29 +341,29 @@ function renderHistoryRow(value) {
 function renderHistoryTable(state) {
   let body = "";
   if (state.status === "loading" && !state.items.length) {
-    body = `<div class="uh-state-card loading">${escapeHtml(t("usageHistory.history.loading"))}</div>`;
+    body = `<div class="uh-state-card loading settings-empty-state" role="status" aria-live="polite">${escapeHtml(t("usageHistory.history.loading"))}</div>`;
   } else if (state.status === "error" && !state.items.length) {
-    body = `<div class="uh-state-card error" role="alert">${escapeHtml(t("usageHistory.history.error", { message: state.error }))}</div>`;
+    body = `<div class="uh-state-card error settings-alert" role="alert">${escapeHtml(t("usageHistory.history.error", { message: state.error }))}</div>`;
   } else if (!state.items.length) {
-    body = `<div class="uh-state-card">${escapeHtml(t("usageHistory.history.empty"))}</div>`;
+    body = `<div class="uh-state-card settings-empty-state" role="status">${escapeHtml(t("usageHistory.history.empty"))}</div>`;
   } else {
-    body = `<div class="uh-table-scroll"><table class="uh-history-table"><thead><tr>${["time", "agent", "kind", "provider", "model", "tokens", "ttft", "duration", "cost", "status"].map((key) => `<th scope="col">${escapeHtml(t(`usageHistory.history.${key}`))}</th>`).join("")}</tr></thead><tbody>${state.items.map(renderHistoryRow).join("")}</tbody></table></div>`;
+    body = `<div class="uh-table-scroll"><table class="uh-history-table settings-data-list" aria-label="${escapeAttr(t("usageHistory.history.title"))}"><thead><tr>${["time", "agent", "kind", "provider", "model", "tokens", "ttft", "duration", "cost", "status"].map((key) => `<th scope="col">${escapeHtml(t(`usageHistory.history.${key}`))}</th>`).join("")}</tr></thead><tbody>${state.items.map(renderHistoryRow).join("")}</tbody></table></div>`;
   }
-  const loadMore = state.nextCursor ? `<div class="uh-load-more"><button id="usageHistoryLoadMore" class="uh-button" type="button"${state.status === "loadingMore" ? " disabled aria-busy=\"true\"" : ""}>${escapeHtml(t(state.status === "loadingMore" ? "usageHistory.history.loadingMore" : "usageHistory.history.loadMore"))}</button></div>` : "";
-  return `<section class="uh-panel uh-history-panel"><div class="uh-section-head"><div><h3>${escapeHtml(t("usageHistory.history.title"))}</h3><p>${escapeHtml(t("usageHistory.history.description"))}</p></div></div>${body}${loadMore}</section>`;
+  const loadMore = state.nextCursor ? `<div class="uh-load-more settings-inline-actions"><button id="usageHistoryLoadMore" class="uh-button" type="button"${state.status === "loadingMore" ? " disabled aria-busy=\"true\"" : ""}>${escapeHtml(t(state.status === "loadingMore" ? "usageHistory.history.loadingMore" : "usageHistory.history.loadMore"))}</button></div>` : "";
+  return `<section class="uh-panel uh-history-panel settings-card" aria-labelledby="usageHistoryHistoryTitle"><div class="uh-section-head settings-card-header"><div><h3 id="usageHistoryHistoryTitle" class="settings-card-title">${escapeHtml(t("usageHistory.history.title"))}</h3><p class="settings-card-description">${escapeHtml(t("usageHistory.history.description"))}</p></div></div>${body}${loadMore}</section>`;
 }
 
 export function renderUsageHistory(value = {}) {
   const state = createUsageHistoryState(value);
   const generatedAt = state.generatedAt ? t("usageHistory.generatedAt", { timestamp: formatTimestamp(state.generatedAt) }) : t("usageHistory.notGenerated");
-  return `<div class="usage-history-page">
-    <header class="uh-hero"><div><div class="uh-kicker">${escapeHtml(t("usageHistory.kicker"))}</div><h2>${escapeHtml(t("usageHistory.title"))}</h2><p>${escapeHtml(t("usageHistory.description"))}</p><small>${escapeHtml(generatedAt)}</small></div><button id="usageHistoryRefresh" class="uh-button primary" type="button"${state.status === "loading" ? " disabled aria-busy=\"true\"" : ""}>${escapeHtml(t(state.status === "loading" ? "usageHistory.refreshing" : "usageHistory.refresh"))}</button></header>
-    ${state.error && state.items.length ? `<div class="uh-inline-error" role="alert">${escapeHtml(t("usageHistory.history.error", { message: state.error }))}</div>` : ""}
-    ${renderSummary(state.summary)}
-    <section class="uh-panel uh-trend-panel"><div class="uh-section-head"><div><h3>${escapeHtml(t("usageHistory.trend.title"))}</h3><p>${escapeHtml(t("usageHistory.trend.description"))}</p></div><div class="uh-trend-controls">${renderBucketControls(state.bucket)}${renderMetricSelect(state.metric)}</div></div>${state.trendTruncated ? `<div class="uh-truncated">${escapeHtml(t("usageHistory.trend.truncated"))}</div>` : ""}<div id="usageHistoryTrendChart" class="uh-chart-host">${renderUsageTrendSVG(state.trend, state.metric)}</div></section>
+  return `<main class="usage-history-page settings-page settings-page-usage" aria-labelledby="usageHistoryTitle">
+    <header class="uh-hero settings-card"><div><div class="uh-kicker">${escapeHtml(t("usageHistory.kicker"))}</div><h2 id="usageHistoryTitle">${escapeHtml(t("usageHistory.title"))}</h2><p class="settings-card-description">${escapeHtml(t("usageHistory.description"))}</p><small aria-live="polite">${escapeHtml(generatedAt)}</small></div><button id="usageHistoryRefresh" class="uh-button primary" type="button"${state.status === "loading" ? " disabled aria-busy=\"true\"" : ""}>${escapeHtml(t(state.status === "loading" ? "usageHistory.refreshing" : "usageHistory.refresh"))}</button></header>
+    ${state.error && state.items.length ? `<div class="uh-inline-error settings-alert" role="alert">${escapeHtml(t("usageHistory.history.error", { message: state.error }))}</div>` : ""}
+    ${renderSummary(state.summary, "uh-summary-grid settings-stat-grid")}
+    <section class="uh-panel uh-trend-panel settings-card" aria-labelledby="usageHistoryTrendTitle"><div class="uh-section-head settings-card-header"><div><h3 id="usageHistoryTrendTitle" class="settings-card-title">${escapeHtml(t("usageHistory.trend.title"))}</h3><p class="settings-card-description">${escapeHtml(t("usageHistory.trend.description"))}</p></div><div class="uh-trend-controls settings-toolbar">${renderBucketControls(state.bucket)}${renderMetricSelect(state.metric)}</div></div>${state.trendTruncated ? `<div class="uh-truncated settings-badge">${escapeHtml(t("usageHistory.trend.truncated"))}</div>` : ""}<div id="usageHistoryTrendChart" class="uh-chart-host">${renderUsageTrendSVG(state.trend, state.metric)}</div></section>
     ${renderFilters(state)}
     ${renderHistoryTable(state)}
-  </div>`;
+  </main>`;
 }
 
 export function createUsageHistoryController({ state = {}, request, onChange, onError } = {}) {

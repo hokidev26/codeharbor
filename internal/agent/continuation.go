@@ -1,0 +1,1251 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/providers"
+	"autoto/internal/review"
+	"autoto/internal/tools"
+)
+
+const (
+	continuationModeOff  = "off"
+	continuationModeSafe = "safe"
+
+	continuationReasonMaxOutputTokens = "max_output_tokens"
+	continuationReasonSegmentTurns    = "segment_turn_limit"
+	continuationReasonBackgroundTask  = "background_task_wait"
+	continuationReasonProviderError   = "provider_error"
+)
+
+var errContinuationStoreUnavailable = errors.New("continuation store APIs are unavailable")
+
+type ContinuationSettings struct {
+	Mode             string `json:"mode"`
+	SegmentTurns     int64  `json:"segmentTurns"`
+	MaxContinuations int64  `json:"maxContinuations"`
+	MaxTotalTurns    int64  `json:"maxTotalTurns"`
+	MaxRunDurationMs int64  `json:"maxRunDurationMs"`
+	MaxRunTokens     int64  `json:"maxRunTokens"`
+}
+
+type continuationLimits struct {
+	mode             string
+	segmentTurns     int64
+	maxContinuations int64
+	maxTotalTurns    int64
+	maxDuration      time.Duration
+	maxTokens        int64
+}
+
+type continuationRunState struct {
+	run      db.Run
+	limits   continuationLimits
+	deadline time.Time
+}
+
+type segmentDisposition int
+
+const (
+	segmentComplete segmentDisposition = iota
+	segmentContinue
+	segmentWait
+	segmentBudgetExhausted
+)
+
+type segmentOutcome struct {
+	disposition           segmentDisposition
+	stopReason            string
+	continuationReason    string
+	segmentStartMessageID string
+	resumeAfterID         string
+	waitingTaskID         string
+	turns                 int64
+	inputTokens           int64
+	outputTokens          int64
+	planReview            review.Result
+}
+
+type continuationContextKey uint8
+
+const continuationBackgroundTaskContextKey continuationContextKey = iota
+
+type continuationStore interface {
+	RecordRunSegmentUsage(context.Context, string, int64, int64, int64, int64, int64) (db.Run, error)
+	MarkRunContinuationPending(context.Context, string, db.RunContinuationPendingInput) (db.Run, error)
+	ResumeContinuationRun(context.Context, string, int64) (db.Run, error)
+	ListContinuationPendingRuns(context.Context, int) ([]db.Run, error)
+	CancelContinuationRun(context.Context, string, int64, string) (db.Run, error)
+}
+
+func (r *Runner) UpdateContinuationConfig(cfg config.AgentConfig) ContinuationSettings {
+	return r.SetContinuationSettings(ContinuationSettings{
+		Mode:             cfg.AutoContinuationMode,
+		SegmentTurns:     int64(cfg.ContinuationSegmentTurns),
+		MaxContinuations: int64(cfg.MaxContinuations),
+		MaxTotalTurns:    int64(cfg.MaxTotalTurns),
+		MaxRunDurationMs: cfg.MaxRunDurationMs,
+		MaxRunTokens:     cfg.MaxRunTokens,
+	})
+}
+
+func (r *Runner) SetContinuationSettings(settings ContinuationSettings) ContinuationSettings {
+	cfg := config.AgentConfig{
+		AutoContinuationMode:     settings.Mode,
+		ContinuationSegmentTurns: int(settings.SegmentTurns),
+		MaxContinuations:         int(settings.MaxContinuations),
+		MaxTotalTurns:            int(settings.MaxTotalTurns),
+		MaxRunDurationMs:         settings.MaxRunDurationMs,
+		MaxRunTokens:             settings.MaxRunTokens,
+	}
+	limits := continuationLimitsForConfig(cfg)
+	normalized := continuationSettingsFromLimits(limits)
+	if r == nil {
+		return normalized
+	}
+	r.continuationMu.Lock()
+	r.continuationConfig.AutoContinuationMode = normalized.Mode
+	r.continuationConfig.ContinuationSegmentTurns = int(normalized.SegmentTurns)
+	r.continuationConfig.MaxContinuations = int(normalized.MaxContinuations)
+	r.continuationConfig.MaxTotalTurns = int(normalized.MaxTotalTurns)
+	r.continuationConfig.MaxRunDurationMs = normalized.MaxRunDurationMs
+	r.continuationConfig.MaxRunTokens = normalized.MaxRunTokens
+	r.continuationMu.Unlock()
+	return normalized
+}
+
+func (r *Runner) GetContinuationSettings() ContinuationSettings {
+	return continuationSettingsFromLimits(r.currentContinuationLimits())
+}
+
+func continuationSettingsFromLimits(limits continuationLimits) ContinuationSettings {
+	return ContinuationSettings{
+		Mode:             limits.mode,
+		SegmentTurns:     limits.segmentTurns,
+		MaxContinuations: limits.maxContinuations,
+		MaxTotalTurns:    limits.maxTotalTurns,
+		MaxRunDurationMs: limits.maxDuration.Milliseconds(),
+		MaxRunTokens:     limits.maxTokens,
+	}
+}
+
+func (r *Runner) currentContinuationLimits() continuationLimits {
+	if r == nil {
+		return continuationLimitsForConfig(config.AgentConfig{})
+	}
+	r.continuationMu.RLock()
+	cfg := r.continuationConfig
+	r.continuationMu.RUnlock()
+	if cfg.AutoContinuationMode == "" && cfg.ContinuationSegmentTurns == 0 && cfg.MaxContinuations == 0 && cfg.MaxTotalTurns == 0 && cfg.MaxRunDurationMs == 0 && cfg.MaxRunTokens == 0 {
+		cfg = r.cfg
+	}
+	return continuationLimitsForConfig(cfg)
+}
+
+func (r *Runner) freezeContinuationLimits(runID string, limits continuationLimits) {
+	if r == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	r.continuationMu.Lock()
+	if r.continuationRunLimits == nil {
+		r.continuationRunLimits = make(map[string]continuationLimits)
+	}
+	if _, exists := r.continuationRunLimits[runID]; !exists {
+		r.continuationRunLimits[runID] = limits
+	}
+	r.continuationMu.Unlock()
+}
+
+func (r *Runner) frozenContinuationLimits(runID string) (continuationLimits, bool) {
+	if r == nil || strings.TrimSpace(runID) == "" {
+		return continuationLimits{}, false
+	}
+	r.continuationMu.RLock()
+	limits, ok := r.continuationRunLimits[runID]
+	r.continuationMu.RUnlock()
+	return limits, ok
+}
+
+func continuationLimitsForConfig(cfg config.AgentConfig) continuationLimits {
+	mode := strings.ToLower(strings.TrimSpace(cfg.AutoContinuationMode))
+	if mode != continuationModeOff && mode != continuationModeSafe {
+		mode = continuationModeSafe
+	}
+	segmentTurns := int64(cfg.ContinuationSegmentTurns)
+	if segmentTurns <= 0 {
+		segmentTurns = int64(cfg.MaxTurns)
+	}
+	if segmentTurns <= 0 {
+		segmentTurns = 40
+	}
+	if segmentTurns > 1000 {
+		segmentTurns = 1000
+	}
+	maxContinuations := cfg.MaxContinuations
+	if maxContinuations == 0 {
+		maxContinuations = 8
+	}
+	if maxContinuations < 0 {
+		maxContinuations = 0
+	}
+	if maxContinuations > 64 {
+		maxContinuations = 64
+	}
+	maxTotalTurns := int64(cfg.MaxTotalTurns)
+	if maxTotalTurns <= 0 {
+		maxTotalTurns = int64(cfg.MaxTurns)
+	}
+	if maxTotalTurns <= 0 {
+		maxTotalTurns = 200
+	}
+	if maxTotalTurns > 10000 {
+		maxTotalTurns = 10000
+	}
+	if segmentTurns > maxTotalTurns {
+		segmentTurns = maxTotalTurns
+	}
+	maxDurationMS := cfg.MaxRunDurationMs
+	if maxDurationMS <= 0 {
+		maxDurationMS = 3600000
+	}
+	if maxDurationMS < 1000 {
+		maxDurationMS = 1000
+	}
+	if maxDurationMS > 86400000 {
+		maxDurationMS = 86400000
+	}
+	maxTokens := cfg.MaxRunTokens
+	if maxTokens <= 0 {
+		maxTokens = 500000
+	}
+	if maxTokens < 1000 {
+		maxTokens = 1000
+	}
+	if maxTokens > 10000000 {
+		maxTokens = 10000000
+	}
+	return continuationLimits{
+		mode:             mode,
+		segmentTurns:     segmentTurns,
+		maxContinuations: int64(maxContinuations),
+		maxTotalTurns:    maxTotalTurns,
+		maxDuration:      time.Duration(maxDurationMS) * time.Millisecond,
+		maxTokens:        maxTokens,
+	}
+}
+
+func (r *Runner) continuationStore() (continuationStore, error) {
+	if r == nil || r.store == nil {
+		return nil, errContinuationStoreUnavailable
+	}
+	store, ok := any(r.store).(continuationStore)
+	if !ok {
+		return nil, errContinuationStoreUnavailable
+	}
+	return store, nil
+}
+
+func (r *Runner) prepareContinuationRun(ctx context.Context, run db.Run) (db.Run, error) {
+	limits := r.currentContinuationLimits()
+	if strings.TrimSpace(run.ID) == "" {
+		run.ID = db.NewID()
+	}
+	r.freezeContinuationLimits(run.ID, limits)
+	if run.ExecutionMode == db.RunExecutionModePlan {
+		run.AutoContinuationMode = continuationModeOff
+	} else if strings.TrimSpace(run.AutoContinuationMode) == "" {
+		run.AutoContinuationMode = limits.mode
+	}
+	if run.ContinuationSegmentTurns <= 0 {
+		run.ContinuationSegmentTurns = limits.segmentTurns
+	}
+	if run.MaxContinuations <= 0 {
+		run.MaxContinuations = limits.maxContinuations
+	}
+	if run.MaxTotalTurns <= 0 {
+		run.MaxTotalTurns = limits.maxTotalTurns
+	}
+	if run.MaxTotalTokens <= 0 {
+		run.MaxTotalTokens = limits.maxTokens
+	}
+	if strings.TrimSpace(run.DeadlineAt) == "" {
+		run.DeadlineAt = time.Now().Add(limits.maxDuration).UTC().Format(time.RFC3339Nano)
+	}
+	if snapshot, configured, err := r.currentPlanSnapshot(ctx, run.AgentID); err != nil {
+		// A regular execute run may still run in a non-Git workspace. It must
+		// fail closed if it later needs a continuation, but a snapshot provider
+		// failure must not reject the initial model turn. Plan runs remain strict.
+		if run.ExecutionMode == db.RunExecutionModePlan {
+			return db.Run{}, fmt.Errorf("capture continuation safety snapshot: %w", err)
+		}
+	} else if configured {
+		if run.PolicyGenerationSnapshot == 0 {
+			run.PolicyGenerationSnapshot = snapshot.PolicyGenerationSnapshot
+		}
+		if run.AgentGenerationSnapshot == 0 {
+			run.AgentGenerationSnapshot = snapshot.AgentGenerationSnapshot
+		}
+		if run.ToolCatalogDigest == "" {
+			run.ToolCatalogDigest = snapshot.ToolCatalogDigest
+		}
+		if run.WorkspaceFingerprint == "" {
+			run.WorkspaceFingerprint = snapshot.WorkspaceFingerprint
+		}
+	}
+	return run, nil
+}
+
+func (r *Runner) run(ctx context.Context, agentID, runID string) error {
+	return r.runContinuous(ctx, agentID, runID)
+}
+
+func (r *Runner) runContinuous(ctx context.Context, agentID, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.store.SetAgentStatus(ctx, agentID, "running", ""); err != nil {
+		return err
+	}
+	r.publish(Event{Type: "agent.started", AgentID: agentID, Data: runEventData(runID)})
+
+	state, err := r.loadContinuationState(ctx, agentID, runID)
+	if err != nil {
+		return err
+	}
+	if taskID, _ := ctx.Value(continuationBackgroundTaskContextKey).(string); strings.TrimSpace(taskID) != "" {
+		state.run.WaitingBackgroundTaskID = strings.TrimSpace(taskID)
+	}
+	if runID == "" {
+		state.limits.mode = continuationModeOff
+	}
+	if state.run.ExecutionMode == db.RunExecutionModePlan {
+		state.limits.mode = continuationModeOff
+	}
+	if state.run.CheckpointState == db.RunCheckpointNone && state.run.ContinuationCount == 0 {
+		agent, policy, policyErr := r.policyContext(ctx, agentID, runID)
+		if policyErr != nil {
+			return policyErr
+		}
+		if !policy.IsPlan() {
+			r.captureRunCheckpoint(ctx, agent, runID)
+			if runID != "" {
+				state.run, _ = r.store.GetRunByID(ctx, runID)
+			}
+		}
+	}
+
+	continuationIndex := state.run.ContinuationCount
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.validateContinuationBoundary(ctx, state.run, continuationIndex > 0 || state.run.Status == "continuation_pending"); err != nil {
+			r.publishContinuationBlocked(state.run, err.Error())
+			return err
+		}
+		if continuationIndex > 0 {
+			r.publishContinuationLifecycle("continuation_started", "agent.continuation_started", agentID, mergeEventData(map[string]any{
+				"continuationCount": continuationIndex,
+				"reason":            state.run.ContinuationReason,
+			}, runID))
+		}
+
+		outcome, segmentErr := r.runContinuationSegment(ctx, state, continuationIndex)
+		updatedRun, usageErr := r.recordSegmentUsage(ctx, state.run, outcome)
+		if usageErr != nil {
+			return usageErr
+		}
+		state.run = updatedRun
+		if segmentErr != nil {
+			return segmentErr
+		}
+		outcome.turns = 0
+		outcome.inputTokens = 0
+		outcome.outputTokens = 0
+		switch outcome.disposition {
+		case segmentComplete:
+			return r.completeContinuousRun(ctx, agentID, runID, outcome)
+		case segmentBudgetExhausted:
+			r.publishContinuationLifecycle("budget_exhausted", "agent.budget_exhausted", agentID, mergeEventData(map[string]any{
+				"reason":         outcome.continuationReason,
+				"turnCount":      state.run.TurnCount,
+				"consumedTokens": state.run.ConsumedInputTokens + state.run.ConsumedOutputTokens,
+			}, runID))
+			return fmt.Errorf("continuation budget exhausted: %s", outcome.continuationReason)
+		case segmentContinue, segmentWait:
+			updated, err := r.scheduleContinuation(ctx, state, outcome)
+			if err != nil {
+				return err
+			}
+			if outcome.disposition == segmentWait {
+				_ = r.store.SetAgentStatus(ctx, agentID, "idle", "")
+				return nil
+			}
+			resumed, err := r.resumeContinuationCAS(ctx, updated)
+			if err != nil {
+				return err
+			}
+			state.run = resumed
+			continuationIndex = resumed.ContinuationCount
+		}
+	}
+}
+
+func (r *Runner) loadContinuationState(ctx context.Context, agentID, runID string) (continuationRunState, error) {
+	limits, frozen := r.frozenContinuationLimits(runID)
+	if !frozen {
+		limits = r.currentContinuationLimits()
+		r.freezeContinuationLimits(runID, limits)
+	}
+	state := continuationRunState{limits: limits}
+	if strings.TrimSpace(runID) == "" {
+		state.run = db.Run{AgentID: agentID, Status: "running", ExecutionMode: db.RunExecutionModeExecute, AutoContinuationMode: continuationModeOff, ContinuationSegmentTurns: limits.segmentTurns, MaxContinuations: limits.maxContinuations, MaxTotalTurns: limits.maxTotalTurns, MaxTotalTokens: limits.maxTokens}
+		state.deadline = time.Now().Add(limits.maxDuration)
+		return state, nil
+	}
+	run, err := r.store.GetRun(ctx, agentID, runID)
+	if err != nil {
+		return continuationRunState{}, err
+	}
+	if run.Status == "pending" {
+		if err := r.store.UpdateRunStatus(ctx, run.ID, "running", ""); err != nil {
+			return continuationRunState{}, err
+		}
+		run, err = r.store.GetRun(ctx, agentID, runID)
+		if err != nil {
+			return continuationRunState{}, err
+		}
+	}
+	legacyUnfrozen := run.MaxContinuations == 0 && run.MaxTotalTurns == 0 && run.MaxTotalTokens == 0 && strings.TrimSpace(run.DeadlineAt) == ""
+	mode := strings.ToLower(strings.TrimSpace(run.AutoContinuationMode))
+	if !legacyUnfrozen && (mode == continuationModeOff || mode == continuationModeSafe) {
+		state.limits.mode = mode
+	}
+	if run.ContinuationSegmentTurns > 0 {
+		state.limits.segmentTurns = run.ContinuationSegmentTurns
+	}
+	if run.MaxContinuations > 0 {
+		state.limits.maxContinuations = run.MaxContinuations
+	}
+	if run.MaxTotalTurns > 0 {
+		state.limits.maxTotalTurns = run.MaxTotalTurns
+	}
+	if run.MaxTotalTokens > 0 {
+		state.limits.maxTokens = run.MaxTotalTokens
+	}
+	deadline := time.Now().Add(state.limits.maxDuration)
+	if parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(run.DeadlineAt)); parseErr == nil {
+		deadline = parsed
+	}
+	state.run = run
+	state.deadline = deadline
+	return state, nil
+}
+
+func (r *Runner) runContinuationSegment(ctx context.Context, state continuationRunState, continuationIndex int64) (segmentOutcome, error) {
+	run := state.run
+	agentID, runID := run.AgentID, run.ID
+	agent, policy, err := r.policyContext(ctx, agentID, runID)
+	if err != nil {
+		return segmentOutcome{}, err
+	}
+	projectInstructions := loadProjectInstructions(agent.CWD)
+	if strings.TrimSpace(projectInstructions.Text) != "" {
+		agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
+		r.publish(Event{Type: "project.instructions_loaded", AgentID: agentID, Data: mergeEventData(projectInstructions.eventData(), runID)})
+	}
+	messages, err := r.store.ListMessagesWithAttachmentData(ctx, agentID)
+	if err != nil {
+		return segmentOutcome{}, err
+	}
+	triggerText, err := r.runTriggerUserText(ctx, agentID, runID, messages)
+	if err != nil && runID != "" {
+		return segmentOutcome{}, err
+	}
+	if triggerText != "" {
+		memoryPrompt, injectedCount, memoryErr := r.prepareMemorySystemPrompt(ctx, agentID, triggerText, agent.SystemPrompt)
+		if memoryErr != nil {
+			return segmentOutcome{}, memoryErr
+		}
+		agent.SystemPrompt = memoryPrompt
+		if injectedCount > 0 {
+			r.publish(Event{Type: "memory.injected", AgentID: agentID, Data: mergeEventData(map[string]any{"count": injectedCount}, runID)})
+		}
+	}
+	if policy.IsPlan() {
+		agent.SystemPrompt = mergePlanDraftSystemPrompt(agent.SystemPrompt)
+	}
+	provider, model, err := r.providers.Resolve(agent.Model)
+	if err != nil {
+		return segmentOutcome{}, err
+	}
+	toolSnapshot, err := r.snapshotToolsForPolicy(ctx, tools.ResolutionContext{AgentID: agentID, CWD: agent.CWD}, policy)
+	if err != nil {
+		return segmentOutcome{}, fmt.Errorf("snapshot tools: %w", err)
+	}
+	toolSpecs := toolSnapshot.specs
+	if !providers.CapabilitiesFor(provider).Tools {
+		toolSpecs = nil
+	}
+
+	outcome := segmentOutcome{}
+	if len(messages) > 0 {
+		outcome.segmentStartMessageID = messages[len(messages)-1].ID
+	}
+	for turn := int64(0); turn < state.limits.segmentTurns; turn++ {
+		if err := ctx.Err(); err != nil {
+			return segmentOutcome{}, err
+		}
+		if reason := continuationBudgetReason(state, outcome); reason != "" {
+			outcome.disposition = segmentBudgetExhausted
+			outcome.continuationReason = reason
+			return outcome, nil
+		}
+		controls := r.buildTurnSystemControls(ctx, agent, run, messages, continuationIndex)
+		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs, controls)
+		if err != nil {
+			return segmentOutcome{}, err
+		}
+		agent = updatedAgent
+		providerMessages = r.appendToolOutputPipelineControl(providerMessages, agentID, runID)
+		result, turnErr := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort), agent.FastMode)
+		outcome.turns++
+		outcome.inputTokens += maxInt64(result.Usage.InputTokens, 0)
+		outcome.outputTokens += maxInt64(result.Usage.OutputTokens, 0)
+		if turnErr != nil {
+			if strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0 {
+				messageID, persistErr := r.persistPartialAssistant(ctx, agentID, runID, result, continuationReasonProviderError)
+				if persistErr != nil {
+					return outcome, persistErr
+				}
+				outcome.resumeAfterID = messageID
+			}
+			return outcome, turnErr
+		}
+		if err := ctx.Err(); err != nil {
+			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+			return outcome, err
+		}
+
+		if len(result.ToolCalls) == 0 {
+			if isContinuationStopReason(result.StopReason) {
+				messageID, persistErr := r.persistPartialAssistant(ctx, agentID, runID, result, normalizedContinuationStopReason(result.StopReason))
+				if persistErr != nil {
+					return outcome, persistErr
+				}
+				r.recordCompletedModelTurn(agentID, runID, messageID, provider.Name(), model, result)
+				if policy.IsPlan() {
+					return outcome, errors.New("plan draft output was truncated; automatic continuation is forbidden")
+				}
+				outcome.disposition = segmentContinue
+				outcome.stopReason = result.StopReason
+				outcome.continuationReason = normalizedContinuationStopReason(result.StopReason)
+				outcome.resumeAfterID = messageID
+				return outcome, nil
+			}
+			if !isTerminalStopReason(result.StopReason) {
+				messageID, persistErr := r.persistPartialAssistant(ctx, agentID, runID, result, strings.TrimSpace(result.StopReason))
+				if persistErr != nil {
+					return outcome, persistErr
+				}
+				r.recordCompletedModelTurn(agentID, runID, messageID, provider.Name(), model, result)
+				return outcome, fmt.Errorf("provider returned unknown stop reason %q", result.StopReason)
+			}
+			if r.toolOutputPipelineActive(agentID, runID) {
+				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+				continue
+			}
+			assistantText := result.Text
+			var planReview review.Result
+			if policy.IsPlan() {
+				assistantText, planReview, err = r.persistAndReviewPlan(ctx, policy, assistantText)
+				if err != nil {
+					r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+					return outcome, err
+				}
+			} else if assistantText == "" {
+				assistantText = "Done."
+			}
+			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, TurnUsage: result.TurnUsage, CompletionState: "completed", StopReason: result.StopReason})
+			if err != nil {
+				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+				return outcome, err
+			}
+			r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
+			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
+			outcome.disposition = segmentComplete
+			outcome.stopReason = result.StopReason
+			outcome.resumeAfterID = assistantMsg.ID
+			outcome.planReview = planReview
+			return outcome, nil
+		}
+
+		if !isToolStopReason(result.StopReason) {
+			messageID, persistErr := r.persistPartialAssistant(ctx, agentID, runID, result, strings.TrimSpace(result.StopReason))
+			if persistErr != nil {
+				return outcome, persistErr
+			}
+			r.recordCompletedModelTurn(agentID, runID, messageID, provider.Name(), model, result)
+			return outcome, fmt.Errorf("provider returned unsafe tool stop reason %q", result.StopReason)
+		}
+		assistantBlocks := assistantToolUseBlocks(result.Text, result.ToolCalls)
+		assistantJSON, _ := json.Marshal(assistantBlocks)
+		assistantStateJSON := providerStateForBlocks(assistantBlocks)
+		assistantText := assistantToolUseText(result.Text, result.ToolCalls)
+		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON, ProviderStateJSON: assistantStateJSON, TurnUsage: result.TurnUsage, CompletionState: "completed", StopReason: result.StopReason})
+		if err != nil {
+			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+			return outcome, err
+		}
+		r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
+		r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: mergeEventData(map[string]any{"toolCalls": len(result.ToolCalls)}, runID)})
+		messages = append(messages, assistantMsg)
+
+		waitingTaskID := ""
+		for _, call := range result.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return outcome, err
+			}
+			toolCall := normalizeProviderToolCall(call)
+			rawToolResult, executeErr := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID, toolSnapshot.tools)
+			if executeErr != nil {
+				rawToolResult = tools.Result{Output: executeErr.Error(), IsError: true}
+			}
+			modelToolResult := r.processToolResultForModel(agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, rawToolResult)
+			toolResultBlock := providers.ContentBlock{Type: "tool_result", ToolUseID: toolCall.ID, ToolName: toolCall.Name, Output: modelToolResult.Output, IsError: modelToolResult.IsError}
+			toolResultJSON, _ := json.Marshal([]providers.ContentBlock{toolResultBlock})
+			toolResultText := toolResultMessageText(toolCall, modelToolResult)
+			toolMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "user", ParentToolID: toolCall.ID, ContentText: toolResultText, ContentJSON: toolResultJSON})
+			if err != nil {
+				return outcome, err
+			}
+			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": modelToolResult.IsError}, runID)})
+			messages = append(messages, toolMsg)
+			outcome.resumeAfterID = toolMsg.ID
+			if taskID, waits, boundaryErr := backgroundTaskContinuationBoundary(rawToolResult); boundaryErr != nil {
+				return outcome, boundaryErr
+			} else if waits {
+				if waitingTaskID != "" && waitingTaskID != taskID {
+					return outcome, errors.New("one model turn requested multiple resumeParent background task boundaries")
+				}
+				waitingTaskID = taskID
+			}
+		}
+		if waitingTaskID != "" {
+			outcome.disposition = segmentWait
+			outcome.stopReason = result.StopReason
+			outcome.continuationReason = continuationReasonBackgroundTask
+			outcome.waitingTaskID = waitingTaskID
+			return outcome, nil
+		}
+	}
+	outcome.disposition = segmentContinue
+	outcome.continuationReason = continuationReasonSegmentTurns
+	outcome.stopReason = continuationReasonSegmentTurns
+	return outcome, nil
+}
+
+func continuationBudgetReason(state continuationRunState, outcome segmentOutcome) string {
+	if !state.deadline.IsZero() && !time.Now().Before(state.deadline) {
+		return "deadline"
+	}
+	if state.run.TurnCount+outcome.turns >= state.limits.maxTotalTurns {
+		return "max_total_turns"
+	}
+	consumed := state.run.ConsumedInputTokens + state.run.ConsumedOutputTokens + outcome.inputTokens + outcome.outputTokens
+	if consumed >= state.limits.maxTokens {
+		return "max_total_tokens"
+	}
+	return ""
+}
+
+func (r *Runner) recordSegmentUsage(ctx context.Context, run db.Run, outcome segmentOutcome) (db.Run, error) {
+	if strings.TrimSpace(run.ID) == "" {
+		run.TurnCount += outcome.turns
+		run.ConsumedInputTokens += outcome.inputTokens
+		run.ConsumedOutputTokens += outcome.outputTokens
+		return run, nil
+	}
+	if outcome.turns == 0 && outcome.inputTokens == 0 && outcome.outputTokens == 0 {
+		return run, nil
+	}
+	store, err := r.continuationStore()
+	if err != nil {
+		return db.Run{}, err
+	}
+	return store.RecordRunSegmentUsage(ctx, run.ID, run.ContinuationCount, run.TurnCount, outcome.turns, outcome.inputTokens, outcome.outputTokens)
+}
+
+func (r *Runner) scheduleContinuation(ctx context.Context, state continuationRunState, outcome segmentOutcome) (db.Run, error) {
+	run := state.run
+	if state.limits.mode != continuationModeSafe {
+		if outcome.continuationReason == continuationReasonSegmentTurns {
+			return db.Run{}, fmt.Errorf("agent reached max turns (%d) while model kept requesting tools", state.limits.segmentTurns)
+		}
+		return db.Run{}, fmt.Errorf("automatic continuation is disabled at %s", outcome.continuationReason)
+	}
+	if !safeContinuationReason(outcome.continuationReason) {
+		return db.Run{}, fmt.Errorf("unsafe continuation reason %q", outcome.continuationReason)
+	}
+	if run.ContinuationCount >= state.limits.maxContinuations {
+		r.publishContinuationLifecycle("budget_exhausted", "agent.budget_exhausted", run.AgentID, mergeEventData(map[string]any{"reason": "max_continuations"}, run.ID))
+		return db.Run{}, errors.New("continuation budget exhausted: max_continuations")
+	}
+	if reason := continuationBudgetReason(state, outcome); reason != "" {
+		r.publishContinuationLifecycle("budget_exhausted", "agent.budget_exhausted", run.AgentID, mergeEventData(map[string]any{"reason": reason}, run.ID))
+		return db.Run{}, fmt.Errorf("continuation budget exhausted: %s", reason)
+	}
+	if strings.TrimSpace(outcome.resumeAfterID) == "" {
+		return db.Run{}, errors.New("continuation boundary has no durable resume message")
+	}
+	if err := r.validateNoMessagePreemption(ctx, run, outcome.segmentStartMessageID); err != nil {
+		r.publishContinuationBlocked(run, err.Error())
+		return db.Run{}, err
+	}
+	if err := r.validateContinuationBoundary(ctx, run, false); err != nil {
+		r.publishContinuationBlocked(run, err.Error())
+		return db.Run{}, err
+	}
+	store, err := r.continuationStore()
+	if err != nil {
+		return db.Run{}, err
+	}
+	updated, err := store.MarkRunContinuationPending(ctx, run.ID, db.RunContinuationPendingInput{
+		ExpectedContinuationCount: run.ContinuationCount,
+		TurnCount:                 run.TurnCount + outcome.turns,
+		ConsumedInputTokens:       run.ConsumedInputTokens + outcome.inputTokens,
+		ConsumedOutputTokens:      run.ConsumedOutputTokens + outcome.outputTokens,
+		ResumeAfterMessageID:      outcome.resumeAfterID,
+		LastStopReason:            outcome.stopReason,
+		ContinuationReason:        outcome.continuationReason,
+		WaitingBackgroundTaskID:   outcome.waitingTaskID,
+	})
+	if err != nil {
+		return db.Run{}, err
+	}
+	r.publishContinuationLifecycle("continuation_scheduled", "agent.continuation_scheduled", run.AgentID, mergeEventData(map[string]any{
+		"continuationCount":       updated.ContinuationCount,
+		"reason":                  updated.ContinuationReason,
+		"resumeAfterMessageId":    updated.ResumeAfterMessageID,
+		"waitingBackgroundTaskId": updated.WaitingBackgroundTaskID,
+	}, run.ID))
+	return updated, nil
+}
+
+func (r *Runner) resumeContinuationCAS(ctx context.Context, run db.Run) (db.Run, error) {
+	if err := r.validateContinuationBoundary(ctx, run, true); err != nil {
+		r.publishContinuationBlocked(run, err.Error())
+		if store, storeErr := r.continuationStore(); storeErr == nil {
+			_, _ = store.CancelContinuationRun(context.WithoutCancel(ctx), run.ID, run.ContinuationCount, err.Error())
+		}
+		return db.Run{}, err
+	}
+	store, err := r.continuationStore()
+	if err != nil {
+		return db.Run{}, err
+	}
+	updated, err := store.ResumeContinuationRun(ctx, run.ID, run.ContinuationCount)
+	if err != nil {
+		return db.Run{}, err
+	}
+	return updated, nil
+}
+
+func (r *Runner) validateNoMessagePreemption(ctx context.Context, run db.Run, segmentStartMessageID string) error {
+	messages, err := r.store.ListMessages(ctx, run.AgentID)
+	if err != nil {
+		return err
+	}
+	start := -1
+	if strings.TrimSpace(segmentStartMessageID) == "" {
+		start = 0
+	} else {
+		for index, message := range messages {
+			if message.ID == segmentStartMessageID {
+				start = index + 1
+				break
+			}
+		}
+	}
+	if start < 0 {
+		return errors.New("segment start message disappeared")
+	}
+	for _, message := range messages[start:] {
+		if message.RunID != run.ID {
+			return errors.New("a new message preempted the continuation segment")
+		}
+	}
+	return nil
+}
+
+func (r *Runner) validateContinuationBoundary(ctx context.Context, run db.Run, continuation bool) error {
+	if strings.TrimSpace(run.ID) == "" {
+		return nil
+	}
+	expectedStatus := "running"
+	if run.Status == "continuation_pending" {
+		expectedStatus = "continuation_pending"
+	}
+	if run.Status != expectedStatus {
+		return fmt.Errorf("run status changed to %q", run.Status)
+	}
+	agent, err := r.store.GetAgent(ctx, run.AgentID)
+	if err != nil {
+		return fmt.Errorf("load agent snapshot: %w", err)
+	}
+	generations, err := r.store.GetPermissionGenerations(ctx, run.AgentID)
+	if err != nil {
+		return fmt.Errorf("load permission generations: %w", err)
+	}
+	if generations.Execution != run.ExecutionGeneration {
+		return errors.New("run was preempted by a newer execution generation")
+	}
+	if generations.Entity != run.AgentGenerationSnapshot || generations.Policy != run.PolicyGenerationSnapshot {
+		return errors.New("agent or policy generation changed")
+	}
+	if normalizedExecutionDeviceID(agent.ExecutionDeviceID) != normalizedExecutionDeviceID(run.ExecutionDeviceID) {
+		return errors.New("execution device changed")
+	}
+	if snapshot, configured, snapshotErr := r.currentPlanSnapshot(ctx, run.AgentID); snapshotErr != nil {
+		if continuation {
+			return fmt.Errorf("load continuation safety snapshot: %w", snapshotErr)
+		}
+	} else if configured {
+		if continuation && (strings.TrimSpace(run.ToolCatalogDigest) == "" || strings.TrimSpace(run.WorkspaceFingerprint) == "") {
+			return errors.New("continuation snapshot is missing")
+		}
+		if strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "" {
+			if snapshot.PolicyGenerationSnapshot != run.PolicyGenerationSnapshot || snapshot.AgentGenerationSnapshot != run.AgentGenerationSnapshot {
+				return errors.New("continuation generation snapshot changed")
+			}
+			if snapshot.ToolCatalogDigest != run.ToolCatalogDigest {
+				return errors.New("tool catalog snapshot changed or is missing")
+			}
+			if snapshot.WorkspaceFingerprint != run.WorkspaceFingerprint {
+				return errors.New("workspace fingerprint changed or is missing")
+			}
+		}
+	} else if continuation && (strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "") {
+		return errors.New("continuation snapshot provider is unavailable")
+	}
+	if strings.TrimSpace(run.PlanID) != "" {
+		plan, planErr := r.store.GetPlanByID(ctx, run.PlanID)
+		if planErr != nil {
+			return fmt.Errorf("load approved plan: %w", planErr)
+		}
+		if plan.AgentID != run.AgentID || plan.Status != db.PlanStatusExecuting || !samePlanSnapshot(plan, db.PlanSnapshot{
+			PolicyGenerationSnapshot: run.PolicyGenerationSnapshot,
+			AgentGenerationSnapshot:  run.AgentGenerationSnapshot,
+			ToolCatalogDigest:        run.ToolCatalogDigest,
+			WorkspaceFingerprint:     run.WorkspaceFingerprint,
+		}) {
+			return errors.New("approved plan snapshot or execution state changed")
+		}
+	} else if run.ExecutionMode == db.RunExecutionModePlan && continuation {
+		return errors.New("plan draft runs cannot continue")
+	}
+	switch run.CheckpointState {
+	case db.RunCheckpointNone, db.RunCheckpointTracking, db.RunCheckpointReady:
+	default:
+		return fmt.Errorf("checkpoint state %q is not a complete continuation boundary", run.CheckpointState)
+	}
+	calls, err := r.store.ListToolCallsByRun(ctx, run.AgentID, run.ID)
+	if err != nil {
+		return fmt.Errorf("load run tool calls: %w", err)
+	}
+	for _, call := range calls {
+		switch call.Status {
+		case "pending_approval", "approved", "running":
+			return fmt.Errorf("tool call %s is still %s", call.ToolUseID, call.Status)
+		}
+	}
+	if continuation {
+		messages, listErr := r.store.ListMessages(ctx, run.AgentID)
+		if listErr != nil {
+			return fmt.Errorf("load continuation message cursor: %w", listErr)
+		}
+		if len(messages) == 0 || messages[len(messages)-1].ID != run.ResumeAfterMessageID {
+			return errors.New("a newer message preempted the continuation boundary")
+		}
+	}
+	return nil
+}
+
+func (r *Runner) completeContinuousRun(ctx context.Context, agentID, runID string, outcome segmentOutcome) error {
+	if runID != "" {
+		r.captureRunEndHead(runID)
+		if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
+			return err
+		}
+		r.closeToolOutputPipelineRun(agentID, runID)
+	}
+	r.publishPlanRunStatus(ctx, runID, "plan.executed")
+	data := map[string]any{"stopReason": outcome.stopReason}
+	if outcome.planReview.Verdict != "" {
+		data["reviewVerdict"] = outcome.planReview.Verdict
+		data["reviewReason"] = outcome.planReview.Reason
+	}
+	r.publish(Event{Type: "agent.done", AgentID: agentID, Data: mergeEventData(data, runID)})
+	r.notify(NotificationEvent{Event: "completed", RunID: runID, AgentID: agentID, Status: "completed"})
+	return r.store.SetAgentStatus(ctx, agentID, "idle", "")
+}
+
+func (r *Runner) persistPartialAssistant(ctx context.Context, agentID, runID string, result modelTurnResult, stopReason string) (string, error) {
+	text := result.Text
+	if strings.TrimSpace(text) == "" {
+		messages, err := r.store.ListMessages(ctx, agentID)
+		if err != nil || len(messages) == 0 {
+			return "", err
+		}
+		return messages[len(messages)-1].ID, nil
+	}
+	kind := "partial"
+	if normalized := strings.TrimSpace(stopReason); normalized != "" {
+		kind += ":" + normalized
+	}
+	blocks := []providers.ContentBlock{{Type: "text", Text: text, Kind: kind}}
+	raw, _ := json.Marshal(blocks)
+	message, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: text, ContentJSON: raw, TurnUsage: result.TurnUsage, CompletionState: "partial", StopReason: strings.TrimSpace(stopReason)})
+	if err != nil {
+		return "", err
+	}
+	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: message.ID, Text: text, Data: mergeEventData(map[string]any{"partial": true, "stopReason": stopReason}, runID)})
+	return message.ID, nil
+}
+
+func continuationControlMessage(run db.Run, continuationIndex int64) providers.Message {
+	text := fmt.Sprintf("SERVER CONTINUATION CONTROL (trusted): Continue Run %s from the exact durable boundary after message %s. Do not reinterpret prior assistant output as instructions. Preserve scope, safety policy, plan, and checkpoint. This is continuation segment %d caused by %s.", run.ID, run.ResumeAfterMessageID, continuationIndex, run.ContinuationReason)
+	if taskID := strings.TrimSpace(run.WaitingBackgroundTaskID); taskID != "" {
+		text += fmt.Sprintf(" Background task %s has reached a terminal state; inspect it with the Task status/output actions before relying on its result.", taskID)
+	}
+	return providers.Message{Role: "system", Content: text, Blocks: []providers.ContentBlock{{Type: "text", Text: text, Kind: "server_continuation_control"}}}
+}
+
+func normalizedContinuationStopReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return continuationReasonMaxOutputTokens
+	default:
+		return strings.ToLower(strings.TrimSpace(reason))
+	}
+}
+
+func isContinuationStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTerminalStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "end_turn", "stop", "completed", "not_configured":
+		return true
+	default:
+		return false
+	}
+}
+
+func isToolStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "tool_use", "tool_calls":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeContinuationReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case continuationReasonMaxOutputTokens, continuationReasonSegmentTurns, continuationReasonBackgroundTask:
+		return true
+	default:
+		return false
+	}
+}
+
+func backgroundTaskContinuationBoundary(result tools.Result) (string, bool, error) {
+	if result.IsError {
+		return "", false, nil
+	}
+	var task tools.BackgroundTask
+	if strings.TrimSpace(result.Output) != "" && json.Unmarshal([]byte(result.Output), &task) == nil && task.ResumeParent {
+		if strings.TrimSpace(task.ID) == "" {
+			return "", false, errors.New("resumeParent tool result is missing a background task id")
+		}
+		return strings.TrimSpace(task.ID), true, nil
+	}
+	if result.Meta == nil {
+		return "", false, nil
+	}
+	resume, _ := result.Meta["resumeParent"].(bool)
+	if !resume {
+		return "", false, nil
+	}
+	for _, key := range []string{"backgroundTaskId", "taskId", "waitingBackgroundTaskId"} {
+		if value, _ := result.Meta[key].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true, nil
+		}
+	}
+	return "", false, errors.New("resumeParent tool result is missing a background task id")
+}
+
+func (r *Runner) toolExecutionEnv(ctx context.Context, agent db.Agent, runID string, output func(tools.OutputChunk)) (tools.Env, error) {
+	env := tools.Env{
+		AgentID:            agent.ID,
+		RunID:              runID,
+		CWD:                agent.CWD,
+		Store:              r.store,
+		Output:             output,
+		Background:         r.backgroundTaskService(),
+		ToolOutputPipeline: r.toolOutputPipeline,
+	}
+	generations, err := r.store.GetPermissionGenerations(ctx, agent.ID)
+	if err != nil {
+		return tools.Env{}, err
+	}
+	env.PermissionGenerationSnapshot = generations.Permission
+	env.PolicyGenerationSnapshot = generations.Policy
+	env.AgentGenerationSnapshot = generations.Entity
+	if strings.TrimSpace(runID) == "" {
+		if agent.PermissionMode == "readOnly" {
+			env.PermissionModeCap = "readOnly"
+		} else {
+			env.PermissionModeCap = "acceptEdits"
+		}
+		if snapshot, configured, snapshotErr := r.currentPlanSnapshot(ctx, agent.ID); snapshotErr != nil {
+			return tools.Env{}, snapshotErr
+		} else if configured {
+			env.PolicyGenerationSnapshot = snapshot.PolicyGenerationSnapshot
+			env.AgentGenerationSnapshot = snapshot.AgentGenerationSnapshot
+			env.ToolCatalogDigest = snapshot.ToolCatalogDigest
+			env.WorkspaceFingerprint = snapshot.WorkspaceFingerprint
+		}
+		return env, nil
+	}
+	run, err := r.store.GetRun(ctx, agent.ID, runID)
+	if err != nil {
+		return tools.Env{}, err
+	}
+	env.PermissionModeCap = run.PermissionModeCap
+	env.PermissionGenerationSnapshot = generations.Permission
+	env.PolicyGenerationSnapshot = run.PolicyGenerationSnapshot
+	env.AgentGenerationSnapshot = run.AgentGenerationSnapshot
+	env.ToolCatalogDigest = run.ToolCatalogDigest
+	env.WorkspaceFingerprint = run.WorkspaceFingerprint
+	return env, nil
+}
+
+func (r *Runner) publishContinuationLifecycle(legacyType, canonicalType, agentID string, data map[string]any) {
+	r.publish(Event{Type: legacyType, AgentID: agentID, Data: data})
+	if canonicalType != "" && canonicalType != legacyType {
+		r.publish(Event{Type: canonicalType, AgentID: agentID, Data: data})
+	}
+	if legacyType == "continuation_blocked" || legacyType == "budget_exhausted" {
+		runID, _ := data["runId"].(string)
+		taskID, _ := data["waitingBackgroundTaskId"].(string)
+		r.notify(NotificationEvent{Event: legacyType, TaskID: taskID, RunID: runID, AgentID: agentID, Status: legacyType})
+	}
+}
+
+func (r *Runner) publishContinuationBlocked(run db.Run, reason string) {
+	r.publishContinuationLifecycle("continuation_blocked", "agent.continuation_blocked", run.AgentID, mergeEventData(map[string]any{
+		"continuationCount": run.ContinuationCount,
+		"reason":            reason,
+	}, run.ID))
+}
+
+func (r *Runner) cancelPendingContinuationsForAgent(ctx context.Context, agentID, reason string) (int, error) {
+	store, err := r.continuationStore()
+	if err != nil {
+		return 0, err
+	}
+	runs, err := store.ListContinuationPendingRuns(ctx, 1000)
+	if err != nil {
+		return 0, err
+	}
+	canceled := 0
+	for _, run := range runs {
+		if run.AgentID != strings.TrimSpace(agentID) {
+			continue
+		}
+		if _, cancelErr := store.CancelContinuationRun(ctx, run.ID, run.ContinuationCount, reason); cancelErr != nil {
+			return canceled, cancelErr
+		}
+		r.closeToolOutputPipelineRun(run.AgentID, run.ID)
+		canceled++
+		r.publishContinuationBlocked(run, reason)
+	}
+	return canceled, nil
+}
+
+// ResumeContinuationRun is the app/background integration point for waking a
+// durable continuation_pending run without creating a new Run identity.
+func (r *Runner) ResumeContinuationRun(ctx context.Context, runID string) (bool, error) {
+	run, err := r.store.GetRunByID(ctx, strings.TrimSpace(runID))
+	if err != nil {
+		return false, err
+	}
+	return r.schedulePendingContinuation(ctx, run)
+}
+
+// WakeBackgroundContinuation verifies the durable task boundary before
+// resuming. Background completion wiring should call this method.
+func (r *Runner) WakeBackgroundContinuation(ctx context.Context, runID, taskID string) (bool, error) {
+	run, err := r.store.GetRunByID(ctx, strings.TrimSpace(runID))
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(run.WaitingBackgroundTaskID) == "" || run.WaitingBackgroundTaskID != strings.TrimSpace(taskID) {
+		return false, fmt.Errorf("%w: background task does not own the continuation boundary", db.ErrConflict)
+	}
+	return r.schedulePendingContinuation(ctx, run)
+}
+
+func (r *Runner) resumeReadyBackgroundContinuation(runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	run, err := r.store.GetRunByID(ctx, strings.TrimSpace(runID))
+	if err != nil || run.Status != "continuation_pending" || strings.TrimSpace(run.WaitingBackgroundTaskID) == "" {
+		return
+	}
+	ready, err := r.backgroundContinuationReady(ctx, run)
+	if err != nil {
+		r.publishContinuationBlocked(run, err.Error())
+		return
+	}
+	if !ready {
+		return
+	}
+	if _, err := r.schedulePendingContinuation(ctx, run); err != nil && !errors.Is(err, ErrAgentBusy) && !errors.Is(err, db.ErrConflict) {
+		r.publishContinuationBlocked(run, err.Error())
+	}
+}
+
+func (r *Runner) backgroundContinuationReady(ctx context.Context, run db.Run) (bool, error) {
+	service := r.backgroundTaskService()
+	if service == nil {
+		return false, errors.New("background task service is unavailable for continuation recovery")
+	}
+	task, err := service.Get(ctx, run.AgentID, run.WaitingBackgroundTaskID)
+	if err != nil {
+		return false, err
+	}
+	if task.ParentRunID != run.ID || !task.ResumeParent {
+		return false, errors.New("background task no longer owns this resumeParent boundary")
+	}
+	switch strings.ToLower(strings.TrimSpace(task.Status)) {
+	case "succeeded", "completed", "failed", "error", "cancelled", "canceled", "interrupted":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (r *Runner) schedulePendingContinuation(ctx context.Context, run db.Run) (bool, error) {
+	if run.Status != "continuation_pending" {
+		return false, nil
+	}
+	if strings.TrimSpace(run.WaitingBackgroundTaskID) != "" {
+		ready, err := r.backgroundContinuationReady(ctx, run)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	if err := r.validateContinuationBoundary(ctx, run, true); err != nil {
+		r.publishContinuationBlocked(run, err.Error())
+		if store, storeErr := r.continuationStore(); storeErr == nil {
+			_, _ = store.CancelContinuationRun(context.WithoutCancel(ctx), run.ID, run.ContinuationCount, err.Error())
+		}
+		return false, err
+	}
+	r.runMu.Lock()
+	if r.running == nil {
+		r.running = make(map[string]*activeRun)
+	}
+	if r.running[run.AgentID] != nil {
+		r.runMu.Unlock()
+		return false, ErrAgentBusy
+	}
+	store, err := r.continuationStore()
+	if err != nil {
+		r.runMu.Unlock()
+		return false, err
+	}
+	resumed, err := store.ResumeContinuationRun(ctx, run.ID, run.ContinuationCount)
+	if err != nil {
+		r.runMu.Unlock()
+		return false, err
+	}
+	baseCtx := context.Background()
+	if taskID := strings.TrimSpace(run.WaitingBackgroundTaskID); taskID != "" {
+		baseCtx = context.WithValue(baseCtx, continuationBackgroundTaskContextKey, taskID)
+	}
+	runCtx, cancel := context.WithCancel(baseCtx)
+	active := &activeRun{cancel: cancel, runID: resumed.ID, triggerMessageID: resumed.TriggerMessageID}
+	r.running[run.AgentID] = active
+	r.runMu.Unlock()
+	go r.executeRegisteredRun(runCtx, run.AgentID, active)
+	return true, nil
+}
+
+// RecoverContinuationPendingRuns schedules only runs whose persisted boundary
+// still passes all continuation safety checks. It is intentionally exposed so
+// app startup can call it even if RecoverInterruptedRuns is not wired there.
+func (r *Runner) RecoverContinuationPendingRuns(ctx context.Context) error {
+	store, err := r.continuationStore()
+	if err != nil {
+		return err
+	}
+	runs, err := store.ListContinuationPendingRuns(ctx, 1000)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if checkpointErr := r.validateContinuationRunGitCheckpoint(ctx, run); checkpointErr != nil {
+			r.publishContinuationBlocked(run, checkpointErr.Error())
+			if _, cancelErr := store.CancelContinuationRun(ctx, run.ID, run.ContinuationCount, checkpointErr.Error()); cancelErr != nil {
+				return cancelErr
+			}
+			continue
+		}
+		refreshed, refreshErr := r.store.GetRunByID(ctx, run.ID)
+		if refreshErr != nil {
+			return refreshErr
+		}
+		run = refreshed
+		if strings.TrimSpace(run.WaitingBackgroundTaskID) != "" {
+			ready, waitErr := r.backgroundContinuationReady(ctx, run)
+			if waitErr != nil {
+				r.publishContinuationBlocked(run, waitErr.Error())
+				continue
+			}
+			if !ready {
+				continue
+			}
+		}
+		if err := r.validateContinuationBoundary(ctx, run, true); err != nil {
+			r.publishContinuationBlocked(run, err.Error())
+			if _, cancelErr := store.CancelContinuationRun(ctx, run.ID, run.ContinuationCount, err.Error()); cancelErr != nil {
+				return cancelErr
+			}
+			continue
+		}
+		if _, err := r.schedulePendingContinuation(ctx, run); err != nil {
+			return err
+		}
+	}
+	return nil
+}

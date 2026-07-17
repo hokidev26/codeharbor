@@ -64,7 +64,7 @@ func TestCreateProjectUsesRequestedModel(t *testing.T) {
 
 	payload := []byte(`{"name":"Demo","gitPath":"` + projectDir + `","model":"cliproxyapi:gpt-dynamic"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPost, "/api/projects", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
@@ -99,7 +99,7 @@ func TestAgentModelUpdateKeepsOnlyTargetSupportedReasoningEffort(t *testing.T) {
 
 	patch := func(path, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+path, strings.NewReader(body))
+		request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+path, strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		app.Routes().ServeHTTP(recorder, request)
 		return recorder
@@ -171,7 +171,7 @@ func TestConcurrentAgentModelAndReasoningPatchesRemainCapabilitySafe(t *testing.
 			defer group.Done()
 			<-start
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+patch.path, strings.NewReader(patch.body))
+			request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+patch.path, strings.NewReader(patch.body))
 			request.Header.Set("Content-Type", "application/json")
 			app.Routes().ServeHTTP(recorder, request)
 			codes <- recorder.Code
@@ -207,7 +207,7 @@ func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	request := newTestRequest(http.MethodGet, "/api/models", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -249,7 +249,7 @@ func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/models", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -269,7 +269,7 @@ func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *
 	}
 
 	recorder = httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/settings", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected settings 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -296,7 +296,7 @@ func TestModelsRouteExposesCanonicalReasoningEfforts(t *testing.T) {
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/models", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -329,7 +329,7 @@ func TestModelsRouteExposesXHighForCodexCapability(t *testing.T) {
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/models", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -369,7 +369,7 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	request := newTestRequest(http.MethodGet, "/api/models", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

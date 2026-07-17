@@ -27,8 +27,14 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Agent.DefaultPermissionMode == "" {
 		t.Fatal("expected default permission mode")
 	}
+	if cfg.Agent.ReviewModel != cfg.Agent.DefaultModel {
+		t.Fatalf("expected review model to default to agent model, got review=%q default=%q", cfg.Agent.ReviewModel, cfg.Agent.DefaultModel)
+	}
 	if cfg.Agent.ContextTokenLimit <= 0 {
 		t.Fatalf("expected positive context token limit, got %d", cfg.Agent.ContextTokenLimit)
+	}
+	if cfg.Agent.AutoContinuationMode != "safe" || cfg.Agent.ContinuationSegmentTurns != 40 || cfg.Agent.MaxContinuations != 8 || cfg.Agent.MaxTotalTurns != 200 || cfg.Agent.MaxRunDurationMs != 3600000 || cfg.Agent.MaxRunTokens != 500000 {
+		t.Fatalf("unexpected continuation defaults: %+v", cfg.Agent)
 	}
 	if cfg.Security.Exposed || cfg.Security.AccessPassword != "" {
 		t.Fatalf("expected local security defaults, got %+v", cfg.Security)
@@ -223,6 +229,31 @@ func TestLoadExplicitPathDoesNotMigrateLegacyConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(explicitPath); err != nil {
 		t.Fatalf("expected explicit config to be created: %v", err)
+	}
+}
+
+func TestNormalizeAgentConfigDefaultsReviewModelToDefaultModel(t *testing.T) {
+	got := normalizeAgentConfig(AgentConfig{DefaultModel: " openai:review-target ", ReviewModel: "   "})
+	if got.DefaultModel != "openai:review-target" || got.ReviewModel != "openai:review-target" {
+		t.Fatalf("expected trimmed default model fallback for reviewer, got %+v", got)
+	}
+}
+
+func TestNormalizeAgentConfigContinuationBounds(t *testing.T) {
+	got := normalizeAgentConfig(AgentConfig{
+		AutoContinuationMode:     "unexpected",
+		ContinuationSegmentTurns: 5000,
+		MaxContinuations:         100,
+		MaxTotalTurns:            12,
+		MaxRunDurationMs:         10,
+		MaxRunTokens:             10,
+	})
+	if got.AutoContinuationMode != "safe" || got.ContinuationSegmentTurns != 12 || got.MaxContinuations != 64 || got.MaxTotalTurns != 12 || got.MaxRunDurationMs != 1000 || got.MaxRunTokens != 1000 {
+		t.Fatalf("unexpected normalized continuation bounds: %+v", got)
+	}
+	off := normalizeAgentConfig(AgentConfig{AutoContinuationMode: " OFF ", MaxContinuations: -1})
+	if off.AutoContinuationMode != "off" || off.MaxContinuations != 0 {
+		t.Fatalf("expected explicit off and zero continuation budget, got %+v", off)
 	}
 }
 
@@ -537,6 +568,54 @@ func TestLoadWithReportTracksNewConfigCreatedAtExplicitLegacyPath(t *testing.T) 
 	}
 	if _, err := os.Stat(legacyPath); err != nil {
 		t.Fatalf("expected config to be written at explicit legacy path: %v", err)
+	}
+}
+
+func TestLoadMigratesLegacyAccessPasswordAndRemovesPlaintextFromDisk(t *testing.T) {
+	t.Setenv("AUTOTO_ACCESS_PASSWORD", "")
+	t.Setenv("CODEHARBOR_ACCESS_PASSWORD", "")
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacyPassword := "Legacy-Remote-Password-9!"
+	input := `{
+  "security": {"exposed": true, "accessPassword": "` + legacyPassword + `"},
+  "providers": {"instances": [{"name": "custom", "type": "openai-compatible", "apiKey": "preserve-existing-value", "model": "test"}]},
+  "unknownExtension": {"enabled": true}
+}`
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.AccessPassword != "" || !VerifyAccessPassword(cfg.Security.AccessPasswordHash, legacyPassword) {
+		t.Fatalf("expected in-memory hash-only credential, got %+v", cfg.Security)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(persisted)
+	if strings.Contains(text, legacyPassword) || strings.Contains(text, `"accessPassword":`) {
+		t.Fatalf("legacy plaintext credential remained on disk: %s", text)
+	}
+	if !strings.Contains(text, `"accessPasswordHash"`) || !strings.Contains(text, `"apiKey": "preserve-existing-value"`) || !strings.Contains(text, `"unknownExtension"`) {
+		t.Fatalf("security-only migration did not preserve unrelated config fields: %s", text)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected migrated config mode 0600, got %o", info.Mode().Perm())
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyAccessPassword(reloaded.Security.AccessPasswordHash, legacyPassword) {
+		t.Fatal("persisted migrated hash did not verify after reload")
 	}
 }
 

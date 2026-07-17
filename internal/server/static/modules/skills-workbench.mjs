@@ -1,7 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { t } from "./messages-skills.mjs";
 import { normalizeSlashCommandName } from "./skills-commands.mjs";
-import { skillTabs } from "./settings-data.mjs";
+import { skillTabs } from "./settings-data.mjs?v=users-panel-removed-1";
 
 function currentRestoreReviewChallenge(error) {
   const body = error?.body;
@@ -89,15 +89,15 @@ export function createSkillsWorkbenchController({
     const active = skillTabs.find((tab) => tab.key === activeKey) || skillTabs[0];
     state.activeSkillTab = active.key;
     return `
-    <div class="skills-page">
-      <div class="skills-tabs" role="tablist" aria-label="${escapeAttr(t("skillsWorkbench.tabsAriaLabel"))}">
+    <div class="skills-page settings-page-section" aria-live="polite" aria-busy="${state.serverSkillsStatus === "loading" || state.workflowLoading ? "true" : "false"}">
+      <div class="skills-tabs settings-toolbar" role="tablist" aria-label="${escapeAttr(t("skillsWorkbench.tabsAriaLabel"))}" aria-orientation="horizontal">
         ${skillTabs.map((tab) => `
-          <button class="skills-tab ${tab.key === active.key ? "active" : ""}" type="button" data-skill-tab="${escapeAttr(tab.key)}" role="tab" aria-selected="${tab.key === active.key ? "true" : "false"}">
+          <button id="skill-tab-${escapeAttr(tab.key)}" class="skills-tab settings-tab ${tab.key === active.key ? "active" : ""}" type="button" data-skill-tab="${escapeAttr(tab.key)}" role="tab" aria-selected="${tab.key === active.key ? "true" : "false"}" ${tab.key === active.key ? `aria-controls="skill-tab-panel-${escapeAttr(tab.key)}"` : ""} tabindex="${tab.key === active.key ? "0" : "-1"}">
             ${escapeHtml(tab.label)}
           </button>
         `).join("")}
       </div>
-      <section class="skills-tab-panel" role="tabpanel">
+      <section id="skill-tab-panel-${escapeAttr(active.key)}" class="skills-tab-panel settings-card-content" role="tabpanel" aria-labelledby="skill-tab-${escapeAttr(active.key)}" tabindex="0">
         ${renderSkillTabPanel(active)}
       </section>
     </div>
@@ -125,50 +125,50 @@ export function createSkillsWorkbenchController({
     const serverSkills = Array.isArray(state.serverSkills) ? state.serverSkills : [];
     const loading = state.serverSkillsStatus === "loading";
     return `
-    <p class="skills-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.commands.compatibilityDescription"))}${skillsPhaseB ? ` ${escapeHtml(t("skillsWorkbench.commands.phaseBDescription"))}` : ""}</p>
+    <p class="skills-description settings-card-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.commands.compatibilityDescription"))}${skillsPhaseB ? ` ${escapeHtml(t("skillsWorkbench.commands.phaseBDescription"))}` : ""}</p>
     <div class="skill-workbench-actions skills-primary-actions">
       <button id="refreshServerSkillsBtn" class="settings-action-btn subtle" type="button" ${loading ? "disabled" : ""}>${loading ? t("skillsWorkbench.commands.statusLoading") : t("skillsWorkbench.commands.refreshServer")}</button>
       <button id="migrateLocalSkillsBtn" class="settings-action-btn subtle" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${t("skillsWorkbench.commands.migrateLocal", { count: localCommands.length })}</button>
     </div>
     ${phaseBMarkup}
-    ${state.serverSkillsError ? `<div class="settings-inline-alert">${escapeHtml(state.serverSkillsError)}</div>` : ""}
-    ${localMigrationSummary ? `<div class="settings-provider-meta">${escapeHtml(localMigrationSummary)}</div>` : ""}
-    <section class="settings-provider-section highlighted">
-      <div class="settings-provider-section-head">
+    ${state.serverSkillsError ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(state.serverSkillsError)}</div>` : ""}
+    ${localMigrationSummary ? `<div class="settings-provider-meta settings-card-description">${escapeHtml(localMigrationSummary)}</div>` : ""}
+    <section class="settings-provider-section settings-card settings-page-section highlighted">
+      <div class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.commands.serverTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.commands.serverDescription"))}</div>
+          <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.serverTitle"))}</div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.serverDescription"))}</div>
         </div>
-        <span class="settings-status-pill ${loading || state.serverSkillsStatus === "stale" ? "warn" : state.serverSkillsStatus === "error" ? "muted" : "ok"}">${loading ? t("skillsWorkbench.commands.statusLoading") : state.serverSkillsStatus === "stale" ? t("skillsWorkbench.commands.statusStale") : state.serverSkillsStatus === "error" ? t("skillsWorkbench.commands.statusError") : state.serverSkillsStatus === "ready" ? t("skillsWorkbench.commands.statusReady") : t("skillsWorkbench.commands.statusIdle")}</span>
+        <span class="settings-status-pill settings-badge ${loading || state.serverSkillsStatus === "stale" ? "warn" : state.serverSkillsStatus === "error" ? "muted" : "ok"}">${loading ? t("skillsWorkbench.commands.statusLoading") : state.serverSkillsStatus === "stale" ? t("skillsWorkbench.commands.statusStale") : state.serverSkillsStatus === "error" ? t("skillsWorkbench.commands.statusError") : state.serverSkillsStatus === "ready" ? t("skillsWorkbench.commands.statusReady") : t("skillsWorkbench.commands.statusIdle")}</span>
       </div>
-      <div class="skill-command-list">
-        ${loading && !serverSkills.length ? `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.commands.loading"))}</div>` : serverSkills.length ? serverSkills.map(renderServerSkillCard).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.commands.empty"))}</div>`}
+      <div class="skill-command-list settings-data-list">
+        ${loading && !serverSkills.length ? `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.commands.loading"))}</div>` : serverSkills.length ? serverSkills.map(renderServerSkillCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.commands.empty"))}</div>`}
       </div>
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.commands.importTitle"))}</div>
-      <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.commands.importDescription"))}</div>
-      <div class="settings-action-row settings-form-actions">
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.importTitle"))}</div>
+      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.importDescription"))}</div>
+      <div class="settings-action-row settings-form-actions settings-inline-actions">
         <input id="skillImportFile" class="hidden" type="file" accept=".md,text/markdown,text/plain" />
         <button id="chooseSkillImportFileBtn" class="settings-action-btn subtle" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.commands.chooseFile"))}</button>
       </div>
       ${renderSkillImportPreview()}
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.commands.createTitle"))}</div>
-      <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.commands.createDescription"))}</div>
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.createTitle"))}</div>
+      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.createDescription"))}</div>
       <form id="skillCommandForm" class="skill-command-form">
-        <div class="settings-provider-form-grid">
+        <div class="settings-provider-form-grid settings-form-grid">
           <label>${escapeHtml(t("skillsWorkbench.commands.nameLabel"))}<input id="skillCommandName" class="settings-field" placeholder="${escapeAttr(t("skillsWorkbench.commands.namePlaceholder"))}" /></label>
           <label>${escapeHtml(t("skillsWorkbench.commands.descriptionLabel"))}<input id="skillCommandDescription" class="settings-field" placeholder="${escapeAttr(t("skillsWorkbench.commands.descriptionPlaceholder"))}" /></label>
           <label class="settings-form-span-2">${escapeHtml(t("skillsWorkbench.commands.promptLabel"))}<textarea id="skillCommandPrompt" class="settings-field settings-textarea" rows="5" placeholder="${escapeAttr(t("skillsWorkbench.commands.promptPlaceholder"))}"></textarea></label>
         </div>
-        <div class="settings-action-row settings-form-actions"><button class="settings-action-btn primary" type="submit" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.commands.saveDisabled"))}</button></div>
+        <div class="settings-action-row settings-form-actions settings-inline-actions"><button class="settings-action-btn primary" type="submit" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.commands.saveDisabled"))}</button></div>
       </form>
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.commands.localFallbackTitle"))}</div>
-      <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.commands.localFallbackDescription"))}</div>
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.localFallbackTitle"))}</div>
+      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.localFallbackDescription"))}</div>
     </section>
   `;
   }
@@ -181,20 +181,20 @@ export function createSkillsWorkbenchController({
     const drawer = bucket.drawer;
     const revisions = drawer ? (bucket.revisions?.[drawer.skillId] || { items: [], status: "idle" }) : null;
     return `
-      <section class="settings-provider-section highlighted skills-v2-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-card settings-page-section highlighted skills-v2-section">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.commands.phaseBTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(skillContextLabel(context))} · ${escapeHtml(t("skillsWorkbench.commands.snapshot", { sequence: String(bucket.snapshotSequence ?? "—") }))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.phaseBTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(skillContextLabel(context))} · ${escapeHtml(t("skillsWorkbench.commands.snapshot", { sequence: String(bucket.snapshotSequence ?? "—") }))}</div>
           </div>
           <div class="skill-workbench-actions">
             ${setSkillContext ? `<select id="skillsV2ScopeSelect" class="settings-field skills-scope-select" aria-label="${escapeAttr(t("skillsWorkbench.commands.scopeAriaLabel"))}">${renderSkillScopeOptions(context.scope)}</select>` : ""}
             <button id="refreshSkillsV2Btn" class="settings-action-btn subtle" type="button" ${loading ? "disabled" : ""}>${loading ? t("skillsWorkbench.commands.statusLoading") : t("skillsWorkbench.commands.refresh")}</button>
           </div>
         </div>
-        ${bucket.error ? `<div class="settings-inline-alert">${escapeHtml(bucket.error)}</div>` : ""}
-        <div class="skill-command-list">
-          ${loading && !bucket.items.length ? `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.commands.loadingSkills"))}</div>` : bucket.items.length ? bucket.items.map((skill) => renderPhaseBSkillCard(skill, context)).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.commands.scopeEmpty"))}</div>`}
+        ${bucket.error ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(bucket.error)}</div>` : ""}
+        <div class="skill-command-list settings-data-list">
+          ${loading && !bucket.items.length ? `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.commands.loadingSkills"))}</div>` : bucket.items.length ? bucket.items.map((skill) => renderPhaseBSkillCard(skill, context)).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.commands.scopeEmpty"))}</div>`}
         </div>
         ${bucket.nextCursor ? `<button id="loadMoreSkillsV2Btn" class="settings-action-btn subtle" type="button" ${bucket.status === "loading-more" ? "disabled" : ""}>${bucket.status === "loading-more" ? t("skillsWorkbench.commands.statusLoading") : t("skillsWorkbench.commands.loadMore")}</button>` : ""}
       </section>
@@ -213,7 +213,7 @@ export function createSkillsWorkbenchController({
   function renderScanFindings(findings) {
     return findings.length
       ? `<ul class="skill-findings">${findings.map((finding) => `<li><strong>${escapeHtml(finding.code || "scan")}</strong>：${escapeHtml(finding.message || t("skillsWorkbench.skills.findingDefault"))}</li>`).join("")}</ul>`
-      : `<div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.skills.noReviewFindings"))}</div>`;
+      : `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.skills.noReviewFindings"))}</div>`;
   }
 
   function renderServerSkillCard(skill) {
@@ -225,20 +225,20 @@ export function createSkillsWorkbenchController({
     const canEnable = verdict !== "blocked";
     const findingsMarkup = detailsLoaded
       ? renderScanFindings(findings)
-      : `<div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.skills.findingCount", { count: findingCount }))}</div>`;
+      : `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.skills.findingCount", { count: findingCount }))}</div>`;
     return `
-    <div class="skill-command-card ${skill.enabled ? "" : "disabled"}">
+    <div class="skill-command-card settings-card settings-data-list-row ${skill.enabled ? "" : "disabled"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(skill.command)} <span class="settings-status-pill ${skill.enabled ? "ok" : "muted"}">${escapeHtml(skill.enabled ? t("skillsWorkbench.skills.enabled") : t("skillsWorkbench.skills.disabled"))}</span> <span class="settings-status-pill ${tone}">${escapeHtml(skillVerdictLabel(verdict))}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(skill.name || t("skillsWorkbench.skills.unnamed"))} · ${escapeHtml(skill.description || t("skillsWorkbench.skills.noDescription"))} · ${escapeHtml(t("skillsWorkbench.skills.source", { source: skillSourceLabel(skill.source) }))}</div>
+        <div class="skill-command-title settings-card-title">${escapeHtml(skill.command)} <span class="settings-status-pill settings-badge ${skill.enabled ? "ok" : "muted"}">${escapeHtml(skill.enabled ? t("skillsWorkbench.skills.enabled") : t("skillsWorkbench.skills.disabled"))}</span> <span class="settings-status-pill settings-badge ${tone}">${escapeHtml(skillVerdictLabel(verdict))}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(skill.name || t("skillsWorkbench.skills.unnamed"))} · ${escapeHtml(skill.description || t("skillsWorkbench.skills.noDescription"))} · ${escapeHtml(t("skillsWorkbench.skills.source", { source: skillSourceLabel(skill.source) }))}</div>
         ${findingsMarkup}
-        ${detailsLoaded ? `<pre class="skill-command-prompt">${escapeHtml(skill.prompt)}</pre>` : `<div class="settings-provider-meta">${skill.detailError ? escapeHtml(t("skillsWorkbench.skills.detailLoadFailed", { message: skill.detailError })) : escapeHtml(t("skillsWorkbench.skills.detailNotLoaded"))}</div>`}
+        ${detailsLoaded ? `<pre class="skill-command-prompt">${escapeHtml(skill.prompt)}</pre>` : `<div class="settings-provider-meta settings-card-description">${skill.detailError ? escapeHtml(t("skillsWorkbench.skills.detailLoadFailed", { message: skill.detailError })) : escapeHtml(t("skillsWorkbench.skills.detailNotLoaded"))}</div>`}
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         ${detailsLoaded ? "" : `<button class="settings-action-btn subtle" type="button" data-server-skill-detail="${escapeAttr(skill.id)}">${escapeHtml(t("skillsWorkbench.skills.loadDetail"))}</button>`}
         <button class="settings-action-btn subtle" type="button" data-server-skill-copy="${escapeAttr(skill.id)}">${escapeHtml(t("skillsWorkbench.skills.copy"))}</button>
         <button class="settings-action-btn subtle" type="button" data-server-skill-toggle="${escapeAttr(skill.id)}" ${!canEnable || state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(skill.enabled ? t("skillsWorkbench.skills.disabled") : canEnable ? t("skillsWorkbench.skills.enabled") : t("skillsWorkbench.skills.cannotEnable"))}</button>
-        <button class="settings-action-btn danger" type="button" data-server-skill-delete="${escapeAttr(skill.id)}" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
+        <button class="settings-action-btn danger destructive" type="button" data-server-skill-delete="${escapeAttr(skill.id)}" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
       </div>
     </div>
   `;
@@ -251,13 +251,13 @@ export function createSkillsWorkbenchController({
     const verdict = String(preview.scanVerdict || "safe");
     const blocked = verdict === "blocked";
     return `
-      <div class="skill-command-card ${blocked ? "disabled" : ""}">
+      <div class="skill-command-card settings-card settings-data-list-row ${blocked ? "disabled" : ""}">
         <div>
-          <div class="skill-command-title">${escapeHtml(t("skillsWorkbench.skills.preview", { command: preview.command || "" }))}&nbsp;<span class="settings-status-pill ${blocked ? "muted" : verdict === "review" ? "warn" : "ok"}">${escapeHtml(skillVerdictLabel(verdict))}</span></div>
-          <div class="settings-provider-meta">${escapeHtml(preview.name || "")} · ${escapeHtml(preview.description || "")}</div>
+          <div class="skill-command-title settings-card-title">${escapeHtml(t("skillsWorkbench.skills.preview", { command: preview.command || "" }))}&nbsp;<span class="settings-status-pill settings-badge ${blocked ? "muted" : verdict === "review" ? "warn" : "ok"}">${escapeHtml(skillVerdictLabel(verdict))}</span></div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(preview.name || "")} · ${escapeHtml(preview.description || "")}</div>
           ${renderScanFindings(findings)}
         </div>
-        <div class="settings-action-row"><button id="confirmSkillImportBtn" class="settings-action-btn primary" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.importConfirm"))}</button></div>
+        <div class="settings-action-row settings-inline-actions"><button id="confirmSkillImportBtn" class="settings-action-btn primary" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.importConfirm"))}</button></div>
       </div>
     `;
   }
@@ -277,20 +277,20 @@ export function createSkillsWorkbenchController({
     const editingRegistryArgs = Array.isArray(editingRegistryServer?.args) ? editingRegistryServer.args.join(" ") : "";
     const registrySubmitting = editingRegistryId ? isMCPRegistryActionBusy(editingRegistryId, "update") : isMCPRegistryActionBusy("new", "create");
     return `
-    <p class="skills-description">${escapeHtml(active.description)}</p>
-    <section class="settings-provider-section">
-      <div class="settings-provider-section-head">
+    <p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.mcp.registryTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.mcp.registryDescription"))}</div>
+          <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.mcp.registryTitle"))}</div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.mcp.registryDescription"))}</div>
         </div>
         <button id="refreshMCPRegistryBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t(state.mcpRegistryLoading ? "skillsWorkbench.mcp.refreshingRegistry" : "skillsWorkbench.mcp.refreshRegistry"))}</button>
       </div>
       ${renderMCPRegistryList()}
       <form id="mcpRegistryForm" class="skill-command-form" data-mcp-registry-editing="${escapeAttr(editingRegistryId)}">
-        <div class="settings-provider-title">${escapeHtml(t(editingRegistryId ? "skillsWorkbench.mcp.editServer" : "skillsWorkbench.mcp.addServer"))}</div>
-        ${editingRegistryId ? `<div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.mcp.editingDescription", { id: editingRegistryId }))}</div>` : ""}
-        <div class="settings-provider-form-grid">
+        <div class="settings-provider-title settings-card-title">${escapeHtml(t(editingRegistryId ? "skillsWorkbench.mcp.editServer" : "skillsWorkbench.mcp.addServer"))}</div>
+        ${editingRegistryId ? `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.mcp.editingDescription", { id: editingRegistryId }))}</div>` : ""}
+        <div class="settings-provider-form-grid settings-form-grid">
           <label>${escapeHtml(t("skillsWorkbench.mcp.nameLabel"))}<input id="mcpRegistryName" class="settings-field" value="${escapeAttr(editingRegistryServer?.name || "")}" placeholder="filesystem" /></label>
           <label>${escapeHtml(t("skillsWorkbench.mcp.enabledLabel"))}
             <select id="mcpRegistryEnabled" class="settings-field"><option value="true" ${editingRegistryServer?.enabled === false ? "" : "selected"}>enabled</option><option value="false" ${editingRegistryServer?.enabled === false ? "selected" : ""}>disabled</option></select>
@@ -302,28 +302,28 @@ export function createSkillsWorkbenchController({
             <textarea id="mcpRegistryEnv" class="settings-field settings-textarea" rows="3" placeholder='${escapeAttr(t("skillsWorkbench.mcp.envPlaceholder"))}'></textarea>
           </label>
         </div>
-        <div class="settings-action-row settings-form-actions">
+        <div class="settings-action-row settings-form-actions settings-inline-actions">
           ${editingRegistryId ? `<button id="cancelMCPRegistryEditBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("skillsWorkbench.mcp.cancelEdit"))}</button>` : ""}
           <button class="settings-action-btn primary" type="submit" ${registrySubmitting ? "disabled" : ""}>${escapeHtml(t(registrySubmitting ? (editingRegistryId ? "skillsWorkbench.mcp.updating" : "skillsWorkbench.mcp.creating") : (editingRegistryId ? "skillsWorkbench.mcp.updateServer" : "skillsWorkbench.mcp.createServer")))}</button>
         </div>
       </form>
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.mcp.localDraftTitle"))}</div>
-      <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.mcp.localDraftDescription"))}</div>
-      <div class="skill-command-list">
-        ${prefs.mcpServers.length ? prefs.mcpServers.map(renderMCPServerCard).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.mcp.localDraftEmpty"))}</div>`}
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.mcp.localDraftTitle"))}</div>
+      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.mcp.localDraftDescription"))}</div>
+      <div class="skill-command-list settings-data-list">
+        ${prefs.mcpServers.length ? prefs.mcpServers.map(renderMCPServerCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.mcp.localDraftEmpty"))}</div>`}
       </div>
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.mcp.addDraftTitle"))}</div>
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.mcp.addDraftTitle"))}</div>
       <form id="mcpServerForm" class="skill-command-form">
-        <div class="settings-provider-form-grid">
+        <div class="settings-provider-form-grid settings-form-grid">
           <label>${escapeHtml(t("skillsWorkbench.mcp.nameLabel"))}<input id="mcpServerName" class="settings-field" placeholder="filesystem" /></label>
           <label>${escapeHtml(t("skillsWorkbench.mcp.transportLabel"))}<select id="mcpServerTransport" class="settings-field"><option value="stdio">stdio</option><option value="sse">sse</option><option value="http">http</option></select></label>
           <label class="settings-form-span-2">${escapeHtml(t("skillsWorkbench.mcp.startCommandLabel"))}<input id="mcpServerCommand" class="settings-field" placeholder="${escapeAttr(t("skillsWorkbench.mcp.commandPlaceholder"))}" /></label>
         </div>
-        <div class="settings-action-row settings-form-actions"><button class="settings-action-btn primary" type="submit">${escapeHtml(t("skillsWorkbench.mcp.addDraft"))}</button></div>
+        <div class="settings-action-row settings-form-actions settings-inline-actions"><button class="settings-action-btn primary" type="submit">${escapeHtml(t("skillsWorkbench.mcp.addDraft"))}</button></div>
       </form>
     </section>
   `;
@@ -331,15 +331,15 @@ export function createSkillsWorkbenchController({
 
   function renderMCPServerCard(server) {
     return `
-    <div class="skill-command-card ${server.enabled ? "" : "disabled"}">
+    <div class="skill-command-card settings-card settings-data-list-row ${server.enabled ? "" : "disabled"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(server.name || t("skillsWorkbench.mcp.defaultName"))} <span class="settings-status-pill ${server.enabled ? "ok" : "muted"}">${escapeHtml(t(server.enabled ? "skillsWorkbench.mcp.draftEnabled" : "skillsWorkbench.mcp.draftDisabled"))}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(server.transport)} · ${escapeHtml(server.command || t("skillsWorkbench.mcp.commandMissing"))}</div>
+        <div class="skill-command-title settings-card-title">${escapeHtml(server.name || t("skillsWorkbench.mcp.defaultName"))} <span class="settings-status-pill settings-badge ${server.enabled ? "ok" : "muted"}">${escapeHtml(t(server.enabled ? "skillsWorkbench.mcp.draftEnabled" : "skillsWorkbench.mcp.draftDisabled"))}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(server.transport)} · ${escapeHtml(server.command || t("skillsWorkbench.mcp.commandMissing"))}</div>
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         <button class="settings-action-btn subtle" type="button" data-mcp-register="${escapeAttr(server.id)}" ${isMCPRegistryActionBusy(server.id, "register") ? "disabled" : ""}>${escapeHtml(t(isMCPRegistryActionBusy(server.id, "register") ? "skillsWorkbench.mcp.saving" : "skillsWorkbench.mcp.saveToRegistry"))}</button>
         <button class="settings-action-btn subtle" type="button" data-mcp-toggle="${escapeAttr(server.id)}">${escapeHtml(t(server.enabled ? "skillsWorkbench.skills.disabled" : "skillsWorkbench.skills.enabled"))}</button>
-        <button class="settings-action-btn danger" type="button" data-mcp-delete="${escapeAttr(server.id)}">${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
+        <button class="settings-action-btn danger destructive" type="button" data-mcp-delete="${escapeAttr(server.id)}">${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
       </div>
     </div>
   `;
@@ -353,18 +353,18 @@ export function createSkillsWorkbenchController({
     const rules = Array.isArray(state.toolPermissionRules) ? state.toolPermissionRules : [];
     const loading = state.workflowLoading || state.toolPermissionRulesLoading;
     return `
-    <p class="skills-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.permissions.description"))}</p>
+    <p class="skills-description settings-card-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.permissions.description"))}</p>
     <div class="skill-workbench-actions">
       <button id="refreshWorkflowPolicyBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t(loading ? "skillsWorkbench.commands.statusLoading" : "skillsWorkbench.permissions.refreshServer"))}</button>
     </div>
-    ${state.workflowError || state.toolPermissionRulesError ? `<div class="settings-inline-alert">${escapeHtml(state.workflowError || state.toolPermissionRulesError)}</div>` : ""}
-    <section class="settings-provider-section highlighted">
-      <div class="settings-provider-section-head">
+    ${state.workflowError || state.toolPermissionRulesError ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(state.workflowError || state.toolPermissionRulesError)}</div>` : ""}
+    <section class="settings-provider-section settings-card settings-page-section highlighted">
+      <div class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.permissions.preferencesTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.permissions.preferencesDescription"))}</div>
+          <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.permissions.preferencesTitle"))}</div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.permissions.preferencesDescription"))}</div>
         </div>
-        <span class="settings-status-pill ${loading ? "warn" : "ok"}">${escapeHtml(t(loading ? "skillsWorkbench.commands.statusLoading" : "skillsWorkbench.permissions.connected"))}</span>
+        <span class="settings-status-pill settings-badge ${loading ? "warn" : "ok"}">${escapeHtml(t(loading ? "skillsWorkbench.commands.statusLoading" : "skillsWorkbench.permissions.connected"))}</span>
       </div>
       <div class="appearance-toggle-list">
         ${renderWorkflowPolicyToggle("requireConfirmationForExec", t("skillsWorkbench.permissions.confirmExecTitle"), t("skillsWorkbench.permissions.confirmExecDescription"), prefs.requireConfirmationForExec !== false)}
@@ -372,19 +372,19 @@ export function createSkillsWorkbenchController({
         ${renderWorkflowPolicyToggle("allowReadOnlyByDefault", t("skillsWorkbench.permissions.allowReadOnlyTitle"), t("skillsWorkbench.permissions.allowReadOnlyDescription"), prefs.allowReadOnlyByDefault !== false)}
       </div>
     </section>
-    <section class="settings-provider-section">
-      <div class="settings-provider-section-head">
+    <section class="settings-provider-section settings-card settings-page-section">
+      <div class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.permissions.rulesTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.permissions.rulesDescription"))}</div>
+          <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.permissions.rulesTitle"))}</div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.permissions.rulesDescription"))}</div>
         </div>
       </div>
       <div class="skill-command-list workflow-rule-list">
-        ${rules.length ? rules.map(renderToolPermissionRuleCard).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.permissions.rulesEmpty"))}</div>`}
+        ${rules.length ? rules.map(renderToolPermissionRuleCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.permissions.rulesEmpty"))}</div>`}
       </div>
       <form id="toolPermissionRuleForm" class="skill-command-form workflow-rule-form">
-        <div class="settings-provider-title">${escapeHtml(t("skillsWorkbench.permissions.addRule"))}</div>
-        <div class="settings-provider-form-grid">
+        <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.permissions.addRule"))}</div>
+        <div class="settings-provider-form-grid settings-form-grid">
           <label>${escapeHtml(t("skillsWorkbench.permissions.modeLabel"))}<select id="toolPermissionMode" class="settings-field">${renderPermissionRuleOptions(["*", "readOnly", "acceptEdits", "bypassPermissions", "default", "dontAsk"], "acceptEdits")}</select></label>
           <label>${escapeHtml(t("skillsWorkbench.permissions.toolNameLabel"))}<input id="toolPermissionToolName" class="settings-field" value="Bash" placeholder="${escapeAttr(t("skillsWorkbench.permissions.toolNamePlaceholder"))}" /></label>
           <label>${escapeHtml(t("skillsWorkbench.permissions.riskLabel"))}<select id="toolPermissionRisk" class="settings-field">${renderPermissionRuleOptions(["read", "write", "exec", "danger", "*"], "exec")}</select></label>
@@ -392,7 +392,7 @@ export function createSkillsWorkbenchController({
           <label>${escapeHtml(t("skillsWorkbench.permissions.priorityLabel"))}<input id="toolPermissionPriority" class="settings-field" type="number" value="10" /></label>
           <label class="settings-form-span-2">${escapeHtml(t("skillsWorkbench.permissions.descriptionLabel"))}<input id="toolPermissionDescription" class="settings-field" placeholder="${escapeAttr(t("skillsWorkbench.permissions.descriptionPlaceholder"))}" /></label>
         </div>
-        <div class="settings-action-row settings-form-actions"><button class="settings-action-btn primary" type="submit" ${state.toolPermissionRulesSaving ? "disabled" : ""}>${escapeHtml(t(state.toolPermissionRulesSaving ? "skillsWorkbench.mcp.saving" : "skillsWorkbench.permissions.addServerRule"))}</button></div>
+        <div class="settings-action-row settings-form-actions settings-inline-actions"><button class="settings-action-btn primary" type="submit" ${state.toolPermissionRulesSaving ? "disabled" : ""}>${escapeHtml(t(state.toolPermissionRulesSaving ? "skillsWorkbench.mcp.saving" : "skillsWorkbench.permissions.addServerRule"))}</button></div>
       </form>
     </section>
   `;
@@ -400,7 +400,7 @@ export function createSkillsWorkbenchController({
 
   function renderWorkflowPolicyToggle(field, title, description, checked) {
     return `
-    <label class="appearance-toggle-row skill-policy-row">
+    <label class="appearance-toggle-row skill-policy-row settings-switch-row">
       <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
       <input type="checkbox" data-workflow-policy="${escapeAttr(field)}" ${checked ? "checked" : ""} ${state.workflowSaving ? "disabled" : ""} />
     </label>
@@ -409,15 +409,15 @@ export function createSkillsWorkbenchController({
 
   function renderToolPermissionRuleCard(rule) {
     return `
-    <div class="skill-command-card workflow-rule-card ${rule.enabled ? "" : "disabled"}">
+    <div class="skill-command-card settings-card settings-data-list-row workflow-rule-card ${rule.enabled ? "" : "disabled"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(rule.toolName || "*")} <span class="settings-status-pill ${rule.enabled ? "ok" : "muted"}">${escapeHtml(t(rule.enabled ? "skillsWorkbench.skills.enabled" : "skillsWorkbench.skills.disabled"))}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(t("skillsWorkbench.permissions.ruleMeta", { mode: rule.mode || "*", risk: rule.risk || "*", decision: rule.decision || "ask", priority: String(rule.priority || 0) }))}</div>
-        ${rule.description ? `<div class="settings-provider-meta">${escapeHtml(rule.description)}</div>` : ""}
+        <div class="skill-command-title settings-card-title">${escapeHtml(rule.toolName || "*")} <span class="settings-status-pill settings-badge ${rule.enabled ? "ok" : "muted"}">${escapeHtml(t(rule.enabled ? "skillsWorkbench.skills.enabled" : "skillsWorkbench.skills.disabled"))}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.permissions.ruleMeta", { mode: rule.mode || "*", risk: rule.risk || "*", decision: rule.decision || "ask", priority: String(rule.priority || 0) }))}</div>
+        ${rule.description ? `<div class="settings-provider-meta settings-card-description">${escapeHtml(rule.description)}</div>` : ""}
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         <button class="settings-action-btn subtle" type="button" data-tool-permission-toggle="${escapeAttr(rule.id)}" ${state.toolPermissionRulesSaving ? "disabled" : ""}>${escapeHtml(t(rule.enabled ? "skillsWorkbench.skills.disabled" : "skillsWorkbench.skills.enabled"))}</button>
-        <button class="settings-action-btn danger" type="button" data-tool-permission-delete="${escapeAttr(rule.id)}" ${state.toolPermissionRulesSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
+        <button class="settings-action-btn danger destructive" type="button" data-tool-permission-delete="${escapeAttr(rule.id)}" ${state.toolPermissionRulesSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.skills.delete"))}</button>
       </div>
     </div>
   `;
@@ -429,7 +429,7 @@ export function createSkillsWorkbenchController({
 
   function renderSkillRoadmapPanel(active) {
     return `
-    <p class="skills-description">${escapeHtml(active.description)}</p>
+    <p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
     <div class="skill-roadmap-grid">
       ${renderSkillRoadmapCard(active.label, active.empty)}
       ${renderSkillRoadmapCard(t("skillsWorkbench.roadmap.serverTitle"), t("skillsWorkbench.roadmap.serverDescription"))}
@@ -439,16 +439,36 @@ export function createSkillsWorkbenchController({
   }
 
   function renderSkillRoadmapCard(title, description) {
-    return `<section class="skill-roadmap-card"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span></section>`;
+    return `<section class="skill-roadmap-card settings-card settings-empty-state"><strong class="settings-card-title">${escapeHtml(title)}</strong><span class="settings-card-description">${escapeHtml(description)}</span></section>`;
+  }
+
+  function renderSkillPanelIntoBody(body, activeKey) {
+    const markup = renderSkillSettingsContent(activeKey);
+    const frame = body?.querySelector?.('[data-settings-page="skills"]');
+    if (frame) frame.innerHTML = markup;
+    else if (body) body.innerHTML = markup;
   }
 
   function bindSkillTabs(activeKey = "commands") {
     const body = $("settingsContentBody");
-    body.querySelectorAll("[data-skill-tab]").forEach((node) => {
-      node.addEventListener("click", () => {
-        state.activeSkillTab = node.dataset.skillTab;
-        body.innerHTML = renderSkillSettingsContent(node.dataset.skillTab);
-        bindSkillTabs(node.dataset.skillTab);
+    const tabs = [...body.querySelectorAll("[data-skill-tab]")];
+    const activateTab = (node) => {
+      state.activeSkillTab = node.dataset.skillTab;
+      renderSkillPanelIntoBody(body, node.dataset.skillTab);
+      bindSkillTabs(node.dataset.skillTab);
+    };
+    tabs.forEach((node, index) => {
+      node.addEventListener("click", () => activateTab(node));
+      node.addEventListener("keydown", (event) => {
+        let nextIndex = index;
+        if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+        else if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === "Home") nextIndex = 0;
+        else if (event.key === "End") nextIndex = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        tabs[nextIndex].focus();
+        activateTab(tabs[nextIndex]);
       });
     });
     bindMCPRegistryActions(body);
@@ -526,8 +546,9 @@ export function createSkillsWorkbenchController({
   function rerenderSkillPanel() {
     const body = $("settingsContentBody");
     if (!body || state.activeSettingsPanel !== "skills") return;
-    body.innerHTML = renderSkillSettingsContent(state.activeSkillTab || "commands");
-    bindSkillTabs(state.activeSkillTab || "commands");
+    const activeKey = state.activeSkillTab || "commands";
+    renderSkillPanelIntoBody(body, activeKey);
+    bindSkillTabs(activeKey);
   }
 
   async function openSkillRevisionDrawer(skillId) {
@@ -757,7 +778,7 @@ export function skillScopeShadowHint(skill, activeContext = {}) {
 export function renderSkillScopeBadge(skill) {
   const scope = String(skill?.scope || skill?.ownerScope || "global").toLowerCase();
   const label = scope === "project" ? t("skillsWorkbench.scope.projectBadge") : scope === "workspace" ? t("skillsWorkbench.scope.workspaceBadge") : t("skillsWorkbench.scope.globalBadge");
-  return `<span class="skill-scope-badge skill-scope-${escapeAttr(scope)}">${escapeHtml(label)}</span>`;
+  return `<span class="skill-scope-badge settings-badge skill-scope-${escapeAttr(scope)}">${escapeHtml(label)}</span>`;
 }
 
 function renderSkillScopeOptions(selected) {
@@ -769,13 +790,13 @@ function renderPhaseBSkillCard(skill, context) {
   const tone = verdict === "safe" ? "ok" : verdict === "review" ? "warn" : "muted";
   const detailLoaded = Boolean(skill.detailLoaded && String(skill.prompt || "").trim());
   return `
-    <div class="skill-command-card skills-v2-card ${skill.enabled ? "" : "disabled"}">
+    <div class="skill-command-card settings-card settings-data-list-row skills-v2-card ${skill.enabled ? "" : "disabled"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(skill.command || skill.name || t("skillsWorkbench.skills.unnamedCommand"))} ${renderSkillScopeBadge(skill)} <span class="settings-status-pill ${tone}">${escapeHtml({ safe: t("skillsWorkbench.skills.verdictSafe"), review: t("skillsWorkbench.skills.verdictReview"), blocked: t("skillsWorkbench.skills.verdictBlocked") }[verdict] || verdict)}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(skill.description || t("skillsWorkbench.skills.noDescription"))} · ${escapeHtml(skillScopeShadowHint(skill, context))}</div>
-        ${detailLoaded ? `<pre class="skill-command-prompt">${escapeHtml(skill.prompt)}</pre>` : skill.detailError ? `<div class="settings-inline-alert">${escapeHtml(t("skillsWorkbench.skills.localFallbackBlocked", { message: skill.detailError }))}</div>` : ""}
+        <div class="skill-command-title settings-card-title">${escapeHtml(skill.command || skill.name || t("skillsWorkbench.skills.unnamedCommand"))} ${renderSkillScopeBadge(skill)} <span class="settings-status-pill settings-badge ${tone}">${escapeHtml({ safe: t("skillsWorkbench.skills.verdictSafe"), review: t("skillsWorkbench.skills.verdictReview"), blocked: t("skillsWorkbench.skills.verdictBlocked") }[verdict] || verdict)}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(skill.description || t("skillsWorkbench.skills.noDescription"))} · ${escapeHtml(skillScopeShadowHint(skill, context))}</div>
+        ${detailLoaded ? `<pre class="skill-command-prompt">${escapeHtml(skill.prompt)}</pre>` : skill.detailError ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(t("skillsWorkbench.skills.localFallbackBlocked", { message: skill.detailError }))}</div>` : ""}
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         <button class="settings-action-btn subtle" type="button" data-skill-v2-detail="${escapeAttr(skill.id)}">${escapeHtml(t(detailLoaded ? "skillsWorkbench.skills.refreshDetail" : "skillsWorkbench.skills.loadDetail"))}</button>
         <button class="settings-action-btn subtle" type="button" data-skill-v2-revisions="${escapeAttr(skill.id)}">${escapeHtml(t("skillsWorkbench.revisions.title"))}</button>
       </div>
@@ -787,16 +808,16 @@ export function renderSkillRevisionDrawer({ drawer, revisions = {}, context = {}
   const items = Array.isArray(revisions.items) ? revisions.items : [];
   const selected = drawer?.revisionDetail;
   return `
-    <aside class="skill-revision-drawer" aria-label="${escapeAttr(t("skillsWorkbench.revisions.ariaLabel"))}">
-      <div class="skill-revision-drawer-head"><div><strong>${escapeHtml(t("skillsWorkbench.revisions.title"))}</strong><small>${escapeHtml(skillContextLabel(context))}</small></div><button id="closeSkillRevisionDrawerBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("skillsWorkbench.revisions.close"))}</button></div>
-      ${revisions.error ? `<div class="settings-inline-alert">${escapeHtml(revisions.error)}</div>` : ""}
-      <div class="skill-revision-list">
-        ${revisions.status === "loading" && !items.length ? `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.revisions.loading"))}</div>` : items.length ? items.map((revision) => {
+    <aside class="skill-revision-drawer settings-sheet settings-card" role="region" aria-label="${escapeAttr(t("skillsWorkbench.revisions.ariaLabel"))}" aria-live="polite" aria-busy="${revisions.status === "loading" ? "true" : "false"}">
+      <div class="skill-revision-drawer-head settings-card-header"><div><strong>${escapeHtml(t("skillsWorkbench.revisions.title"))}</strong><small>${escapeHtml(skillContextLabel(context))}</small></div><button id="closeSkillRevisionDrawerBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("skillsWorkbench.revisions.close"))}</button></div>
+      ${revisions.error ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(revisions.error)}</div>` : ""}
+      <div class="skill-revision-list settings-data-list">
+        ${revisions.status === "loading" && !items.length ? `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.revisions.loading"))}</div>` : items.length ? items.map((revision) => {
           const revisionNo = String(revision.revisionNo ?? revision.revision ?? "");
-          return `<div class="skill-revision-card ${String(drawer?.selectedRevision || "") === revisionNo ? "selected" : ""}"><div><strong>${escapeHtml(revision.label || t("skillsWorkbench.revisions.label", { revision: revisionNo }))}</strong><small>${escapeHtml(revision.createdAt || revision.updatedAt || "")}</small></div><div class="settings-action-row"><button class="settings-action-btn subtle" type="button" data-skill-v2-revision-detail="${escapeAttr(drawer?.skillId)}" data-skill-v2-revision-id="${escapeAttr(revisionNo)}">${escapeHtml(t("skillsWorkbench.revisions.view"))}</button><button class="settings-action-btn danger" type="button" data-skill-v2-restore="${escapeAttr(drawer?.skillId)}" data-skill-v2-revision-id="${escapeAttr(revisionNo)}">${escapeHtml(t("skillsWorkbench.revisions.restore"))}</button></div></div>`;
-        }).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("skillsWorkbench.revisions.empty"))}</div>`}
+          return `<div class="skill-revision-card settings-card settings-data-list-row ${String(drawer?.selectedRevision || "") === revisionNo ? "selected" : ""}"><div><strong>${escapeHtml(revision.label || t("skillsWorkbench.revisions.label", { revision: revisionNo }))}</strong><small>${escapeHtml(revision.createdAt || revision.updatedAt || "")}</small></div><div class="settings-action-row settings-inline-actions"><button class="settings-action-btn subtle" type="button" data-skill-v2-revision-detail="${escapeAttr(drawer?.skillId)}" data-skill-v2-revision-id="${escapeAttr(revisionNo)}">${escapeHtml(t("skillsWorkbench.revisions.view"))}</button><button class="settings-action-btn danger destructive" type="button" data-skill-v2-restore="${escapeAttr(drawer?.skillId)}" data-skill-v2-revision-id="${escapeAttr(revisionNo)}">${escapeHtml(t("skillsWorkbench.revisions.restore"))}</button></div></div>`;
+        }).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.revisions.empty"))}</div>`}
       </div>
-      ${selected ? `<pre class="skill-command-prompt skill-revision-detail">${escapeHtml(selected.prompt || selected.content || JSON.stringify(selected, null, 2))}</pre>` : drawer?.revisionDetailError ? `<div class="settings-inline-alert">${escapeHtml(drawer.revisionDetailError)}</div>` : ""}
+      ${selected ? `<pre class="skill-command-prompt skill-revision-detail">${escapeHtml(selected.prompt || selected.content || JSON.stringify(selected, null, 2))}</pre>` : drawer?.revisionDetailError ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(drawer.revisionDetailError)}</div>` : ""}
     </aside>
   `;
 }

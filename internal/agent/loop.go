@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"reflect"
 	"regexp"
 	"sort"
@@ -17,20 +18,36 @@ import (
 	"autoto/internal/config"
 	"autoto/internal/db"
 	"autoto/internal/providers"
+	"autoto/internal/review"
 	"autoto/internal/skills"
+	"autoto/internal/toolpipeline"
 	"autoto/internal/tools"
 )
 
 type Runner struct {
-	store     *db.Store
-	providers *providers.Registry
-	tools     *tools.Registry
-	hub       *Hub
-	cfg       config.AgentConfig
+	store              *db.Store
+	providers          *providers.Registry
+	tools              *tools.Registry
+	toolOutputPipeline tools.ToolOutputPipelineService
+	hub                *Hub
+	cfg                config.AgentConfig
+
+	modelSettingsMu sync.RWMutex
+	defaultModel    string
+	summaryModel    string
+	subagentModels  map[string]string
+	subagentPools   map[string][]string
+
+	continuationMu        sync.RWMutex
+	continuationConfig    config.AgentConfig
+	continuationRunLimits map[string]continuationLimits
 
 	dynamicToolsMu sync.RWMutex
 	toolSource     tools.ToolSource
 	toolResolver   tools.Resolver
+
+	backgroundMu sync.RWMutex
+	background   tools.BackgroundTaskService
 
 	reasoningMu            sync.RWMutex
 	defaultReasoningEffort string
@@ -44,6 +61,10 @@ type Runner struct {
 
 	notifierMu sync.RWMutex
 	notifier   Notifier
+
+	planMu               sync.RWMutex
+	reviewer             *review.Service
+	planSnapshotProvider func(context.Context, string) (db.PlanSnapshot, error)
 }
 
 type activeRun struct {
@@ -78,6 +99,7 @@ type SourceSubmission struct {
 
 type NotificationEvent struct {
 	Event               string
+	TaskID              string
 	RunID               string
 	AgentID             string
 	Status              string
@@ -134,6 +156,9 @@ type toolPermissionResolution struct {
 	Decision string
 	Reason   string
 	Warning  string
+	Source   string
+	RuleID   string
+	Scope    string
 }
 
 const (
@@ -143,17 +168,30 @@ const (
 )
 
 const (
-	toolApprovalTimeout       = 10 * time.Minute
-	defaultContextTokenLimit  = 120000
-	contextKeepRecentMessages = 8
-	maxDeterministicSummary   = 8000
-	maxSummaryLineRunes       = 240
-	memoryInjectionLimit      = 5
-	memoryContentMaxRunes     = 2000
+	toolApprovalTimeout          = 10 * time.Minute
+	maxToolResultPreviewBytes    = 4 * 1024
+	maxToolEventInputBytes       = 16 * 1024
+	maxToolEventInputStringBytes = 2 * 1024
+	maxToolEventInputItems       = 32
+	maxToolEventInputDepth       = 4
+	defaultContextTokenLimit     = 120000
+	contextKeepRecentMessages    = 8
+	maxContextToolInputBytes     = 16 * 1024
+	maxDeterministicSummary      = 8000
+	maxSummaryLineRunes          = 240
+	memoryInjectionLimit         = 5
+	memoryContentMaxRunes        = 2000
+)
+
+var (
+	toolActivitySecretAssignmentPattern = regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|cookie|password|passwd|secret|session[_-]?token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	toolActivityBearerPattern           = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+	toolActivitySensitiveQueryPattern   = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|access[_-]?token|auth|authorization|key|password|secret|session|token)=)[^&#\s]*`)
 )
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	runner := &Runner{store: store, providers: providers, tools: toolRegistry, hub: hub, cfg: cfg, defaultReasoningEffort: "auto", running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	runner := &Runner{store: store, providers: providers, tools: toolRegistry, toolOutputPipeline: toolpipeline.NewManager(), hub: hub, cfg: cfg, continuationConfig: cfg, continuationRunLimits: make(map[string]continuationLimits), defaultReasoningEffort: "auto", running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	runner.SetAgentModelSettings(cfg)
 	if store != nil {
 		if settings, err := store.GetRuntimeSettings(context.Background()); err == nil {
 			runner.SetDefaultReasoningEffort(settings.DefaultReasoningEffort)
@@ -193,6 +231,130 @@ func (r *Runner) dynamicTools() (tools.ToolSource, tools.Resolver) {
 	r.dynamicToolsMu.RLock()
 	defer r.dynamicToolsMu.RUnlock()
 	return r.toolSource, r.toolResolver
+}
+
+// SetBackgroundTaskService installs the execution service used by background
+// tools. App wiring may call this alongside the server's own setter.
+func (r *Runner) SetBackgroundTaskService(service tools.BackgroundTaskService) {
+	if r == nil {
+		return
+	}
+	r.backgroundMu.Lock()
+	r.background = service
+	r.backgroundMu.Unlock()
+}
+
+func (r *Runner) backgroundTaskService() tools.BackgroundTaskService {
+	if r == nil {
+		return nil
+	}
+	r.backgroundMu.RLock()
+	defer r.backgroundMu.RUnlock()
+	return r.background
+}
+
+func (r *Runner) SetAgentModelSettings(cfg config.AgentConfig) {
+	if r == nil {
+		return
+	}
+	models := make(map[string]string, len(cfg.SubagentModels))
+	for role, model := range cfg.SubagentModels {
+		role = normalizeSubagentRole(role)
+		model = strings.TrimSpace(model)
+		if role != "" && model != "" {
+			models[role] = model
+		}
+	}
+	pools := make(map[string][]string, len(cfg.SubagentModelPools))
+	for role, values := range cfg.SubagentModelPools {
+		role = normalizeSubagentRole(role)
+		if role == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(values))
+		pool := make([]string, 0, len(values))
+		for _, model := range values {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				continue
+			}
+			if _, exists := seen[model]; exists {
+				continue
+			}
+			seen[model] = struct{}{}
+			pool = append(pool, model)
+		}
+		if len(pool) > 0 {
+			pools[role] = pool
+		}
+	}
+	r.modelSettingsMu.Lock()
+	r.defaultModel = strings.TrimSpace(cfg.DefaultModel)
+	r.summaryModel = strings.TrimSpace(cfg.SummaryModel)
+	r.subagentModels = models
+	r.subagentPools = pools
+	r.modelSettingsMu.Unlock()
+}
+
+func (r *Runner) SummaryModel() string {
+	if r == nil {
+		return ""
+	}
+	r.modelSettingsMu.RLock()
+	model := r.summaryModel
+	r.modelSettingsMu.RUnlock()
+	return model
+}
+
+func (r *Runner) ResolveSubagentModel(role, explicitModel, parentModel string) (string, string, error) {
+	role = normalizeSubagentRole(role)
+	if role == "" {
+		role = "general"
+	}
+	explicitModel = strings.TrimSpace(explicitModel)
+	parentModel = strings.TrimSpace(parentModel)
+	r.modelSettingsMu.RLock()
+	preferred := strings.TrimSpace(r.subagentModels[role])
+	pool := append([]string(nil), r.subagentPools[role]...)
+	defaultModel := strings.TrimSpace(r.defaultModel)
+	r.modelSettingsMu.RUnlock()
+	allowed := func(model string) bool {
+		if len(pool) == 0 {
+			return true
+		}
+		for _, candidate := range pool {
+			if candidate == model {
+				return true
+			}
+		}
+		return false
+	}
+	if explicitModel != "" {
+		if !allowed(explicitModel) {
+			return "", role, fmt.Errorf("model %s is not allowed for %s subagents", explicitModel, role)
+		}
+		return explicitModel, role, nil
+	}
+	for _, candidate := range []string{preferred, parentModel, defaultModel} {
+		if candidate != "" && allowed(candidate) {
+			return candidate, role, nil
+		}
+	}
+	if len(pool) > 0 {
+		return pool[0], role, nil
+	}
+	return "", role, errors.New("subagent model is not configured")
+}
+
+func normalizeSubagentRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "", "background", "general":
+		return "general"
+	case "explore", "plan", "search":
+		return strings.ToLower(strings.TrimSpace(role))
+	default:
+		return ""
+	}
 }
 
 func (r *Runner) SetDefaultReasoningEffort(effort string) {
@@ -256,7 +418,53 @@ func (r *Runner) notify(event NotificationEvent) {
 var serverSkillCommandPattern = regexp.MustCompile(`^(/[A-Za-z0-9][A-Za-z0-9_-]{0,62})(?:$|[ \t\r\n]+([\s\S]*))`)
 
 func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy string, attachments ...db.Attachment) (db.Message, error) {
+	agent, err := r.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.Message{}, err
+	}
+	return r.submitUserMessageWithMode(ctx, agentID, text, createdBy, runExecutionModeForAgent(agent), attachments...)
+}
+
+// SubmitUserMessageWithMode freezes an explicit capability boundary directly on
+// the new Run. It never mutates the Agent's persisted default, so concurrent
+// submissions cannot observe a transient Plan/Execute selection.
+func (r *Runner) SubmitUserMessageWithMode(ctx context.Context, agentID, text, createdBy string, mode ExecutionMode, attachments ...db.Attachment) (db.Message, error) {
+	return r.SubmitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, mode, "", attachments...)
+}
+
+// SubmitUserMessageWithModeAndPermissionCap freezes a request-scoped
+// permission ceiling on the durable Run. It never rewrites the Agent's default
+// permission mode, so a restricted remote submission cannot affect later local
+// work or a concurrent full session.
+func (r *Runner) SubmitUserMessageWithModeAndPermissionCap(ctx context.Context, agentID, text, createdBy string, mode ExecutionMode, permissionModeCap string, attachments ...db.Attachment) (db.Message, error) {
+	var durableMode string
+	switch mode {
+	case ExecutionModePlan:
+		durableMode = db.RunExecutionModePlan
+	case ExecutionModeExecute:
+		durableMode = db.RunExecutionModeExecute
+	default:
+		return db.Message{}, fmt.Errorf("invalid execution mode %q", mode)
+	}
+	permissionModeCap = strings.TrimSpace(permissionModeCap)
+	if permissionModeCap != "" && permissionModeCap != "readOnly" && permissionModeCap != "acceptEdits" {
+		return db.Message{}, fmt.Errorf("invalid permission mode cap %q", permissionModeCap)
+	}
+	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, durableMode, permissionModeCap, attachments...)
+}
+
+func (r *Runner) submitUserMessageWithMode(ctx context.Context, agentID, text, createdBy, mode string, attachments ...db.Attachment) (db.Message, error) {
+	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, mode, "", attachments...)
+}
+
+func (r *Runner) submitUserMessageWithModeAndPermissionCap(ctx context.Context, agentID, text, createdBy, mode, permissionModeCap string, attachments ...db.Attachment) (db.Message, error) {
 	if err := r.EnsureLocalExecution(ctx, agentID); err != nil {
+		return db.Message{}, err
+	}
+	if mode != db.RunExecutionModePlan && mode != db.RunExecutionModeExecute {
+		return db.Message{}, errors.New("invalid durable run execution mode")
+	}
+	if _, err := r.cancelPendingContinuationsForAgent(ctx, agentID, "preempted by a new user message"); err != nil && !errors.Is(err, errContinuationStoreUnavailable) {
 		return db.Message{}, err
 	}
 	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
@@ -267,7 +475,15 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 	if err != nil {
 		return db.Message{}, err
 	}
-	run, err := r.store.CreateRun(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending", Source: "manual"})
+	runRequest, err := r.bindPlanRunSnapshot(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending", Source: "manual", ExecutionMode: mode, PermissionModeCap: permissionModeCap})
+	if err != nil {
+		return db.Message{}, err
+	}
+	runRequest, err = r.prepareContinuationRun(ctx, runRequest)
+	if err != nil {
+		return db.Message{}, err
+	}
+	run, err := r.store.CreateRun(ctx, runRequest)
 	if err != nil {
 		return db.Message{}, err
 	}
@@ -275,7 +491,7 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 		return db.Message{}, err
 	}
 	msg.RunID = run.ID
-	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments)}, run.ID)})
+	r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: msg.ID, Text: text, Data: mergeEventData(map[string]any{"attachments": len(msg.Attachments), "executionMode": mode}, run.ID)})
 	go r.runWithRun(context.Background(), agentID, run.ID, msg.ID)
 	return msg, nil
 }
@@ -283,6 +499,19 @@ func (r *Runner) SubmitUserMessage(ctx context.Context, agentID, text, createdBy
 // SubmitCorrection creates an immutable follow-up to a user message and starts a
 // new run. It intentionally does not alter the source message or reuse its run.
 func (r *Runner) SubmitCorrection(ctx context.Context, agentID, sourceMessageID, text, createdBy string, keepAttachmentIDs []string, attachments ...db.Attachment) (db.Message, error) {
+	if err := r.EnsureLocalExecution(ctx, agentID); err != nil {
+		return db.Message{}, err
+	}
+	agent, err := r.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.Message{}, err
+	}
+	// CreateCorrectionWithRun predates runs.execution_mode and always creates an
+	// execute run. Refuse this path while the agent is in plan mode rather than
+	// silently widening the run capability.
+	if agent.PlanMode {
+		return db.Message{}, errors.New("plan-mode corrections require an execution-mode-aware Store API")
+	}
 	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
 	if err != nil {
 		return db.Message{}, err
@@ -368,6 +597,10 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 	if err := r.EnsureLocalExecution(ctx, submission.AgentID); err != nil {
 		return db.Run{}, err
 	}
+	agent, err := r.store.GetAgent(ctx, submission.AgentID)
+	if err != nil {
+		return db.Run{}, err
+	}
 	if submission.DispatchID != "" {
 		existing, found, err := r.runForDispatch(ctx, submission.DispatchID)
 		if err != nil {
@@ -379,6 +612,24 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 			}
 			return existing, nil
 		}
+	}
+
+	runRequest, err := r.bindPlanRunSnapshot(ctx, db.Run{
+		AgentID:           submission.AgentID,
+		Status:            "pending",
+		Source:            submission.Source,
+		SourceID:          submission.SourceID,
+		PermissionModeCap: submission.PermissionModeCap,
+		DispatchID:        submission.DispatchID,
+		TriggerType:       submission.TriggerType,
+		ExecutionMode:     runExecutionModeForAgent(agent),
+	})
+	if err != nil {
+		return db.Run{}, err
+	}
+	runRequest, err = r.prepareContinuationRun(ctx, runRequest)
+	if err != nil {
+		return db.Run{}, err
 	}
 
 	r.runMu.Lock()
@@ -403,16 +654,8 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 		r.runMu.Unlock()
 		return db.Run{}, err
 	}
-	run, err := r.store.CreateRun(ctx, db.Run{
-		AgentID:           submission.AgentID,
-		TriggerMessageID:  msg.ID,
-		Status:            "pending",
-		Source:            submission.Source,
-		SourceID:          submission.SourceID,
-		PermissionModeCap: submission.PermissionModeCap,
-		DispatchID:        submission.DispatchID,
-		TriggerType:       submission.TriggerType,
-	})
+	runRequest.TriggerMessageID = msg.ID
+	run, err := r.store.CreateRun(ctx, runRequest)
 	if err != nil {
 		r.runMu.Unlock()
 		return db.Run{}, err
@@ -562,7 +805,13 @@ func (r *Runner) runWithRun(ctx context.Context, agentID, runID, triggerMessageI
 
 func (r *Runner) executeRegisteredRun(runCtx context.Context, agentID string, active *activeRun) {
 	err := r.run(runCtx, agentID, active.runID)
+	if err != nil && active != nil {
+		r.closeToolOutputPipelineRun(agentID, active.runID)
+	}
 	completion := r.unregisterRun(agentID, active)
+	if err == nil && active != nil && strings.TrimSpace(active.runID) != "" {
+		r.resumeReadyBackgroundContinuation(active.runID)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			if completion.interrupted || !completion.pending {
@@ -622,9 +871,17 @@ func (r *Runner) Interrupt(ctx context.Context, agentID string) (bool, error) {
 	if pendingRunID != "" {
 		r.captureRunEndHead(pendingRunID)
 		_ = r.store.CompleteRun(context.Background(), pendingRunID, "interrupted", "")
+		r.closeToolOutputPipelineRun(agentID, pendingRunID)
 	}
 	if cancel == nil {
-		return false, nil
+		canceled, cancelErr := r.cancelPendingContinuationsForAgent(ctx, agentID, "interrupted by user")
+		if cancelErr != nil && !errors.Is(cancelErr, errContinuationStoreUnavailable) {
+			return false, cancelErr
+		}
+		if canceled > 0 {
+			r.closeToolOutputPipelineAgent(agentID)
+		}
+		return canceled > 0, nil
 	}
 	cancel()
 	return true, nil
@@ -674,6 +931,21 @@ func (r *Runner) ApproveToolCall(ctx context.Context, agentID, toolUseID string,
 }
 
 func (r *Runner) registerRun(ctx context.Context, agentID, runID, triggerMessageID string) (context.Context, *activeRun, bool, error) {
+	var runRequest db.Run
+	if strings.TrimSpace(runID) == "" {
+		agent, err := r.store.GetAgent(ctx, agentID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		runRequest, err = r.bindPlanRunSnapshot(ctx, db.Run{AgentID: agentID, TriggerMessageID: triggerMessageID, Status: "running", ExecutionMode: runExecutionModeForAgent(agent)})
+		if err != nil {
+			return nil, nil, false, err
+		}
+		runRequest, err = r.prepareContinuationRun(ctx, runRequest)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	}
 	r.runMu.Lock()
 	if r.running == nil {
 		r.running = make(map[string]*activeRun)
@@ -720,7 +992,7 @@ func (r *Runner) registerRun(ctx context.Context, agentID, runID, triggerMessage
 	runCtx, cancel := context.WithCancel(ctx)
 	active := &activeRun{cancel: cancel, runID: runID, triggerMessageID: triggerMessageID}
 	if active.runID == "" {
-		runningRun, err := r.store.CreateRun(context.Background(), db.Run{AgentID: agentID, TriggerMessageID: triggerMessageID, Status: "running"})
+		runningRun, err := r.store.CreateRun(context.Background(), runRequest)
 		if err != nil {
 			r.runMu.Unlock()
 			cancel()
@@ -761,7 +1033,7 @@ func (r *Runner) unregisterRun(agentID string, active *activeRun) runCompletion 
 	return completion
 }
 
-func (r *Runner) run(ctx context.Context, agentID, runID string) error {
+func (r *Runner) runSingleSegmentLegacy(ctx context.Context, agentID, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -770,21 +1042,13 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	}
 	r.publish(Event{Type: "agent.started", AgentID: agentID, Data: runEventData(runID)})
 
-	agent, err := r.store.GetAgent(ctx, agentID)
+	agent, policy, err := r.policyContext(ctx, agentID, runID)
 	if err != nil {
 		return err
 	}
-	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
-		return fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
+	if !policy.IsPlan() {
+		r.captureRunCheckpoint(ctx, agent, runID)
 	}
-	if runID != "" {
-		run, err := r.store.GetRun(ctx, agentID, runID)
-		if err != nil {
-			return err
-		}
-		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
-	}
-	r.captureRunCheckpoint(ctx, agent, runID)
 	projectInstructions := loadProjectInstructions(agent.CWD)
 	if strings.TrimSpace(projectInstructions.Text) != "" {
 		agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
@@ -808,6 +1072,9 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			r.publish(Event{Type: "memory.injected", AgentID: agentID, Data: mergeEventData(map[string]any{"count": injectedCount}, runID)})
 		}
 	}
+	if policy.IsPlan() {
+		agent.SystemPrompt = mergePlanDraftSystemPrompt(agent.SystemPrompt)
+	}
 	provider, model, err := r.providers.Resolve(agent.Model)
 	if err != nil {
 		return err
@@ -817,7 +1084,7 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
-	toolSnapshot, err := r.snapshotTools(ctx, tools.ResolutionContext{AgentID: agentID, CWD: agent.CWD})
+	toolSnapshot, err := r.snapshotToolsForPolicy(ctx, tools.ResolutionContext{AgentID: agentID, CWD: agent.CWD}, policy)
 	if err != nil {
 		return fmt.Errorf("snapshot tools: %w", err)
 	}
@@ -829,11 +1096,12 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs)
+		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs, turnSystemControls{})
 		if err != nil {
 			return err
 		}
 		agent = updatedAgent
+		providerMessages = r.appendToolOutputPipelineControl(providerMessages, agentID, runID)
 		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort), agent.FastMode)
 		if err != nil {
 			return err
@@ -843,8 +1111,19 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			return err
 		}
 		if len(result.ToolCalls) == 0 {
+			if r.toolOutputPipelineActive(agentID, runID) {
+				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+				continue
+			}
 			assistantText := result.Text
-			if assistantText == "" {
+			var planReview review.Result
+			if policy.IsPlan() {
+				assistantText, planReview, err = r.persistAndReviewPlan(ctx, policy, assistantText)
+				if err != nil {
+					r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
+					return err
+				}
+			} else if assistantText == "" {
 				assistantText = "Done."
 			}
 			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, TurnUsage: result.TurnUsage})
@@ -854,11 +1133,21 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 			}
 			r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
 			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
-			r.captureRunEndHead(runID)
+			if !policy.IsPlan() {
+				r.captureRunEndHead(runID)
+			}
 			if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
 				return err
 			}
-			r.publish(Event{Type: "agent.done", AgentID: agentID, Data: mergeEventData(map[string]any{"stopReason": result.StopReason}, runID)})
+			r.closeToolOutputPipelineRun(agentID, runID)
+			r.publishPlanRunStatus(ctx, runID, "plan.executed")
+			doneData := map[string]any{"stopReason": result.StopReason}
+			if policy.IsPlan() {
+				doneData["executionMode"] = policy.ExecutionMode
+				doneData["reviewVerdict"] = planReview.Verdict
+				doneData["reviewReason"] = planReview.Reason
+			}
+			r.publish(Event{Type: "agent.done", AgentID: agentID, Data: mergeEventData(doneData, runID)})
 			r.notify(NotificationEvent{Event: "completed", RunID: runID, AgentID: agentID, Status: "completed"})
 			if err := r.store.SetAgentStatus(ctx, agentID, "idle", ""); err != nil {
 				return err
@@ -884,18 +1173,19 @@ func (r *Runner) run(ctx context.Context, agentID, runID string) error {
 				return err
 			}
 			toolCall := normalizeProviderToolCall(call)
-			toolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID, toolSnapshot.tools)
+			rawToolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID, toolSnapshot.tools)
 			if err != nil {
-				toolResult = tools.Result{Output: err.Error(), IsError: true}
+				rawToolResult = tools.Result{Output: err.Error(), IsError: true}
 			}
-			toolResultBlock := providers.ContentBlock{Type: "tool_result", ToolUseID: toolCall.ID, ToolName: toolCall.Name, Output: toolResult.Output, IsError: toolResult.IsError}
+			modelToolResult := r.processToolResultForModel(agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, rawToolResult)
+			toolResultBlock := providers.ContentBlock{Type: "tool_result", ToolUseID: toolCall.ID, ToolName: toolCall.Name, Output: modelToolResult.Output, IsError: modelToolResult.IsError}
 			toolResultJSON, _ := json.Marshal([]providers.ContentBlock{toolResultBlock})
-			toolResultText := toolResultMessageText(toolCall, toolResult)
+			toolResultText := toolResultMessageText(toolCall, modelToolResult)
 			toolMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "user", ParentToolID: toolCall.ID, ContentText: toolResultText, ContentJSON: toolResultJSON})
 			if err != nil {
 				return err
 			}
-			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": toolResult.IsError}, runID)})
+			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": modelToolResult.IsError}, runID)})
 			messages = append(messages, toolMsg)
 		}
 	}
@@ -980,33 +1270,49 @@ func mergeMemorySystemContext(systemPrompt, memoryContext string) string {
 	return strings.TrimSpace(systemPrompt) + "\n\n" + memoryContext
 }
 
-func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, messages []db.Message, toolSpecs []providers.ToolSpec) ([]providers.Message, db.Agent, error) {
+func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, messages []db.Message, toolSpecs []providers.ToolSpec, controls turnSystemControls) ([]providers.Message, db.Agent, error) {
 	providerMessages := providerMessagesForContext(agent, messages)
 	limit := r.contextTokenLimit()
-	if estimateRequestTokens(agent.SystemPrompt, providerMessages, toolSpecs) <= limit {
-		return providerMessages, agent, nil
+	preferredControls := controls.preferredMessages()
+	preferredRequest := appendProviderMessages(providerMessages, preferredControls)
+	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
+		return preferredRequest, agent, nil
+	}
+	providerMessages = compactOversizedContextToolInputs(providerMessages)
+	preferredRequest = appendProviderMessages(providerMessages, preferredControls)
+	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
+		return preferredRequest, agent, nil
 	}
 
 	candidates := selectSummaryCandidates(messages, agent.PruneBoundaryMessageID, contextKeepRecentMessages)
-	if len(candidates) == 0 {
-		return providerMessages, agent, nil
+	if len(candidates) > 0 {
+		summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
+		if summary != "" {
+			boundaryID := candidates[len(candidates)-1].ID
+			prunedPercent := 0
+			if len(messages) > 0 {
+				prunedPercent = int(float64(len(candidates)) / float64(len(messages)) * 100)
+			}
+			if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
+				return nil, agent, err
+			}
+			agent.ContextSummary = summary
+			agent.PruneBoundaryMessageID = boundaryID
+			agent.PrunedPercent = prunedPercent
+			providerMessages = providerMessagesForContext(agent, messages)
+			preferredRequest = appendProviderMessages(providerMessages, preferredControls)
+			if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
+				return preferredRequest, agent, nil
+			}
+		}
 	}
-	summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
-	if summary == "" {
-		return providerMessages, agent, nil
-	}
-	boundaryID := candidates[len(candidates)-1].ID
-	prunedPercent := 0
-	if len(messages) > 0 {
-		prunedPercent = int(float64(len(candidates)) / float64(len(messages)) * 100)
-	}
-	if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
+
+	providerMessages = compactConversationForBudget(agent.SystemPrompt, providerMessages, toolSpecs, limit, controls.requiredMessages())
+	fittedControls, err := fitTurnSystemControls(agent.SystemPrompt, providerMessages, toolSpecs, limit, controls)
+	if err != nil {
 		return nil, agent, err
 	}
-	agent.ContextSummary = summary
-	agent.PruneBoundaryMessageID = boundaryID
-	agent.PrunedPercent = prunedPercent
-	return providerMessagesForContext(agent, messages), agent, nil
+	return appendProviderMessages(providerMessages, fittedControls), agent, nil
 }
 
 func (r *Runner) contextTokenLimit() int {
@@ -1095,7 +1401,7 @@ func messagesStartAfterBoundary(messages []db.Message, boundaryID string) int {
 
 func summaryProviderMessage(summary string) providers.Message {
 	text := "以下是较早对话的压缩摘要，后续消息仍按时间顺序完整提供：\n" + strings.TrimSpace(summary)
-	return providers.Message{Role: "system", Content: text, Blocks: []providers.ContentBlock{{Type: "text", Text: text}}}
+	return providers.Message{Role: "system", Content: text, Blocks: []providers.ContentBlock{{Type: "text", Text: text, Kind: "server_context_summary"}}}
 }
 
 func providerMessageFromDBForContext(message db.Message, compactToolResult bool) providers.Message {
@@ -1121,6 +1427,97 @@ func compactToolResultBlocks(blocks []providers.ContentBlock) []providers.Conten
 			continue
 		}
 		out[i].Output = compactToolResultOutput(out[i].ToolName)
+	}
+	return out
+}
+
+func compactConversationForBudget(systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, limit int, requiredControls []providers.Message) []providers.Message {
+	out := compactOversizedContextToolInputs(messages)
+	if estimateRequestTokens(systemPrompt, appendProviderMessages(out, requiredControls), toolSpecs) <= limit {
+		return out
+	}
+	out = compactAllContextToolResults(out)
+	if estimateRequestTokens(systemPrompt, appendProviderMessages(out, requiredControls), toolSpecs) <= limit {
+		return out
+	}
+	return truncateContextSummaryForBudget(systemPrompt, out, toolSpecs, limit, requiredControls)
+}
+
+func compactOversizedContextToolInputs(messages []providers.Message) []providers.Message {
+	out := make([]providers.Message, len(messages))
+	copy(out, messages)
+	for messageIndex := range out {
+		blocks := out[messageIndex].Blocks
+		changed := false
+		for blockIndex := range blocks {
+			if blocks[blockIndex].Type == "tool_use" && len(blocks[blockIndex].Input) > maxContextToolInputBytes {
+				if !changed {
+					blocks = append([]providers.ContentBlock(nil), blocks...)
+					changed = true
+				}
+				blocks[blockIndex].Input = json.RawMessage(`{"_autotoCompacted":true}`)
+			}
+		}
+		if changed {
+			out[messageIndex].Blocks = blocks
+		}
+	}
+	return out
+}
+
+func compactAllContextToolResults(messages []providers.Message) []providers.Message {
+	out := make([]providers.Message, len(messages))
+	copy(out, messages)
+	for messageIndex := range out {
+		blocks := out[messageIndex].Blocks
+		changed := false
+		for blockIndex := range blocks {
+			if blocks[blockIndex].Type != "tool_result" {
+				continue
+			}
+			if !changed {
+				blocks = append([]providers.ContentBlock(nil), blocks...)
+				changed = true
+			}
+			blocks[blockIndex].Output = compactToolResultOutput(blocks[blockIndex].ToolName)
+		}
+		if changed {
+			out[messageIndex].Blocks = blocks
+		}
+	}
+	return out
+}
+
+func truncateContextSummaryForBudget(systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec, limit int, requiredControls []providers.Message) []providers.Message {
+	out := make([]providers.Message, len(messages))
+	copy(out, messages)
+	for messageIndex := range out {
+		for blockIndex, block := range out[messageIndex].Blocks {
+			if block.Kind != "server_context_summary" {
+				continue
+			}
+			blocks := append([]providers.ContentBlock(nil), out[messageIndex].Blocks...)
+			text := block.Text
+			for attempt := 0; attempt < 3; attempt++ {
+				estimated := estimateRequestTokens(systemPrompt, appendProviderMessages(out, requiredControls), toolSpecs)
+				if estimated <= limit {
+					return out
+				}
+				runes := []rune(text)
+				targetRunes := len(runes) - (estimated-limit)*4 - 16
+				if targetRunes <= 0 {
+					return append(out[:messageIndex], out[messageIndex+1:]...)
+				}
+				text = strings.TrimSpace(string(runes[:targetRunes]))
+				blocks[blockIndex].Text = text
+				out[messageIndex].Blocks = blocks
+				out[messageIndex].Content = text
+			}
+			if estimateRequestTokens(systemPrompt, appendProviderMessages(out, requiredControls), toolSpecs) > limit {
+				return append(out[:messageIndex], out[messageIndex+1:]...)
+			}
+			return out
+		}
 	}
 	return out
 }
@@ -1225,10 +1622,11 @@ func (r *Runner) summarizeOldestMessages(ctx context.Context, agent db.Agent, ca
 }
 
 func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string, candidates []db.Message) (string, error) {
-	if r.providers == nil || strings.TrimSpace(r.cfg.SummaryModel) == "" {
+	summaryModel := r.SummaryModel()
+	if r.providers == nil || summaryModel == "" {
 		return "", errors.New("summary model is not configured")
 	}
-	provider, model, err := r.providers.Resolve(r.cfg.SummaryModel)
+	provider, model, err := r.providers.Resolve(summaryModel)
 	if err != nil {
 		return "", err
 	}
@@ -1394,7 +1792,7 @@ func (r *Runner) runModelTurn(ctx context.Context, agentID, runID string, provid
 		}
 		lastErr = err
 		if ctx.Err() != nil || !retryable || attempt == maxRetries {
-			return modelTurnResult{}, err
+			return result, err
 		}
 		backoff := modelRetryBackoff(attempt)
 		slog.Warn("retrying transient provider error", "agentId", agentID, "provider", provider.Name(), "model", model, "attempt", attempt+1, "maxRetries", maxRetries, "backoff", backoff.String(), "error", err)
@@ -1536,7 +1934,10 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 			case "error":
 				err := &ProviderError{Message: event.Text}
 				r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, event.Text)
-				return modelTurnResult{}, err, !modelOutputStarted && isTransientProviderError(err)
+				if modelOutputStarted {
+					return finalize(false), err, false
+				}
+				return modelTurnResult{}, err, isTransientProviderError(err)
 			case "done":
 				result.StopReason = event.StopReason
 				return finalize(shouldRecordAPIRequest(result.StopReason)), nil, false
@@ -1930,26 +2331,25 @@ func (r *Runner) resolveTool(ctx context.Context, scope tools.ResolutionContext,
 	return tool, nil
 }
 
+// ExecuteTool is retained for out-of-band callers. It derives policy from the
+// agent's current mode; callers holding a durable run should use ExecuteToolForRun.
 func (r *Runner) ExecuteTool(ctx context.Context, agentID string, call tools.Call) (tools.Result, error) {
-	return r.executeTool(ctx, agentID, call, "")
+	return r.executeTool(ctx, agentID, "", call, "")
+}
+
+// ExecuteToolForRun shares the same PolicyContext and final execution gateway
+// as the model loop, including the persisted run execution mode.
+func (r *Runner) ExecuteToolForRun(ctx context.Context, agentID, runID string, call tools.Call) (tools.Result, error) {
+	return r.executeTool(ctx, agentID, runID, call, "")
 }
 
 func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, call tools.Call, messageID string, snapshots ...map[string]tools.Tool) (tools.Result, error) {
-	call = normalizeToolCall(call)
-	agent, err := r.store.GetAgent(ctx, agentID)
+	call = policyToolCall(call)
+	agent, policy, err := r.policyContext(ctx, agentID, runID)
 	if err != nil {
 		return tools.Result{}, err
 	}
-	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
-		return tools.Result{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
-	}
-	if runID != "" {
-		run, runErr := r.store.GetRun(ctx, agentID, runID)
-		if runErr != nil {
-			return tools.Result{}, runErr
-		}
-		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
-	}
+	executionDeviceID := policy.ExecutionDeviceID
 	var snapshot map[string]tools.Tool
 	if len(snapshots) > 0 {
 		snapshot = snapshots[0]
@@ -1959,18 +2359,25 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 		return tools.Result{}, err
 	}
 	risk := tool.Risk(call.Input)
+	if result, denied := planToolDeniedResult(policy, call, risk); denied {
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: decisionSourcePlanMode, Scope: "plan"}
+		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", result.Output)
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": result.Output, "executionMode": policy.ExecutionMode}, resolution)})
+		return result, nil
+	}
 	if risk == tools.RiskDanger {
 		warning := toolRiskWarning(call.Name, call.Input)
 		result := tools.Result{Output: dangerBlockedMessage(warning), IsError: true}
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: warning, Warning: warning, Source: decisionSourceHardDangerBlock}
 		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", warning)
-		r.publish(Event{Type: "tool.approval_required", AgentID: agentID, Data: mergeEventData(approvalEventData(agent, call, risk, warning, "danger", time.Time{}), runID)})
+		r.publish(Event{Type: "tool.approval_required", AgentID: agentID, Data: mergeEventData(approvalEventDataWithResolution(agent, call, risk, warning, "danger", time.Time{}, 0, 0, resolution), runID)})
 		r.notify(NotificationEvent{Event: "approval_required", RunID: runID, AgentID: agentID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
-		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "warning": warning}, runID)})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": warning}, resolution)})
 		return result, nil
 	}
-	permission := r.resolveToolPermission(ctx, agent.ID, agent.PermissionMode, call.Name, risk, call.Input)
+	permission := r.resolveToolPermission(ctx, policy.AgentID, policy.PermissionMode, call.Name, risk, call.Input)
 	if permission.Decision == toolPermissionAllow {
-		return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, false, permission.Reason)
+		return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, false, permission)
 	}
 	if permission.Decision == toolPermissionDeny {
 		message := strings.TrimSpace(permission.Reason)
@@ -1979,10 +2386,10 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 		}
 		result := tools.Result{Output: message, IsError: true}
 		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", message)
-		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, nil, permission)})
 		return result, nil
 	}
-	decision, err := r.waitForToolApproval(ctx, agent, runID, call, risk, messageID, permission.Reason, permission.Warning)
+	decision, err := r.waitForToolApproval(ctx, agent, runID, call, risk, messageID, permission)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -1993,7 +2400,11 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 		}
 		result := tools.Result{Output: message, IsError: true}
 		r.updatePendingToolResult(ctx, agentID, call.ID, result, "denied", 0)
-		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+		source, scope := decisionSourceHumanApproval, "once"
+		if strings.EqualFold(strings.TrimSpace(decision.DecidedBy), "system") {
+			source, scope = decisionSourceSystem, "tool_call"
+		}
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, nil, toolPermissionResolution{Decision: toolPermissionDeny, Reason: message, Source: source, Scope: scope})})
 		return result, nil
 	}
 	current, err := r.approvalGenerationsCurrent(ctx, agentID, decision.PermissionGeneration, decision.PolicyGeneration)
@@ -2004,8 +2415,9 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 		message := "tool approval invalidated by permission or policy change"
 		result := tools.Result{Output: message, IsError: true}
 		r.updatePendingToolResult(ctx, agentID, call.ID, result, "denied", 0)
-		r.publish(Event{Type: "tool.approval_invalidated", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk, "reason": message}, runID)})
-		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}, runID)})
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: message, Source: decisionSourceGenerationInvalidation}
+		r.publish(Event{Type: "tool.approval_invalidated", AgentID: agentID, Data: mergeEventData(NewToolEventMetaBuilder(call, risk, executionDeviceID, runID).Decision(resolution.Decision, resolution.Source, "", "").Finished(result, "denied", 0).Approval("", message, time.Time{}, decision.PermissionGeneration, decision.PolicyGeneration).ToEventData(), runID)})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, nil, resolution)})
 		return result, nil
 	}
 	if decision.Decision == "allow_session" {
@@ -2014,30 +2426,42 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 	if err := r.store.UpdateToolCallApproval(ctx, agentID, call.ID, "approved", decision.DecidedBy, "", decision.Reason, ""); err != nil {
 		slog.Warn("record tool approval failed", "agentId", agentID, "toolUseId", call.ID, "error", err)
 	}
-	return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, true, decision.Reason)
+	humanResolution := toolPermissionResolution{Decision: toolPermissionAllow, Reason: decision.Reason, Source: decisionSourceHumanApproval}
+	if decision.Decision == "allow_session" {
+		humanResolution.Scope = "session"
+	} else {
+		humanResolution.Scope = "once"
+	}
+	return r.executeApprovedTool(ctx, agent, runID, call, tool, risk, messageID, true, humanResolution)
 }
 
-func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Call, messageID string) (tools.Result, error) {
-	if call.ID == "" {
-		call.ID = db.NewID()
-	}
-	if len(call.Input) == 0 {
-		call.Input = json.RawMessage(`{}`)
-	}
-	agent, err := r.store.GetAgent(ctx, agentID)
+func (r *Runner) executeTool(ctx context.Context, agentID, runID string, call tools.Call, messageID string) (tools.Result, error) {
+	call = policyToolCall(call)
+	agent, policy, err := r.policyContext(ctx, agentID, runID)
 	if err != nil {
 		return tools.Result{}, err
 	}
-	if deviceID := strings.TrimSpace(agent.ExecutionDeviceID); deviceID != "" && deviceID != "local" {
-		return tools.Result{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
-	}
+	executionDeviceID := policy.ExecutionDeviceID
 	tool, err := r.resolveTool(ctx, tools.ResolutionContext{AgentID: agent.ID, CWD: agent.CWD}, call.Name, nil)
 	if err != nil {
 		return tools.Result{}, err
 	}
 	risk := tool.Risk(call.Input)
-	r.publish(Event{Type: "tool.started", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}})
-	permission := r.resolveToolPermission(ctx, agent.ID, agent.PermissionMode, call.Name, risk, call.Input)
+	if tools.IsToolOutputPipelineControl(call.Name) {
+		message := "tool output pipeline control tools are only available inside the model loop"
+		result := tools.Result{Output: "pipeline_operation_not_allowed: " + message, IsError: true}
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: message, Warning: message, Source: decisionSourceDefaultPolicy, Scope: "tool_call"}
+		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", message)
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": message}, resolution)})
+		return result, nil
+	}
+	if result, denied := planToolDeniedResult(policy, call, risk); denied {
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: decisionSourcePlanMode, Scope: "plan"}
+		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", result.Output)
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": result.Output, "executionMode": policy.ExecutionMode}, resolution)})
+		return result, nil
+	}
+	permission := r.resolveToolPermission(ctx, policy.AgentID, policy.PermissionMode, call.Name, risk, call.Input)
 	if permission.Decision != toolPermissionAllow {
 		message := strings.TrimSpace(permission.Reason)
 		if permission.Decision == toolPermissionAsk {
@@ -2048,19 +2472,24 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 		}
 		result := tools.Result{Output: message, IsError: true}
 		output, _ := json.Marshal(result)
-		if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: "denied", ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: permission.Reason, PermissionSuggestions: permission.Warning}); err != nil {
+		if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, OutputJSON: output, Status: "denied", ErrorMessage: result.Output, PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDenyMessage: result.Output, PermissionDecisionReason: permission.Reason, PermissionSuggestions: permission.Warning}); err != nil {
 			slog.Warn("record denied tool call failed", "agentId", agentID, "toolUseId", call.ID, "error", err)
 		}
-		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": "denied", "risk": risk}})
+		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, nil, permission)})
 		return result, nil
 	}
 	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
 	defer unlockGitMutation()
-	if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); err != nil {
+	if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agentID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); err != nil {
 		return tools.Result{}, fmt.Errorf("persist running tool call: %w", err)
 	}
+	r.publish(Event{Type: "tool.started", AgentID: agentID, Data: toolStartedEventDataWithResolution(call, risk, executionDeviceID, runID, permission)})
+	env, err := r.toolExecutionEnv(ctx, agent, runID, r.toolOutputPublisher(agentID, runID, call))
+	if err != nil {
+		return tools.Result{}, err
+	}
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agentID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agentID, "", call)})
+	result, err := tool.Execute(ctx, call, env)
 	duration := time.Since(started).Milliseconds()
 	output, _ := json.Marshal(result)
 	status := "completed"
@@ -2076,7 +2505,7 @@ func (r *Runner) executeTool(ctx context.Context, agentID string, call tools.Cal
 	if recordErr := r.store.UpdateToolCallResult(ctx, agentID, call.ID, output, status, duration, errMsg); recordErr != nil {
 		slog.Warn("record tool call result failed", "agentId", agentID, "toolUseId", call.ID, "error", recordErr)
 	}
-	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}})
+	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, status, duration, nil, permission)})
 	return result, err
 }
 
@@ -2097,20 +2526,24 @@ func (r *Runner) toolOutputPublisher(agentID, runID string, call tools.Call) fun
 	}
 }
 
-func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID string, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool, permissionReason string) (tools.Result, error) {
-	r.publish(Event{Type: "tool.started", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk}, runID)})
+func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID string, call tools.Call, tool tools.Tool, risk tools.Risk, messageID string, updateExisting bool, permission toolPermissionResolution) (tools.Result, error) {
 	unlockGitMutation := runGitMutationLock(ctx, agent.CWD, risk)
 	defer unlockGitMutation()
 	if updateExisting {
 		if err := r.store.MarkToolCallRunning(ctx, agent.ID, call.ID); err != nil {
 			return tools.Result{}, fmt.Errorf("persist approved tool call as running: %w", err)
 		}
-	} else if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permissionReason)}); err != nil {
+	} else if _, err := r.store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: runID, MessageID: messageID, ToolUseID: call.ID, ToolName: call.Name, InputJSON: call.Input, Status: "running", PermissionDecidedBy: "policy", PermissionDecidedAt: db.Now(), PermissionDecisionReason: autoApprovalReasonWithPolicy(call.Name, call.Input, permission.Reason)}); err != nil {
 		return tools.Result{}, fmt.Errorf("persist running tool call: %w", err)
 	}
+	r.publish(Event{Type: "tool.started", AgentID: agent.ID, Data: toolStartedEventDataWithResolution(call, risk, normalizedExecutionDeviceID(agent.ExecutionDeviceID), runID, permission)})
 	gitBefore := r.captureRunToolGitBefore(ctx, agent, runID, risk)
+	env, err := r.toolExecutionEnv(ctx, agent, runID, r.toolOutputPublisher(agent.ID, runID, call))
+	if err != nil {
+		return tools.Result{}, err
+	}
 	started := time.Now()
-	result, err := tool.Execute(ctx, call, tools.Env{AgentID: agent.ID, CWD: agent.CWD, Store: r.store, Output: r.toolOutputPublisher(agent.ID, runID, call)})
+	result, err := tool.Execute(ctx, call, env)
 	r.captureRunToolGitAfter(context.Background(), runID, gitBefore)
 	duration := time.Since(started).Milliseconds()
 	status := "completed"
@@ -2127,17 +2560,23 @@ func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID 
 	if recordErr := r.store.UpdateToolCallResult(ctx, agent.ID, call.ID, output, status, duration, errMsg); recordErr != nil {
 		slog.Warn("update tool call result failed", "agentId", agent.ID, "toolUseId", call.ID, "error", recordErr)
 	}
-	r.publish(Event{Type: "tool.finished", AgentID: agent.ID, Data: mergeEventData(map[string]any{"toolUseId": call.ID, "toolName": call.Name, "status": status, "risk": risk, "durationMs": duration}, runID)})
+	r.publish(Event{Type: "tool.finished", AgentID: agent.ID, Data: toolFinishedEventDataWithResolution(call, risk, normalizedExecutionDeviceID(agent.ExecutionDeviceID), runID, result, status, duration, nil, permission)})
 	return result, err
 }
 
-func (r *Runner) waitForToolApproval(ctx context.Context, agent db.Agent, runID string, call tools.Call, risk tools.Risk, messageID, reason, warning string) (ToolApprovalDecision, error) {
+func (r *Runner) waitForToolApproval(ctx context.Context, agent db.Agent, runID string, call tools.Call, risk tools.Risk, messageID string, resolution toolPermissionResolution) (ToolApprovalDecision, error) {
 	command := toolCommand(call.Name, call.Input)
+	reason := resolution.Reason
+	warning := resolution.Warning
 	if strings.TrimSpace(reason) == "" {
 		reason = defaultApprovalReason(risk)
 	}
 	if strings.TrimSpace(warning) == "" {
 		warning = defaultApprovalWarning(call.Name, risk, call.Input)
+	}
+	resolution.Decision = toolPermissionAsk
+	if resolution.Source == "" {
+		resolution.Source = decisionSourceDefaultPolicy
 	}
 	generations, err := r.store.GetPermissionGenerations(ctx, agent.ID)
 	if err != nil {
@@ -2165,9 +2604,7 @@ func (r *Runner) waitForToolApproval(ctx context.Context, agent db.Agent, runID 
 	}
 	r.addPendingApproval(approval)
 	defer r.removePendingApproval(agent.ID, call.ID)
-	approvalData := approvalEventData(agent, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt)
-	approvalData["permissionGeneration"] = approval.PermissionGeneration
-	approvalData["policyGeneration"] = approval.PolicyGeneration
+	approvalData := approvalEventDataWithResolution(agent, call, risk, approval.Warning, approval.Reason, approval.ExpiresAt, approval.PermissionGeneration, approval.PolicyGeneration, resolution)
 	r.publish(Event{Type: "tool.approval_required", AgentID: agent.ID, Data: mergeEventData(approvalData, runID)})
 	r.notify(NotificationEvent{Event: "approval_required", RunID: runID, AgentID: agent.ID, Status: "pending_approval", ToolUseID: call.ID, ToolName: call.Name})
 
@@ -2300,7 +2737,15 @@ func (r *Runner) invalidateApprovals(agentID, reason string) int {
 		case approval.Decision <- decision:
 		default:
 		}
-		r.publish(Event{Type: "tool.approval_invalidated", AgentID: approval.AgentID, Data: mergeEventData(map[string]any{"toolUseId": approval.ToolUseID, "toolName": approval.ToolName, "status": "denied", "reason": reason}, approval.RunID)})
+		call := tools.Call{ID: approval.ToolUseID, Name: approval.ToolName, Input: approval.Input}
+		result := tools.Result{Output: reason, IsError: true}
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: reason, Source: decisionSourceGenerationInvalidation}
+		data := NewToolEventMetaBuilder(call, approval.Risk, "local", approval.RunID).
+			Decision(resolution.Decision, resolution.Source, "", "").
+			Finished(result, "denied", 0).
+			Approval("", reason, time.Time{}, approval.PermissionGeneration, approval.PolicyGeneration).
+			ToEventData()
+		r.publish(Event{Type: "tool.approval_invalidated", AgentID: approval.AgentID, Data: mergeEventData(data, approval.RunID)})
 	}
 	return len(approvals)
 }
@@ -2312,18 +2757,18 @@ func approvalKey(agentID, toolUseID string) string {
 func (r *Runner) resolveToolPermission(ctx context.Context, agentID, mode, toolName string, risk tools.Risk, input json.RawMessage) toolPermissionResolution {
 	if risk == tools.RiskDanger {
 		warning := toolRiskWarning(toolName, input)
-		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", "hard_danger_block")
-		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: warning, Warning: warning}
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", decisionSourceHardDangerBlock)
+		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: warning, Warning: warning, Source: decisionSourceHardDangerBlock}
 	}
 	if mode == "readOnly" && risk != tools.RiskRead {
-		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", "read_only_cap")
-		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: string(risk) + " risk denied by readOnly permission mode", Warning: defaultApprovalWarning(toolName, risk, input)}
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionDeny, "source", decisionSourceReadOnlyCap)
+		return toolPermissionResolution{Decision: toolPermissionDeny, Reason: string(risk) + " risk denied by readOnly permission mode", Warning: defaultApprovalWarning(toolName, risk, input), Source: decisionSourceReadOnlyCap}
 	}
 	if r != nil && r.store != nil {
 		rules, err := r.store.ListToolPermissionRules(ctx)
 		if err != nil {
 			slog.Warn("load tool permission rules failed; requiring approval", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "error", err)
-			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "tool permission policy unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input)}
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "tool permission policy unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input), Source: decisionSourcePolicyUnavailable}
 		}
 		// The store returns the deterministic policy order: priority, match
 		// specificity, deny/ask/allow safety precedence, then stable age/ID.
@@ -2334,25 +2779,26 @@ func (r *Runner) resolveToolPermission(ctx context.Context, agentID, mode, toolN
 			}
 			decision := normalizedRuleDecision(rule.Decision)
 			reason := toolPermissionRuleReason(rule)
-			slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", decision, "source", "rule", "ruleId", rule.ID, "rulePriority", rule.Priority, "ruleEnabled", rule.Enabled)
-			return toolPermissionResolution{Decision: decision, Reason: reason, Warning: defaultApprovalWarning(toolName, risk, input)}
+			slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", decision, "source", decisionSourceRule, "ruleId", rule.ID, "rulePriority", rule.Priority, "ruleEnabled", rule.Enabled)
+			return toolPermissionResolution{Decision: decision, Reason: reason, Warning: defaultApprovalWarning(toolName, risk, input), Source: decisionSourceRule, RuleID: rule.ID}
 		}
 	}
 	if r.hasSessionGrant(ctx, agentID, sessionGrantKey(toolName, input)) {
-		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionAllow, "source", "session_approval")
-		return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by session approval"}
+		slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", toolPermissionAllow, "source", decisionSourceSessionApproval)
+		return toolPermissionResolution{Decision: toolPermissionAllow, Reason: "allowed by session approval", Source: decisionSourceSessionApproval, Scope: "session"}
 	}
 	prefs := db.DefaultWorkflowPreferences()
 	if r != nil && r.store != nil {
 		loaded, err := r.store.GetWorkflowPreferences(ctx)
 		if err != nil {
 			slog.Warn("load workflow preferences failed; requiring approval", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "error", err)
-			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "workflow preferences unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input)}
+			return toolPermissionResolution{Decision: toolPermissionAsk, Reason: "workflow preferences unavailable; approval required", Warning: defaultApprovalWarning(toolName, risk, input), Source: decisionSourceWorkflowUnavailable}
 		}
 		prefs = loaded
 	}
 	resolution := r.defaultToolPermission(ctx, agentID, mode, toolName, risk, input, prefs)
-	slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", resolution.Decision, "source", "default_policy")
+	resolution.Source = decisionSourceDefaultPolicy
+	slog.Info("tool permission decision", "agentId", agentID, "mode", mode, "toolName", toolName, "risk", risk, "decision", resolution.Decision, "source", resolution.Source)
 	return resolution
 }
 
@@ -2533,12 +2979,253 @@ func mergeEventData(data map[string]any, runID string) map[string]any {
 	return data
 }
 
-func approvalEventData(agent db.Agent, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
-	data := map[string]any{"toolUseId": call.ID, "toolName": call.Name, "risk": risk, "input": json.RawMessage(call.Input), "command": toolCommand(call.Name, call.Input), "cwd": agent.CWD, "warning": warning, "reason": reason}
-	if !expiresAt.IsZero() {
-		data["expiresAt"] = expiresAt.Format(time.RFC3339Nano)
+func toolStartedEventData(call tools.Call, risk tools.Risk, executionDeviceID, runID string) map[string]any {
+	return toolStartedEventDataWithResolution(call, risk, executionDeviceID, runID, toolPermissionResolution{Source: decisionSourceDefaultPolicy})
+}
+
+func toolStartedEventDataWithResolution(call tools.Call, risk tools.Risk, executionDeviceID, runID string, resolution toolPermissionResolution) map[string]any {
+	return NewToolEventMetaBuilder(call, risk, executionDeviceID, runID).
+		Decision(resolution.Decision, resolution.Source, resolution.RuleID, resolution.Scope).
+		DecisionReason(resolution.Reason).
+		ToEventData()
+}
+
+func toolFinishedEventData(call tools.Call, risk tools.Risk, executionDeviceID, runID string, result tools.Result, status string, durationMS int64, extra map[string]any) map[string]any {
+	return toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, status, durationMS, extra, toolPermissionResolution{Source: decisionSourceDefaultPolicy})
+}
+
+func toolFinishedEventDataWithResolution(call tools.Call, risk tools.Risk, executionDeviceID, runID string, result tools.Result, status string, durationMS int64, extra map[string]any, resolution toolPermissionResolution) map[string]any {
+	return NewToolEventMetaBuilder(call, risk, executionDeviceID, runID).
+		Decision(resolution.Decision, resolution.Source, resolution.RuleID, resolution.Scope).
+		DecisionReason(resolution.Reason).
+		Finished(result, status, durationMS).
+		Extra(extra).
+		ToEventData()
+}
+
+func approvalEventDataWithResolution(agent db.Agent, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time, permissionGeneration, policyGeneration int64, resolution toolPermissionResolution) map[string]any {
+	data := NewToolEventMetaBuilder(call, risk, normalizedExecutionDeviceID(agent.ExecutionDeviceID), "").
+		Decision(resolution.Decision, resolution.Source, resolution.RuleID, resolution.Scope).
+		Approval(warning, reason, expiresAt, permissionGeneration, policyGeneration).
+		ToEventData()
+	// Keep the historical approval keys, but only with safe projections.
+	data["input"] = data["inputJson"]
+	data["command"] = ""
+	if toolCommand(call.Name, call.Input) != "" {
+		data["commandOmitted"] = true
 	}
+	data["cwd"] = agent.CWD
+	data["warning"] = boundedToolEventMetaText(warning)
+	data["reason"] = boundedToolEventMetaText(reason)
 	return data
+}
+
+func toolEventInputJSON(input json.RawMessage) (json.RawMessage, bool) {
+	return ProjectToolActivityInput("", input, maxToolEventInputBytes)
+}
+
+func ProjectToolActivityInput(toolName string, input json.RawMessage, maximum int) (json.RawMessage, bool) {
+	if maximum <= 0 {
+		maximum = maxToolEventInputBytes
+	}
+	var source map[string]any
+	if len(input) == 0 || json.Unmarshal(input, &source) != nil || source == nil {
+		return json.RawMessage(`{}`), len(input) > 0
+	}
+	priority := []string{
+		"command", "file_path", "filePath", "path", "pattern", "glob", "pages", "offset", "limit", "output_mode",
+		"replace_all", "replaceAll", "url", "ref_id", "selector", "mode", "max_length", "purpose", "query", "description",
+		"subagent_type", "model", "reasoning_effort", "run_in_background", "workdir", "skill", "name", "args", "recency", "domains",
+		"location", "start", "duration", "ticker", "market", "utc_offset", "fn", "league", "team", "opponent", "date_from",
+		"date_to", "num_games", "locale", "type",
+	}
+	projected := make(map[string]any, len(priority)+4)
+	included := make(map[string]struct{}, len(priority))
+	truncated := false
+	for _, key := range priority {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		included[key] = struct{}{}
+		if sensitiveToolActivityInputKey(key) {
+			truncated = true
+			continue
+		}
+		bounded, valueTruncated := projectToolActivityValue(key, value, min(maxToolEventInputStringBytes, maximum/2), 0)
+		projected[key] = bounded
+		encoded, err := json.Marshal(projected)
+		if err != nil || len(encoded) > maximum {
+			delete(projected, key)
+			truncated = true
+			continue
+		}
+		truncated = truncated || valueTruncated
+	}
+	for key, value := range source {
+		if _, ok := included[key]; ok {
+			continue
+		}
+		if lengthKey := omittedToolActivityLengthKey(key); lengthKey != "" {
+			projected[lengthKey] = toolActivityValueBytes(value)
+			truncated = true
+			continue
+		}
+		truncated = true
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil || len(encoded) > maximum {
+		return json.RawMessage(`{}`), true
+	}
+	if !utf8.Valid(encoded) {
+		return json.RawMessage(`{}`), true
+	}
+	return encoded, truncated
+}
+
+func projectToolActivityValue(key string, value any, stringLimit, depth int) (any, bool) {
+	if depth >= 3 {
+		return nil, true
+	}
+	switch typed := value.(type) {
+	case string:
+		text := RedactToolActivityText(typed)
+		if strings.EqualFold(key, "url") {
+			text = sanitizeToolActivityURL(text)
+		}
+		return boundedToolEventString(text, stringLimit)
+	case nil, bool, float64, json.Number:
+		return typed, false
+	case []any:
+		limit := min(len(typed), 16)
+		result := make([]any, 0, limit)
+		truncated := len(typed) > limit
+		for _, item := range typed[:limit] {
+			bounded, itemTruncated := projectToolActivityValue(key, item, min(stringLimit, 512), depth+1)
+			result = append(result, bounded)
+			truncated = truncated || itemTruncated
+		}
+		return result, truncated
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for nestedKey := range typed {
+			keys = append(keys, nestedKey)
+		}
+		sort.Strings(keys)
+		limit := min(len(keys), 16)
+		result := make(map[string]any, limit)
+		truncated := len(keys) > limit
+		for _, nestedKey := range keys[:limit] {
+			if sensitiveToolActivityInputKey(nestedKey) {
+				truncated = true
+				continue
+			}
+			bounded, itemTruncated := projectToolActivityValue(nestedKey, typed[nestedKey], min(stringLimit, 512), depth+1)
+			result[nestedKey] = bounded
+			truncated = truncated || itemTruncated
+		}
+		return result, truncated
+	default:
+		return nil, true
+	}
+}
+
+func sensitiveToolActivityInputKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "").Replace(strings.TrimSpace(key)))
+	for _, fragment := range []string{"apikey", "authorization", "cookie", "credential", "env", "header", "password", "passwd", "secret", "token"} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func omittedToolActivityLengthKey(key string) string {
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "").Replace(strings.TrimSpace(key)))
+	switch normalized {
+	case "content":
+		return "contentBytes"
+	case "oldstring":
+		return "oldStringBytes"
+	case "newstring":
+		return "newStringBytes"
+	case "prompt":
+		return "promptBytes"
+	case "body":
+		return "bodyBytes"
+	default:
+		return ""
+	}
+}
+
+func toolActivityValueBytes(value any) int {
+	if text, ok := value.(string); ok {
+		return len(text)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return 0
+	}
+	return len(encoded)
+}
+
+func sanitizeToolActivityURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" {
+		return toolActivitySensitiveQueryPattern.ReplaceAllString(value, `${1}[redacted]`)
+	}
+	parsed.User = nil
+	query := parsed.Query()
+	for key, values := range query {
+		for index := range values {
+			values[index] = "[redacted]"
+		}
+		query[key] = values
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func RedactToolActivityText(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = toolActivityBearerPattern.ReplaceAllString(value, "Bearer [redacted]")
+	value = toolActivitySecretAssignmentPattern.ReplaceAllString(value, `${1}[redacted]`)
+	return toolActivitySensitiveQueryPattern.ReplaceAllString(value, `${1}[redacted]`)
+}
+
+func boundedToolEventString(value string, limit int) (string, bool) {
+	value = strings.ToValidUTF8(value, "�")
+	if len(value) <= limit {
+		return value, false
+	}
+	end := limit
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end], true
+}
+
+func normalizedExecutionDeviceID(executionDeviceID string) string {
+	if executionDeviceID = strings.TrimSpace(executionDeviceID); executionDeviceID == "" {
+		return "local"
+	}
+	return executionDeviceID
+}
+
+func boundedToolResultPreview(output string) (string, bool) {
+	output = strings.ToValidUTF8(output, "�")
+	if len(output) <= maxToolResultPreviewBytes {
+		return output, false
+	}
+	end := maxToolResultPreviewBytes
+	for end > 0 && !utf8.ValidString(output[:end]) {
+		end--
+	}
+	return output[:end], true
+}
+
+func approvalEventData(agent db.Agent, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
+	return approvalEventDataWithResolution(agent, call, risk, warning, reason, expiresAt, 0, 0, toolPermissionResolution{Decision: toolPermissionAsk, Source: decisionSourceDefaultPolicy})
 }
 
 func toolCommand(toolName string, input json.RawMessage) string {
@@ -2599,7 +3286,8 @@ func autoApprovalReasonWithPolicy(toolName string, input json.RawMessage, reason
 
 func isWhitelistedExecCommand(command string) bool {
 	command = strings.TrimSpace(command)
-	if command == "" || shellCommandIsComplex(command) {
+	facts := tools.AnalyzeBashCommand(command)
+	if command == "" || !facts.ParseKnown || len(facts.Dangerous) > 0 || facts.Compound || facts.Pipeline || facts.Redirection || facts.Substitution || facts.Background || facts.CommandCount != 1 {
 		return false
 	}
 	fields := strings.Fields(command)

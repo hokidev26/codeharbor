@@ -77,7 +77,7 @@ func TestGitStatusRouteReturnsChangedFiles(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -106,7 +106,7 @@ func TestGitDiffRouteReturnsPatchForPath(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?scope=all&path=tracked.txt", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?scope=all&path=tracked.txt", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -132,7 +132,7 @@ func TestGitDiffRouteHandlesUnbornHead(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?scope=all&path=new.txt", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?scope=all&path=new.txt", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -157,7 +157,7 @@ func TestGitLogRouteReturnsCommitsAndBoundsLimit(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/log?limit=9999", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/log?limit=9999", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -186,7 +186,7 @@ func TestGitCommitRouteCommitsSelectedPaths(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit selected paths","paths":["tracked.txt","new.txt"]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit selected paths","paths":["tracked.txt","new.txt"]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
@@ -219,7 +219,7 @@ func TestGitCommitRouteRejectsEmptyMessage(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"   ","paths":["tracked.txt"]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"   ","paths":["tracked.txt"]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -238,7 +238,7 @@ func TestGitCommitRouteRejectsEmptyPaths(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit","paths":[]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit","paths":[]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -257,7 +257,7 @@ func TestGitCommitRouteRejectsEscapingPath(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit","paths":["../secret.txt"]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit","paths":["../secret.txt"]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -276,7 +276,7 @@ func TestGitCommitRouteRejectsSensitivePath(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit env","paths":[".env"]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit env","paths":[".env"]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -302,7 +302,7 @@ func TestGitCommitRouteRejectsStagedOutsideSelection(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit selected","paths":["tracked.txt"]}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/git/commit", strings.NewReader(`{"message":"commit selected","paths":["tracked.txt"]}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -340,7 +340,7 @@ func TestRollbackRunRouteRestoresOnlyRecordedRunChanges(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -389,7 +389,7 @@ func TestRollbackRunPreviewAndIdempotence(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	previewRecorder := httptest.NewRecorder()
-	previewRequest := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", nil)
+	previewRequest := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", nil)
 	app.Routes().ServeHTTP(previewRecorder, previewRequest)
 	if previewRecorder.Code != http.StatusOK {
 		t.Fatalf("expected preview 200, got %d: %s", previewRecorder.Code, previewRecorder.Body.String())
@@ -403,7 +403,7 @@ func TestRollbackRunPreviewAndIdempotence(t *testing.T) {
 	}
 
 	rollbackRecorder := httptest.NewRecorder()
-	rollbackRequest := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	rollbackRequest := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(rollbackRecorder, rollbackRequest)
 	if rollbackRecorder.Code != http.StatusOK {
 		t.Fatalf("expected rollback 200, got %d: %s", rollbackRecorder.Code, rollbackRecorder.Body.String())
@@ -417,7 +417,7 @@ func TestRollbackRunPreviewAndIdempotence(t *testing.T) {
 	}
 
 	repeatedRecorder := httptest.NewRecorder()
-	repeatedRequest := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	repeatedRequest := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(repeatedRecorder, repeatedRequest)
 	if repeatedRecorder.Code != http.StatusConflict || !strings.Contains(repeatedRecorder.Body.String(), "already rolled back") {
 		t.Fatalf("expected repeated rollback conflict, got %d: %s", repeatedRecorder.Code, repeatedRecorder.Body.String())
@@ -450,7 +450,7 @@ func TestRollbackRunRouteConcurrentPostClaimsOnce(t *testing.T) {
 			defer wait.Done()
 			<-start
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+			request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 			app.Routes().ServeHTTP(recorder, request)
 			results <- recorder.Code
 		}()
@@ -534,7 +534,7 @@ func TestRollbackRunRoutePreservesUserFileCreatedOutsideToolWindow(t *testing.T)
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+runs[0].ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+runs[0].ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -574,7 +574,7 @@ func TestRollbackRunRouteRestoresRenameRecordedWithoutOrigPath(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -610,7 +610,7 @@ func TestRollbackRunRouteRejectsModeChangeAfterCompletion(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "contents or mode changed") {
 		t.Fatalf("expected mode conflict, got %d: %s", recorder.Code, recorder.Body.String())
@@ -644,7 +644,7 @@ func TestRollbackRunRouteRejectsRunPathModifiedAfterCompletion(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -677,7 +677,7 @@ func TestRollbackRunRouteRequiresConfirmation(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":false}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":false}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -699,7 +699,7 @@ func TestRollbackRunRouteRejectsMissingCheckpoint(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -723,7 +723,7 @@ func TestRollbackRunRouteRejectsMissingScopedSnapshot(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "still tracking") {
 		t.Fatalf("expected tracking checkpoint conflict, got %d: %s", recorder.Code, recorder.Body.String())
@@ -752,7 +752,7 @@ func TestRollbackRunRouteRejectsCurrentHeadMismatch(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -784,7 +784,7 @@ func TestRollbackRunRouteRejectsCommitChangingRun(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/runs/"+run.ID+"/rollback", strings.NewReader(`{"confirm":true}`))
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -810,7 +810,7 @@ func TestGitStatusRouteRejectsRepoOutsideProjectBoundary(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
@@ -839,7 +839,7 @@ func TestGitStatusRouteAllowsRepoUnderDefaultProjectDir(t *testing.T) {
 
 	app := New(config.Config{Paths: config.PathsConfig{DefaultProjectDir: defaultRoot}}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -853,7 +853,7 @@ func TestGitStatusRouteRejectsNonGitRepo(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/status", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
@@ -871,7 +871,7 @@ func TestGitDiffRouteRejectsEscapingPath(t *testing.T) {
 
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?path=../secret.txt", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/git/diff?path=../secret.txt", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())

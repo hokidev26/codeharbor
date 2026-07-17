@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 
@@ -11,18 +12,22 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
+	"autoto/internal/anthropicauth"
 	"autoto/internal/config"
 )
 
 type AnthropicProvider struct {
-	cfg       config.ProviderConfig
-	client    anthropic.Client
-	configErr error
+	cfg            config.ProviderConfig
+	store          *anthropicauth.Store
+	configErr      error
+	telemetry      AccountTelemetry
+	quotaTelemetry AccountQuotaTelemetry
+	clock          func() time.Time
 }
 
 func NewAnthropicProvider(cfg config.ProviderConfig) *AnthropicProvider {
 	if cfg.Name == "" {
-		cfg.Name = "anthropic"
+		cfg.Name = anthropicauth.DefaultProviderName
 	}
 	if cfg.Model == "" {
 		cfg.Model = "claude-sonnet-4-5"
@@ -30,22 +35,18 @@ func NewAnthropicProvider(cfg config.ProviderConfig) *AnthropicProvider {
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 4096
 	}
-	configErr := validateProviderRuntimeConfig(cfg)
-	opts := make([]option.RequestOption, 0, 3)
-	opts = append(opts, option.WithHTTPClient(providerHTTPClient(90*time.Second)))
-	if cfg.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(cfg.APIKey))
+	return &AnthropicProvider{
+		cfg:       cfg,
+		store:     anthropicauth.NewStore(cfg.CredentialStorePath),
+		configErr: validateProviderRuntimeConfig(cfg),
+		clock:     time.Now,
 	}
-	if cfg.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
-	}
-	return &AnthropicProvider{cfg: cfg, client: anthropic.NewClient(opts...), configErr: configErr}
 }
 
 func (p *AnthropicProvider) Name() string { return p.cfg.Name }
 
 func (p *AnthropicProvider) Configured() bool {
-	return p != nil && p.configErr == nil && strings.TrimSpace(p.cfg.APIKey) != ""
+	return p != nil && p.configErr == nil && ((p.store != nil && p.store.Configured()) || strings.TrimSpace(p.cfg.APIKey) != "")
 }
 
 func (p *AnthropicProvider) Capabilities() Capabilities {
@@ -53,95 +54,163 @@ func (p *AnthropicProvider) Capabilities() Capabilities {
 }
 
 func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
+	if p == nil {
+		return nil, providerUnavailableError(anthropicauth.DefaultProviderName, "provider is not configured")
+	}
 	if p.configErr != nil {
 		return nil, p.configErr
 	}
-	if p.cfg.APIKey == "" {
-		return []string{p.cfg.Model}, nil
-	}
-	page, err := p.client.Models.List(ctx, anthropic.ModelListParams{})
+	candidates, err := p.accountCandidates()
 	if err != nil {
 		return nil, err
 	}
-	models := make([]string, 0, len(page.Data))
-	for _, model := range page.Data {
-		if model.ID != "" {
-			models = append(models, model.ID)
+	seen := make(map[string]struct{})
+	models := make([]string, 0)
+	var lastErr error
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		accountModels, _, requestErr := p.listModelsWithClient(ctx, candidate.client)
+		if requestErr != nil {
+			lastErr = requestErr
+			if shouldTryNextAnthropicAccount(ctx, requestErr) {
+				continue
+			}
+			return nil, sanitizeAnthropicError(ctx, p.cfg.Name, requestErr)
+		}
+		for _, model := range accountModels {
+			if _, exists := seen[model]; exists {
+				continue
+			}
+			seen[model] = struct{}{}
+			models = append(models, model)
 		}
 	}
-	if len(models) == 0 && p.cfg.Model != "" {
-		models = append(models, p.cfg.Model)
+	if len(models) == 0 {
+		if lastErr != nil {
+			return nil, sanitizeAnthropicError(ctx, p.cfg.Name, lastErr)
+		}
+		if p.cfg.Model != "" {
+			models = append(models, p.cfg.Model)
+		}
 	}
 	return models, nil
 }
 
 func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if p == nil {
+		return nil, providerUnavailableError(anthropicauth.DefaultProviderName, "provider is not configured")
+	}
 	if p.configErr != nil {
 		return nil, p.configErr
 	}
 	if _, err := normalizeReasoningEffort(req.ReasoningEffort, false, p.cfg.Name); err != nil {
 		return nil, err
 	}
-	if p.cfg.APIKey == "" {
-		return nil, providerUnavailableError(p.cfg.Name, "API key is not configured")
+	candidates, err := p.accountCandidates()
+	if err != nil {
+		return nil, err
 	}
+	model := req.Model
+	if model == "" {
+		model = p.cfg.Model
+	}
+	messages, system := anthropicMessages(req.Messages, req.SystemPrompt)
+	if len(messages) == 0 {
+		messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock("Continue.")))
+	}
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(model),
+		MaxTokens: p.cfg.MaxTokens,
+		Messages:  messages,
+		System:    system,
+		Tools:     anthropicTools(req.Tools),
+	}
+	applyAnthropicPromptCaching(&params)
+
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-		model := req.Model
-		if model == "" {
-			model = p.cfg.Model
-		}
-		messages, system := anthropicMessages(req.Messages, req.SystemPrompt)
-		if len(messages) == 0 {
-			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock("Continue.")))
-		}
-		params := anthropic.MessageNewParams{
-			Model:     anthropic.Model(model),
-			MaxTokens: p.cfg.MaxTokens,
-			Messages:  messages,
-			System:    system,
-			Tools:     anthropicTools(req.Tools),
-		}
-		applyAnthropicPromptCaching(&params)
-		stream := p.client.Messages.NewStreaming(ctx, params)
-		defer stream.Close()
-		var acc anthropic.Message
-		var usage Usage
-		var stopReason string
-		for stream.Next() {
-			event := stream.Current()
-			if err := acc.Accumulate(event); err != nil {
-				out <- Event{Type: "error", Text: err.Error()}
+		var lastErr error
+		for _, candidate := range candidates {
+			if ctx.Err() != nil {
 				return
 			}
-			switch typed := event.AsAny().(type) {
-			case anthropic.MessageStartEvent:
-				usage = anthropicUsageFromUsage(typed.Message.Usage)
-			case anthropic.ContentBlockDeltaEvent:
-				if delta, ok := typed.Delta.AsAny().(anthropic.TextDelta); ok && delta.Text != "" {
-					out <- Event{Type: "text", Text: delta.Text}
+			lastErr = nil
+			var response *http.Response
+			stream := candidate.client.Messages.NewStreaming(ctx, params, option.WithResponseInto(&response))
+			var acc anthropic.Message
+			var usage Usage
+			var stopReason string
+			emittedContent := false
+			for stream.Next() {
+				event := stream.Current()
+				if accumulateErr := acc.Accumulate(event); accumulateErr != nil {
+					lastErr = accumulateErr
+					break
 				}
-			case anthropic.ContentBlockStopEvent:
-				emitAnthropicToolCall(out, acc, typed.Index)
-			case anthropic.MessageDeltaEvent:
-				applyAnthropicDeltaUsage(&usage, typed.Usage)
-				if typed.Delta.StopReason != "" {
-					stopReason = string(typed.Delta.StopReason)
+				switch typed := event.AsAny().(type) {
+				case anthropic.MessageStartEvent:
+					usage = anthropicUsageFromUsage(typed.Message.Usage)
+				case anthropic.ContentBlockDeltaEvent:
+					if delta, ok := typed.Delta.AsAny().(anthropic.TextDelta); ok && delta.Text != "" {
+						if !emitProviderEvent(ctx, out, Event{Type: "text", Text: delta.Text}) {
+							_ = stream.Close()
+							return
+						}
+						emittedContent = true
+					}
+				case anthropic.ContentBlockStopEvent:
+					if toolEvent, ok := anthropicToolCallEvent(acc, typed.Index); ok {
+						if !emitProviderEvent(ctx, out, toolEvent) {
+							_ = stream.Close()
+							return
+						}
+						emittedContent = true
+					}
+				case anthropic.MessageDeltaEvent:
+					applyAnthropicDeltaUsage(&usage, typed.Usage)
+					if typed.Delta.StopReason != "" {
+						stopReason = string(typed.Delta.StopReason)
+					}
 				}
 			}
-		}
-		if err := stream.Err(); err != nil {
-			out <- Event{Type: "error", Text: err.Error()}
+			if streamErr := stream.Err(); streamErr != nil {
+				lastErr = streamErr
+			}
+			_ = stream.Close()
+			if response == nil {
+				if apiErr := anthropicAPIError(lastErr); apiErr != nil {
+					response = apiErr.Response
+				}
+			}
+			quota := anthropicQuotaSnapshot(p.cfg.Name, candidate.id, response, p.now())
+			p.recordAccountQuota(ctx, quota)
+			if lastErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				p.recordAccountAttempt(ctx, candidate.id, false, anthropicResponseStatus(response), lastErr)
+				if !emittedContent && shouldTryNextAnthropicAccount(ctx, lastErr) {
+					continue
+				}
+				_ = emitProviderEvent(ctx, out, Event{Type: "error", Text: sanitizeAnthropicError(ctx, p.cfg.Name, lastErr).Error()})
+				return
+			}
+			p.recordAccountAttempt(ctx, candidate.id, true, anthropicResponseStatus(response), nil)
+			if usage != (Usage{}) && !emitProviderEvent(ctx, out, Event{Type: "usage", Usage: &usage}) {
+				return
+			}
+			if stopReason == "" {
+				stopReason = string(acc.StopReason)
+			}
+			_ = emitProviderEvent(ctx, out, Event{Type: "done", Done: true, StopReason: stopReason})
 			return
 		}
-		if usage != (Usage{}) {
-			out <- Event{Type: "usage", Usage: &usage}
+		if lastErr != nil && ctx.Err() == nil {
+			_ = emitProviderEvent(ctx, out, Event{Type: "error", Text: sanitizeAnthropicError(ctx, p.cfg.Name, lastErr).Error()})
 		}
-		if stopReason == "" {
-			stopReason = string(acc.StopReason)
-		}
-		out <- Event{Type: "done", Done: true, StopReason: stopReason}
 	}()
 	return out, nil
 }
@@ -171,18 +240,24 @@ func applyAnthropicDeltaUsage(usage *Usage, delta anthropic.MessageDeltaUsage) {
 }
 
 func emitAnthropicToolCall(out chan<- Event, message anthropic.Message, index int64) {
+	if event, ok := anthropicToolCallEvent(message, index); ok {
+		out <- event
+	}
+}
+
+func anthropicToolCallEvent(message anthropic.Message, index int64) (Event, bool) {
 	if index < 0 || index >= int64(len(message.Content)) {
-		return
+		return Event{}, false
 	}
 	block := message.Content[index]
 	if block.Type != "tool_use" || block.ID == "" || block.Name == "" {
-		return
+		return Event{}, false
 	}
 	input := block.Input
 	if len(input) == 0 {
 		input = json.RawMessage(`{}`)
 	}
-	out <- Event{Type: "tool_call", ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input}}
+	return Event{Type: "tool_call", ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input}}, true
 }
 
 func anthropicMessages(messages []Message, systemPrompt string) ([]anthropic.MessageParam, []anthropic.TextBlockParam) {

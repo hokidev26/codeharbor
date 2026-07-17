@@ -19,15 +19,23 @@ const (
 )
 
 type bashInput struct {
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
+	Command         string `json:"command"`
+	Timeout         int    `json:"timeout,omitempty"`
+	RunInBackground bool   `json:"run_in_background,omitempty"`
+	ResumeParent    bool   `json:"resume_parent,omitempty"`
 }
 
 func (BashTool) Name() string        { return "Bash" }
 func (BashTool) Description() string { return "Run a shell command in the agent working directory." }
 func (BashTool) Schema() any         { return bashInput{} }
 func (BashTool) Risk(input json.RawMessage) Risk {
-	if BashDangerWarning(BashCommand(input)) != "" {
+	command := BashCommand(input)
+	if analyzeBashCommand(command).warning != "" {
+		return RiskDanger
+	}
+	var parsed bashInput
+	_ = json.Unmarshal(input, &parsed)
+	if parsed.RunInBackground && bashBackgroundEscapeWarning(command) != "" {
 		return RiskDanger
 	}
 	return RiskExec
@@ -40,6 +48,10 @@ func BashCommand(input json.RawMessage) string {
 }
 
 func BashDangerWarning(command string) string {
+	return analyzeBashCommand(command).warning
+}
+
+func legacyBashDangerWarning(command string) string {
 	cmd := strings.TrimSpace(strings.ToLower(command))
 	if cmd == "" {
 		return ""
@@ -95,6 +107,23 @@ func shellPipesToShell(cmd string) bool {
 	return regexp.MustCompile(`\|\s*(sh|bash|zsh|dash)(\s|$)`).MatchString(cmd)
 }
 
+var backgroundEscapeCommandPattern = regexp.MustCompile(`(?i)(^|[[:space:];&|()])(nohup|disown)([[:space:];&|()]|$)`)
+
+func bashBackgroundEscapeWarning(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	facts := AnalyzeBashCommand(command)
+	if facts.Background {
+		return "后台任务必须由 Autoto 管理，命令中不能再使用 shell 的 & 后台化。"
+	}
+	if backgroundEscapeCommandPattern.MatchString(command) {
+		return "后台任务不能使用 nohup 或 disown 逃逸 Autoto 的取消与生命周期管理。"
+	}
+	return ""
+}
+
 func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error) {
 	var input bashInput
 	if err := json.Unmarshal(call.Input, &input); err != nil {
@@ -106,6 +135,50 @@ func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	timeout := time.Duration(input.Timeout) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
+	}
+	if input.RunInBackground {
+		if warning := bashBackgroundEscapeWarning(input.Command); warning != "" {
+			return Result{Output: warning, IsError: true}, nil
+		}
+		if env.Background == nil {
+			return Result{Output: "background task service is unavailable", IsError: true}, nil
+		}
+		if input.ResumeParent && strings.TrimSpace(env.RunID) == "" {
+			return Result{Output: "resume_parent requires a durable parent run", IsError: true}, nil
+		}
+		payload, err := json.Marshal(map[string]any{
+			"command":   input.Command,
+			"timeoutMs": timeout.Milliseconds(),
+			"cwd":       env.CWD,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		publicSummary, _ := json.Marshal(AnalyzeBashCommand(input.Command))
+		task, err := env.Background.Submit(ctx, BackgroundTaskRequest{
+			Kind:                         BackgroundTaskKindShell,
+			OwnerAgentID:                 env.AgentID,
+			ParentRunID:                  env.RunID,
+			ParentToolUseID:              call.ID,
+			CWD:                          env.CWD,
+			Payload:                      payload,
+			PublicSummary:                publicSummary,
+			ResumeParent:                 input.ResumeParent,
+			PermissionModeCap:            env.PermissionModeCap,
+			PermissionGenerationSnapshot: env.PermissionGenerationSnapshot,
+			PolicyGenerationSnapshot:     env.PolicyGenerationSnapshot,
+			AgentGenerationSnapshot:      env.AgentGenerationSnapshot,
+			ToolCatalogDigest:            env.ToolCatalogDigest,
+			WorkspaceFingerprint:         env.WorkspaceFingerprint,
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return Result{}, ctx.Err()
+			}
+			return Result{Output: "background shell task could not be created", IsError: true}, nil
+		}
+		encoded, _ := json.Marshal(task)
+		return Result{Output: string(encoded), Meta: map[string]any{"backgroundTaskId": task.ID, "background": true}}, nil
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

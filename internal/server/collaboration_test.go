@@ -28,7 +28,7 @@ func TestAuthSessionCookieAndMe(t *testing.T) {
 	app := New(config.Config{Auth: config.AuthConfig{RegistrationOpen: true}}, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"handle":"Alice","password":"correct horse battery staple"}`))
+	request := newTestRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"handle":"Alice","password":"correct horse battery staple"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
@@ -51,38 +51,73 @@ func TestAuthSessionCookieAndMe(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	request = newTestRequest(http.MethodGet, "/api/auth/me", nil)
 	request.AddCookie(cookie)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"handle":"Alice"`) {
 		t.Fatalf("expected authenticated me response, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/users?handlePrefix=al&limit=3", nil)
+	request = newTestRequest(http.MethodGet, "/api/users?handlePrefix=al&limit=3", nil)
 	request.AddCookie(cookie)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"handle":"Alice"`) {
 		t.Fatalf("expected authenticated handle suggestions, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/users", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/users", nil))
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected unauthenticated suggestions to be rejected, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	request = newTestRequest(http.MethodPost, "/api/auth/logout", nil)
 	request.AddCookie(cookie)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Header().Get("Set-Cookie"), "Max-Age=0") {
 		t.Fatalf("expected logout to revoke and clear cookie, got %d: %s", recorder.Code, recorder.Header().Get("Set-Cookie"))
 	}
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	request = newTestRequest(http.MethodGet, "/api/auth/me", nil)
 	request.AddCookie(cookie)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected revoked session to be unauthorized, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthSessionCookieUsesTrustedProxyHTTPS(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "proxy-session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	app := New(config.Config{Auth: config.AuthConfig{RegistrationOpen: true}}, store, nil, nil)
+	registerCollaborationTestUser(t, app, "proxy-user")
+	user, _, err := store.GetUserByHandle(ctx, "proxy-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := newTestRequest(http.MethodPost, "/api/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:4321"
+	request.Header.Set("CF-Connecting-IP", "203.0.113.61")
+	request.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+	if err := app.startSession(recorder, request, user); err != nil {
+		t.Fatal(err)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != authSessionCookieName || !cookies[0].Secure {
+		t.Fatalf("trusted proxy HTTPS must issue a Secure auth cookie, got %+v", cookies)
+	}
+
+	cleared := httptest.NewRecorder()
+	app.clearSessionCookie(cleared, request)
+	clearCookies := cleared.Result().Cookies()
+	if len(clearCookies) != 1 || !clearCookies[0].Secure || clearCookies[0].MaxAge >= 0 {
+		t.Fatalf("trusted proxy HTTPS must clear the Secure auth cookie consistently, got %+v", clearCookies)
 	}
 }
 
@@ -110,7 +145,7 @@ func TestMessageDraftsAreIsolatedByUserAndUseCAS(t *testing.T) {
 
 	putDraft := func(cookie *http.Cookie, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPut, "/api/agents/"+agent.ID+"/draft", strings.NewReader(body))
+		request := newTestRequest(http.MethodPut, "/api/agents/"+agent.ID+"/draft", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.AddCookie(cookie)
 		app.Routes().ServeHTTP(recorder, request)
@@ -120,7 +155,7 @@ func TestMessageDraftsAreIsolatedByUserAndUseCAS(t *testing.T) {
 		t.Fatalf("expected first draft creation, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/draft", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/draft", nil)
 	request.AddCookie(second)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
@@ -130,7 +165,7 @@ func TestMessageDraftsAreIsolatedByUserAndUseCAS(t *testing.T) {
 		t.Fatalf("expected second draft creation, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/draft", nil)
+	request = newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/draft", nil)
 	request.AddCookie(first)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "first draft") || strings.Contains(recorder.Body.String(), "second draft") {
@@ -160,7 +195,7 @@ func TestAuthenticatedMessageOverridesClientCreatedBy(t *testing.T) {
 	cookie := registerCollaborationTestUser(t, app, "poster")
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"hello","createdBy":"spoofed"}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"hello","createdBy":"spoofed"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.AddCookie(cookie)
 	app.Routes().ServeHTTP(recorder, request)
@@ -226,7 +261,7 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages/"+source.ID+"/corrections", &body)
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages/"+source.ID+"/corrections", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusAccepted {
@@ -258,7 +293,7 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 
 	payload, _ := json.Marshal(correctionRequest{KeepAttachmentIDs: []string{other.Attachments[0].ID}})
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages/"+source.ID+"/corrections", bytes.NewReader(payload))
+	request = newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages/"+source.ID+"/corrections", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
@@ -293,7 +328,7 @@ func TestProjectScopedRoutesRequireMembership(t *testing.T) {
 	}
 	for _, path := range cases {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request := newTestRequest(http.MethodGet, path, nil)
 		request.AddCookie(owner)
 		app.Routes().ServeHTTP(recorder, request)
 		if recorder.Code == http.StatusUnauthorized || recorder.Code == http.StatusNotFound {
@@ -301,7 +336,7 @@ func TestProjectScopedRoutesRequireMembership(t *testing.T) {
 		}
 
 		recorder = httptest.NewRecorder()
-		request = httptest.NewRequest(http.MethodGet, path, nil)
+		request = newTestRequest(http.MethodGet, path, nil)
 		request.AddCookie(outsider)
 		app.Routes().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusNotFound {
@@ -310,7 +345,7 @@ func TestProjectScopedRoutesRequireMembership(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID, nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agent.ID, nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected unauthenticated project route to require login, got %d: %s", recorder.Code, recorder.Body.String())
@@ -336,7 +371,7 @@ func TestMessageListRouteUsesCursorPagination(t *testing.T) {
 	app := New(config.Config{}, store, nil, agentpkg.NewHub())
 
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages?limit=2", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages?limit=2", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected first page 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -349,7 +384,7 @@ func TestMessageListRouteUsesCursorPagination(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages?limit=2&before="+first.NextBefore, nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages?limit=2&before="+first.NextBefore, nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected second page 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -363,7 +398,7 @@ func TestMessageListRouteUsesCursorPagination(t *testing.T) {
 
 	for _, query := range []string{"?limit=201", "?before=invalid"} {
 		recorder = httptest.NewRecorder()
-		app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages"+query, nil))
+		app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/messages"+query, nil))
 		if recorder.Code != http.StatusBadRequest {
 			t.Errorf("expected bad pagination query %q to return 400, got %d: %s", query, recorder.Code, recorder.Body.String())
 		}
@@ -374,7 +409,7 @@ func registerCollaborationTestUser(t *testing.T, app *Server, handle string) *ht
 	t.Helper()
 	body := `{"handle":"` + handle + `","password":"correct horse battery staple"}`
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(body))
+	request := newTestRequest(http.MethodPost, "/api/auth/register", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {

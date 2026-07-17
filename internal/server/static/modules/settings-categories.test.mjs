@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 
 import {
   firstSettingsItemForCategory,
+  groupSettingsItemsByLegacyCategory,
   legacySettingsCategories,
   settingsCategoryForItem,
 } from "./settings-categories.mjs";
 import { t } from "./i18n.mjs";
-import { settingsItems, skillTabs } from "./settings-data.mjs";
+import { settingsItemByKey, settingsItems, skillTabs } from "./settings-data.mjs";
 
-test("legacy settings expose the nine horizontal categories in order", () => {
+test("legacy settings expose the nine category shortcuts in order", () => {
   assert.deepEqual(legacySettingsCategories.map((category) => category.label), [
     "API 设置",
     "聊天平台",
@@ -29,6 +30,21 @@ test("every existing settings page remains reachable from a legacy category", ()
   assert.equal(settingsCategoryForItem("runtime"), "diagnostics");
   assert.equal(settingsCategoryForItem("providers"), "api");
   assert.equal(firstSettingsItemForCategory("market"), "skills");
+  assert.equal(settingsItemByKey("providers")?.key, "providers");
+  assert.equal(settingsItemByKey("users"), null);
+  assert.equal(legacySettingsCategories.some((category) => category.items.includes("users")), false);
+  assert.equal(settingsItemByKey("missing"), null);
+});
+
+test("legacy category grouping preserves page order and filters empty groups", () => {
+  const groups = groupSettingsItemsByLegacyCategory(settingsItems);
+  assert.deepEqual(groups.map((group) => group.key), legacySettingsCategories.map((group) => group.key));
+  assert.deepEqual(groups.find((group) => group.key === "api").items.map((item) => item.key), ["providers", "models", "profile", "appearance"]);
+
+  const modelsOnly = groupSettingsItemsByLegacyCategory(settingsItems, (item) => item.key === "models");
+  assert.deepEqual(modelsOnly.map((group) => ({ key: group.key, items: group.items.map((item) => item.key) })), [
+    { key: "api", items: ["models"] },
+  ]);
 });
 
 test("skill tab metadata is sourced from translated messages", () => {

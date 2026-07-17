@@ -154,15 +154,15 @@ export function createPluginRegistryUIController({
 
   function renderEnvironment(plugin) {
     const statuses = pluginEnvironmentStatuses(plugin);
-    if (!statuses.length) return `<div class="settings-provider-meta">${escapeHtml(t("pluginRegistry.noEnvironment"))}</div>`;
-    return `<div class="plugin-env-list">${statuses.map((entry) => `<span class="settings-status-pill ${entry.configured ? "ok" : "warn"}">${escapeHtml(entry.key)} · ${escapeHtml(t(entry.configured ? "pluginRegistry.configured" : "pluginRegistry.notConfigured"))}</span>`).join("")}</div>`;
+    if (!statuses.length) return `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.noEnvironment"))}</div>`;
+    return `<div class="plugin-env-list settings-inline-actions">${statuses.map((entry) => `<span class="settings-status-pill settings-badge ${entry.configured ? "ok" : "warn"}">${escapeHtml(entry.key)} · ${escapeHtml(t(entry.configured ? "pluginRegistry.configured" : "pluginRegistry.notConfigured"))}</span>`).join("")}</div>`;
   }
 
   function renderDiscovery(result) {
     const tools = pluginTools(result);
     if (!result) return "";
-    if (!tools.length) return `<div class="settings-empty-card compact">${escapeHtml(t("pluginRegistry.noTools"))}</div>`;
-    return `<div class="settings-empty-card compact"><strong>${escapeHtml(t("pluginRegistry.toolsCount", { count: tools.length }))}</strong><div class="settings-provider-meta">${tools.map((tool) => escapeHtml(tool?.exposedName || tool?.remoteName || t("pluginRegistry.unnamedTool"))).join(" · ")}</div></div>`;
+    if (!tools.length) return `<div class="settings-empty-card settings-empty-state compact" aria-live="polite">${escapeHtml(t("pluginRegistry.noTools"))}</div>`;
+    return `<div class="settings-empty-card settings-card settings-empty-state compact" aria-live="polite"><strong>${escapeHtml(t("pluginRegistry.toolsCount", { count: tools.length }))}</strong><div class="settings-provider-meta settings-card-description">${tools.map((tool) => escapeHtml(tool?.exposedName || tool?.remoteName || t("pluginRegistry.unnamedTool"))).join(" · ")}</div></div>`;
   }
 
   function renderPluginCard(plugin) {
@@ -175,20 +175,20 @@ export function createPluginRegistryUIController({
     const uninstalling = isPluginActionBusy(id, "uninstall");
     const loadingDetail = isPluginActionBusy(id, "detail");
     const anyBusy = enabling || disabling || discovering || uninstalling || loadingDetail;
-    return `<div class="skill-command-card ${view.enabled ? "" : "disabled"}">
+    return `<div class="skill-command-card settings-card settings-data-list-row ${view.enabled ? "" : "disabled"}" aria-busy="${anyBusy ? "true" : "false"}">
       <div>
-        <div class="skill-command-title">${escapeHtml(view.name || id || t("pluginRegistry.unnamed"))} <span class="settings-status-pill ${view.enabled ? "ok" : "muted"}">${escapeHtml(t(view.enabled ? "pluginRegistry.enabled" : "pluginRegistry.disabled"))}</span></div>
-        <div class="settings-provider-meta">${escapeHtml(t("pluginRegistry.id"))}: <code>${escapeHtml(id)}</code>${view.version ? ` · ${escapeHtml(view.version)}` : ""}</div>
-        ${view.description ? `<div class="settings-provider-meta">${escapeHtml(view.description)}</div>` : ""}
-        ${view.rootPath ? `<div class="settings-provider-meta">${escapeHtml(t("pluginRegistry.sourcePath", { path: view.rootPath }))}</div>` : ""}
+        <div class="skill-command-title settings-card-title">${escapeHtml(view.name || id || t("pluginRegistry.unnamed"))} <span class="settings-status-pill settings-badge ${view.enabled ? "ok" : "muted"}">${escapeHtml(t(view.enabled ? "pluginRegistry.enabled" : "pluginRegistry.disabled"))}</span></div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.id"))}: <code>${escapeHtml(id)}</code>${view.version ? ` · ${escapeHtml(view.version)}` : ""}</div>
+        ${view.description ? `<div class="settings-provider-meta settings-card-description">${escapeHtml(view.description)}</div>` : ""}
+        ${view.rootPath ? `<div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.sourcePath", { path: view.rootPath }))}</div>` : ""}
         ${renderEnvironment(view)}
         ${renderDiscovery(registry.discoveries[id])}
       </div>
-      <div class="settings-action-row">
+      <div class="settings-action-row settings-inline-actions">
         <button class="settings-action-btn subtle" type="button" data-plugin-detail="${escapeAttr(id)}" ${anyBusy ? "disabled" : ""}>${escapeHtml(t(loadingDetail ? "pluginRegistry.loadingDetail" : "pluginRegistry.detail"))}</button>
         <button class="settings-action-btn subtle" type="button" data-plugin-discover="${escapeAttr(id)}" ${anyBusy || !view.enabled ? "disabled" : ""}>${escapeHtml(t(discovering ? "pluginRegistry.discovering" : "pluginRegistry.discover"))}</button>
         <button class="settings-action-btn subtle" type="button" data-plugin-toggle="${escapeAttr(id)}" data-plugin-enable="${view.enabled ? "false" : "true"}" ${anyBusy ? "disabled" : ""}>${escapeHtml(t(enabling || disabling ? "pluginRegistry.changing" : view.enabled ? "pluginRegistry.disable" : "pluginRegistry.enable"))}</button>
-        <button class="settings-action-btn danger" type="button" data-plugin-uninstall="${escapeAttr(id)}" ${anyBusy ? "disabled" : ""}>${escapeHtml(t(uninstalling ? "pluginRegistry.uninstalling" : "pluginRegistry.uninstall"))}</button>
+        <button class="settings-action-btn danger destructive" type="button" data-plugin-uninstall="${escapeAttr(id)}" ${anyBusy ? "disabled" : ""}>${escapeHtml(t(uninstalling ? "pluginRegistry.uninstalling" : "pluginRegistry.uninstall"))}</button>
       </div>
     </div>`;
   }
@@ -196,22 +196,22 @@ export function createPluginRegistryUIController({
   function renderPluginRegistryPanel(active) {
     const installing = isPluginActionBusy("new", "install");
     const list = registry.loading && !registry.loaded
-      ? `<div class="settings-empty-card compact">${escapeHtml(t("pluginRegistry.loading"))}</div>`
+      ? `<div class="settings-empty-card settings-empty-state settings-skeleton compact" aria-busy="true">${escapeHtml(t("pluginRegistry.loading"))}</div>`
       : registry.error
-        ? `<div class="settings-empty-card compact danger">${escapeHtml(t("pluginRegistry.loadFailed", { message: registry.error }))}</div>`
+        ? `<div class="settings-empty-card settings-empty-state settings-alert compact danger" role="alert">${escapeHtml(t("pluginRegistry.loadFailed", { message: registry.error }))}</div>`
         : registry.items.length
-          ? `<div class="skill-command-list">${registry.items.map(renderPluginCard).join("")}</div>`
-          : `<div class="settings-empty-card compact">${escapeHtml(t("pluginRegistry.empty"))}</div>`;
-    return `<p class="skills-description">${escapeHtml(active.description)}</p>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head"><div><div class="settings-provider-title">${escapeHtml(t("pluginRegistry.title"))}</div><div class="settings-provider-meta">${escapeHtml(t("pluginRegistry.description"))}</div></div><button id="refreshPluginsBtn" class="settings-action-btn subtle" type="button" ${registry.loading ? "disabled" : ""}>${escapeHtml(t(registry.loading ? "pluginRegistry.refreshing" : "pluginRegistry.refresh"))}</button></div>
-        ${list}
+          ? `<div class="skill-command-list settings-data-list" aria-live="polite" aria-busy="${registry.loading ? "true" : "false"}">${registry.items.map(renderPluginCard).join("")}</div>`
+          : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("pluginRegistry.empty"))}</div>`;
+    return `<p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
+      <section class="settings-provider-section settings-card settings-page-section highlighted" aria-busy="${registry.loading ? "true" : "false"}">
+        <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(t("pluginRegistry.title"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.description"))}</div></div><button id="refreshPluginsBtn" class="settings-action-btn subtle" type="button" ${registry.loading ? "disabled" : ""}>${escapeHtml(t(registry.loading ? "pluginRegistry.refreshing" : "pluginRegistry.refresh"))}</button></div>
+        <div class="settings-card-content">${list}</div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-title">${escapeHtml(t("pluginRegistry.installTitle"))}</div>
-        <div class="settings-provider-meta">${escapeHtml(t("pluginRegistry.installDescription"))}</div>
-        <form id="pluginInstallForm" class="skill-command-form"><div class="settings-provider-form-grid"><label class="settings-form-span-2">${escapeHtml(t("pluginRegistry.pathLabel"))}<input id="pluginRootPath" class="settings-field" placeholder="${escapeAttr(t("pluginRegistry.pathPlaceholder"))}" /></label></div><div class="settings-action-row settings-form-actions"><button class="settings-action-btn primary" type="submit" ${installing ? "disabled" : ""}>${escapeHtml(t(installing ? "pluginRegistry.installing" : "pluginRegistry.install"))}</button></div></form>
-        <div class="settings-provider-note">${escapeHtml(t("pluginRegistry.uninstallNote"))}</div>
+      <section class="settings-provider-section settings-card settings-page-section" aria-busy="${installing ? "true" : "false"}">
+        <div class="settings-provider-title settings-card-title">${escapeHtml(t("pluginRegistry.installTitle"))}</div>
+        <div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.installDescription"))}</div>
+        <form id="pluginInstallForm" class="skill-command-form"><div class="settings-provider-form-grid settings-form-grid"><label class="settings-form-span-2 settings-form-field">${escapeHtml(t("pluginRegistry.pathLabel"))}<input id="pluginRootPath" class="settings-field" placeholder="${escapeAttr(t("pluginRegistry.pathPlaceholder"))}" /></label></div><div class="settings-action-row settings-form-actions settings-inline-actions"><button class="settings-action-btn primary" type="submit" ${installing ? "disabled" : ""}>${escapeHtml(t(installing ? "pluginRegistry.installing" : "pluginRegistry.install"))}</button></div></form>
+        <div class="settings-provider-note settings-alert" role="note">${escapeHtml(t("pluginRegistry.uninstallNote"))}</div>
       </section>`;
   }
 

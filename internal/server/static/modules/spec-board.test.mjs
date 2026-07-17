@@ -110,6 +110,41 @@ test("spec board controller loads root and child navigation and accepts goal con
   assert.equal(controller.getState().latestConfirmation.id, "confirm-1");
 });
 
+test("Spec board subscriptions receive snapshots and agent switches invalidate stale loads", async () => {
+  let resolveFirstLoad;
+  const firstLoad = new Promise((resolve) => { resolveFirstLoad = resolve; });
+  const controller = createSpecBoardController({
+    document: { getElementById: () => null },
+    request: (path) => {
+      if (path.includes("agent-a")) return firstLoad;
+      return Promise.resolve({ agentId: "agent-b", tasks: [{ id: "fresh", text: "Fresh", status: "todo", revision: 1 }] });
+    },
+  });
+  const selectedAgents = [];
+  const unsubscribe = controller.subscribe((state) => selectedAgents.push(state.selectedAgentId));
+
+  controller.setAgent({ id: "agent-a", title: "A" });
+  const staleLoad = controller.load({ includeChildren: false });
+  controller.setAgent({ id: "agent-b", title: "B" });
+  await controller.load({ includeChildren: false });
+  resolveFirstLoad({ agentId: "agent-a", tasks: [{ id: "stale", text: "Stale", status: "done", revision: 1 }] });
+  assert.equal(await staleLoad, false);
+  assert.equal(controller.getState().board.tasks[0].id, "fresh");
+  assert.ok(selectedAgents.includes("agent-a"));
+  assert.ok(selectedAgents.includes("agent-b"));
+
+  unsubscribe();
+  const count = selectedAgents.length;
+  controller.setAgent({ id: "agent-c", title: "C" });
+  assert.equal(selectedAgents.length, count);
+
+  const directSubscriber = () => selectedAgents.push("direct");
+  controller.subscribe(directSubscriber, { immediate: false });
+  assert.equal(controller.unsubscribe(directSubscriber), true);
+  controller.setAgent({ id: "agent-d", title: "D" });
+  assert.equal(selectedAgents.includes("direct"), false);
+});
+
 test("Spec header button reflects open, doing, and blocked task state", async () => {
   const badge = { textContent: "", classList: classList(["hidden"]) };
   const button = {

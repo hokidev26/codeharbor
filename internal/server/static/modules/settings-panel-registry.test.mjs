@@ -20,6 +20,8 @@ test("register rejects empty keys and definitions without render", () => {
   assert.throws(() => registry.register("", { render() {} }), /key must not be empty/);
   assert.throws(() => registry.register("   ", { render() {} }), /key must not be empty/);
   assert.throws(() => registry.register("profile", {}), /render must be a function/);
+  assert.throws(() => registry.register("about", { render() {}, layout: "   " }), /layout must be a non-empty string/);
+  assert.throws(() => registry.register("about", { render() {}, layout: 2 }), /layout must be a non-empty string/);
 });
 
 test("register rejects duplicate keys", () => {
@@ -33,6 +35,13 @@ test("resolve returns undefined for unknown keys", () => {
   const registry = createSettingsPanelRegistry();
 
   assert.equal(registry.resolve("unknown"), undefined);
+});
+
+test("register stores an optional normalized layout contract", () => {
+  const registry = createSettingsPanelRegistry();
+  registry.register("about", { render: () => "about", layout: " about " });
+
+  assert.equal(registry.resolve("about").layout, "about");
 });
 
 test("bind is optional and invoked from a resolved panel", () => {

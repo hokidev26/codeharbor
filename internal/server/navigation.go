@@ -12,7 +12,21 @@ type navigationResponse struct {
 }
 
 func (s *Server) navigation(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.store.ListProjects(r.Context())
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var projects []db.Project
+	if hasUsers {
+		user, ok := s.requireUser(w, r)
+		if !ok {
+			return
+		}
+		projects, err = s.store.ListProjectsForUser(r.Context(), user.ID)
+	} else {
+		projects, err = s.store.ListProjects(r.Context())
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -22,8 +36,21 @@ func (s *Server) navigation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if hasUsers {
+		allowedProjects := make(map[string]struct{}, len(projects))
+		for _, project := range projects {
+			allowedProjects[project.ID] = struct{}{}
+		}
+		filtered := make([]db.NavigationConversation, 0, len(conversations))
+		for _, conversation := range conversations {
+			if _, ok := allowedProjects[conversation.ProjectID]; ok {
+				filtered = append(filtered, conversation)
+			}
+		}
+		conversations = filtered
+	}
 	writeJSON(w, http.StatusOK, navigationResponse{
-		Projects:      projects,
-		Conversations: conversations,
+		Projects:      s.filterProjectsForRequest(r, projects),
+		Conversations: s.filterNavigationConversationsForRequest(r, conversations),
 	})
 }

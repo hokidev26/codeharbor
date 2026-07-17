@@ -84,6 +84,15 @@ test("usage history defaults to total tokens", () => {
   assert.match(renderUsageHistory({ status: "ready" }), /value="totalTokens" selected/);
 });
 
+test("usage history exposes shared settings classes and accessible regions", () => {
+  const html = renderUsageHistory(response());
+  assert.match(html, /<main class="usage-history-page settings-page settings-page-usage" aria-labelledby="usageHistoryTitle">/);
+  assert.match(html, /class="uh-summary-grid settings-stat-grid"/);
+  assert.match(html, /class="uh-panel uh-filter-panel settings-card" aria-labelledby="usageHistoryFiltersTitle"/);
+  assert.match(html, /class="uh-history-table settings-data-list" aria-label=/);
+  assert.match(html, /aria-live="polite"/);
+});
+
 test("selected filters remain visible and missing summary timings render as dashes", () => {
   const html = renderUsageHistory({
     status: "ready",

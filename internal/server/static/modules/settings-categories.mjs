@@ -6,7 +6,7 @@ export const legacySettingsCategories = Object.freeze([
   { key: "memory", label: t("settings.category.memory"), items: ["memory"] },
   { key: "diagnostics", label: t("settings.category.diagnostics"), items: ["runtime", "servers-system", "storage", "terminals"] },
   { key: "network", label: t("settings.category.network"), items: ["network-search", "agent-admin"] },
-  { key: "permissions", label: t("settings.category.permissions"), items: ["agents", "users", "worklines-containers"] },
+  { key: "permissions", label: t("settings.category.permissions"), items: ["agents", "worklines-containers", "remote-access"] },
   { key: "market", label: t("settings.category.market"), items: ["skills"] },
   { key: "logs", label: t("settings.category.logs"), items: ["notifications", "usage"] },
   { key: "about", label: t("settings.category.about"), items: ["about"] },
@@ -25,4 +25,14 @@ export function settingsCategoryByKey(key) {
 
 export function firstSettingsItemForCategory(key) {
   return settingsCategoryByKey(key)?.items?.[0] || "providers";
+}
+
+export function groupSettingsItemsByLegacyCategory(items = [], predicate = () => true) {
+  const itemByKey = new Map((Array.isArray(items) ? items : []).map((item) => [item?.key, item]));
+  return legacySettingsCategories.map((category) => ({
+    ...category,
+    items: category.items
+      .map((key) => itemByKey.get(key))
+      .filter((item) => item && predicate(item, category)),
+  })).filter((category) => category.items.length);
 }

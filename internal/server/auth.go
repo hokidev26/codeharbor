@@ -162,12 +162,12 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user db.Us
 	if _, err := s.store.CreateAuthSession(r.Context(), db.AuthSession{UserID: user.ID, TokenHash: db.HashSessionToken(token), CreatedAt: now.Format(time.RFC3339Nano), ExpiresAt: expiresAt.Format(time.RFC3339Nano)}); err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{Name: authSessionCookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, Expires: expiresAt, MaxAge: int(authSessionLifetime.Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: authSessionCookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: requestIsHTTPS(r), Expires: expiresAt, MaxAge: int(authSessionLifetime.Seconds())})
 	return nil
 }
 
 func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: authSessionCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: -1, Expires: time.Unix(1, 0)})
+	http.SetCookie(w, &http.Cookie{Name: authSessionCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: requestIsHTTPS(r), MaxAge: -1, Expires: time.Unix(1, 0)})
 }
 
 func newSessionToken() (string, error) {

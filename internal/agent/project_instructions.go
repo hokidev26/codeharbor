@@ -10,7 +10,7 @@ import (
 
 const (
 	maxProjectInstructionReadBytes = 64 * 1024
-	maxProjectInstructionFileRunes = 6000
+	maxProjectInstructionFileRunes = 12_000
 )
 
 var projectInstructionFilenames = []string{"AGENTS.md", "CLAUDE.md"}

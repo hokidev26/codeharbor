@@ -222,6 +222,7 @@ type monitoringSnapshotResponse struct {
 	Deliveries        db.NotificationDeliveryStats `json:"deliveries"`
 	Channels          db.ChannelStats              `json:"channels"`
 	DeviceActions     db.DeviceActionRequestStats  `json:"deviceActions"`
+	BackgroundTasks   db.BackgroundTaskStats       `json:"backgroundTasks"`
 	Workers           automation.WorkerStatus      `json:"workers"`
 }
 
@@ -243,6 +244,11 @@ func (s *Server) monitoringSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deviceStats, err := s.store.DeviceActionRequestStats(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "monitoring snapshot unavailable")
+		return
+	}
+	backgroundStats, err := s.store.BackgroundTaskStats(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "monitoring snapshot unavailable")
 		return
@@ -280,6 +286,6 @@ func (s *Server) monitoringSnapshot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, monitoringSnapshotResponse{
 		CapturedAt: capturedAt, ActiveRuns: activeRuns, PendingApprovals: pendingApprovals,
 		ScheduleCount: scheduleStats.Total, NotificationCount: deliveryStats.Total, ChannelCount: channelCount, DeviceCount: deviceCount,
-		Schedules: scheduleStats, Deliveries: deliveryStats, Channels: channelStats, DeviceActions: deviceStats, Workers: workers,
+		Schedules: scheduleStats, Deliveries: deliveryStats, Channels: channelStats, DeviceActions: deviceStats, BackgroundTasks: backgroundStats, Workers: workers,
 	})
 }

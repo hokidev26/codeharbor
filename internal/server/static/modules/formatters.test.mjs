@@ -33,6 +33,12 @@ test("formatTimestamp is deterministic for explicit UTC zh/en preferences", () =
   assert.equal(formatTimestamp(value, { locale: "en-US", timezone: "UTC" }), "01/02/2025, 03:04:05");
 });
 
+test("formatTimestamp supports compact time-only message labels", () => {
+  const value = "2025-01-02T03:04:05Z";
+  assert.equal(formatTimestamp(value, { locale: "zh-CN", timezone: "UTC", timeOnly: true }), "03:04");
+  assert.equal(formatTimestamp(value, { locale: "en-US", timezone: "UTC", timeOnly: true }), "03:04");
+});
+
 test("formatTimestamp uses explicit fallbacks for missing and invalid dates", () => {
   assert.equal(formatTimestamp(""), "暂无");
   assert.equal(formatTimestamp("not-a-date"), "无效日期");

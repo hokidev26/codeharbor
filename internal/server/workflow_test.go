@@ -37,7 +37,7 @@ func TestWorkflowPreferencesAPI(t *testing.T) {
 	routes := app.Routes()
 
 	recorder := httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/workflow/preferences", nil))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/workflow/preferences", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected preferences 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -71,7 +71,7 @@ func TestWorkflowPreferencesAPIRejectsMissingFields(t *testing.T) {
 	defer store.Close()
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/workflow/preferences", strings.NewReader(`{"requireConfirmationForExec":false}`)))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodPut, "/api/workflow/preferences", strings.NewReader(`{"requireConfirmationForExec":false}`)))
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "all workflow preference fields are required") {
 		t.Fatalf("expected missing-field rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -95,7 +95,7 @@ func TestToolPermissionRulesAPI(t *testing.T) {
 	routes := app.Routes()
 
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"mode":"acceptEdits","toolName":"Bash","risk":"exec","decision":"ask","priority":7,"enabled":true,"description":"confirm bash"}`))
+	req := newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"mode":"acceptEdits","toolName":"Bash","risk":"exec","decision":"ask","priority":7,"enabled":true,"description":"confirm bash"}`))
 	routes.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected create 201, got %d: %s", recorder.Code, recorder.Body.String())
@@ -112,7 +112,7 @@ func TestToolPermissionRulesAPI(t *testing.T) {
 	deny := "deny"
 	recorder = httptest.NewRecorder()
 	body, _ := json.Marshal(toolPermissionRuleRequest{Decision: &deny, Enabled: &disabled})
-	req = httptest.NewRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(string(body)))
+	req = newTestRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(string(body)))
 	routes.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected patch 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -126,7 +126,7 @@ func TestToolPermissionRulesAPI(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/workflow/tool-permissions", nil))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/workflow/tool-permissions", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected list 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -139,7 +139,7 @@ func TestToolPermissionRulesAPI(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/api/workflow/tool-permissions/"+created.ID, nil))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodDelete, "/api/workflow/tool-permissions/"+created.ID, nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected delete 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -174,7 +174,7 @@ func TestToolPermissionRulesAPIUsesConfiguredRegistry(t *testing.T) {
 
 	registry.Register(workflowTestTool{name: "DynamicTool"})
 	recorder := httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"DynamicTool","risk":"read","decision":"ask"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"DynamicTool","risk":"read","decision":"ask"}`)))
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected dynamic tool rule create 201, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -184,38 +184,38 @@ func TestToolPermissionRulesAPIUsesConfiguredRegistry(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__safe-plugin__echo","risk":"exec","decision":"ask"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__safe-plugin__echo","risk":"exec","decision":"ask"}`)))
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected namespaced plugin tool rule create 201, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__missing__echo","risk":"exec","decision":"ask"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__missing__echo","risk":"exec","decision":"ask"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected unknown plugin tool rule rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__bad path__echo","risk":"exec","decision":"ask"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"plugin__bad path__echo","risk":"exec","decision":"ask"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected malformed plugin tool rule rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"UnknownTool","risk":"read","decision":"ask"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(`{"toolName":"UnknownTool","risk":"read","decision":"ask"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected unknown tool create rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"UnknownTool"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"UnknownTool"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected unknown tool update rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	registry.Register(workflowTestTool{name: "DynamicToolV2"})
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"DynamicToolV2"}`)))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPatch, "/api/workflow/tool-permissions/"+created.ID, strings.NewReader(`{"toolName":"DynamicToolV2"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected dynamically registered tool update 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -242,7 +242,7 @@ func TestToolPermissionRulesAPIRejectsInvalidValues(t *testing.T) {
 	}
 	for _, body := range cases {
 		recorder := httptest.NewRecorder()
-		routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(body)))
+		routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/workflow/tool-permissions", strings.NewReader(body)))
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d: %s", body, recorder.Code, recorder.Body.String())
 		}

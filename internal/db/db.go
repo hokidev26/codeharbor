@@ -182,6 +182,8 @@ type Message struct {
 	CommandText           string            `json:"commandText,omitempty"`
 	CorrectionOfMessageID string            `json:"correctionOfMessageId,omitempty"`
 	CreatedBy             string            `json:"createdBy,omitempty"`
+	CompletionState       string            `json:"completionState,omitempty"`
+	StopReason            string            `json:"stopReason,omitempty"`
 	CreatedAt             string            `json:"createdAt"`
 	Attachments           []Attachment      `json:"attachments,omitempty"`
 }
@@ -193,33 +195,56 @@ type MessagePage struct {
 }
 
 type Run struct {
-	ID                  string `json:"id"`
-	AgentID             string `json:"agentId"`
-	TriggerMessageID    string `json:"triggerMessageId,omitempty"`
-	Status              string `json:"status"`
-	StartedAt           string `json:"startedAt,omitempty"`
-	CompletedAt         string `json:"completedAt,omitempty"`
-	ErrorMessage        string `json:"errorMessage,omitempty"`
-	BaseHead            string `json:"baseHead,omitempty"`
-	EndHead             string `json:"endHead,omitempty"`
-	CheckpointRepoRoot  string `json:"checkpointRepoRoot,omitempty"`
-	GitSnapshotAt       string `json:"gitSnapshotAt,omitempty"`
-	CheckpointState     string `json:"checkpointState"`
-	CheckpointError     string `json:"checkpointError,omitempty"`
-	RolledBackAt        string `json:"rolledBackAt,omitempty"`
-	Source              string `json:"source"`
-	SourceID            string `json:"sourceId,omitempty"`
-	PermissionModeCap   string `json:"permissionModeCap,omitempty"`
-	ExecutionGeneration int64  `json:"executionGeneration"`
-	DispatchID          string `json:"dispatchId,omitempty"`
-	DurationMS          int64  `json:"durationMs,omitempty"`
-	TriggerType         string `json:"triggerType"`
-	ExecutionDeviceID   string `json:"executionDeviceId"`
-	CreatedAt           string `json:"createdAt"`
-	UpdatedAt           string `json:"updatedAt"`
+	ID                       string `json:"id"`
+	AgentID                  string `json:"agentId"`
+	TriggerMessageID         string `json:"triggerMessageId,omitempty"`
+	Status                   string `json:"status"`
+	StartedAt                string `json:"startedAt,omitempty"`
+	CompletedAt              string `json:"completedAt,omitempty"`
+	ErrorMessage             string `json:"errorMessage,omitempty"`
+	BaseHead                 string `json:"baseHead,omitempty"`
+	EndHead                  string `json:"endHead,omitempty"`
+	CheckpointRepoRoot       string `json:"checkpointRepoRoot,omitempty"`
+	GitSnapshotAt            string `json:"gitSnapshotAt,omitempty"`
+	CheckpointState          string `json:"checkpointState"`
+	CheckpointError          string `json:"checkpointError,omitempty"`
+	RolledBackAt             string `json:"rolledBackAt,omitempty"`
+	Source                   string `json:"source"`
+	SourceID                 string `json:"sourceId,omitempty"`
+	PermissionModeCap        string `json:"permissionModeCap,omitempty"`
+	ExecutionGeneration      int64  `json:"executionGeneration"`
+	DispatchID               string `json:"dispatchId,omitempty"`
+	DurationMS               int64  `json:"durationMs,omitempty"`
+	TriggerType              string `json:"triggerType"`
+	ExecutionDeviceID        string `json:"executionDeviceId"`
+	ExecutionMode            string `json:"executionMode"`
+	PlanID                   string `json:"planId,omitempty"`
+	PolicyGenerationSnapshot int64  `json:"policyGenerationSnapshot"`
+	AgentGenerationSnapshot  int64  `json:"agentGenerationSnapshot"`
+	ToolCatalogDigest        string `json:"toolCatalogDigest,omitempty"`
+	WorkspaceFingerprint     string `json:"workspaceFingerprint,omitempty"`
+	AutoContinuationMode     string `json:"autoContinuationMode"`
+	ContinuationCount        int64  `json:"continuationCount"`
+	ContinuationSegmentTurns int64  `json:"continuationSegmentTurns"`
+	TurnCount                int64  `json:"turnCount"`
+	MaxTotalTurns            int64  `json:"maxTotalTurns"`
+	MaxContinuations         int64  `json:"maxContinuations"`
+	MaxTotalTokens           int64  `json:"maxTotalTokens"`
+	ConsumedInputTokens      int64  `json:"consumedInputTokens"`
+	ConsumedOutputTokens     int64  `json:"consumedOutputTokens"`
+	DeadlineAt               string `json:"deadlineAt,omitempty"`
+	ResumeAfterMessageID     string `json:"resumeAfterMessageId,omitempty"`
+	LastStopReason           string `json:"lastStopReason,omitempty"`
+	ContinuationReason       string `json:"continuationReason,omitempty"`
+	WaitingBackgroundTaskID  string `json:"waitingBackgroundTaskId,omitempty"`
+	CreatedAt                string `json:"createdAt"`
+	UpdatedAt                string `json:"updatedAt"`
 }
 
 const (
+	RunExecutionModePlan    = "plan"
+	RunExecutionModeExecute = "execute"
+
 	RunCheckpointNone        = "none"
 	RunCheckpointTracking    = "tracking"
 	RunCheckpointCapturing   = "capturing"
@@ -344,6 +369,9 @@ type APIRequest struct {
 	CostUSD           float64         `json:"costUsd,omitempty"`
 	ErrorMessage      string          `json:"errorMessage,omitempty"`
 	RawDumpJSON       json.RawMessage `json:"rawDumpJson,omitempty"`
+	StopReason        string          `json:"stopReason,omitempty"`
+	TurnIndex         int64           `json:"turnIndex"`
+	ContinuationIndex int64           `json:"continuationIndex"`
 	CreatedAt         string          `json:"createdAt"`
 }
 
@@ -1455,6 +1483,16 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	run.PermissionModeCap = strings.TrimSpace(run.PermissionModeCap)
 	run.TriggerType = strings.TrimSpace(run.TriggerType)
 	run.ExecutionDeviceID = strings.TrimSpace(run.ExecutionDeviceID)
+	run.ExecutionMode = strings.TrimSpace(run.ExecutionMode)
+	run.PlanID = strings.TrimSpace(run.PlanID)
+	run.ToolCatalogDigest = strings.TrimSpace(run.ToolCatalogDigest)
+	run.WorkspaceFingerprint = strings.TrimSpace(run.WorkspaceFingerprint)
+	run.AutoContinuationMode = strings.TrimSpace(run.AutoContinuationMode)
+	run.DeadlineAt = strings.TrimSpace(run.DeadlineAt)
+	run.ResumeAfterMessageID = strings.TrimSpace(run.ResumeAfterMessageID)
+	run.LastStopReason = strings.TrimSpace(run.LastStopReason)
+	run.ContinuationReason = strings.TrimSpace(run.ContinuationReason)
+	run.WaitingBackgroundTaskID = strings.TrimSpace(run.WaitingBackgroundTaskID)
 	if run.ID == "" {
 		run.ID = NewID()
 	}
@@ -1473,7 +1511,7 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 		// Queued work has not started. Do not synthesize a start timestamp.
 		run.StartedAt = ""
 		run.CompletedAt = ""
-	case "running":
+	case "running", "continuation_pending":
 		if run.StartedAt == "" {
 			run.StartedAt = now
 		}
@@ -1493,6 +1531,12 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	}
 	if run.Source == "" {
 		run.Source = "manual"
+	}
+	if run.ExecutionMode == "" {
+		run.ExecutionMode = RunExecutionModeExecute
+	}
+	if run.AutoContinuationMode == "" {
+		run.AutoContinuationMode = "off"
 	}
 	if run.TriggerType == "" {
 		switch run.Source {
@@ -1519,6 +1563,13 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 		{"run dispatch id", run.DispatchID, 256, false, false},
 		{"run source", run.Source, 64, true, true},
 		{"run source id", run.SourceID, 256, false, false},
+		{"run plan id", run.PlanID, 128, false, false},
+		{"run tool catalog digest", run.ToolCatalogDigest, 512, false, false},
+		{"run workspace fingerprint", run.WorkspaceFingerprint, 512, false, false},
+		{"run resume after message id", run.ResumeAfterMessageID, 128, false, false},
+		{"run last stop reason", run.LastStopReason, 256, false, false},
+		{"run continuation reason", run.ContinuationReason, 4096, false, false},
+		{"run waiting background task id", run.WaitingBackgroundTaskID, 128, false, false},
 	} {
 		if err := validateP2P3Text(field.name, field.value, field.max, field.required, field.token); err != nil {
 			return Run{}, err
@@ -1532,6 +1583,21 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	}
 	if run.TriggerType != "manual" && run.TriggerType != "scheduled" && run.TriggerType != "goal" && run.TriggerType != "internal" {
 		return Run{}, errors.New("invalid run trigger type")
+	}
+	if run.ExecutionMode != RunExecutionModePlan && run.ExecutionMode != RunExecutionModeExecute {
+		return Run{}, errors.New("invalid run execution mode")
+	}
+	if run.AutoContinuationMode != "off" && run.AutoContinuationMode != "safe" {
+		return Run{}, errors.New("invalid run auto continuation mode")
+	}
+	if run.ContinuationCount < 0 || run.ContinuationSegmentTurns < 0 || run.TurnCount < 0 || run.MaxTotalTurns < 0 || run.MaxContinuations < 0 || run.MaxTotalTokens < 0 || run.ConsumedInputTokens < 0 || run.ConsumedOutputTokens < 0 {
+		return Run{}, errors.New("run continuation counters must not be negative")
+	}
+	if run.ExecutionMode == RunExecutionModePlan && run.PlanID != "" {
+		return Run{}, errors.New("plan mode run cannot execute a plan")
+	}
+	if run.PolicyGenerationSnapshot < 0 || run.AgentGenerationSnapshot < 0 {
+		return Run{}, errors.New("run generation snapshots must not be negative")
 	}
 	if run.DurationMS < 0 {
 		return Run{}, errors.New("invalid run duration")
@@ -1550,6 +1616,7 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 		"run completed_at":    &run.CompletedAt,
 		"run git_snapshot_at": &run.GitSnapshotAt,
 		"run rolled_back_at":  &run.RolledBackAt,
+		"run deadline_at":     &run.DeadlineAt,
 	} {
 		if *value, err = canonicalP2P3Time(name, *value, false); err != nil {
 			return Run{}, err
@@ -1571,8 +1638,40 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, sql.ErrNoRows
 	}
 	var agentDeviceID string
-	if err := tx.QueryRowContext(ctx, `SELECT execution_generation, COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, run.AgentID).Scan(&run.ExecutionGeneration, &agentDeviceID); err != nil {
+	var currentAgentGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT execution_generation, COALESCE(entity_generation,1), COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, run.AgentID).Scan(&run.ExecutionGeneration, &currentAgentGeneration, &agentDeviceID); err != nil {
 		return Run{}, err
+	}
+	currentPolicyGeneration := int64(1)
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(policy_generation,1) FROM workflow_preferences WHERE id = 'default'`).Scan(&currentPolicyGeneration); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Run{}, err
+	}
+	if run.PlanID != "" {
+		plan, err := scanPlan(func(dest ...any) error {
+			return tx.QueryRowContext(ctx, `SELECT `+planColumns+` FROM plans WHERE id = ?`, run.PlanID).Scan(dest...)
+		})
+		if err != nil {
+			return Run{}, err
+		}
+		if plan.AgentID != run.AgentID || plan.Status != PlanStatusApproved {
+			return Run{}, fmt.Errorf("%w: plan is not approved for this agent", ErrConflict)
+		}
+		if plan.PolicyGenerationSnapshot != currentPolicyGeneration || plan.AgentGenerationSnapshot != currentAgentGeneration {
+			return Run{}, fmt.Errorf("%w: approved plan generations are stale", ErrConflict)
+		}
+		if run.PolicyGenerationSnapshot != 0 && run.PolicyGenerationSnapshot != plan.PolicyGenerationSnapshot || run.AgentGenerationSnapshot != 0 && run.AgentGenerationSnapshot != plan.AgentGenerationSnapshot || run.ToolCatalogDigest != "" && run.ToolCatalogDigest != plan.ToolCatalogDigest || run.WorkspaceFingerprint != "" && run.WorkspaceFingerprint != plan.WorkspaceFingerprint {
+			return Run{}, fmt.Errorf("%w: execution run snapshots do not match plan", ErrConflict)
+		}
+		run.PolicyGenerationSnapshot = plan.PolicyGenerationSnapshot
+		run.AgentGenerationSnapshot = plan.AgentGenerationSnapshot
+		run.ToolCatalogDigest = plan.ToolCatalogDigest
+		run.WorkspaceFingerprint = plan.WorkspaceFingerprint
+	}
+	if run.AgentGenerationSnapshot == 0 {
+		run.AgentGenerationSnapshot = currentAgentGeneration
+	}
+	if run.PolicyGenerationSnapshot == 0 {
+		run.PolicyGenerationSnapshot = currentPolicyGeneration
 	}
 	if run.ExecutionDeviceID == "" {
 		run.ExecutionDeviceID = agentDeviceID
@@ -1584,12 +1683,36 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM execution_devices WHERE id = ?`, run.ExecutionDeviceID).Scan(&deviceExists); err != nil {
 		return Run{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs (id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head, checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id, permission_mode_cap, execution_generation, dispatch_id, duration_ms, trigger_type, execution_device_id, created_at, updated_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, 0), ?, ?, ?, ?)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.ExecutionGeneration, run.DispatchID, run.DurationMS, run.TriggerType, run.ExecutionDeviceID, run.CreatedAt, run.UpdatedAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs (
+		id, agent_id, trigger_message_id, status, started_at, completed_at, error_message, base_head, end_head,
+		checkpoint_repo_root, git_snapshot_at, checkpoint_state, checkpoint_error, rolled_back_at, source, source_id,
+		permission_mode_cap, execution_generation, dispatch_id, duration_ms, trigger_type, execution_device_id,
+		execution_mode, plan_id, policy_generation_snapshot, agent_generation_snapshot, tool_catalog_digest,
+		workspace_fingerprint, auto_continuation_mode, continuation_count, continuation_segment_turns, turn_count, max_total_turns,
+		max_continuations, max_total_tokens, consumed_input_tokens, consumed_output_tokens, deadline_at,
+		resume_after_message_id, last_stop_reason, continuation_reason, waiting_background_task_id, created_at, updated_at
+	) VALUES (
+		?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+		NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, 0), ?, ?,
+		?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+		NULLIF(?, ''), NULLIF(?, ''), ?, ?
+	)`, run.ID, run.AgentID, run.TriggerMessageID, run.Status, run.StartedAt, run.CompletedAt, run.ErrorMessage, run.BaseHead, run.EndHead, run.CheckpointRepoRoot, run.GitSnapshotAt, run.CheckpointState, run.CheckpointError, run.RolledBackAt, run.Source, run.SourceID, run.PermissionModeCap, run.ExecutionGeneration, run.DispatchID, run.DurationMS, run.TriggerType, run.ExecutionDeviceID, run.ExecutionMode, run.PlanID, run.PolicyGenerationSnapshot, run.AgentGenerationSnapshot, run.ToolCatalogDigest, run.WorkspaceFingerprint, run.AutoContinuationMode, run.ContinuationCount, run.ContinuationSegmentTurns, run.TurnCount, run.MaxTotalTurns, run.MaxContinuations, run.MaxTotalTokens, run.ConsumedInputTokens, run.ConsumedOutputTokens, run.DeadlineAt, run.ResumeAfterMessageID, run.LastStopReason, run.ContinuationReason, run.WaitingBackgroundTaskID, run.CreatedAt, run.UpdatedAt)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return Run{}, fmt.Errorf("%w: run dispatch or execution generation already exists", ErrConflict)
 		}
 		return Run{}, err
+	}
+	if run.PlanID != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE plans SET status = ?, stale_reason = NULL, updated_at = ? WHERE id = ? AND agent_id = ? AND status = ?`, PlanStatusExecuting, Now(), run.PlanID, run.AgentID, PlanStatusApproved)
+		if err != nil {
+			return Run{}, err
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return Run{}, err
+		} else if affected != 1 {
+			return Run{}, fmt.Errorf("%w: plan status changed", ErrConflict)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Run{}, err
@@ -1599,7 +1722,7 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 
 func validRunStatus(status string) bool {
 	switch status {
-	case "pending", "running", "completed", "interrupted", "error", "superseded", "skipped":
+	case "pending", "running", "continuation_pending", "completed", "interrupted", "error", "superseded", "skipped":
 		return true
 	default:
 		return false
@@ -1809,7 +1932,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage str
 	var allowed string
 	switch status {
 	case "interrupted", "error":
-		allowed = "('pending', 'running')"
+		allowed = "('pending', 'running', 'continuation_pending')"
 	case "completed":
 		allowed = "('running')"
 	case "superseded":
@@ -1824,7 +1947,15 @@ func (s *Store) CompleteRun(ctx context.Context, runID, status, errorMessage str
 	if err != nil {
 		return err
 	}
-	return s.requireRunTransition(ctx, result, runID, status)
+	if err := s.requireRunTransition(ctx, result, runID, status); err != nil {
+		return err
+	}
+	planStatus := PlanStatusApproved
+	if status == "completed" {
+		planStatus = PlanStatusExecuted
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE plans SET status = ?, updated_at = ? WHERE id = (SELECT plan_id FROM runs WHERE id = ?) AND status = ?`, planStatus, now, runID, PlanStatusExecuting)
+	return err
 }
 
 func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
@@ -1834,19 +1965,26 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var agentID string
-	if err := tx.QueryRowContext(ctx, `SELECT agent_id FROM runs WHERE id = ?`, runID).Scan(&agentID); err != nil {
+	var agentID, currentStatus, currentError string
+	if err := tx.QueryRowContext(ctx, `SELECT agent_id, status, COALESCE(error_message,'') FROM runs WHERE id = ?`, runID).Scan(&agentID, &currentStatus, &currentError); err != nil {
 		return err
 	}
 	now := Now()
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, now, restartReason, now, runID)
-	if err != nil {
-		return err
+	if currentStatus != "interrupted" || currentError != restartReason {
+		result, err := tx.ExecContext(ctx, `UPDATE runs SET status = 'interrupted', completed_at = ?, duration_ms = MAX(0, CAST(ROUND((julianday(?) - julianday(started_at)) * 86400000.0) AS INTEGER)), error_message = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'running')`, now, now, restartReason, now, runID)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return err
+		} else if affected != 1 {
+			return fmt.Errorf("run is not recoverable after process restart: %s", runID)
+		}
 	}
-	if affected, err := result.RowsAffected(); err != nil {
+	// Match CompleteRun's non-completed outcome. The status predicate preserves
+	// concurrent stale/cancelled transitions and makes retrying recovery safe.
+	if _, err := tx.ExecContext(ctx, `UPDATE plans SET status = ?, updated_at = ? WHERE id = (SELECT plan_id FROM runs WHERE id = ?) AND status = ?`, PlanStatusApproved, now, runID, PlanStatusExecuting); err != nil {
 		return err
-	} else if affected != 1 {
-		return fmt.Errorf("run is not recoverable after process restart: %s", runID)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'interrupted', error_message = ?, updated_at = ? WHERE id = ?`, restartReason, now, agentID); err != nil {
 		return err
@@ -1857,13 +1995,13 @@ func (s *Store) RecoverInterruptedRun(ctx context.Context, runID string) error {
 	return tx.Commit()
 }
 
-const runSelectSQL = `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), COALESCE(execution_generation,0), COALESCE(dispatch_id,''), COALESCE(duration_ms,0), COALESCE(trigger_type,'manual'), COALESCE(execution_device_id,'local'), created_at, updated_at FROM runs`
+const runSelectSQL = `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(permission_mode_cap,''), COALESCE(execution_generation,0), COALESCE(dispatch_id,''), COALESCE(duration_ms,0), COALESCE(trigger_type,'manual'), COALESCE(execution_device_id,'local'), COALESCE(execution_mode,'execute'), COALESCE(plan_id,''), COALESCE(policy_generation_snapshot,0), COALESCE(agent_generation_snapshot,0), COALESCE(tool_catalog_digest,''), COALESCE(workspace_fingerprint,''), COALESCE(auto_continuation_mode,'off'), COALESCE(continuation_count,0), COALESCE(continuation_segment_turns,0), COALESCE(turn_count,0), COALESCE(max_total_turns,0), COALESCE(max_continuations,0), COALESCE(max_total_tokens,0), COALESCE(consumed_input_tokens,0), COALESCE(consumed_output_tokens,0), COALESCE(deadline_at,''), COALESCE(resume_after_message_id,''), COALESCE(last_stop_reason,''), COALESCE(continuation_reason,''), COALESCE(waiting_background_task_id,''), created_at, updated_at FROM runs`
 
 type runScanner func(dest ...any) error
 
 func scanRun(scan runScanner) (Run, error) {
 	var run Run
-	err := scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.ExecutionGeneration, &run.DispatchID, &run.DurationMS, &run.TriggerType, &run.ExecutionDeviceID, &run.CreatedAt, &run.UpdatedAt)
+	err := scan(&run.ID, &run.AgentID, &run.TriggerMessageID, &run.Status, &run.StartedAt, &run.CompletedAt, &run.ErrorMessage, &run.BaseHead, &run.EndHead, &run.CheckpointRepoRoot, &run.GitSnapshotAt, &run.CheckpointState, &run.CheckpointError, &run.RolledBackAt, &run.Source, &run.SourceID, &run.PermissionModeCap, &run.ExecutionGeneration, &run.DispatchID, &run.DurationMS, &run.TriggerType, &run.ExecutionDeviceID, &run.ExecutionMode, &run.PlanID, &run.PolicyGenerationSnapshot, &run.AgentGenerationSnapshot, &run.ToolCatalogDigest, &run.WorkspaceFingerprint, &run.AutoContinuationMode, &run.ContinuationCount, &run.ContinuationSegmentTurns, &run.TurnCount, &run.MaxTotalTurns, &run.MaxContinuations, &run.MaxTotalTokens, &run.ConsumedInputTokens, &run.ConsumedOutputTokens, &run.DeadlineAt, &run.ResumeAfterMessageID, &run.LastStopReason, &run.ContinuationReason, &run.WaitingBackgroundTaskID, &run.CreatedAt, &run.UpdatedAt)
 	return run, err
 }
 
@@ -2202,6 +2340,27 @@ func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
 	})
 }
 
+func (s *Store) UpdateAgentTitle(ctx context.Context, id, title string) (Agent, error) {
+	id = strings.TrimSpace(id)
+	title = strings.TrimSpace(title)
+	if err := validateP2P3Text("agent id", id, 128, true, false); err != nil {
+		return Agent{}, err
+	}
+	if err := validateP2P3Text("agent title", title, 200, true, false); err != nil || strings.ContainsAny(title, "\r\n") {
+		return Agent{}, errors.New("invalid agent title")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET title = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`, title, Now(), id)
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, sql.ErrNoRows
+	}
+	return s.GetAgent(ctx, id)
+}
+
 func (s *Store) UpdateAgentCWD(ctx context.Context, id, cwd string) (Agent, error) {
 	now := Now()
 	result, err := s.db.ExecContext(ctx, `UPDATE agents SET cwd = ?, entity_generation = entity_generation + 1, permission_generation = permission_generation + 1, updated_at = ? WHERE id = ?`, cwd, now, id)
@@ -2392,7 +2551,7 @@ func (s *Store) AddMessageWithAttachments(ctx context.Context, msg Message, atta
 		return Message{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, provider_state_json, content_text, turn_usage_json, command_text, correction_of_message_id, created_by, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), string(msg.ProviderStateJSON), msg.ContentText, turnUsageJSON, nullEmpty(msg.CommandText), msg.CorrectionOfMessageID, createdBy, msg.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_messages (id, agent_id, run_id, parent_tool_use_id, role, content_json, provider_state_json, content_text, turn_usage_json, command_text, correction_of_message_id, created_by, completion_state, stop_reason, created_at) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, msg.ID, msg.AgentID, msg.RunID, nullEmpty(msg.ParentToolID), msg.Role, string(msg.ContentJSON), string(msg.ProviderStateJSON), msg.ContentText, turnUsageJSON, nullEmpty(msg.CommandText), msg.CorrectionOfMessageID, createdBy, msg.CompletionState, msg.StopReason, msg.CreatedAt); err != nil {
 		return Message{}, err
 	}
 	storedAttachments := make([]Attachment, 0, len(attachments))
@@ -2530,7 +2689,7 @@ func (s *Store) ListMessagesPage(ctx context.Context, agentID, before string, li
 	if err != nil {
 		return MessagePage{}, err
 	}
-	query := `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ?`
+	query := `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), COALESCE(completion_state,''), COALESCE(stop_reason,''), created_at FROM agent_messages WHERE agent_id = ?`
 	args := []any{agentID}
 	if cursor.ID != "" {
 		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
@@ -2606,7 +2765,7 @@ func decodeMessageCursor(value string) (messageCursor, error) {
 }
 
 func (s *Store) listMessages(ctx context.Context, agentID string) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC, id ASC`, agentID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), role, COALESCE(content_json,''), COALESCE(provider_state_json,''), COALESCE(content_text,''), COALESCE(turn_usage_json,''), COALESCE(parent_tool_use_id,''), COALESCE(command_text,''), COALESCE(correction_of_message_id,''), COALESCE(created_by,''), COALESCE(completion_state,''), COALESCE(stop_reason,''), created_at FROM agent_messages WHERE agent_id = ? ORDER BY created_at ASC, id ASC`, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -2619,7 +2778,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var raw, providerState, turnUsage string
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &providerState, &m.ContentText, &turnUsage, &m.ParentToolID, &m.CommandText, &m.CorrectionOfMessageID, &m.CreatedBy, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.RunID, &m.Role, &raw, &providerState, &m.ContentText, &turnUsage, &m.ParentToolID, &m.CommandText, &m.CorrectionOfMessageID, &m.CreatedBy, &m.CompletionState, &m.StopReason, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if raw != "" {
@@ -2814,7 +2973,40 @@ func (s *Store) ListPendingToolCalls(ctx context.Context, agentID string) ([]Too
 }
 
 func (s *Store) ListToolCallsByRun(ctx context.Context, agentID, runID string) ([]ToolCall, error) {
-	return s.listToolCalls(ctx, `WHERE agent_id = ? AND run_id = ? ORDER BY created_at ASC`, agentID, runID)
+	return s.listToolCalls(ctx, `WHERE agent_id = ? AND run_id = ? ORDER BY created_at ASC, id ASC`, agentID, runID)
+}
+
+func (s *Store) ListToolCallsByRunWindow(ctx context.Context, agentID, runID string, limit, offset int) ([]ToolCall, error) {
+	if limit <= 0 || offset < 0 {
+		return nil, fmt.Errorf("invalid tool call window limit=%d offset=%d", limit, offset)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, COALESCE(run_id,''), COALESCE(message_id,''), tool_use_id, tool_name, COALESCE(input_json,''), COALESCE(output_json,''), status, COALESCE(duration_ms,0), COALESCE(error_message,''), COALESCE(execution_device_id,'local'), COALESCE(started_at,''), COALESCE(completed_at,''), created_at, COALESCE(updated_at, created_at) FROM agent_tool_calls WHERE agent_id = ? AND run_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, agentID, runID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	calls := make([]ToolCall, 0, limit)
+	for rows.Next() {
+		var call ToolCall
+		var input, output string
+		if err := rows.Scan(&call.ID, &call.AgentID, &call.RunID, &call.MessageID, &call.ToolUseID, &call.ToolName, &input, &output, &call.Status, &call.DurationMS, &call.ErrorMessage, &call.ExecutionDeviceID, &call.StartedAt, &call.CompletedAt, &call.CreatedAt, &call.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if input != "" {
+			call.InputJSON = json.RawMessage(input)
+		}
+		if output != "" {
+			call.OutputJSON = json.RawMessage(output)
+		}
+		calls = append(calls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(calls)-1; left < right; left, right = left+1, right-1 {
+		calls[left], calls[right] = calls[right], calls[left]
+	}
+	return calls, nil
 }
 
 func (s *Store) listToolCalls(ctx context.Context, where string, args ...any) ([]ToolCall, error) {
@@ -2869,16 +3061,19 @@ func (s *Store) RunSummary(ctx context.Context, agentID, runID string) (RunSumma
 
 func (s *Store) ActiveRunSummary(ctx context.Context, agentID string) (ActiveRunSummary, error) {
 	var summary ActiveRunSummary
-	if err := s.db.QueryRowContext(ctx, `SELECT id, agent_id, COALESCE(trigger_message_id,''), status, COALESCE(started_at,''), COALESCE(completed_at,''), COALESCE(error_message,''), COALESCE(base_head,''), COALESCE(end_head,''), COALESCE(checkpoint_repo_root,''), COALESCE(git_snapshot_at,''), COALESCE(checkpoint_state,'none'), COALESCE(checkpoint_error,''), COALESCE(rolled_back_at,''), created_at, updated_at FROM runs WHERE agent_id = ? AND status IN ('pending', 'running') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, COALESCE(started_at, created_at) DESC, id DESC LIMIT 1`, agentID).Scan(&summary.Run.ID, &summary.Run.AgentID, &summary.Run.TriggerMessageID, &summary.Run.Status, &summary.Run.StartedAt, &summary.Run.CompletedAt, &summary.Run.ErrorMessage, &summary.Run.BaseHead, &summary.Run.EndHead, &summary.Run.CheckpointRepoRoot, &summary.Run.GitSnapshotAt, &summary.Run.CheckpointState, &summary.Run.CheckpointError, &summary.Run.RolledBackAt, &summary.Run.CreatedAt, &summary.Run.UpdatedAt); err != nil {
+	run, err := scanRun(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, runSelectSQL+` WHERE agent_id = ? AND status IN ('pending', 'running', 'continuation_pending') ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'continuation_pending' THEN 1 ELSE 2 END, COALESCE(started_at, created_at) DESC, id DESC LIMIT 1`, agentID).Scan(dest...)
+	})
+	if err != nil {
 		return ActiveRunSummary{}, err
 	}
+	summary.Run = run
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_messages WHERE agent_id = ? AND run_id = ?`, agentID, summary.Run.ID).Scan(&summary.MessageCount); err != nil {
 		return ActiveRunSummary{}, err
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END),0) FROM agent_tool_calls WHERE agent_id = ? AND run_id = ?`, agentID, summary.Run.ID).Scan(&summary.ToolCallCount, &summary.PendingApprovals); err != nil {
 		return ActiveRunSummary{}, err
 	}
-	var err error
 	summary.ToolCalls, err = s.listToolCallPreviewsByRun(ctx, agentID, summary.Run.ID, 6)
 	if err != nil {
 		return ActiveRunSummary{}, err
@@ -2961,7 +3156,10 @@ func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIReque
 	if request.Kind == "" {
 		request.Kind = "model"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, agent_id, run_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, request.ID, request.AgentID, request.RunID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.CreatedAt)
+	if request.TurnIndex < 0 || request.ContinuationIndex < 0 {
+		return APIRequest{}, errors.New("api request turn indexes must not be negative")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, agent_id, run_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, stop_reason, turn_index, continuation_index, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, request.ID, request.AgentID, request.RunID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.StopReason, request.TurnIndex, request.ContinuationIndex, request.CreatedAt)
 	if err != nil {
 		return APIRequest{}, err
 	}

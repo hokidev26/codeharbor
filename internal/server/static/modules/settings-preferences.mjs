@@ -4,6 +4,8 @@ import { setRegionalPreferences } from "./locale-registry.mjs";
 import {
   appearancePrefsKey,
   appearanceStyleVersion,
+  appearanceThemeForPreset,
+  normalizeAppearanceThemePreset,
   chatDraftsKey,
   defaultAppearancePrefs,
   defaultIMGatewayPrefs,
@@ -22,8 +24,10 @@ import {
   migrateLegacyLocalPreferences,
   notificationPrefsKey,
   normalizeImportedRegionalPreferences,
+  normalizePrimaryModePreference,
   normalizeRegionalPreferences,
   preferredModelKey,
+  primaryModePrefsKey,
   profilePrefsKey,
   promptHistoryKey,
   readLocalPreference,
@@ -40,6 +44,7 @@ export function createSettingsPreferencesController({
   state,
   activeBackend,
   appendTerminal,
+  applyPrimaryMode,
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -57,6 +62,7 @@ export function createSettingsPreferencesController({
   trimTerminalOutput,
   updatePromptHistoryHint,
   updateSlashCommandPalette,
+  updateGlobalThemeToggle,
 } = {}) {
   let localPreferencesMigrated = false;
 
@@ -480,9 +486,10 @@ export function createSettingsPreferencesController({
       const raw = safeReadLocalPreference(appearancePrefsKey);
       const value = JSON.parse(raw || "{}");
       const normalized = normalizeAppearancePreferences(value);
-      if (raw !== null && Number(value?.styleVersion || 0) < appearanceStyleVersion) {
+      const normalizedText = JSON.stringify(normalized);
+      if (raw !== null && (Number(value?.styleVersion || 0) < appearanceStyleVersion || JSON.stringify(value) !== normalizedText)) {
         try {
-          localStorage.setItem(appearancePrefsKey, JSON.stringify(normalized));
+          localStorage.setItem(appearancePrefsKey, normalizedText);
         } catch {}
       }
       return normalized;
@@ -493,14 +500,19 @@ export function createSettingsPreferencesController({
 
   function normalizeAppearancePreferences(value = {}) {
     const sourceStyleVersion = Number(value.styleVersion || 0);
-    const requestedTheme = ["dark", "light"].includes(value.theme) ? value.theme : defaultAppearancePrefs.theme;
-    const theme = sourceStyleVersion >= appearanceStyleVersion || requestedTheme === "light"
-      ? requestedTheme
-      : defaultAppearancePrefs.theme;
+    const hasThemePreset = Object.prototype.hasOwnProperty.call(value, "themePreset");
+    const requestedPreset = normalizeAppearanceThemePreset(value.themePreset);
+    const legacyTheme = ["dark", "light"].includes(value.theme) ? value.theme : defaultAppearancePrefs.theme;
+    // Version 2 stored only a light/dark value. Older, unversioned preferences
+    // retain the previous safe migration to light instead of reviving a stale dark shell.
+    const themePreset = hasThemePreset
+      ? (requestedPreset || defaultAppearancePrefs.themePreset)
+      : (sourceStyleVersion >= 2 ? legacyTheme : defaultAppearancePrefs.themePreset);
     const density = ["comfortable", "compact"].includes(value.density) ? value.density : defaultAppearancePrefs.density;
     return {
       styleVersion: appearanceStyleVersion,
-      theme,
+      themePreset,
+      theme: appearanceThemeForPreset(themePreset),
       density,
       terminalDefaultOpen: value.terminalDefaultOpen !== undefined ? Boolean(value.terminalDefaultOpen) : defaultAppearancePrefs.terminalDefaultOpen,
       showEventLog: value.showEventLog !== undefined ? Boolean(value.showEventLog) : defaultAppearancePrefs.showEventLog,
@@ -529,8 +541,10 @@ export function createSettingsPreferencesController({
     // out any grid, sizing, positioning, or responsive rules.
     document.body.classList.toggle("theme-light", true);
     document.body.classList.toggle("theme-dark", prefs.theme === "dark");
+    if (document.body.dataset) document.body.dataset.themePreset = prefs.themePreset;
     document.body.classList.toggle("ui-density-compact", prefs.density === "compact");
     document.body.classList.toggle("ui-density-comfortable", prefs.density !== "compact");
+    updateGlobalThemeToggle?.();
     if (applyTerminalDefault && $("appShell")) {
       toggleTerminal?.(!prefs.terminalDefaultOpen);
     }
@@ -538,7 +552,10 @@ export function createSettingsPreferencesController({
 
   function setAppearancePreference(field, value) {
     const prefs = { ...currentAppearancePreferences() };
-    if (field === "terminalDefaultOpen" || field === "showEventLog") {
+    if (field === "theme") {
+      // Preserve the legacy public setter while persisting the preset as the source of truth.
+      prefs.themePreset = value;
+    } else if (field === "terminalDefaultOpen" || field === "showEventLog") {
       prefs[field] = value === true || value === "true";
     } else {
       prefs[field] = value;
@@ -548,6 +565,34 @@ export function createSettingsPreferencesController({
 
   function shouldLogAgentEvents() {
     return currentAppearancePreferences().showEventLog;
+  }
+
+  function loadPrimaryModePreference() {
+    return normalizePrimaryModePreference(safeReadLocalPreference(primaryModePrefsKey));
+  }
+
+  function currentPrimaryModePreference() {
+    if (!state.primaryModePreference) state.primaryModePreference = loadPrimaryModePreference();
+    return state.primaryModePreference;
+  }
+
+  function applyPrimaryModePreference() {
+    const primaryMode = currentPrimaryModePreference();
+    applyPrimaryMode?.(primaryMode);
+    return primaryMode;
+  }
+
+  function savePrimaryModePreference(next) {
+    state.primaryModePreference = normalizePrimaryModePreference(next);
+    try {
+      localStorage.setItem(primaryModePrefsKey, state.primaryModePreference);
+    } catch {}
+    applyPrimaryModePreference();
+    return state.primaryModePreference;
+  }
+
+  function setPrimaryModePreference(value) {
+    return savePrimaryModePreference(value);
   }
 
   function safeReadLocalPreference(key) {
@@ -560,6 +605,7 @@ export function createSettingsPreferencesController({
   }
 
   function localPreferenceValueForBackup(entry, raw) {
+    if (entry.key === primaryModePrefsKey) return normalizePrimaryModePreference(raw);
     if (entry.type !== "json") return raw;
     try {
       return normalizeImportedJSONPreference(entry.key, JSON.parse(raw || "null"));
@@ -627,6 +673,7 @@ export function createSettingsPreferencesController({
       return JSON.stringify(normalizeImportedJSONPreference(entry.key, parsed));
     }
     const text = String(value ?? "").trim();
+    if (entry.key === primaryModePrefsKey) return normalizePrimaryModePreference(text);
     if (entry.key === relayProtocolPrefsKey) return relayProtocolSpec(text).key;
     if (entry.key === preferredModelKey) return text.slice(0, 240);
     return text.slice(0, 1000);
@@ -668,6 +715,7 @@ export function createSettingsPreferencesController({
   }
 
   function reloadLocalPreferencesFromStorage() {
+    state.primaryModePreference = loadPrimaryModePreference();
     state.profile = loadProfilePreferences();
     state.searchPrefs = loadSearchPreferences();
     state.imGatewayPrefs = loadIMGatewayPreferences();
@@ -678,6 +726,7 @@ export function createSettingsPreferencesController({
     state.chatDrafts = loadChatDrafts();
     state.promptHistory = loadPromptHistory();
     state.appearance = loadAppearancePreferences();
+    applyPrimaryModePreference();
     applyProfilePreferences();
     applyAppearancePreferences();
     applyRegionalPreferences();
@@ -692,12 +741,14 @@ export function createSettingsPreferencesController({
 
   return {
     applyAppearancePreferences,
+    applyPrimaryModePreference,
     applyProfilePreferences,
     applyRegionalPreferences,
     createLocalPreferencesBackup,
     currentAppearancePreferences,
     currentIMGatewayPreferences,
     currentNotificationPreferences,
+    currentPrimaryModePreference,
     currentProfilePreferences,
     currentRegionalPreferences,
     currentSearchPreferences,
@@ -707,6 +758,7 @@ export function createSettingsPreferencesController({
     loadAppearancePreferences,
     loadIMGatewayPreferences,
     loadNotificationPreferences,
+    loadPrimaryModePreference,
     loadProfilePreferences,
     loadRegionalPreferences,
     loadSearchPreferences,
@@ -742,6 +794,7 @@ export function createSettingsPreferencesController({
     saveAppearancePreferences,
     saveIMGatewayPreferences,
     saveNotificationPreferences,
+    savePrimaryModePreference,
     saveProfilePreferences,
     saveRegionalPreferences,
     saveSearchPreferences,
@@ -750,6 +803,7 @@ export function createSettingsPreferencesController({
     searchProviderLabel,
     setAppearancePreference,
     setNotificationPreference,
+    setPrimaryModePreference,
     shouldLogAgentEvents,
     skillsPrefsExport,
     updateSidebarAccountSummary,

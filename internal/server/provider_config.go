@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"autoto/internal/anthropicauth"
 	"autoto/internal/codexauth"
 	"autoto/internal/config"
 	"autoto/internal/providers"
@@ -47,11 +48,12 @@ type providerDeleteResponse struct {
 }
 
 type providerTestResponse struct {
-	Reachable  bool   `json:"reachable"`
-	Configured bool   `json:"configured"`
-	ModelCount int    `json:"modelCount"`
-	ErrorCode  string `json:"errorCode,omitempty"`
-	Message    string `json:"message"`
+	Reachable  bool     `json:"reachable"`
+	Configured bool     `json:"configured"`
+	ModelCount int      `json:"modelCount"`
+	Models     []string `json:"models,omitempty"`
+	ErrorCode  string   `json:"errorCode,omitempty"`
+	Message    string   `json:"message"`
 }
 
 const (
@@ -78,6 +80,11 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Keep the full config read-modify-save-publish transaction serialized with
+	// security and continuation updates. The global config lock is always
+	// acquired before the narrower provider runtime lock.
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	existing, _ := s.providerConfig(providerName)
@@ -142,6 +149,8 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "enabled or model is required")
 		return
 	}
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	existing, ok := s.providerConfig(providerName)
@@ -212,6 +221,8 @@ func (s *Server) deleteProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	existing, ok := s.providerConfig(providerName)
@@ -328,8 +339,9 @@ func (s *Server) testProviderAdapter(w http.ResponseWriter, r *http.Request, pro
 		})
 		return
 	}
+	models = normalizeModelNames(models, provider.Model)
 	writeJSON(w, http.StatusOK, providerTestResponse{
-		Reachable: true, Configured: configured, ModelCount: distinctModelCount(models), Message: "Provider 可访问。",
+		Reachable: true, Configured: configured, ModelCount: len(models), Models: models, Message: "Provider 可访问。",
 	})
 }
 
@@ -535,6 +547,9 @@ func (s *Server) newRuntimeProvider(provider config.ProviderConfig) (providers.P
 	if provider.Type == config.ProviderTypeCodex {
 		provider.CredentialStorePath = codexauth.DefaultStoreDir(s.configSnapshot().Paths.HomeDir)
 	}
+	if provider.Name == anthropicauth.DefaultProviderName && provider.Type == "anthropic" {
+		provider.CredentialStorePath = anthropicauth.DefaultStoreDir(s.configSnapshot().Paths.HomeDir)
+	}
 	if s.store != nil {
 		if settings, err := s.store.GetRuntimeSettings(context.Background()); err == nil {
 			provider.InstallationID = settings.InstallationID
@@ -546,6 +561,9 @@ func (s *Server) newRuntimeProvider(provider config.ProviderConfig) (providers.P
 	}
 	if codexProvider, ok := adapter.(*providers.CodexProvider); ok && s.store != nil {
 		codexProvider.SetAccountTelemetry(s.store)
+	}
+	if anthropicProvider, ok := adapter.(*providers.AnthropicProvider); ok && s.store != nil {
+		anthropicProvider.SetAccountTelemetry(s.store)
 	}
 	return adapter, nil
 }

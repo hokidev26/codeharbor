@@ -20,6 +20,8 @@ export const regionalPrefsKey = "autoto.regional";
 export const chatDraftsKey = "autoto.chatDrafts";
 export const promptHistoryKey = "autoto.promptHistory";
 export const relayProtocolPrefsKey = "autoto.relayProtocol";
+export const primaryModePrefsKey = "autoto.ui.primaryMode";
+export const defaultPrimaryModePreference = "conversation";
 export const localPreferenceBackupKind = "autoto.local-preferences";
 export const legacyLocalPreferenceBackupKind = "codeharbor.local-preferences";
 export const localPreferenceBackupVersion = 1;
@@ -40,6 +42,7 @@ export const localPreferenceKeys = [
   chatDraftsKey,
   promptHistoryKey,
   relayProtocolPrefsKey,
+  primaryModePrefsKey,
 ];
 
 export function legacyLocalPreferenceKey(key) {
@@ -87,10 +90,15 @@ export const localPreferenceBackupKeys = [
   { key: recentConversationsKey, labelKey: "recentConversations", type: "json" },
   { key: preferredModelKey, labelKey: "preferredModel", type: "string" },
   { key: relayProtocolPrefsKey, labelKey: "relayProtocol", type: "string" },
+  { key: primaryModePrefsKey, labelKey: "primaryMode", type: "string" },
 ].map((entry) => ({ ...entry, label: localPreferenceBackupLabel(entry) }));
 
 export function localPreferenceBackupLabel(entry, locale = currentUILocale()) {
   return preferencesMessage(`backupLabels.${entry?.labelKey || ""}`, {}, locale);
+}
+
+export function normalizePrimaryModePreference(value) {
+  return String(value || "").trim() === "workbench" ? "workbench" : defaultPrimaryModePreference;
 }
 
 export const defaultProfilePrefs = {
@@ -166,10 +174,27 @@ export const defaultNotificationPrefs = {
   duration: "normal",
 };
 
-export const appearanceStyleVersion = 2;
+export const appearanceStyleVersion = 3;
+export const appearanceThemePresets = Object.freeze(["light", "dark", "cyber", "cream"]);
+export const appearanceThemePresetTheme = Object.freeze({
+  light: "light",
+  dark: "dark",
+  cyber: "dark",
+  cream: "light",
+});
+
+export function normalizeAppearanceThemePreset(value) {
+  const preset = String(value || "").trim().toLowerCase();
+  return appearanceThemePresets.includes(preset) ? preset : "";
+}
+
+export function appearanceThemeForPreset(preset) {
+  return appearanceThemePresetTheme[normalizeAppearanceThemePreset(preset)] || "light";
+}
 
 export const defaultAppearancePrefs = {
   styleVersion: appearanceStyleVersion,
+  themePreset: "light",
   theme: "light",
   density: "comfortable",
   terminalDefaultOpen: false,

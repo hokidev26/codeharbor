@@ -43,9 +43,9 @@ function memoryKeywordsText(keywords) {
 
 function renderMemoryStatus(item) {
   const badges = [];
-  if (item.pinned) badges.push(`<span class="settings-status-pill ok">${escapeHtml(t("memory.status.pinned"))}</span>`);
-  if (item.archived) badges.push(`<span class="settings-status-pill muted">${escapeHtml(t("memory.status.archived"))}</span>`);
-  if (!badges.length) badges.push(`<span class="settings-status-pill">${escapeHtml(t("memory.status.normal"))}</span>`);
+  if (item.pinned) badges.push(`<span class="settings-status-pill settings-badge ok">${escapeHtml(t("memory.status.pinned"))}</span>`);
+  if (item.archived) badges.push(`<span class="settings-status-pill settings-badge muted">${escapeHtml(t("memory.status.archived"))}</span>`);
+  if (!badges.length) badges.push(`<span class="settings-status-pill settings-badge">${escapeHtml(t("memory.status.normal"))}</span>`);
   return badges.join(" ");
 }
 
@@ -54,16 +54,16 @@ export function renderMemoryItem(value, { saving = false } = {}) {
   const disabled = saving ? " disabled" : "";
   const timestamp = item.updatedAt || item.createdAt;
   return `
-    <section class="settings-provider-section${item.archived ? " collapsed" : ""}" data-memory-card="${escapeAttr(item.id)}">
-      <div class="settings-provider-section-head">
+    <section class="settings-provider-section settings-card settings-data-list-row${item.archived ? " collapsed" : ""}" data-memory-card="${escapeAttr(item.id)}" aria-busy="${saving ? "true" : "false"}">
+      <div class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(item.content || t("memory.emptyItem"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(timestamp ? t("memory.updatedAt", { timestamp }) : t("memory.itemId", { id: item.id || t("memory.unknownId") }))}</div>
+          <div class="settings-provider-title settings-card-title">${escapeHtml(item.content || t("memory.emptyItem"))}</div>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(timestamp ? t("memory.updatedAt", { timestamp }) : t("memory.itemId", { id: item.id || t("memory.unknownId") }))}</div>
         </div>
         <div class="settings-action-row">${renderMemoryStatus(item)}</div>
       </div>
       <form class="settings-provider-config-form" data-memory-edit-form="${escapeAttr(item.id)}">
-        <div class="settings-provider-form-grid">
+        <div class="settings-provider-form-grid settings-form-grid">
           <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
             <textarea class="settings-field settings-textarea" rows="3" data-memory-content required${disabled}>${escapeHtml(item.content)}</textarea>
           </label>
@@ -71,11 +71,11 @@ export function renderMemoryItem(value, { saving = false } = {}) {
             <textarea class="settings-field settings-textarea" rows="2" data-memory-keywords placeholder="${escapeAttr(t("memory.keywordsPlaceholder"))}"${disabled}>${escapeHtml(memoryKeywordsText(item.keywords))}</textarea>
           </label>
         </div>
-        <div class="settings-action-row settings-form-actions">
+        <div class="settings-action-row settings-form-actions settings-inline-actions">
           <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("memory.saveChanges"))}</button>
           <button class="settings-action-btn subtle" type="button" data-memory-pin="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.pinned ? "memory.unpin" : "memory.pin"))}</button>
           <button class="settings-action-btn subtle" type="button" data-memory-archive="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t(item.archived ? "memory.restore" : "memory.archive"))}</button>
-          <button class="settings-action-btn danger" type="button" data-memory-delete="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t("memory.delete"))}</button>
+          <button class="settings-action-btn danger destructive" type="button" data-memory-delete="${escapeAttr(item.id)}"${disabled}>${escapeHtml(t("memory.delete"))}</button>
         </div>
       </form>
     </section>
@@ -96,80 +96,80 @@ export function renderMemorySettingsContent(value = {}) {
   const disabled = state.saving ? " disabled" : "";
   let list = "";
   if (state.loading) {
-    list = `<div class="settings-empty-card">${escapeHtml(t("memory.loading"))}</div>`;
+    list = `<div class="settings-empty-card settings-empty-state settings-skeleton" aria-busy="true">${escapeHtml(t("memory.loading"))}</div>`;
   } else if (!state.items.length) {
-    list = `<div class="settings-empty-card">${escapeHtml(state.query ? t("memory.noMatches", { query: state.query }) : t("memory.emptyList"))}</div>`;
+    list = `<div class="settings-empty-card settings-empty-state">${escapeHtml(state.query ? t("memory.noMatches", { query: state.query }) : t("memory.emptyList"))}</div>`;
   } else {
     list = state.items.map((item) => renderMemoryItem(item, { saving: state.saving })).join("");
   }
 
   return `
-    <div class="settings-live-page memory-settings-page">
-      <section class="settings-hero-card">
+    <div class="settings-live-page memory-settings-page settings-page-section" aria-live="polite" aria-busy="${state.loading || state.saving ? "true" : "false"}">
+      <section class="settings-hero-card settings-card settings-card-header">
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("memory.heroKicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(t("memory.heroTitle"))}</div>
-          <p>${escapeHtml(t("memory.heroDescription"))}</p>
+          <div class="settings-hero-title settings-card-title">${escapeHtml(t("memory.heroTitle"))}</div>
+          <p class="settings-card-description">${escapeHtml(t("memory.heroDescription"))}</p>
         </div>
-        <div class="settings-action-row">
+        <div class="settings-action-row settings-toolbar settings-inline-actions">
           <button id="refreshMemoriesBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("common.refresh"))}</button>
         </div>
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(String(state.items.length))}</strong><span>${escapeHtml(t("memory.currentResults"))}</span></div>
-        <div><strong>${escapeHtml(String(pinnedCount))}</strong><span>${escapeHtml(t("memory.status.pinned"))}</span></div>
-        <div><strong>${escapeHtml(String(archivedCount))}</strong><span>${escapeHtml(t("memory.status.archived"))}</span></div>
+      <div class="settings-status-strip settings-stat-grid" aria-label="${escapeAttr(t("memory.currentResults"))}">
+        <div class="settings-stat-card"><strong>${escapeHtml(String(state.items.length))}</strong><span>${escapeHtml(t("memory.currentResults"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(pinnedCount))}</strong><span>${escapeHtml(t("memory.status.pinned"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(archivedCount))}</strong><span>${escapeHtml(t("memory.status.archived"))}</span></div>
       </div>
-      ${state.error ? `<div class="settings-inline-alert">${escapeHtml(state.error)}</div>` : ""}
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
+      ${state.error ? `<div class="settings-inline-alert settings-alert" role="alert" aria-live="assertive">${escapeHtml(state.error)}</div>` : ""}
+      <section class="settings-provider-section settings-card settings-page-section highlighted">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("memory.searchTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("memory.searchDescription"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("memory.searchTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("memory.searchDescription"))}</div>
           </div>
         </div>
         <form id="memorySearchForm" class="settings-provider-config-form">
-          <div class="settings-provider-form-grid">
+          <div class="settings-provider-form-grid settings-form-grid">
             <label>${escapeHtml(t("memory.searchLabel"))}
               <input id="memorySearchInput" class="settings-field" value="${escapeAttr(state.query)}" placeholder="${escapeAttr(t("memory.searchPlaceholder"))}"${disabled} />
             </label>
-            <label class="settings-checkbox-field">
+            <label class="settings-checkbox-field settings-switch-row">
               <input id="memoryIncludeArchived" type="checkbox" ${state.includeArchived ? "checked" : ""}${disabled} />
               <span>${escapeHtml(t("memory.includeArchived"))}</span>
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-inline-actions">
             <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t("common.search"))}</button>
             <button id="clearMemorySearchBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("memory.clearSearch"))}</button>
           </div>
         </form>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-card settings-page-section">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("memory.createTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("memory.createDescription"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("memory.createTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("memory.createDescription"))}</div>
           </div>
         </div>
         <form id="createMemoryForm" class="settings-provider-config-form">
-          <div class="settings-provider-form-grid">
+          <div class="settings-provider-form-grid settings-form-grid">
             <label class="settings-form-span-2">${escapeHtml(t("memory.contentLabel"))}
               <textarea id="newMemoryContent" class="settings-field settings-textarea" rows="3" required placeholder="${escapeAttr(t("memory.contentPlaceholder"))}"${disabled}></textarea>
             </label>
             <label>${escapeHtml(t("memory.keywordsLabel"))}
               <textarea id="newMemoryKeywords" class="settings-field settings-textarea" rows="2" placeholder="${escapeAttr(t("memory.newKeywordsPlaceholder"))}"${disabled}></textarea>
             </label>
-            <label class="settings-checkbox-field">
+            <label class="settings-checkbox-field settings-switch-row">
               <input id="newMemoryPinned" type="checkbox"${disabled} />
               <span>${escapeHtml(t("memory.pinAfterCreate"))}</span>
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-inline-actions">
             <button class="settings-action-btn primary" type="submit"${disabled}>${escapeHtml(t(state.saving ? "memory.saving" : "memory.create"))}</button>
           </div>
         </form>
       </section>
-      <div class="settings-provider-cards">${list}</div>
+      <div class="settings-provider-cards settings-data-list" aria-live="polite">${list}</div>
     </div>
   `;
 }

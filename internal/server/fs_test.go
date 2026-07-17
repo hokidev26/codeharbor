@@ -29,13 +29,13 @@ func TestFSOperationsRejectSymlinkEscape(t *testing.T) {
 	}
 
 	browse := httptest.NewRecorder()
-	app.fsBrowse(browse, httptest.NewRequest(http.MethodGet, "/api/fs/browse?path=.", nil))
+	app.fsBrowse(browse, newTestRequest(http.MethodGet, "/api/fs/browse?path=.", nil))
 	if browse.Code != http.StatusOK || strings.Contains(browse.Body.String(), "secret.txt") {
 		t.Fatalf("browse must hide external symlink target, code=%d body=%s", browse.Code, browse.Body.String())
 	}
 
 	mkdir := httptest.NewRecorder()
-	app.fsMkdir(mkdir, httptest.NewRequest(http.MethodPost, "/api/fs/mkdir", strings.NewReader(`{"path":"link/new-directory"}`)))
+	app.fsMkdir(mkdir, newTestRequest(http.MethodPost, "/api/fs/mkdir", strings.NewReader(`{"path":"link/new-directory"}`)))
 	if mkdir.Code != http.StatusBadRequest {
 		t.Fatalf("expected mkdir symlink rejection, got %d: %s", mkdir.Code, mkdir.Body.String())
 	}
@@ -51,7 +51,7 @@ func TestFSPreviewBoundsLargeFiles(t *testing.T) {
 	}
 	app := New(config.Config{Paths: config.PathsConfig{DefaultProjectDir: project}}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	app.fsPreview(recorder, httptest.NewRequest(http.MethodGet, "/api/fs/preview?path=large.txt", nil))
+	app.fsPreview(recorder, newTestRequest(http.MethodGet, "/api/fs/preview?path=large.txt", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -72,7 +72,7 @@ func TestFSDirectoriesRestrictsRemoteRootEnumeration(t *testing.T) {
 	outside := t.TempDir()
 	app := New(config.Config{Paths: config.PathsConfig{DefaultProjectDir: project}, Security: config.SecurityConfig{Exposed: true}}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	app.fsDirectories(recorder, httptest.NewRequest(http.MethodGet, "/api/fs/directories?path="+outside, nil))
+	app.fsDirectories(recorder, newTestRequest(http.MethodGet, "/api/fs/directories?path="+outside, nil))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected remote root restriction, got %d: %s", recorder.Code, recorder.Body.String())
 	}

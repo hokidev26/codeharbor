@@ -41,7 +41,7 @@ test("terminal toggle synchronizes the legacy header button ARIA state", () => {
   };
   try {
     const controller = createTerminalController({
-      state: {},
+      state: { remoteAccess: { session: { remote: false }, capabilities: { terminalAllowed: true } } },
       showToast: () => {},
       refreshActiveSettingsPanel: () => {},
     });
@@ -59,6 +59,65 @@ test("terminal toggle synchronizes the legacy header button ARIA state", () => {
     controller.toggleTerminal(true);
     assert.equal(button.classList.contains("active"), false);
     assert.equal(button.attributes.get("aria-pressed"), "false");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("terminal management action cards omit redundant descriptions", () => {
+  const previousDocument = globalThis.document;
+  const elements = {
+    appShell: { classList: classList(["terminal-collapsed"]) },
+    terminalOutput: { textContent: "hello\nworld" },
+  };
+  globalThis.document = {
+    body: { classList: classList() },
+    getElementById: (id) => elements[id] || null,
+  };
+  try {
+    const controller = createTerminalController({
+      state: {
+        agent: { cwd: "/workspace" },
+        terminalPrefs: { clearOnReconnect: false, focusOnConnect: true, maxLines: 5000 },
+        remoteAccess: { session: { remote: false }, capabilities: { terminalAllowed: true } },
+      },
+      formatNumber: (value) => String(value),
+    });
+    const html = controller.renderTerminalSettingsContent();
+    const cards = html.match(/<button class="terminal-control-card settings-card"[\s\S]*?<\/button>/g) || [];
+
+    assert.equal(cards.length, 4);
+    cards.forEach((card) => assert.doesNotMatch(card, /<small>/));
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("terminal policy enforcement closes an active socket after fail-closed downgrade", () => {
+  const previousDocument = globalThis.document;
+  const status = { textContent: "" };
+  globalThis.document = {
+    body: { classList: classList() },
+    getElementById: (id) => id === "terminalStatus" ? status : null,
+  };
+  const closed = [];
+  const state = {
+    remoteAccessFailClosed: true,
+    remoteAccess: {
+      session: { remote: true, authenticated: true, mode: "full" },
+      capabilities: { terminalAllowed: true, maxPermissionMode: "bypassPermissions", filesystemScope: "host" },
+    },
+    terminalWS: { close: (...args) => closed.push(args) },
+  };
+  try {
+    const controller = createTerminalController({ state, refreshActiveSettingsPanel: () => {} });
+    assert.equal(controller.enforceAccessPolicy(), false);
+    assert.equal(state.terminalWS, null);
+    assert.equal(state.terminalStatus, "remote-locked");
+    assert.deepEqual(closed, [[1008, "remote access capability changed"]]);
+    assert.match(status.textContent, /remote-locked|远程|Remote/i);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

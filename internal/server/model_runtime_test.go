@@ -151,7 +151,7 @@ func TestRuntimeModelSettingsAndSettingsResponse(t *testing.T) {
 	}
 
 	settingsResponse := httptest.NewRecorder()
-	app.Routes().ServeHTTP(settingsResponse, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	app.Routes().ServeHTTP(settingsResponse, newTestRequest(http.MethodGet, "/api/settings", nil))
 	if settingsResponse.Code != http.StatusOK {
 		t.Fatalf("settings response: %d %s", settingsResponse.Code, settingsResponse.Body.String())
 	}
@@ -165,6 +165,43 @@ func TestRuntimeModelSettingsAndSettingsResponse(t *testing.T) {
 	wantTierOrder := []string{"free", "plus", "pro", "team", "enterprise", "education_k12"}
 	if !reflect.DeepEqual(settingsBody.TierOrder, wantTierOrder) || settingsBody.RuntimeSettings.SubscriptionTier != "education_k12" {
 		t.Fatalf("unexpected settings metadata: %+v", settingsBody)
+	}
+}
+
+func TestAgentModelSettingsPersistDefaultsAndRolePools(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	app := New(config.Config{
+		Paths: config.PathsConfig{HomeDir: home},
+		Agent: config.AgentConfig{DefaultModel: "openai:old", SummaryModel: "openai:old"},
+	}, nil, nil, nil)
+	app.SetConfigPath(configPath)
+	handler := modelRuntimeTestHandler(app)
+	body := `{"defaultModel":"codex:gpt-5.5","summaryModel":"openai:gpt-4.1-mini","subagentModels":{"explore":"codex:gpt-5.4-mini","general":"codex:gpt-5.5"},"subagentModelPools":{"explore":["codex:gpt-5.4-mini","openai:gpt-4.1-mini"],"general":["codex:gpt-5.5"]}}`
+	response := modelRuntimeRequest(handler, http.MethodPatch, "/runtime/agent-model-settings", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("patch agent model settings: %d %s", response.Code, response.Body.String())
+	}
+	updated := app.configSnapshot().Agent
+	if updated.DefaultModel != "codex:gpt-5.5" || updated.SummaryModel != "openai:gpt-4.1-mini" || updated.SubagentModels["explore"] != "codex:gpt-5.4-mini" || len(updated.SubagentModelPools["explore"]) != 2 {
+		t.Fatalf("unexpected agent model settings: %+v", updated)
+	}
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persisted.Agent.SubagentModels, updated.SubagentModels) || !reflect.DeepEqual(persisted.Agent.SubagentModelPools, updated.SubagentModelPools) {
+		t.Fatalf("agent model settings were not persisted: %+v", persisted.Agent)
+	}
+	for _, invalidBody := range []string{
+		`{"defaultModel":"missing-colon","summaryModel":"openai:gpt","subagentModels":{},"subagentModelPools":{}}`,
+		`{"defaultModel":"openai:gpt","summaryModel":"openai:gpt","subagentModels":{"unknown":"openai:gpt"},"subagentModelPools":{}}`,
+		`{"defaultModel":"openai:gpt","summaryModel":"openai:gpt","subagentModels":{"plan":"openai:gpt"},"subagentModelPools":{"plan":["codex:gpt"]}}`,
+	} {
+		invalid := modelRuntimeRequest(handler, http.MethodPatch, "/runtime/agent-model-settings", invalidBody)
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("expected invalid agent settings rejection for %s, got %d: %s", invalidBody, invalid.Code, invalid.Body.String())
+		}
 	}
 }
 
@@ -283,7 +320,7 @@ func TestAgentFastModeRequiresModelCapabilityAndDisablesOnModelSwitch(t *testing
 	}
 
 	switched := httptest.NewRecorder()
-	switchRequest := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/model", strings.NewReader(`{"model":"basic:model"}`))
+	switchRequest := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/model", strings.NewReader(`{"model":"basic:model"}`))
 	switchRequest.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(switched, switchRequest)
 	if switched.Code != http.StatusOK {
@@ -318,7 +355,7 @@ func TestAgentReasoningEffortAPIPersistsXHigh(t *testing.T) {
 	app := New(config.Config{}, store, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"XHIGH"}`))
+	request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"XHIGH"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -337,7 +374,7 @@ func TestAgentReasoningEffortAPIPersistsXHigh(t *testing.T) {
 	}
 
 	invalid := httptest.NewRecorder()
-	invalidRequest := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"extreme"}`))
+	invalidRequest := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"extreme"}`))
 	invalidRequest.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(invalid, invalidRequest)
 	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "xhigh") {
@@ -363,6 +400,7 @@ func modelRuntimeTestHandler(app *Server) http.Handler {
 	router.Put("/aggregates/{name}", app.putModelAggregate)
 	router.Delete("/aggregates/{name}", app.deleteModelAggregate)
 	router.Patch("/runtime/model-settings", app.updateRuntimeModelSettings)
+	router.Patch("/runtime/agent-model-settings", app.updateAgentModelSettings)
 	router.Patch("/agents/{id}/reasoning", app.updateAgentReasoningEffort)
 	router.Patch("/agents/{id}/fast-mode", app.updateAgentFastMode)
 	router.Get("/client/identity", app.clientIdentity)
@@ -372,7 +410,7 @@ func modelRuntimeTestHandler(app *Server) http.Handler {
 
 func modelRuntimeRequest(handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	request := newTestRequest(method, target, bytes.NewBufferString(body))
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}

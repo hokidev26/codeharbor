@@ -24,6 +24,12 @@ function firstString(...values) {
 }
 
 export function executionNotificationFamily(value) {
+  const eventType = typeof value === "object" ? firstString(value?.type, value?.event, value?.data?.type, value?.data?.event) : "";
+  const normalizedEventType = eventType.trim().toLowerCase().replaceAll("-", "_");
+  const eventStatus = firstString(value?.status, value?.data?.status, value?.task?.status, value?.backgroundTask?.status).toLowerCase();
+  if (normalizedEventType === "task.completed" || (normalizedEventType === "task.status" && ["completed", "complete", "success", "succeeded", "failed", "error", "cancelled", "canceled", "interrupted"].includes(eventStatus))) return "task_terminal";
+  if (normalizedEventType === "agent.continuation_blocked") return "continuation_blocked";
+  if (normalizedEventType === "agent.budget_exhausted") return "budget_exhausted";
   const candidate = typeof value === "string"
     ? value
     : firstString(
@@ -39,6 +45,7 @@ export function executionNotificationFamily(value) {
     );
   const token = String(candidate || "").trim().toLowerCase().replaceAll("-", "_");
   if (!token) return "";
+  if (["task_terminal", "continuation_blocked", "budget_exhausted"].includes(token)) return token;
   if (token === "approval_required" || token === "pending_approval" || token.endsWith(".approval_required")) return "approval_required";
   if (["done", "completed", "complete", "success", "succeeded"].includes(token) || token.endsWith(".done") || token.endsWith(".completed")) return "completed";
   if (["error", "failed", "failure"].includes(token) || token.endsWith(".error") || token.endsWith(".failed")) return "error";
@@ -48,12 +55,33 @@ export function executionNotificationFamily(value) {
   return "";
 }
 
+function notificationScope(value, family) {
+  if (!value || typeof value !== "object") return "";
+  const raw = value.raw && typeof value.raw === "object" ? value.raw : value;
+  const data = raw.data && typeof raw.data === "object" ? raw.data : {};
+  if (family === "task_terminal") {
+    const id = firstString(value.taskId, raw.taskId, raw.backgroundTaskId, raw.task?.id, raw.backgroundTask?.id, data.taskId, data.backgroundTaskId, data.task?.id);
+    return id ? `task:${id}` : "task";
+  }
+  if (family === "continuation_blocked") {
+    const count = normalizedGeneration(value.continuationCount ?? raw.continuationCount ?? raw.count ?? data.continuationCount ?? data.count);
+    const reason = firstString(value.reason, raw.reason, data.reason, data.blockedReason).slice(0, 80);
+    return `continuation:${count ?? (reason || "blocked")}`;
+  }
+  if (family === "budget_exhausted") {
+    const budget = firstString(value.budget, raw.budget, raw.budgetKind, data.budget, data.budgetKind, data.reason).slice(0, 80);
+    return `budget:${budget || "exhausted"}`;
+  }
+  return "";
+}
+
 export function executionNotificationKey(agentId, executionGeneration, familyOrEvent) {
   const normalizedAgentId = String(agentId || "").trim();
   const generation = normalizedGeneration(executionGeneration);
   const family = executionNotificationFamily(familyOrEvent);
   if (!normalizedAgentId || generation === null || !family) return "";
-  return `${normalizedAgentId}:${generation}:${family}`;
+  const scope = notificationScope(familyOrEvent, family);
+  return `${normalizedAgentId}:${generation}:${scope ? `${scope}:` : ""}${family}`;
 }
 
 function loadState(storage, storageKey, maxEntries, maxAgents) {
@@ -98,7 +126,7 @@ function notificationRecord(value, fallback = {}) {
   const run = value.run && typeof value.run === "object" ? value.run : null;
   const data = value.data && typeof value.data === "object" ? value.data : null;
   const agentId = firstString(value.agentId, run?.agentId, data?.agentId, fallback.agentId);
-  const executionGeneration = normalizedGeneration(
+  let executionGeneration = normalizedGeneration(
     value.executionGeneration
       ?? value.generation
       ?? run?.executionGeneration
@@ -106,6 +134,7 @@ function notificationRecord(value, fallback = {}) {
       ?? fallback.executionGeneration,
   );
   const family = executionNotificationFamily(value);
+  if (executionGeneration === null && ["task_terminal", "continuation_blocked", "budget_exhausted"].includes(family)) executionGeneration = 0;
   if (!agentId || executionGeneration === null || !family) return null;
   return {
     agentId,
@@ -113,6 +142,10 @@ function notificationRecord(value, fallback = {}) {
     family,
     runId: firstString(value.runId, value.id, run?.id, data?.runId),
     toolUseId: firstString(value.toolUseId, data?.toolUseId),
+    taskId: firstString(value.taskId, value.backgroundTaskId, value.task?.id, value.backgroundTask?.id, data?.taskId, data?.backgroundTaskId, data?.task?.id),
+    continuationCount: normalizedGeneration(value.continuationCount ?? value.count ?? data?.continuationCount ?? data?.count),
+    reason: firstString(value.reason, data?.reason, data?.blockedReason),
+    budget: firstString(value.budget, value.budgetKind, data?.budget, data?.budgetKind),
     raw: value,
   };
 }
@@ -143,11 +176,28 @@ function snapshotRecords(snapshot, fallbackAgentId, fallbackGeneration) {
       });
     }
   }
+  for (const task of [...(Array.isArray(snapshot?.backgroundTasks) ? snapshot.backgroundTasks : []), ...(Array.isArray(snapshot?.recentBackgroundTasks) ? snapshot.recentBackgroundTasks : [])]) {
+    const status = firstString(task?.status, task?.state).toLowerCase();
+    if (!["completed", "complete", "success", "succeeded", "failed", "error", "cancelled", "canceled", "interrupted"].includes(status)) continue;
+    records.push({
+      ...task,
+      type: "task.completed",
+      taskId: firstString(task?.taskId, task?.id),
+      executionGeneration: task?.executionGeneration ?? fallbackGeneration,
+      agentId: task?.agentId || fallbackAgentId,
+    });
+  }
+  const continuation = snapshot?.continuation;
+  if (continuation && typeof continuation === "object") {
+    const status = firstString(continuation.status, continuation.state).toLowerCase();
+    if (status === "blocked" || status === "continuation_blocked") records.push({ ...continuation, type: "agent.continuation_blocked", executionGeneration: continuation.executionGeneration ?? fallbackGeneration, agentId: fallbackAgentId });
+    if (status === "budget_exhausted" || continuation.budgetExhausted === true) records.push({ ...continuation, type: "agent.budget_exhausted", executionGeneration: continuation.executionGeneration ?? fallbackGeneration, agentId: fallbackAgentId });
+  }
   const unique = new Map();
   for (const value of records) {
     const record = notificationRecord(value, { agentId: fallbackAgentId, executionGeneration: fallbackGeneration });
     if (!record) continue;
-    const key = executionNotificationKey(record.agentId, record.executionGeneration, record.family);
+    const key = executionNotificationKey(record.agentId, record.executionGeneration, record);
     if (key && !unique.has(key)) unique.set(key, record);
   }
   return [...unique.values()];
@@ -225,7 +275,7 @@ export function createExecutionNotifications({
     const fresh = [];
     for (const record of records) {
       changed = updateCheckpoint(record.agentId, record.executionGeneration) || changed;
-      const key = executionNotificationKey(record.agentId, record.executionGeneration, record.family);
+      const key = executionNotificationKey(record.agentId, record.executionGeneration, record);
       if (!rememberKey(key)) {
         duplicateCount += 1;
         continue;

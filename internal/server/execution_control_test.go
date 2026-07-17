@@ -181,6 +181,63 @@ func TestRemoteExecutionLedgerFailsClosedUntilReadyAndAuthorized(t *testing.T) {
 	}
 }
 
+func TestRemoteExecutionTasksRespectMembership(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "execution-membership.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	project, _, agent, err := store.CreateProject(ctx, "Owner", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := store.RegisterRemoteExecutionDevice(ctx, db.ExecutionDeviceRegistration{Name: "member-device", IdentityFingerprint: "sha256:member-device"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE execution_devices SET enabled = 1, status = 'ready' WHERE id = ?`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectDeviceGrant(ctx, db.ProjectDeviceGrant{ProjectID: project.ID, DeviceID: device.ID, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAgentExecutionDevice(ctx, agent.ID, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.CreateRemoteExecutionTask(ctx, db.RemoteExecutionTask{IdempotencyKey: "member-task", ProjectID: project.ID, AgentID: agent.ID, ExecutionDeviceID: device.ID, Payload: json.RawMessage(`{"operation":"read"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{Auth: config.AuthConfig{RegistrationOpen: true}}, store, nil, nil)
+	owner := registerCollaborationTestUser(t, app, "execution-owner")
+	ownerUser, _, err := store.GetUserByHandle(ctx, "execution-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignUnownedProjectsToUser(ctx, ownerUser.ID); err != nil {
+		t.Fatal(err)
+	}
+	outsider := registerCollaborationTestUser(t, app, "execution-outsider")
+
+	ownerList := executionControlRequestWithCookie(app.Routes(), http.MethodGet, "/api/execution/tasks", nil, owner)
+	if ownerList.Code != http.StatusOK || !strings.Contains(ownerList.Body.String(), task.ID) {
+		t.Fatalf("owner task list missing task: %d %s", ownerList.Code, ownerList.Body.String())
+	}
+	outsiderList := executionControlRequestWithCookie(app.Routes(), http.MethodGet, "/api/execution/tasks", nil, outsider)
+	if outsiderList.Code != http.StatusOK || strings.Contains(outsiderList.Body.String(), task.ID) || strings.Contains(outsiderList.Body.String(), "operation") {
+		t.Fatalf("outsider task list leaked payload: %d %s", outsiderList.Code, outsiderList.Body.String())
+	}
+	outsiderGet := executionControlRequestWithCookie(app.Routes(), http.MethodGet, "/api/execution/tasks/"+task.ID, nil, outsider)
+	if outsiderGet.Code != http.StatusNotFound || strings.Contains(outsiderGet.Body.String(), "operation") {
+		t.Fatalf("outsider task detail leaked payload: %d %s", outsiderGet.Code, outsiderGet.Body.String())
+	}
+	outsiderCreate := executionControlRequestWithCookie(app.Routes(), http.MethodPost, "/api/execution/tasks", []byte(`{"idempotencyKey":"cross-tenant","projectId":"`+project.ID+`","agentId":"`+agent.ID+`","executionDeviceId":"`+device.ID+`","payload":{"operation":"read"}}`), outsider)
+	if outsiderCreate.Code != http.StatusNotFound || strings.Contains(outsiderCreate.Body.String(), "operation") {
+		t.Fatalf("outsider task creation must be hidden: %d %s", outsiderCreate.Code, outsiderCreate.Body.String())
+	}
+}
+
 func assertSafeConflict(t *testing.T, response *httptest.ResponseRecorder, marker string) {
 	t.Helper()
 	if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), marker) {
@@ -202,9 +259,16 @@ func executionControlRawRequest(handler http.Handler, method, target, payload st
 }
 
 func executionControlRequest(handler http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, target, bytes.NewReader(body))
+	return executionControlRequestWithCookie(handler, method, target, body, nil)
+}
+
+func executionControlRequestWithCookie(handler http.Handler, method, target string, body []byte, cookie *http.Cookie) *httptest.ResponseRecorder {
+	request := newTestRequest(method, target, bytes.NewReader(body))
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != nil {
+		request.AddCookie(cookie)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)

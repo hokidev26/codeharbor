@@ -66,13 +66,24 @@ type runtimePathSummary struct {
 }
 
 type runtimeAgentSummary struct {
-	DefaultModel           string `json:"defaultModel"`
-	SummaryModel           string `json:"summaryModel"`
-	DefaultPermissionMode  string `json:"defaultPermissionMode"`
-	DefaultStartInPlanMode bool   `json:"defaultStartInPlanMode"`
-	MaxTurns               int    `json:"maxTurns"`
-	FirstTokenTimeoutMs    int    `json:"firstTokenTimeoutMs"`
-	MaxTransientRetries    int    `json:"maxTransientRetries"`
+	DefaultModel           string                      `json:"defaultModel"`
+	SummaryModel           string                      `json:"summaryModel"`
+	ReviewModel            string                      `json:"reviewModel"`
+	DefaultPermissionMode  string                      `json:"defaultPermissionMode"`
+	DefaultStartInPlanMode bool                        `json:"defaultStartInPlanMode"`
+	MaxTurns               int                         `json:"maxTurns"`
+	FirstTokenTimeoutMs    int                         `json:"firstTokenTimeoutMs"`
+	MaxTransientRetries    int                         `json:"maxTransientRetries"`
+	Continuation           runtimeContinuationSettings `json:"continuation"`
+}
+
+type runtimeContinuationSettings struct {
+	Mode             string `json:"mode"`
+	SegmentTurns     int    `json:"segmentTurns"`
+	MaxContinuations int    `json:"maxContinuations"`
+	MaxTotalTurns    int    `json:"maxTotalTurns"`
+	MaxRunDurationMs int64  `json:"maxRunDurationMs"`
+	MaxRunTokens     int64  `json:"maxRunTokens"`
 }
 
 type runtimeProviderStats struct {
@@ -86,15 +97,16 @@ type runtimeBackendStats struct {
 }
 
 type runtimeSecuritySummary struct {
-	Exposed                  bool   `json:"exposed"`
-	CurrentRequestRemote     bool   `json:"currentRequestRemote"`
-	RemoteAccessRequired     bool   `json:"remoteAccessRequired"`
-	AccessPasswordConfigured bool   `json:"accessPasswordConfigured"`
-	BypassPermissionsAllowed bool   `json:"bypassPermissionsAllowed"`
-	RemoteTerminalAllowed    bool   `json:"remoteTerminalAllowed"`
-	MaxPermissionMode        string `json:"maxPermissionMode"`
-	Mode                     string `json:"mode"`
-	Message                  string `json:"message"`
+	Exposed                  bool               `json:"exposed"`
+	CurrentRequestRemote     bool               `json:"currentRequestRemote"`
+	RemoteAccessRequired     bool               `json:"remoteAccessRequired"`
+	AccessPasswordConfigured bool               `json:"accessPasswordConfigured"`
+	BypassPermissionsAllowed bool               `json:"bypassPermissionsAllowed"`
+	RemoteTerminalAllowed    bool               `json:"remoteTerminalAllowed"`
+	MaxPermissionMode        string             `json:"maxPermissionMode"`
+	Mode                     string             `json:"mode"`
+	Message                  string             `json:"message"`
+	Capabilities             remoteCapabilities `json:"capabilities"`
 }
 
 func (s *Server) runtimeSummary(w http.ResponseWriter, r *http.Request) {
@@ -190,11 +202,13 @@ func buildRuntimeSummary(cfg config.Config, configPath string, startedAt time.Ti
 		Agent: runtimeAgentSummary{
 			DefaultModel:           cfg.Agent.DefaultModel,
 			SummaryModel:           cfg.Agent.SummaryModel,
+			ReviewModel:            cfg.Agent.ReviewModel,
 			DefaultPermissionMode:  cfg.Agent.DefaultPermissionMode,
 			DefaultStartInPlanMode: cfg.Agent.DefaultStartInPlanMode,
 			MaxTurns:               cfg.Agent.MaxTurns,
 			FirstTokenTimeoutMs:    cfg.Agent.FirstTokenTimeoutMs,
 			MaxTransientRetries:    cfg.Agent.MaxTransientRetries,
+			Continuation:           runtimeContinuationSettings{Mode: cfg.Agent.AutoContinuationMode, SegmentTurns: cfg.Agent.ContinuationSegmentTurns, MaxContinuations: cfg.Agent.MaxContinuations, MaxTotalTurns: cfg.Agent.MaxTotalTurns, MaxRunDurationMs: cfg.Agent.MaxRunDurationMs, MaxRunTokens: cfg.Agent.MaxRunTokens},
 		},
 		Security: runtimeSecuritySummary{
 			Exposed:                  cfg.Security.Exposed,
@@ -239,27 +253,33 @@ func mapBoolString(condition bool, whenTrue, whenFalse string) string {
 
 func (s *Server) runtimeSecuritySummaryForRequest(r *http.Request) runtimeSecuritySummary {
 	cfg := s.configSnapshot()
-	remoteRequest := !isLoopbackHost(r.Host) || requestHasRemoteForwardingHeaders(r)
-	hardening := cfg.Security.Exposed || remoteRequest
-	accessPasswordConfigured := strings.TrimSpace(cfg.Security.AccessPassword) != ""
+	auth := s.remoteAccessAuthentication(r)
+	capabilities := s.capabilitiesForRequest(r)
+	configured, _ := s.credentialConfigured()
+	hardening := auth.Remote && auth.Authenticated && auth.Mode == remoteAccessModeRestricted
 	summary := runtimeSecuritySummary{
 		Exposed:                  cfg.Security.Exposed,
-		CurrentRequestRemote:     remoteRequest,
-		RemoteAccessRequired:     hardening,
-		AccessPasswordConfigured: accessPasswordConfigured,
-		BypassPermissionsAllowed: !hardening,
-		RemoteTerminalAllowed:    !hardening || cfg.Security.AllowRemoteTerminal,
-		MaxPermissionMode:        "bypassPermissions",
+		CurrentRequestRemote:     auth.Remote,
+		RemoteAccessRequired:     auth.Remote,
+		AccessPasswordConfigured: configured,
+		BypassPermissionsAllowed: capabilities.MaxPermissionMode == "bypassPermissions",
+		RemoteTerminalAllowed:    capabilities.TerminalAllowed,
+		MaxPermissionMode:        capabilities.MaxPermissionMode,
 		Mode:                     "local",
 		Message:                  "本地模式：允许使用完整权限模式。",
+		Capabilities:             capabilities,
+	}
+	if auth.Remote {
+		summary.Mode = "remote-full"
+		summary.Message = "完整远程会话已启用；安全设置仍只能在运行 Autoto 的主机通过 localhost 修改。"
 	}
 	if hardening {
-		summary.MaxPermissionMode = "acceptEdits"
-		summary.Mode = "remote-hardened"
-		summary.Message = "远程收紧已启用：需要访问密码，且禁用 bypassPermissions。"
-		if !accessPasswordConfigured {
-			summary.Message = "远程收紧已启用：请配置 AUTOTO_ACCESS_PASSWORD 或仅通过已认证边缘访问。"
-		}
+		summary.Mode = "remote-restricted"
+		summary.Message = "受限远程会话已启用：Run 被限制为 acceptEdits，终端和宿主机文件系统不可用。"
+	}
+	if auth.Remote && !auth.Authenticated {
+		summary.Mode = "remote-unauthenticated"
+		summary.Message = "远程访问需要认证。请配置 AUTOTO_ACCESS_PASSWORD 或在本地安全设置中创建访问密码。"
 	}
 	return summary
 }

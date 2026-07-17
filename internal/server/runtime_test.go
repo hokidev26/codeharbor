@@ -32,6 +32,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 		Agent: config.AgentConfig{
 			DefaultModel:          "openai:gpt-4.1-mini",
 			SummaryModel:          "anthropic:claude-sonnet-4-5",
+			ReviewModel:           "openai:gpt-4.1",
 			DefaultPermissionMode: "acceptEdits",
 			MaxTurns:              120,
 			FirstTokenTimeoutMs:   45000,
@@ -53,7 +54,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 	app.SetConfigPath(configPath)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/runtime/summary", nil)
+	request := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
 	request.Host = "localhost:7788"
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -82,7 +83,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 	if body.Backends.Configured != 2 || body.Backends.Active != 1 {
 		t.Fatalf("unexpected backend stats: %+v", body.Backends)
 	}
-	if len(body.Paths) != 4 || body.Agent.DefaultModel != "openai:gpt-4.1-mini" || body.Agent.MaxTurns != 120 {
+	if len(body.Paths) != 4 || body.Agent.DefaultModel != "openai:gpt-4.1-mini" || body.Agent.ReviewModel != "openai:gpt-4.1" || body.Agent.MaxTurns != 120 {
 		t.Fatalf("unexpected config summary: paths=%+v agent=%+v", body.Paths, body.Agent)
 	}
 	if body.Security.RemoteAccessRequired || !body.Security.BypassPermissionsAllowed || body.Security.MaxPermissionMode != "bypassPermissions" {
@@ -106,11 +107,125 @@ func TestBuildRuntimeSummaryUsesSafeDefaults(t *testing.T) {
 
 func TestRuntimeSecuritySummaryUsesCanonicalPasswordEnvName(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{Exposed: true}}, nil, nil, nil)
-	request := httptest.NewRequest(http.MethodGet, "/api/runtime/summary", nil)
+	request := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	summary := app.runtimeSecuritySummaryForRequest(request)
 	if !strings.Contains(summary.Message, "AUTOTO_ACCESS_PASSWORD") || strings.Contains(summary.Message, "CODEHARBOR_ACCESS_PASSWORD") {
 		t.Fatalf("expected canonical password env guidance, got %q", summary.Message)
+	}
+}
+
+func TestRuntimeSecuritySummaryReflectsLocalUnauthenticatedRestrictedAndFullRequests(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          "secret",
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeRestricted,
+	}}, nil, nil, nil)
+
+	local := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	local.Host = "localhost:7788"
+	local.RemoteAddr = "127.0.0.1:4321"
+	localSummary := app.runtimeSecuritySummaryForRequest(local)
+	if localSummary.Mode != "local" || localSummary.CurrentRequestRemote || localSummary.MaxPermissionMode != "bypassPermissions" || !localSummary.BypassPermissionsAllowed {
+		t.Fatalf("unexpected local summary: %+v", localSummary)
+	}
+
+	unauthenticated := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	unauthenticated.Host = "remote.example.test"
+	markRemoteHTTPS(unauthenticated)
+	unauthSummary := app.runtimeSecuritySummaryForRequest(unauthenticated)
+	if unauthSummary.Mode != "remote-unauthenticated" || !unauthSummary.CurrentRequestRemote || unauthSummary.MaxPermissionMode != "acceptEdits" || unauthSummary.BypassPermissionsAllowed {
+		t.Fatalf("unexpected unauthenticated summary: %+v", unauthSummary)
+	}
+
+	restrictedCookies := loginRuntimeRemoteAccess(t, app, remoteAccessModeRestricted)
+	restricted := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	restricted.Host = "remote.example.test"
+	markRemoteHTTPS(restricted)
+	for _, cookie := range restrictedCookies {
+		restricted.AddCookie(cookie)
+	}
+	restrictedSummary := app.runtimeSecuritySummaryForRequest(restricted)
+	if restrictedSummary.Mode != "remote-restricted" || restrictedSummary.MaxPermissionMode != "acceptEdits" || restrictedSummary.BypassPermissionsAllowed || restrictedSummary.RemoteTerminalAllowed {
+		t.Fatalf("unexpected restricted summary: %+v", restrictedSummary)
+	}
+
+	fullCookies := loginRuntimeRemoteAccess(t, app, remoteAccessModeFull)
+	full := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	full.Host = "remote.example.test"
+	markRemoteHTTPS(full)
+	for _, cookie := range fullCookies {
+		full.AddCookie(cookie)
+	}
+	fullSummary := app.runtimeSecuritySummaryForRequest(full)
+	if fullSummary.Mode != "remote-full" || fullSummary.MaxPermissionMode != "bypassPermissions" || !fullSummary.BypassPermissionsAllowed || !fullSummary.RemoteTerminalAllowed {
+		t.Fatalf("unexpected full summary: %+v", fullSummary)
+	}
+}
+
+func loginRuntimeRemoteAccess(t *testing.T, app *Server, mode string) []*http.Cookie {
+	t.Helper()
+	app.cfgMu.Lock()
+	app.cfg.Security.AllowRemoteFullAccess = mode == remoteAccessModeFull
+	app.cfg.Security.DefaultRemoteAccessMode = mode
+	app.cfgMu.Unlock()
+
+	request := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret"))
+	request.Host = "remote.example.test"
+	markRemoteHTTPS(request)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "https://remote.example.test")
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("remote %s login returned %d: %s", mode, recorder.Code, recorder.Body.String())
+	}
+	return recorder.Result().Cookies()
+}
+
+func TestRuntimeSecuritySummaryReflectsRequestAuthority(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          "secret",
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeFull,
+	}}, nil, nil, nil)
+
+	local := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	local.Host = "localhost:7788"
+	localSummary := app.runtimeSecuritySummaryForRequest(local)
+	if localSummary.Mode != "local" || localSummary.CurrentRequestRemote || !localSummary.BypassPermissionsAllowed {
+		t.Fatalf("unexpected local summary: %+v", localSummary)
+	}
+
+	unauthenticated := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	unauthenticated.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(unauthenticated)
+	unauthenticatedSummary := app.runtimeSecuritySummaryForRequest(unauthenticated)
+	if unauthenticatedSummary.Mode != "remote-unauthenticated" || !unauthenticatedSummary.CurrentRequestRemote || unauthenticatedSummary.BypassPermissionsAllowed {
+		t.Fatalf("unexpected unauthenticated remote summary: %+v", unauthenticatedSummary)
+	}
+
+	restricted := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	restricted.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(restricted)
+	restricted.Header.Set("Authorization", "Bearer secret")
+	restrictedSummary := app.runtimeSecuritySummaryForRequest(restricted)
+	if restrictedSummary.Mode != "remote-restricted" || restrictedSummary.MaxPermissionMode != "acceptEdits" || restrictedSummary.RemoteTerminalAllowed {
+		t.Fatalf("unexpected restricted remote summary: %+v", restrictedSummary)
+	}
+
+	fullToken, _, err := app.newRemoteAccessSession(remoteAccessModeFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := newTestRequest(http.MethodGet, "/api/runtime/summary", nil)
+	full.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(full)
+	full.AddCookie(&http.Cookie{Name: remoteAccessCookieName, Value: fullToken})
+	fullSummary := app.runtimeSecuritySummaryForRequest(full)
+	if fullSummary.Mode != "remote-full" || fullSummary.MaxPermissionMode != "bypassPermissions" || !fullSummary.RemoteTerminalAllowed {
+		t.Fatalf("unexpected full remote summary: %+v", fullSummary)
 	}
 }
 

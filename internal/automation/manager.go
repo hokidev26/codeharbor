@@ -739,6 +739,9 @@ func notificationPayload(event agent.NotificationEvent, now time.Time) (json.Raw
 		"status": boundedText(event.Status, 96), "createdAt": now.UTC().Format(time.RFC3339Nano),
 		"executionGeneration": event.ExecutionGeneration,
 	}
+	if event.TaskID != "" {
+		payload["taskId"] = boundedText(event.TaskID, 128)
+	}
 	if event.ToolUseID != "" || event.ToolName != "" {
 		payload["tool"] = map[string]any{"toolUseId": boundedText(event.ToolUseID, 256), "toolName": boundedText(event.ToolName, 128)}
 	}
@@ -761,7 +764,7 @@ func notificationPayload(event agent.NotificationEvent, now time.Time) (json.Raw
 
 func notificationKind(event string) string {
 	switch event {
-	case "approval_required", "completed", "error", "interrupted", "superseded":
+	case "approval_required", "completed", "error", "interrupted", "superseded", "task_terminal", "continuation_blocked", "budget_exhausted":
 		return event
 	default:
 		return "event"
@@ -775,9 +778,9 @@ func shouldEnqueueWebhook(settings db.NotificationSettings, event string) bool {
 	switch event {
 	case "approval_required":
 		return settings.NotifyOnApproval
-	case "completed", "interrupted", "superseded":
+	case "completed", "interrupted", "superseded", "task_terminal":
 		return settings.NotifyOnDone
-	case "error":
+	case "error", "continuation_blocked", "budget_exhausted":
 		return settings.NotifyOnError
 	default:
 		return false
@@ -791,7 +794,7 @@ func deliveryDedupe(sinkType, sinkID string, event agent.NotificationEvent) stri
 		version = "notification:v2"
 		identity = fmt.Sprintf("%d", event.ExecutionGeneration)
 	}
-	value := strings.Join([]string{version, sinkType, sinkID, event.AgentID, identity, event.Event, event.ToolUseID}, "\x00")
+	value := strings.Join([]string{version, sinkType, sinkID, event.AgentID, identity, event.Event, event.TaskID, event.ToolUseID}, "\x00")
 	hash := sha256.Sum256([]byte(value))
 	return sinkType + ":" + hex.EncodeToString(hash[:])
 }

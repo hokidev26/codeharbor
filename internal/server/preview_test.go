@@ -152,7 +152,7 @@ func performPreviewRequest(t *testing.T, handler http.Handler, method, path stri
 			t.Fatal(err)
 		}
 	}
-	request := httptest.NewRequest(method, path, bytes.NewReader(data))
+	request := newTestRequest(method, path, bytes.NewReader(data))
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

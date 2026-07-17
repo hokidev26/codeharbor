@@ -69,7 +69,7 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", &body)
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusAccepted {
@@ -98,7 +98,7 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 
 	recorder = httptest.NewRecorder()
 	path := "/api/agents/" + agent.ID + "/messages/" + posted.ID + "/attachments/" + posted.Attachments[0].ID
-	request = httptest.NewRequest(http.MethodGet, path, nil)
+	request = newTestRequest(http.MethodGet, path, nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected attachment 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -182,7 +182,7 @@ func TestPostMessageMapsUnavailableServerSkillToConflict(t *testing.T) {
 	app := New(config.Config{}, store, runner, hub, registry)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"/disabled client prompt"}`))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"/disabled client prompt"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {

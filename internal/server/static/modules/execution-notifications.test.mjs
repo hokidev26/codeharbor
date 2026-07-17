@@ -31,6 +31,10 @@ test("execution notification keys normalize live and snapshot event families", (
   assert.equal(executionNotificationFamily({ status: "failed" }), "error");
   assert.equal(executionNotificationFamily("tool.approval_required"), "approval_required");
   assert.equal(executionNotificationKey("agent-1", 7, "agent.done"), "agent-1:7:completed");
+  assert.equal(executionNotificationFamily({ type: "task.completed", data: { status: "failed" } }), "task_terminal");
+  assert.equal(executionNotificationKey("agent-1", 7, { type: "task.completed", data: { taskId: "task-1" } }), "agent-1:7:task:task-1:task_terminal");
+  assert.equal(executionNotificationKey("agent-1", 7, { type: "agent.continuation_blocked", data: { count: 2 } }), "agent-1:7:continuation:2:continuation_blocked");
+  assert.equal(executionNotificationKey("agent-1", 7, { type: "agent.budget_exhausted", data: { budgetKind: "tokens" } }), "agent-1:7:budget:tokens:budget_exhausted");
   assert.equal(executionNotificationDefaults.storageKey, "autoto.executionNotifications.v1");
 });
 
@@ -115,6 +119,44 @@ test("truncated recovery emits one summary and marks included events as seen", a
   await controller.live({ type: "agent.done", agentId: "agent-1", data: { executionGeneration: 10, runId: "run-10" } });
   await controller.snapshot(truncated);
   assert.equal(notices.length, 1);
+});
+
+test("task terminals and continuation failures use scoped dedupe keys", async () => {
+  const notices = [];
+  const controller = createExecutionNotifications({
+    storage: new MemoryStorage(),
+    notifier: (notice) => notices.push(notice),
+  });
+
+  await controller.live({ type: "task.completed", agentId: "agent-1", data: { taskId: "task-1", executionGeneration: 8, status: "completed" } });
+  await controller.live({ type: "task.completed", agentId: "agent-1", data: { taskId: "task-2", executionGeneration: 8, status: "failed" } });
+  await controller.live({ type: "task.status", agentId: "agent-1", data: { taskId: "task-2", executionGeneration: 8, status: "failed" } });
+  await controller.live({ type: "agent.continuation_blocked", agentId: "agent-1", data: { executionGeneration: 8, count: 2, reason: "approval" } });
+  await controller.live({ type: "agent.budget_exhausted", agentId: "agent-1", data: { executionGeneration: 8, budgetKind: "tokens" } });
+
+  assert.deepEqual(notices.map((notice) => notice.key), [
+    "agent-1:8:task:task-1:task_terminal",
+    "agent-1:8:task:task-2:task_terminal",
+    "agent-1:8:continuation:2:continuation_blocked",
+    "agent-1:8:budget:tokens:budget_exhausted",
+  ]);
+});
+
+test("recovery snapshots include terminal tasks and blocked continuations once", async () => {
+  const notices = [];
+  const controller = createExecutionNotifications({ storage: new MemoryStorage(), notifier: (notice) => notices.push(notice) });
+  const snapshot = {
+    agent: { id: "agent-1" },
+    executionGeneration: 9,
+    recentBackgroundTasks: [{ id: "task-9", status: "completed" }],
+    continuation: { status: "blocked", count: 3, reason: "waiting task" },
+  };
+  await controller.snapshot(snapshot);
+  await controller.snapshot(snapshot);
+  assert.deepEqual(notices.map((notice) => notice.key), [
+    "agent-1:9:task:task-9:task_terminal",
+    "agent-1:9:continuation:3:continuation_blocked",
+  ]);
 });
 
 test("session storage state remains bounded and survives controller recreation", async () => {

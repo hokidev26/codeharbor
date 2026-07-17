@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 37
+const CurrentDBVersion = 40
 
 type migration struct {
 	version int
@@ -55,6 +55,9 @@ var migrations = []migration{
 	{version: 35, name: "project memberships", up: migrateV35ProjectMembers},
 	{version: 36, name: "api request usage history indexes", up: migrateV36APIRequestUsageIndexes},
 	{version: 37, name: "global plugins and tool snapshots", up: migrateV37Plugins},
+	{version: 38, name: "durable plans and execution snapshots", up: migrateV38Plans},
+	{version: 39, name: "durable background tasks and output", up: migrateV39BackgroundTasks},
+	{version: 40, name: "run continuation metadata", up: migrateV40RunContinuations},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1184,6 +1187,113 @@ func migrateV37Plugins(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
+func migrateV38Plans(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, planSchemaSQL); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "plans", "source_run_id", "TEXT REFERENCES runs(id) ON DELETE SET NULL"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_source_run ON plans(source_run_id) WHERE source_run_id IS NOT NULL`); err != nil {
+		return err
+	}
+	runsExist, err := tableExists(ctx, tx, "runs")
+	if err != nil || !runsExist {
+		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"execution_mode", "TEXT NOT NULL DEFAULT 'execute'"},
+		{"plan_id", "TEXT REFERENCES plans(id) ON DELETE SET NULL"},
+		{"policy_generation_snapshot", "INTEGER NOT NULL DEFAULT 0"},
+		{"agent_generation_snapshot", "INTEGER NOT NULL DEFAULT 0"},
+		{"tool_catalog_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(ctx, tx, "runs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE runs
+SET execution_mode = 'execute'
+WHERE execution_mode IS NULL OR execution_mode NOT IN ('plan', 'execute');
+UPDATE runs
+SET policy_generation_snapshot = 0
+WHERE policy_generation_snapshot IS NULL OR policy_generation_snapshot < 0;
+UPDATE runs
+SET agent_generation_snapshot = 0
+WHERE agent_generation_snapshot IS NULL OR agent_generation_snapshot < 0;
+UPDATE runs
+SET tool_catalog_digest = ''
+WHERE tool_catalog_digest IS NULL;
+UPDATE runs
+SET workspace_fingerprint = ''
+WHERE workspace_fingerprint IS NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_plan ON runs(plan_id, execution_generation DESC, id DESC);
+`)
+	return err
+}
+
+func migrateV39BackgroundTasks(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, backgroundTaskSchemaSQL)
+	return err
+}
+
+func migrateV40RunContinuations(ctx context.Context, tx *sql.Tx) error {
+	runsExist, err := tableExists(ctx, tx, "runs")
+	if err != nil || !runsExist {
+		return err
+	}
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"runs", "auto_continuation_mode", "TEXT NOT NULL DEFAULT 'off'"},
+		{"runs", "continuation_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "continuation_segment_turns", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "turn_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "max_total_turns", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "max_continuations", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "max_total_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "consumed_input_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "consumed_output_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "deadline_at", "TEXT"},
+		{"runs", "resume_after_message_id", "TEXT REFERENCES agent_messages(id) ON DELETE SET NULL"},
+		{"runs", "last_stop_reason", "TEXT"},
+		{"runs", "continuation_reason", "TEXT"},
+		{"runs", "waiting_background_task_id", "TEXT REFERENCES background_tasks(id) ON DELETE SET NULL"},
+		{"agent_messages", "completion_state", "TEXT"},
+		{"agent_messages", "stop_reason", "TEXT"},
+		{"api_requests", "stop_reason", "TEXT"},
+		{"api_requests", "turn_index", "INTEGER NOT NULL DEFAULT 0"},
+		{"api_requests", "continuation_index", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureColumn(ctx, tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE runs SET auto_continuation_mode = 'off' WHERE auto_continuation_mode IS NULL OR auto_continuation_mode NOT IN ('off', 'safe');
+UPDATE runs SET continuation_count = MAX(0, COALESCE(continuation_count, 0)), continuation_segment_turns = MAX(0, COALESCE(continuation_segment_turns, 0)), turn_count = MAX(0, COALESCE(turn_count, 0)), max_total_turns = MAX(0, COALESCE(max_total_turns, 0)), max_continuations = MAX(0, COALESCE(max_continuations, 0)), max_total_tokens = MAX(0, COALESCE(max_total_tokens, 0)), consumed_input_tokens = MAX(0, COALESCE(consumed_input_tokens, 0)), consumed_output_tokens = MAX(0, COALESCE(consumed_output_tokens, 0));
+UPDATE api_requests SET turn_index = MAX(0, COALESCE(turn_index, 0)), continuation_index = MAX(0, COALESCE(continuation_index, 0));
+CREATE INDEX IF NOT EXISTS idx_runs_continuation_pending ON runs(status, updated_at ASC, id ASC) WHERE status = 'continuation_pending';
+CREATE INDEX IF NOT EXISTS idx_runs_waiting_background_task ON runs(waiting_background_task_id, status, id) WHERE waiting_background_task_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS trg_runs_auto_continuation_mode_insert
+BEFORE INSERT ON runs FOR EACH ROW
+WHEN NEW.auto_continuation_mode NOT IN ('off', 'safe')
+BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
+CREATE TRIGGER IF NOT EXISTS trg_runs_auto_continuation_mode_update
+BEFORE UPDATE OF auto_continuation_mode ON runs FOR EACH ROW
+WHEN NEW.auto_continuation_mode NOT IN ('off', 'safe')
+BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
+`)
+	return err
+}
+
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1219,7 +1329,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 func legacyNamingSchemaSQL() string {
 	// P2-P3 tables were introduced after the agent/workline naming migration and
 	// must be created by their own migrations with modern column names.
-	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL)
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",

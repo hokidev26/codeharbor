@@ -131,13 +131,13 @@ func TestPluginRoutesRequireSensitiveLocalToken(t *testing.T) {
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			app.Routes().ServeHTTP(recorder, httptest.NewRequest(route.method, route.path, strings.NewReader(`{"rootPath":"/tmp/plugin"}`)))
+			app.Routes().ServeHTTP(recorder, newTestRequest(route.method, route.path, strings.NewReader(`{"rootPath":"/tmp/plugin"}`)))
 			if recorder.Code != http.StatusUnauthorized {
 				t.Fatalf("expected 401 without sensitive local token, got %d: %s", recorder.Code, recorder.Body.String())
 			}
 		})
 	}
-	legacyRequest := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	legacyRequest := newTestRequest(http.MethodGet, "/api/plugins", nil)
 	legacyRequest.Header.Set(legacyLocalTokenHeader, app.localToken)
 	legacyRecorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(legacyRecorder, legacyRequest)
@@ -257,7 +257,7 @@ func TestPluginInstallValidationAndConflictStatuses(t *testing.T) {
 
 func pluginRequest(t *testing.T, app *Server, method, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(method, path, bytes.NewReader(body))
+	request := newTestRequest(method, path, bytes.NewReader(body))
 	request.Header.Set(localTokenHeader, app.localToken)
 	recorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(recorder, request)

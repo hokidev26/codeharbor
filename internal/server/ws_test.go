@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -89,6 +90,57 @@ func TestAgentWSProtocol2ResyncAndAgentValidation(t *testing.T) {
 			t.Fatal("expected unknown-agent HTTP response")
 		}
 		t.Fatalf("expected 404 for unknown agent, got %d", response.StatusCode)
+	}
+}
+
+func TestRemoteAgentWebSocketClosesWhenSessionIsRevoked(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "remote-ws-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Remote WebSocket", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret", AllowRemoteFullAccess: true, DefaultRemoteAccessMode: remoteAccessModeFull}}, store, nil, agentpkg.NewHub())
+	token, _, err := app.newRemoteAccessSession(remoteAccessModeFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Routes())
+	defer server.Close()
+
+	query := url.Values{"id": {agent.ID}, "protocol": {"2"}}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/agent?" + query.Encode()
+	headers := http.Header{
+		"Origin":            []string{"https://remote.example.test"},
+		"CF-Connecting-IP":  []string{"203.0.113.45"},
+		"X-Forwarded-Host":  []string{"remote.example.test"},
+		"X-Forwarded-Proto": []string{"https"},
+		"Cookie":            []string{(&http.Cookie{Name: remoteAccessCookieName, Value: token}).String()},
+	}
+	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		if response != nil {
+			body, _ := io.ReadAll(response.Body)
+			t.Fatalf("remote websocket dial failed with status %d: %s: %v", response.StatusCode, body, err)
+		}
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	connected := readWSTestFrame(t, ctx, conn)
+	if connected.Type != "connected" {
+		t.Fatalf("unexpected connected frame: %+v", connected)
+	}
+
+	app.revokeRemoteAccessSession(token)
+	readCtx, readCancel := context.WithTimeout(ctx, time.Second)
+	defer readCancel()
+	if _, _, err := conn.Read(readCtx); err == nil {
+		t.Fatal("revoked remote session left the Agent websocket open")
 	}
 }
 

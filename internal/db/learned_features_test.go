@@ -111,6 +111,68 @@ func TestSpecBoardProtectedCASGoalAndOrdering(t *testing.T) {
 	}
 }
 
+func TestSpecReminderSnapshotIsBoundedActiveAndReadOnly(t *testing.T) {
+	store, _, agent := openLearnedFeatureStore(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	var board SpecBoard
+	for _, task := range []SpecTask{
+		{AgentID: agent.ID, Text: "completed first", Status: "done"},
+		{AgentID: agent.ID, Text: "active doing", Status: "doing", Protected: true},
+		{AgentID: agent.ID, Text: "active todo", Status: "todo"},
+		{AgentID: agent.ID, Text: "active blocked", Status: "blocked"},
+		{AgentID: agent.ID, Text: "completed last", Status: "done"},
+	} {
+		var err error
+		board, err = store.CreateSpecTask(ctx, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := store.ReadSpecReminderSnapshot(ctx, agent.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AgentID != agent.ID || snapshot.Revision != board.Revision || snapshot.Omitted != 1 || len(snapshot.Tasks) != 2 {
+		t.Fatalf("unexpected bounded snapshot: %+v", snapshot)
+	}
+	if snapshot.Tasks[0].Text != "active doing" || !snapshot.Tasks[0].Protected || snapshot.Tasks[1].Text != "active todo" {
+		t.Fatalf("active task ordering or projection changed: %+v", snapshot.Tasks)
+	}
+
+	countOnly, err := store.ReadSpecReminderSnapshot(ctx, agent.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countOnly.Revision != board.Revision || len(countOnly.Tasks) != 0 || countOnly.Omitted != 3 {
+		t.Fatalf("unexpected count-only snapshot: %+v", countOnly)
+	}
+	after, err := store.GetSpecBoard(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != board.Revision || len(after.Tasks) != len(board.Tasks) {
+		t.Fatalf("reminder read mutated the board: before=%+v after=%+v", board, after)
+	}
+
+	emptyAgent, err := store.CreateAgent(ctx, Agent{Title: "Empty Spec", Model: "openai:test", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := store.ReadSpecReminderSnapshot(ctx, emptyAgent.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Revision != 0 || len(empty.Tasks) != 0 || empty.Omitted != 0 {
+		t.Fatalf("unexpected empty snapshot: %+v", empty)
+	}
+	if _, err := store.ReadSpecReminderSnapshot(ctx, "missing-agent", 2); err == nil {
+		t.Fatal("expected a missing Agent to be rejected")
+	}
+}
+
 func TestAgentReasoningEffortXHighRoundTripsAcrossModelChanges(t *testing.T) {
 	store, _, agent := openLearnedFeatureStore(t)
 	defer store.Close()

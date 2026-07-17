@@ -44,6 +44,9 @@ test("plugin registry escapes manifest text and never renders secret targets or 
   assert.match(html, /data-plugin-discover="plugin-1" disabled>/);
   assert.doesNotMatch(html, /HIDDEN_TARGET|hidden-value/);
   assert.match(html, /不会删除插件源目录/);
+  assert.match(html, /settings-card/);
+  assert.match(html, /settings-form-grid/);
+  assert.match(html, /aria-live="polite"/);
 });
 
 test("plugin actions maintain private busy state and refresh after enable", async () => {

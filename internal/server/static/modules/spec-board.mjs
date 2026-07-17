@@ -145,6 +145,7 @@ export function createSpecBoardController({
     open: false,
     seq: 0,
   };
+  const subscribers = new Set();
 
   const snapshot = () => ({ ...state, children: state.children.map((item) => ({ ...item })), board: normalizeSpecBoard(state.board), rootAgent: state.rootAgent ? { ...state.rootAgent } : null });
   const modal = () => documentImpl?.getElementById?.("specBoardModal");
@@ -171,10 +172,29 @@ export function createSpecBoardController({
   }
 
   function emit() {
-    onChange?.(snapshot());
+    const value = snapshot();
+    onChange?.(value);
+    subscribers.forEach((subscriber) => {
+      try {
+        subscriber(value);
+      } catch (error) {
+        showError?.(error);
+      }
+    });
     render();
     renderConfirmationStack();
     renderButtonState();
+  }
+
+  function unsubscribe(subscriber) {
+    return subscribers.delete(subscriber);
+  }
+
+  function subscribe(subscriber, { immediate = true } = {}) {
+    if (typeof subscriber !== "function") throw new TypeError("Spec board subscriber must be a function");
+    subscribers.add(subscriber);
+    if (immediate) subscriber(snapshot());
+    return () => unsubscribe(subscriber);
   }
 
   function render() {
@@ -193,12 +213,14 @@ export function createSpecBoardController({
   }
 
   function setAgent(agent) {
+    ++state.seq;
     state.rootAgent = agent?.id ? normalizeAgent(agent) : null;
     state.selectedAgentId = state.rootAgent?.id || "";
     state.children = [];
     state.board = normalizeSpecBoard({}, state.selectedAgentId);
     state.latestConfirmation = null;
     state.loaded = false;
+    state.saving = false;
     state.error = "";
     emit();
   }
@@ -236,29 +258,43 @@ export function createSpecBoardController({
   async function selectAgent(agentId) {
     const id = text(agentId, 160);
     if (!id || id === state.selectedAgentId) return;
+    ++state.seq;
     state.selectedAgentId = id;
     state.board = normalizeSpecBoard({}, id);
+    state.latestConfirmation = null;
     state.loaded = false;
+    state.saving = false;
+    state.error = "";
+    emit();
     await load({ includeChildren: false });
   }
 
   async function mutate(path, options, success) {
-    if (state.saving) return false;
+    if (state.saving || !state.selectedAgentId) return false;
+    const seq = ++state.seq;
+    const agentId = state.selectedAgentId;
     state.saving = true;
     state.error = "";
     emit();
     try {
-      state.board = normalizeSpecBoard(await request(path, options), state.selectedAgentId);
+      const result = await request(path, options);
+      if (seq !== state.seq || agentId !== state.selectedAgentId) return false;
+      state.board = normalizeSpecBoard(result, agentId);
       showToast?.(success, "success", { force: true });
       return true;
     } catch (error) {
+      if (seq !== state.seq || agentId !== state.selectedAgentId) return false;
       state.error = error?.message || String(error);
       showError?.(error);
+      state.saving = false;
+      emit();
       await load({ includeChildren: false });
       return false;
     } finally {
-      state.saving = false;
-      emit();
+      if (seq === state.seq && agentId === state.selectedAgentId) {
+        state.saving = false;
+        emit();
+      }
     }
   }
 
@@ -314,13 +350,12 @@ export function createSpecBoardController({
   async function handleGoalConfirmation(result, agentId = state.rootAgent?.id) {
     if (result?.kind !== "goal.confirmation") return false;
     const id = text(agentId, 160);
+    const belongsToCurrentRoot = id === state.rootAgent?.id || state.children.some((child) => child.id === id);
+    if (!id || !belongsToCurrentRoot) return false;
     state.latestConfirmation = normalizeGoalConfirmation(result.confirmation);
     if (result.board && id === state.selectedAgentId) state.board = normalizeSpecBoard(result.board, id);
     emit();
-    if (id) {
-      const previous = state.selectedAgentId;
-      if (id === previous) await load({ includeChildren: false });
-    }
+    if (id === state.selectedAgentId) await load({ includeChildren: false });
     return true;
   }
 
@@ -372,5 +407,5 @@ export function createSpecBoardController({
     renderButtonState();
   }
 
-  return { bind, close, createTask, deleteTask, getState: snapshot, handleGoalConfirmation, load, moveTask, open, render, renderButtonState, selectAgent, setAgent, updateTask };
+  return { bind, close, createTask, deleteTask, getState: snapshot, handleGoalConfirmation, load, moveTask, open, render, renderButtonState, selectAgent, setAgent, subscribe, unsubscribe, updateTask };
 }

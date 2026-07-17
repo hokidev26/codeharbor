@@ -31,10 +31,10 @@ export const settingsSections = [
       settingItem("agent-admin", "⬡", "agentAdmin"),
       settingItem("worklines-containers", "◇", "worklines"),
       settingItem("servers-system", "▤", "serversSystem"),
-      settingItem("users", "♟", "users"),
       settingItem("terminals", "▻", "terminals"),
       settingItem("storage", "▭", "storage"),
       settingItem("runtime", "▷", "runtime"),
+      settingItem("remote-access", "◉", "remoteAccess"),
       settingItem("usage", "▧", "usage"),
       settingItem("about", "ⓘ", "about"),
     ],
@@ -42,6 +42,11 @@ export const settingsSections = [
 ];
 
 export const settingsItems = settingsSections.flatMap((section) => section.items);
+export const settingsItemsByKey = new Map(settingsItems.map((item) => [item.key, item]));
+
+export function settingsItemByKey(key) {
+  return settingsItemsByKey.get(String(key || "")) || null;
+}
 
 export const skillTabs = [
   { key: "commands", messageKey: "commands" },

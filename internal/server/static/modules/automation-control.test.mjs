@@ -59,6 +59,9 @@ test("automation rendering escapes all dynamic content and bounds rendered colle
   assert.doesNotMatch(html, /<svg onload/);
   assert.match(html, /&lt;script&gt;alert\(0\)&lt;\/script&gt;/);
   assert.equal((html.match(/data-schedule-card=/g) || []).length, automationLimits.schedules);
+  assert.match(html, /settings-page-section/);
+  assert.match(html, /settings-stat-grid/);
+  assert.match(html, /settings-table/);
 });
 
 test("automation timestamps use the shared UTC regional formatter and explicit invalid fallback", () => {

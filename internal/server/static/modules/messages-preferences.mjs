@@ -16,6 +16,7 @@ const preferencesMessages = Object.freeze({
         recentConversations: "最近会话",
         preferredModel: "首选模型",
         relayProtocol: "中转协议",
+        primaryMode: "主工作台视图",
       },
       settings: {
         profileSaved: "个人资料已保存。",
@@ -71,6 +72,7 @@ const preferencesMessages = Object.freeze({
         recentConversations: "最近對話",
         preferredModel: "偏好模型",
         relayProtocol: "中轉協定",
+        primaryMode: "主要工作台檢視",
       },
       settings: {
         profileSaved: "個人資料偏好已儲存。",
@@ -126,6 +128,7 @@ const preferencesMessages = Object.freeze({
         recentConversations: "Recent conversations",
         preferredModel: "Preferred model",
         relayProtocol: "Relay protocol",
+        primaryMode: "Primary workbench view",
       },
       settings: {
         profileSaved: "Profile preferences saved.",

@@ -2,6 +2,7 @@ import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { recentDirectoriesKey } from "./preferences-data.mjs";
 import { api } from "./runtime.mjs";
 import { t } from "./i18n.mjs";
+import { directoryBrowserScope, nativeDirectoryPickerAllowedFor } from "./remote-access-capabilities.mjs";
 
 export function normalizeRecentDirectories(value = []) {
   return (Array.isArray(value) ? value : [])
@@ -40,6 +41,20 @@ export function basename(path) {
   return String(path || "").replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
 }
 
+export function nativeDirectoryPickerAllowed(locationLike = globalThis.location, { state = {}, platformLike } = {}) {
+  return nativeDirectoryPickerAllowedFor(state, locationLike, platformLike);
+}
+
+export function directoryScopeForBrowser(state = {}) {
+  return directoryBrowserScope(state);
+}
+
+const directoryFolderIcon = `
+  <svg class="directory-folder-svg" viewBox="0 0 24 20" aria-hidden="true" focusable="false">
+    <path class="directory-folder-fill" d="M2.75 5.25A2.25 2.25 0 0 1 5 3h4.2l1.8 2h8A2.25 2.25 0 0 1 21.25 7.25v7.5A2.25 2.25 0 0 1 19 17H5a2.25 2.25 0 0 1-2.25-2.25Z"></path>
+    <path class="directory-folder-stroke" d="M2.75 7h18.5M2.75 5.25A2.25 2.25 0 0 1 5 3h4.2l1.8 2h8A2.25 2.25 0 0 1 21.25 7.25v7.5A2.25 2.25 0 0 1 19 17H5a2.25 2.25 0 0 1-2.25-2.25Z"></path>
+  </svg>`;
+
 export function createDirectoryBrowserController({
   state,
   createProjectFromDirectory,
@@ -58,7 +73,7 @@ export function createDirectoryBrowserController({
 
   async function openDirectoryChooser(path = "", { trigger = null, preferNative = true } = {}) {
     const defaultPath = String(path || "").trim();
-    if (preferNative) {
+    if (preferNative && nativeDirectoryPickerAllowed(globalThis.location, { state })) {
       try {
         const picked = await selectNativeDirectory(defaultPath, { trigger });
         if (picked?.canceled) return;
@@ -81,8 +96,9 @@ export function createDirectoryBrowserController({
     setButtonBusy(trigger, true, "…");
     showToast?.(t("workspace.directory.openingNative"), "info", { force: true });
     try {
-      const query = path ? `?path=${encodeURIComponent(path)}` : "";
-      const data = await api(`/api/fs/native-directory${query}`, { method: "POST", body: JSON.stringify({}) });
+      const params = new URLSearchParams({ scope: directoryScopeForBrowser(state) });
+      if (path) params.set("path", path);
+      const data = await api(`/api/fs/native-directory?${params.toString()}`, { method: "POST", body: JSON.stringify({}) });
       if (data.canceled) {
         showToast?.(t("workspace.directory.selectionCanceled"), "info", { force: true });
         return { canceled: true };
@@ -146,8 +162,9 @@ export function createDirectoryBrowserController({
     const seq = ++state.directoryBrowseSeq;
     setDirectoryBrowserBusy(true);
     try {
-      const query = path ? `?path=${encodeURIComponent(path)}` : "";
-      const data = await api(`/api/fs/directories${query}`);
+      const params = new URLSearchParams({ scope: directoryScopeForBrowser(state) });
+      if (path) params.set("path", path);
+      const data = await api(`/api/fs/directories?${params.toString()}`);
       if (seq !== state.directoryBrowseSeq || !directoryElementVisible("folderModal")) return;
       state.directoryPath = data.path;
       state.directoryParent = data.parent || "";
@@ -266,7 +283,7 @@ export function createDirectoryBrowserController({
     }
     rows.push(...(data.entries || []).map((entry) => `
     <button class="directory-row" type="button" data-path="${escapeAttr(entry.path)}">
-      <span class="directory-row-main"><span class="directory-icon">▱</span><span>${escapeHtml(entry.name)}</span></span>
+      <span class="directory-row-main"><span class="directory-icon" aria-hidden="true">${directoryFolderIcon}</span><span>${escapeHtml(entry.name)}</span></span>
       <span class="directory-meta">${escapeHtml(t("workspace.directory.folder"))}</span>
     </button>
   `));
@@ -297,15 +314,21 @@ export function createDirectoryBrowserController({
   function showNewFolderInline() {
     const row = $("newFolderInline");
     const input = $("newFolderNameInput");
+    const trigger = $("newFolderBtn");
     row.classList.remove("hidden");
+    trigger?.classList.add("active");
+    trigger?.setAttribute("aria-expanded", "true");
     input.value = "";
     window.setTimeout(() => input.focus(), 0);
   }
 
   function hideNewFolderInline() {
     const row = $("newFolderInline");
+    const trigger = $("newFolderBtn");
     if (!row) return;
     row.classList.add("hidden");
+    trigger?.classList.remove("active");
+    trigger?.setAttribute("aria-expanded", "false");
     if ($("newFolderNameInput")) $("newFolderNameInput").value = "";
   }
 

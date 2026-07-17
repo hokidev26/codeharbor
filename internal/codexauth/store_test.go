@@ -58,6 +58,49 @@ func TestStoreImportPersistsAndListsWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestStoreExportByIDRoundTripsCompleteCredential(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "source"))
+	result, err := store.Import([]ImportDocument{{
+		Filename: "backup.json",
+		Content:  []byte(`{"type":"codex","access_token":"export-access","refresh_token":"rt_export","email":"export@example.test","account_id":"export-account","alias":"Primary","priority":7,"disabled":true}`),
+	}})
+	if err != nil || len(result.Files) != 1 {
+		t.Fatalf("import failed: result=%+v err=%v", result, err)
+	}
+	accounts, err := store.ListAccounts()
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("list failed: accounts=%+v err=%v", accounts, err)
+	}
+
+	document, err := store.ExportByID(accounts[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Filename != result.Files[0] || !json.Valid(document.Content) || !strings.HasSuffix(string(document.Content), "\n") {
+		t.Fatalf("unexpected export document: filename=%q content=%q", document.Filename, document.Content)
+	}
+	for _, secret := range []string{"export-access", "rt_export"} {
+		if !strings.Contains(string(document.Content), secret) {
+			t.Fatalf("export omitted credential material %q: %s", secret, document.Content)
+		}
+	}
+	var exported Credential
+	if err := json.Unmarshal(document.Content, &exported); err != nil {
+		t.Fatal(err)
+	}
+	if exported.ID != accounts[0].ID || exported.Alias != "Primary" || exported.Priority != 7 || !exported.Disabled {
+		t.Fatalf("export lost account metadata: %+v", exported)
+	}
+
+	restored := NewStore(filepath.Join(t.TempDir(), "restored"))
+	if restoredResult, err := restored.Import([]ImportDocument{document}); err != nil || restoredResult.Imported != 1 {
+		t.Fatalf("export did not round-trip: result=%+v err=%v", restoredResult, err)
+	}
+	if _, err := store.ExportByID("codex_missing"); !os.IsNotExist(err) {
+		t.Fatalf("missing export error = %v, want os.ErrNotExist", err)
+	}
+}
+
 func TestStoreMigratesStableIDAndSupportsMetadataLifecycle(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "codex")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

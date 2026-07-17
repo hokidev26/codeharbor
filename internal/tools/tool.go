@@ -34,11 +34,47 @@ type OutputChunk struct {
 	Truncated bool
 }
 
-type Env struct {
+type ToolOutputPipelineScope struct {
 	AgentID string
-	CWD     string
-	Store   *db.Store
-	Output  func(OutputChunk)
+	RunID   string
+}
+
+type ToolOutputPipelineStartOptions struct {
+	Label           string
+	MaxPreviewChars int
+}
+
+type ToolOutputPipelineEndOptions struct {
+	Aliases  []string
+	Rule     string
+	Format   string
+	MaxChars int
+	Discard  bool
+}
+
+type ToolOutputPipelineService interface {
+	Start(ToolOutputPipelineScope, ToolOutputPipelineStartOptions) Result
+	End(ToolOutputPipelineScope, ToolOutputPipelineEndOptions) Result
+	ProcessResult(ToolOutputPipelineScope, Call, Result) Result
+	IsActive(ToolOutputPipelineScope) bool
+	CloseRun(ToolOutputPipelineScope)
+	CloseAgent(string)
+}
+
+type Env struct {
+	AgentID                      string
+	RunID                        string
+	CWD                          string
+	Store                        *db.Store
+	Output                       func(OutputChunk)
+	Background                   BackgroundTaskService
+	ToolOutputPipeline           ToolOutputPipelineService
+	PermissionModeCap            string
+	PermissionGenerationSnapshot int64
+	PolicyGenerationSnapshot     int64
+	AgentGenerationSnapshot      int64
+	ToolCatalogDigest            string
+	WorkspaceFingerprint         string
 }
 
 // ResolutionContext scopes dynamic tools to the agent and working directory

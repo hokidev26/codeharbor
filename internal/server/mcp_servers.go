@@ -152,6 +152,14 @@ func (s *Server) deleteMCPServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMCPServerTools(w http.ResponseWriter, r *http.Request) {
+	// Tool discovery launches the configured stdio command on this host. Keep
+	// local discovery compatible, but require an authenticated full remote
+	// session before a remote caller can cause that host-side execution.
+	auth := s.remoteAccessAuthentication(r)
+	if auth.Remote && (!auth.Authenticated || !auth.Session || auth.Mode != remoteAccessModeFull) {
+		writeError(w, http.StatusForbidden, "MCP tool discovery requires a full remote session")
+		return
+	}
 	server, err := s.store.GetMCPServer(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())

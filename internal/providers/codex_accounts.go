@@ -32,6 +32,27 @@ type AccountTelemetry interface {
 	RecordProviderAccountAttempt(context.Context, ProviderAccountAttempt) error
 }
 
+type ProviderAccountQuotaSnapshot struct {
+	Provider     string                   `json:"-"`
+	AccountID    string                   `json:"-"`
+	Requests     AccountRateLimitSnapshot `json:"requests"`
+	InputTokens  AccountRateLimitSnapshot `json:"input_tokens"`
+	OutputTokens AccountRateLimitSnapshot `json:"output_tokens"`
+	Models       []string                 `json:"models,omitempty"`
+	RetryAfter   string                   `json:"retry_after,omitempty"`
+	FetchedAt    time.Time                `json:"fetched_at"`
+}
+
+type AccountRateLimitSnapshot struct {
+	Limit     string `json:"limit,omitempty"`
+	Remaining string `json:"remaining,omitempty"`
+	Reset     string `json:"reset,omitempty"`
+}
+
+type AccountQuotaTelemetry interface {
+	UpdateProviderAccountQuota(context.Context, string, string, any, time.Time) error
+}
+
 var errCodexQuotaUnauthorized = errors.New("codex quota unauthorized")
 
 func ValidateCodexProviderConfig(cfg config.ProviderConfig) error {

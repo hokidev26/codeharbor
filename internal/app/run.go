@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"autoto/internal/agent"
+	"autoto/internal/anthropicauth"
 	"autoto/internal/audit"
 	"autoto/internal/automation"
+	"autoto/internal/background"
 	"autoto/internal/channels"
 	"autoto/internal/codexauth"
 	"autoto/internal/compat"
@@ -103,6 +105,9 @@ func Run(options Options) int {
 		if providerCfg.Type == config.ProviderTypeCodex {
 			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
 		}
+		if providerCfg.Name == anthropicauth.DefaultProviderName && providerCfg.Type == "anthropic" {
+			providerCfg.CredentialStorePath = anthropicauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
 		provider, err := providers.NewProvider(providerCfg)
 		if err != nil {
 			logger.Warn("skip unsupported provider", "name", providerCfg.Name, "type", providerCfg.Type, "error", err)
@@ -110,6 +115,9 @@ func Run(options Options) int {
 		}
 		if codexProvider, ok := provider.(*providers.CodexProvider); ok {
 			codexProvider.SetAccountTelemetry(store)
+		}
+		if anthropicProvider, ok := provider.(*providers.AnthropicProvider); ok {
+			anthropicProvider.SetAccountTelemetry(store)
 		}
 		providerRegistry.Register(provider)
 	}
@@ -145,12 +153,32 @@ func Run(options Options) int {
 	automationManager.SetTelegramSender(channelManager)
 	runner.SetNotifier(automationManager)
 
+	backgroundManager := background.NewManager(store, background.Options{})
+	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindShell, background.NewShellExecutor()); err != nil {
+		logger.Error("register background shell executor", "error", err)
+		return 1
+	}
+	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindAgent, background.NewAgentExecutor(store, runner)); err != nil {
+		logger.Error("register background agent executor", "error", err)
+		return 1
+	}
+	backgroundService := background.NewService(backgroundManager, store)
+	backgroundManager.SetValidator(runner.ValidateBackgroundTask)
+	eventHook, terminalHook := background.NewManagerHooks(hub, automationManager, runner)
+	backgroundManager.SetEventHook(eventHook)
+	backgroundManager.SetTerminalHook(terminalHook)
+	runner.SetBackgroundTaskService(backgroundService)
+
 	previewManager := preview.NewManager()
+	reviewService := server.NewReviewService(providerRegistry, cfg.Agent.ReviewModel)
+	runner.SetReviewService(reviewService)
 	application := server.New(cfg, store, runner, hub, providerRegistry)
 	application.SetToolRegistry(toolRegistry)
+	application.SetBackgroundTaskService(backgroundService)
 	application.SetAutomationManager(automationManager)
 	application.SetConnectionService(connectionService)
 	application.SetPluginService(pluginService)
+	application.SetReviewService(reviewService)
 	application.SetAuditRecorder(auditRecorder)
 	application.SetPreviewManager(previewManager)
 	application.SetConfigPath(resolvedConfigPath)
@@ -169,7 +197,7 @@ func Run(options Options) int {
 		logger.Error("serve", "error", err)
 		stop()
 	})
-	if err := registerRuntimeServices(supervisor, previewManager, channelManager, automationManager, httpService); err != nil {
+	if err := registerRuntimeServices(supervisor, previewManager, channelManager, automationManager, backgroundManager, httpService); err != nil {
 		logger.Error("register service", "error", err)
 		return 1
 	}
@@ -177,6 +205,12 @@ func Run(options Options) int {
 	logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
 	if err := supervisor.Start(ctx); err != nil {
 		logger.Error("start services", "error", err)
+		return 1
+	}
+	// Background reconciliation runs as part of the supervisor start. Only then
+	// can a continuation safely decide whether its task boundary is terminal.
+	if err := runner.RecoverContinuationPendingRuns(context.Background()); err != nil {
+		logger.Error("recover continuation pending runs", "error", err)
 		return 1
 	}
 

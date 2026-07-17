@@ -69,7 +69,7 @@ func TestUpdateStatusUsesOnlyValidatedInjectedPath(t *testing.T) {
 func requestUpdateStatus(t *testing.T, app *Server) UpdateStatusResponse {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, UpdateStatusPath, nil)
+	request := newTestRequest(http.MethodGet, UpdateStatusPath, nil)
 	app.UpdateRoutes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

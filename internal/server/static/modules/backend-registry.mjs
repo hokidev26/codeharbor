@@ -118,7 +118,7 @@ export function createBackendRegistryController({
     const el = $("backendsList");
     if (!el) return;
     if (!state.backends.length) {
-      el.innerHTML = `<div class="empty-list">${escapeHtml(t("backend.emptyList"))}</div>`;
+      el.innerHTML = `<div class="empty-list settings-empty-state">${escapeHtml(t("backend.emptyList"))}</div>`;
       return;
     }
     el.innerHTML = state.backends.map((backend) => {
@@ -126,13 +126,13 @@ export function createBackendRegistryController({
       const healthText = health ? (health.status || t(health.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
       const pendingDelete = state.backendDeleteConfirmId === backend.id;
       return `
-      <div class="backend-card ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
+      <div class="backend-card settings-data-row ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
         <div class="backend-card-main">
-          <div class="backend-card-title">${escapeHtml(backend.name)} ${backend.active ? `<span class='mini-tag'>${escapeHtml(t("backend.active"))}</span>` : ""}</div>
+          <div class="backend-card-title">${escapeHtml(backend.name)} ${backend.active ? `<span class='mini-tag settings-badge'>${escapeHtml(t("backend.active"))}</span>` : ""}</div>
           <div class="backend-card-url">${escapeHtml(backend.baseUrl)}</div>
           <div class="backend-card-meta">${escapeHtml(backend.kind)} · ${escapeHtml(t(backend.apiKeyConfigured ? "backend.apiKeyConfigured" : "backend.noApiKey"))} · ${escapeHtml(healthText)}</div>
         </div>
-        <div class="backend-card-actions">
+        <div class="backend-card-actions settings-inline-actions">
           ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "backend-test", label: t("backend.test"), busyLabel: t("backend.testing"), className: "ghost-btn mini" })}
           ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "backend-activate", label: t("backend.setCurrent"), busyLabel: t("backend.switching"), className: "ghost-btn mini" })}
           ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "backend-delete", label: t(pendingDelete ? "backend.confirmDelete" : "backend.delete"), busyLabel: t("backend.deleting"), className: `ghost-btn mini danger ${pendingDelete ? "confirm" : ""}` })}
@@ -264,48 +264,48 @@ export function createBackendRegistryController({
     const activeHealthText = activeHealth ? (activeHealth.status || t(activeHealth.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
     return `
     <div class="settings-live-page agent-admin-page">
-      <section class="settings-hero-card">
-        <div>
+      <section class="settings-hero-card settings-page-section settings-card">
+        <div class="settings-card-header">
           <div class="settings-hero-kicker">${escapeHtml(t("backend.heroKicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(active?.name || t("backend.noAgentServer"))}</div>
-          <p>${escapeHtml(t("backend.heroDescription"))}</p>
+          <div class="settings-hero-title settings-card-title">${escapeHtml(active?.name || t("backend.noAgentServer"))}</div>
+          <p class="settings-card-description">${escapeHtml(t("backend.heroDescription"))}</p>
         </div>
-        <div class="settings-action-row">
+        <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
           <button id="refreshAgentBackendsBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("backend.refreshBackends"))}</button>
           <button id="openBackendModalFromSettingsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.manageInModal"))}</button>
         </div>
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(formatNumber(backends.length))}</strong><span>${escapeHtml(t("backend.count"))}</span></div>
-        <div><strong>${escapeHtml(activeHealthText)}</strong><span>${escapeHtml(t("backend.currentHealth"))}</span></div>
-        <div><strong>${escapeHtml(formatNumber(keyedCount))}</strong><span>${escapeHtml(t("backend.configuredKeys"))}</span></div>
+      <div class="settings-status-strip settings-stat-grid">
+        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(backends.length))}</strong><span>${escapeHtml(t("backend.count"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(activeHealthText)}</strong><span>${escapeHtml(t("backend.currentHealth"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(keyedCount))}</strong><span>${escapeHtml(t("backend.configuredKeys"))}</span></div>
       </div>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section highlighted settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("backend.agentServerBackends"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("backend.apiKeyDescription"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.agentServerBackends"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("backend.apiKeyDescription"))}</div>
           </div>
         </div>
-        <div class="settings-backend-list">
-          ${backends.length ? backends.map(renderSettingsBackendCard).join("") : `<div class="settings-empty-card compact">${escapeHtml(t("backend.emptySettingsList"))}</div>`}
+        <div class="settings-backend-list settings-data-list settings-card-content">
+          ${backends.length ? backends.map(renderSettingsBackendCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("backend.emptySettingsList"))}</div>`}
         </div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("backend.addTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("backend.addDescription"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.addTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("backend.addDescription"))}</div>
           </div>
         </div>
-        <form id="settingsBackendForm" class="settings-backend-form">
-          <div class="settings-provider-form-grid">
-            <label>${escapeHtml(t("backend.nameLabel"))}<input id="settingsBackendName" class="settings-field" placeholder="${escapeAttr(t("backend.namePlaceholder"))}" /></label>
-            <label>${escapeHtml(t("backend.kindLabel"))}<select id="settingsBackendKind" class="settings-field"><option value="local">local</option><option value="cloud">cloud</option></select></label>
-            <label class="settings-form-span-2">${escapeHtml(t("backend.urlLabel"))}<input id="settingsBackendBaseUrl" class="settings-field" placeholder="http://127.0.0.1:8000" /></label>
-            <label class="settings-form-span-2">${escapeHtml(t("backend.apiKeyLabel"))}<input id="settingsBackendApiKey" class="settings-field" type="password" placeholder="${escapeAttr(t("backend.apiKeyPlaceholder"))}" /></label>
+        <form id="settingsBackendForm" class="settings-backend-form settings-card-content">
+          <div class="settings-provider-form-grid settings-form-grid">
+            <label class="settings-form-field">${escapeHtml(t("backend.nameLabel"))}<input id="settingsBackendName" class="settings-field" placeholder="${escapeAttr(t("backend.namePlaceholder"))}" /></label>
+            <label class="settings-form-field">${escapeHtml(t("backend.kindLabel"))}<select id="settingsBackendKind" class="settings-field"><option value="local">local</option><option value="cloud">cloud</option></select></label>
+            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("backend.urlLabel"))}<input id="settingsBackendBaseUrl" class="settings-field" placeholder="http://127.0.0.1:8000" /></label>
+            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("backend.apiKeyLabel"))}<input id="settingsBackendApiKey" class="settings-field" type="password" placeholder="${escapeAttr(t("backend.apiKeyPlaceholder"))}" /></label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-inline-actions settings-card-footer">
             <button id="resetSettingsBackendFormBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.clear"))}</button>
             <button class="settings-action-btn primary" type="submit" data-backend-submit>${escapeHtml(t("backend.add"))}</button>
           </div>
@@ -320,19 +320,19 @@ export function createBackendRegistryController({
     const healthText = health ? (health.status || t(health.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
     const pendingDelete = state.backendDeleteConfirmId === backend.id;
     return `
-    <div class="settings-backend-card ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
+    <div class="settings-backend-card settings-data-row ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
       <div class="settings-backend-main">
         <div class="settings-backend-title">
           ${escapeHtml(backend.name || t("backend.agentServer"))}
-          ${backend.active ? `<span class='settings-status-pill ok'>${escapeHtml(t("backend.active"))}</span>` : ""}
-          <span class="settings-status-pill ${backendHealthPillClass(health)}">${escapeHtml(healthText)}</span>
+          ${backend.active ? `<span class='settings-status-pill settings-badge ok'>${escapeHtml(t("backend.active"))}</span>` : ""}
+          <span class="settings-status-pill settings-badge ${backendHealthPillClass(health)}">${escapeHtml(healthText)}</span>
         </div>
         <div class="settings-provider-meta path">${escapeHtml(backend.baseUrl || t("backend.urlNotConfigured"))}</div>
         <div class="settings-backend-meta">${escapeHtml(backend.kind || "local")} · ${escapeHtml(t(backend.apiKeyConfigured ? "backend.apiKeyConfigured" : "backend.noApiKey"))} · ${escapeHtml(t("backend.updatedAt", { timestamp: formatTimestamp(backend.updatedAt) }))}</div>
-        ${health?.error ? `<div class="settings-inline-alert compact">${escapeHtml(health.error)}</div>` : ""}
+        ${health?.error ? `<div class="settings-inline-alert settings-alert compact" role="alert">${escapeHtml(health.error)}</div>` : ""}
         ${health?.checks?.length ? renderBackendHealthChecks(health.checks) : ""}
       </div>
-      <div class="settings-backend-actions">
+      <div class="settings-backend-actions settings-inline-actions">
         ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "settings-backend-test", label: t("backend.test"), busyLabel: t("backend.testing"), className: "settings-action-btn subtle" })}
         ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "settings-backend-activate", label: t("backend.setCurrent"), busyLabel: t("backend.switching"), className: "settings-action-btn subtle" })}
         ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "settings-backend-delete", label: t(pendingDelete ? "backend.confirmDelete" : "backend.delete"), busyLabel: t("backend.deleting"), className: `settings-action-btn danger ${pendingDelete ? "confirm" : ""}` })}
@@ -350,9 +350,9 @@ export function createBackendRegistryController({
 
   function renderBackendHealthChecks(checks) {
     return `
-    <div class="settings-backend-checks">
+    <div class="settings-backend-checks settings-data-list">
       ${checks.map((check) => `
-        <div class="settings-backend-check ${check.ok ? "ok" : "warn"}">
+        <div class="settings-backend-check settings-data-row ${check.ok ? "ok" : "warn"}">
           <span>${escapeHtml(check.name || t("backend.check"))}</span>
           <strong>${escapeHtml(check.statusCode ? String(check.statusCode) : (check.error || t("backend.notAvailable")))}</strong>
         </div>

@@ -83,6 +83,8 @@ test("MCP registry UI translates controls while preserving command, environment,
     assert.match(html, /env: TOKEN/);
     assert.match(html, /cwd: \/tmp\/demo/);
     assert.match(html, /&lt;Local MCP&gt;/);
+    assert.match(html, /settings-data-list/);
+    assert.match(html, /settings-card/);
   } finally {
     setUILocale("zh-CN");
   }

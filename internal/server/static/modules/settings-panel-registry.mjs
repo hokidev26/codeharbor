@@ -11,10 +11,14 @@ export class SettingsPanelRegistry {
     if (definition.bind != null && typeof definition.bind !== "function") {
       throw new TypeError(`Settings panel bind must be a function: ${normalizedKey}`);
     }
+    if (definition.layout != null && (!String(definition.layout).trim() || typeof definition.layout !== "string")) {
+      throw new TypeError(`Settings panel layout must be a non-empty string: ${normalizedKey}`);
+    }
 
     const panel = Object.freeze({
       render: definition.render,
       ...(definition.bind ? { bind: definition.bind } : {}),
+      ...(definition.layout ? { layout: definition.layout.trim() } : {}),
     });
     this.panels.set(normalizedKey, panel);
     return this;

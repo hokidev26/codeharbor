@@ -2,6 +2,7 @@ import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { defaultTerminalPrefs, terminalPrefsKey } from "./preferences-data.mjs";
 import { webSocketURL } from "./runtime.mjs";
 import { t } from "./i18n.mjs";
+import { terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 
 export function createTerminalController({
@@ -85,12 +86,28 @@ export function createTerminalController({
   }
 
   function remoteTerminalLocked() {
-    const security = state.runtimeSummary?.security || {};
-    return Boolean(security.remoteAccessRequired && security.remoteTerminalAllowed === false);
+    return !terminalAccessAllowed(state);
   }
 
   function remoteTerminalLockedMessage() {
     return t("workspace.terminal.remoteLocked");
+  }
+
+  function enforceAccessPolicy({ notify = false } = {}) {
+    if (!remoteTerminalLocked()) {
+      renderTerminalButtonState();
+      return true;
+    }
+    const socket = state.terminalWS;
+    state.terminalWS = null;
+    if (socket && typeof socket.close === "function") {
+      try {
+        socket.close(1008, "remote access capability changed");
+      } catch {}
+    }
+    if (notify) appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
+    setTerminalStatus("remote-locked");
+    return false;
   }
 
   function focusTerminalPanel() {
@@ -137,72 +154,73 @@ export function createTerminalController({
     const locked = remoteTerminalLocked();
     return `
       <div class="settings-live-page terminal-settings-page">
-        <section class="settings-hero-card terminal-hero-card">
-          <div>
+        <section class="settings-hero-card terminal-hero-card settings-page-section settings-card">
+          <div class="settings-card-header">
             <div class="settings-hero-kicker">${escapeHtml(t("workspace.terminal.management"))}</div>
-            <div class="settings-hero-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? t("workspace.terminal.collapsed") : t("workspace.terminal.expanded"))}</div>
-            <p>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.description"))}</p>
+            <div class="settings-hero-title settings-card-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? t("workspace.terminal.collapsed") : t("workspace.terminal.expanded"))}</div>
+            <p class="settings-card-description">${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.description"))}</p>
           </div>
-          <div class="settings-action-row">
+          <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
             <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button" ${locked ? "disabled" : ""}>${escapeHtml(t("workspace.terminal.reconnect"))}</button>
             <button id="terminalFocusSettingsBtn" class="settings-action-btn subtle" type="button" ${locked ? "disabled" : ""}>${escapeHtml(t("workspace.terminal.focus"))}</button>
           </div>
         </section>
-        <div class="settings-status-strip">
-          <div><strong>${escapeHtml(wsLabel)}</strong><span>${escapeHtml(t("workspace.terminal.connection"))}</span></div>
-          <div><strong>${escapeHtml(locked ? t("workspace.terminal.remoteDisabled") : t("workspace.terminal.available"))}</strong><span>${escapeHtml(sx("terminal.terminalPolicy"))}</span></div>
-          <div><strong>${escapeHtml(formatNumber(stats.lines))}</strong><span>${escapeHtml(sx("terminal.outputLines"))}</span></div>
-          <div><strong>${escapeHtml(formatNumber(stats.chars))}</strong><span>${escapeHtml(sx("terminal.characters"))}</span></div>
+        ${locked ? `<section class="settings-provider-section settings-page-section settings-card settings-alert" role="alert"><div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.remoteDisabled"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(remoteTerminalLockedMessage())}</div></div></div></section>` : ""}
+        <div class="settings-status-strip settings-stat-grid">
+          <div class="settings-stat-card"><strong>${escapeHtml(wsLabel)}</strong><span>${escapeHtml(t("workspace.terminal.connection"))}</span></div>
+          <div class="settings-stat-card"><strong>${escapeHtml(locked ? t("workspace.terminal.remoteDisabled") : t("workspace.terminal.available"))}</strong><span>${escapeHtml(sx("terminal.terminalPolicy"))}</span></div>
+          <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(stats.lines))}</strong><span>${escapeHtml(sx("terminal.outputLines"))}</span></div>
+          <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(stats.chars))}</strong><span>${escapeHtml(sx("terminal.characters"))}</span></div>
         </div>
-        <section class="settings-provider-section highlighted">
-          <div class="settings-provider-section-head">
+        <section class="settings-provider-section highlighted settings-page-section settings-card">
+          <div class="settings-provider-section-head settings-card-header">
             <div>
-              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.currentSession"))}</div>
-              <div class="settings-provider-meta path">${escapeHtml(cwd)}</div>
+              <div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.currentSession"))}</div>
+              <div class="settings-provider-meta settings-card-description path">${escapeHtml(cwd)}</div>
             </div>
-            <span class="settings-status-pill ${state.agent ? "ok" : "warn"}">${escapeHtml(state.agent ? t("workspace.terminal.agentSelected") : t("workspace.terminal.agentNotSelected"))}</span>
+            <span class="settings-status-pill settings-badge ${state.agent ? "ok" : "warn"}">${escapeHtml(state.agent ? t("workspace.terminal.agentSelected") : t("workspace.terminal.agentNotSelected"))}</span>
           </div>
-          <div class="terminal-control-grid">
-            <button class="terminal-control-card" type="button" data-terminal-action="reconnect" ${locked ? "disabled" : ""}>
-              <span>${escapeHtml(t("workspace.terminal.reconnect"))}</span><small>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.reconnectDescription"))}</small>
+          <div class="terminal-control-grid settings-card-content">
+            <button class="terminal-control-card settings-card" type="button" data-terminal-action="reconnect" ${locked ? "disabled" : ""}>
+              <span>${escapeHtml(t("workspace.terminal.reconnect"))}</span>
             </button>
-            <button class="terminal-control-card" type="button" data-terminal-action="toggle" ${locked ? "disabled" : ""}>
-              <span>${escapeHtml(collapsed ? t("chat.expandTerminal") : t("terminal.collapse"))}</span><small>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.toggleDescription"))}</small>
+            <button class="terminal-control-card settings-card" type="button" data-terminal-action="toggle" ${locked ? "disabled" : ""}>
+              <span>${escapeHtml(collapsed ? t("chat.expandTerminal") : t("terminal.collapse"))}</span>
             </button>
-            <button class="terminal-control-card" type="button" data-terminal-action="clear">
-              <span>${escapeHtml(t("workspace.terminal.clear"))}</span><small>${escapeHtml(sx("terminal.clearDescription"))}</small>
+            <button class="terminal-control-card settings-card" type="button" data-terminal-action="clear">
+              <span>${escapeHtml(t("workspace.terminal.clear"))}</span>
             </button>
-            <button class="terminal-control-card" type="button" data-terminal-action="copy">
-              <span>${escapeHtml(t("workspace.terminal.copy"))}</span><small>${escapeHtml(sx("terminal.copyDescription"))}</small>
+            <button class="terminal-control-card settings-card" type="button" data-terminal-action="copy">
+              <span>${escapeHtml(t("workspace.terminal.copy"))}</span>
             </button>
           </div>
         </section>
-        <section class="settings-provider-section">
-          <div class="settings-provider-section-head">
+        <section class="settings-provider-section settings-page-section settings-card">
+          <div class="settings-provider-section-head settings-card-header">
             <div>
-              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.localPreferences"))}</div>
-              <div class="settings-provider-meta">${escapeHtml(sx("terminal.localPrefsDescription"))}</div>
+              <div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.localPreferences"))}</div>
+              <div class="settings-provider-meta settings-card-description">${escapeHtml(sx("terminal.localPrefsDescription"))}</div>
             </div>
           </div>
-          <div class="appearance-toggle-list">
+          <div class="appearance-toggle-list settings-card-content">
             ${renderTerminalToggle("clearOnReconnect", sx("terminal.clearOnReconnect"), sx("terminal.clearOnReconnectDescription"), prefs.clearOnReconnect)}
             ${renderTerminalToggle("focusOnConnect", sx("terminal.focusOnConnect"), sx("terminal.focusOnConnectDescription"), prefs.focusOnConnect)}
           </div>
-          <div class="terminal-retention-block">
-            <div class="settings-provider-title small">${escapeHtml(sx("terminal.outputRetention"))}</div>
-            <div class="appearance-choice-grid terminal-retention-grid">
+          <div class="terminal-retention-block settings-card-content">
+            <div class="settings-provider-title settings-card-title small">${escapeHtml(sx("terminal.outputRetention"))}</div>
+            <div class="appearance-choice-grid terminal-retention-grid settings-data-list">
               ${[1000, 3000, 5000, 10000].map((value) => renderTerminalMaxLineChoice(value, prefs.maxLines)).join("")}
             </div>
           </div>
         </section>
-        <section class="settings-provider-section">
-          <div class="settings-provider-section-head">
+        <section class="settings-provider-section settings-page-section settings-card">
+          <div class="settings-provider-section-head settings-card-header">
             <div>
-              <div class="settings-provider-title">${escapeHtml(t("workspace.terminal.keyboardShortcuts"))}</div>
-              <div class="settings-provider-meta">${escapeHtml(sx("terminal.shortcutsDescription"))}</div>
+              <div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.keyboardShortcuts"))}</div>
+              <div class="settings-provider-meta settings-card-description">${escapeHtml(sx("terminal.shortcutsDescription"))}</div>
             </div>
           </div>
-          <div class="terminal-shortcut-grid">
+          <div class="terminal-shortcut-grid settings-data-list settings-card-content">
             ${renderTerminalShortcut("Enter", sx("terminalExtras.shortcuts.sendReturn"))}
             ${renderTerminalShortcut("Ctrl + C", sx("terminalExtras.shortcuts.interrupt"))}
             ${renderTerminalShortcut("Tab", sx("terminalExtras.shortcuts.complete"))}
@@ -231,7 +249,7 @@ export function createTerminalController({
 
   function renderTerminalToggle(field, title, description, checked) {
     return `
-      <label class="appearance-toggle-row terminal-toggle-row">
+      <label class="appearance-toggle-row terminal-toggle-row settings-switch-row">
         <span>
           <strong>${escapeHtml(title)}</strong>
           <small>${escapeHtml(description)}</small>
@@ -243,7 +261,7 @@ export function createTerminalController({
 
   function renderTerminalMaxLineChoice(value, current) {
     return `
-      <button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-terminal-max-lines="${escapeAttr(value)}">
+      <button class="appearance-choice settings-data-row ${current === value ? "active" : ""}" type="button" data-terminal-max-lines="${escapeAttr(value)}">
         <span>${escapeHtml(formatNumber(value))}</span>
         <small>${escapeHtml(sx("terminal.maxOutputLines", { count: formatNumber(value) }))}</small>
       </button>
@@ -251,7 +269,7 @@ export function createTerminalController({
   }
 
   function renderTerminalShortcut(keys, description) {
-    return `<div class="terminal-shortcut-card"><strong>${escapeHtml(keys)}</strong><span>${escapeHtml(description)}</span></div>`;
+    return `<div class="terminal-shortcut-card settings-data-row"><strong>${escapeHtml(keys)}</strong><span>${escapeHtml(description)}</span></div>`;
   }
 
   function bindTerminalSettingsActions() {
@@ -279,9 +297,7 @@ export function createTerminalController({
   function connectTerminal() {
     if (!state.agent) return;
     if (remoteTerminalLocked()) {
-      if (state.terminalWS) state.terminalWS.close();
-      appendTerminal(`[terminal] ${remoteTerminalLockedMessage()}\n`);
-      setTerminalStatus("remote-locked");
+      enforceAccessPolicy({ notify: true });
       return;
     }
     if (state.terminalWS) state.terminalWS.close();
@@ -440,6 +456,7 @@ export function createTerminalController({
     connectTerminal,
     copyTerminalOutput,
     currentTerminalPreferences,
+    enforceAccessPolicy,
     focusTerminalPanel,
     handleTerminalKeydown,
     loadTerminalPreferences,

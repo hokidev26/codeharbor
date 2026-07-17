@@ -42,7 +42,7 @@ func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 
 	payload := []byte(`{"name":"openai-compatible","type":"openai-compatible","baseUrl":"` + upstream.URL + `/v1","apiKey":"relay-secret","model":"relay-model"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -51,7 +51,7 @@ func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	request = newTestRequest(http.MethodGet, "/api/models", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -93,7 +93,7 @@ func TestUpdateProviderConfigPreservesRuntimeAPIKeyWhenBlank(t *testing.T) {
 
 	payload := []byte(`{"name":"openai-compatible","type":"openai-compatible","baseUrl":"` + upstream.URL + `/v1","model":"new-model"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -102,7 +102,7 @@ func TestUpdateProviderConfigPreservesRuntimeAPIKeyWhenBlank(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	request = newTestRequest(http.MethodGet, "/api/models", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -120,7 +120,7 @@ func TestUpdateProviderConfigDoesNotMutateRuntimeWhenSaveFails(t *testing.T) {
 
 	payload := []byte(`{"name":"openai-compatible","type":"openai-compatible","baseUrl":"http://127.0.0.1:65534/v1","apiKey":"secret","model":"new-model"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -129,7 +129,7 @@ func TestUpdateProviderConfigDoesNotMutateRuntimeWhenSaveFails(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	request = newTestRequest(http.MethodGet, "/api/settings", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected settings 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -165,7 +165,7 @@ func TestUpdateProviderConfigCreatesCustomProvider(t *testing.T) {
 
 	payload := []byte(`{"name":"groq","type":"openai-compatible","baseUrl":"` + upstream.URL + `/openai/v1","apiKey":"groq-secret","model":"openai/gpt-oss-20b"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/providers/groq/config", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPut, "/api/providers/groq/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -174,7 +174,7 @@ func TestUpdateProviderConfigCreatesCustomProvider(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	request = newTestRequest(http.MethodGet, "/api/models", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -230,7 +230,7 @@ func TestUpdateProviderConfigRejectsUnsafeCodexBaseURL(t *testing.T) {
 	for _, baseURL := range []string{"http://chatgpt.com/backend-api/codex", "https://evil.example/backend-api/codex", "https://chatgpt.com/other"} {
 		payload, _ := json.Marshal(providerConfigUpdateRequest{Name: "codex", Type: config.ProviderTypeCodex, BaseURL: baseURL, Model: "gpt-test"})
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPut, "/api/providers/codex/config", bytes.NewReader(payload))
+		request := newTestRequest(http.MethodPut, "/api/providers/codex/config", bytes.NewReader(payload))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
@@ -245,7 +245,7 @@ func TestUpdateProviderConfigRejectsInvalidProviderName(t *testing.T) {
 
 	payload := []byte(`{"name":"bad name","type":"openai-compatible","baseUrl":"http://example.com/v1","model":"model"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/providers/bad%20name/config", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPut, "/api/providers/bad%20name/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -285,7 +285,7 @@ func TestPatchProviderConfigDisablesAndReenablesRuntimeProvider(t *testing.T) {
 
 	patch := func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPatch, "/api/providers/relay", strings.NewReader(body))
+		request := newTestRequest(http.MethodPatch, "/api/providers/relay", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
@@ -352,7 +352,7 @@ func TestProviderLifecycleRejectsRemovingOnlyDefault(t *testing.T) {
 			}
 			app := New(config.Config{Agent: config.AgentConfig{DefaultModel: "relay:relay-model"}, Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{provider}}}, nil, nil, nil, registry)
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(test.method, "/api/providers/relay", strings.NewReader(test.body))
+			request := newTestRequest(test.method, "/api/providers/relay", strings.NewReader(test.body))
 			if test.body != "" {
 				request.Header.Set("Content-Type", "application/json")
 			}
@@ -385,7 +385,7 @@ func TestDeleteProviderOnlyAllowsCustomProviders(t *testing.T) {
 
 	deleteProvider := func(name string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodDelete, "/api/providers/"+name, nil)
+		request := newTestRequest(http.MethodDelete, "/api/providers/"+name, nil)
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
 		return recorder
@@ -447,7 +447,7 @@ func TestSavedProviderTestUsesSavedDisabledConfigAndRedactsFailures(t *testing.T
 
 	testProvider := func(name, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/providers/"+name+"/test", strings.NewReader(body))
+		request := newTestRequest(http.MethodPost, "/api/providers/"+name+"/test", strings.NewReader(body))
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
 		return recorder
@@ -462,6 +462,9 @@ func TestSavedProviderTestUsesSavedDisabledConfigAndRedactsFailures(t *testing.T
 	}
 	if !result.Reachable || !result.Configured || result.ModelCount != 2 || result.ErrorCode != "" {
 		t.Fatalf("unexpected successful test response: %+v", result)
+	}
+	if strings.Join(result.Models, ",") != "model-a,model-b" {
+		t.Fatalf("successful test did not return normalized models: %+v", result.Models)
 	}
 	if savedConfigCalls != 1 || bodyConfigCalls != 0 {
 		t.Fatalf("test must use only saved config, saved=%d body=%d", savedConfigCalls, bodyConfigCalls)
@@ -525,13 +528,13 @@ func TestProviderTestsSkipMissingRequiredAPIKey(t *testing.T) {
 	}
 
 	saved := httptest.NewRecorder()
-	savedRequest := httptest.NewRequest(http.MethodPost, "/api/providers/saved-required/test", nil)
+	savedRequest := newTestRequest(http.MethodPost, "/api/providers/saved-required/test", nil)
 	savedRequest.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(saved, savedRequest)
 	assertNotConfigured("saved", saved)
 
 	draft := httptest.NewRecorder()
-	draftRequest := httptest.NewRequest(http.MethodPost, "/api/providers/test", strings.NewReader(`{"name":"draft-required","type":"openai-compatible","baseUrl":"`+upstream.URL+`/v1","model":"required-model"}`))
+	draftRequest := newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(`{"name":"draft-required","type":"openai-compatible","baseUrl":"`+upstream.URL+`/v1","model":"required-model"}`))
 	draftRequest.Header.Set("Content-Type", "application/json")
 	draftRequest.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(draft, draftRequest)
@@ -577,13 +580,13 @@ func TestProviderTestsAllowOptionalAPIKey(t *testing.T) {
 	}
 
 	saved := httptest.NewRecorder()
-	savedRequest := httptest.NewRequest(http.MethodPost, "/api/providers/saved-optional/test", nil)
+	savedRequest := newTestRequest(http.MethodPost, "/api/providers/saved-optional/test", nil)
 	savedRequest.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(saved, savedRequest)
 	assertTested("saved", saved)
 
 	draft := httptest.NewRecorder()
-	draftRequest := httptest.NewRequest(http.MethodPost, "/api/providers/test", strings.NewReader(`{"name":"draft-optional","type":"openai-compatible","baseUrl":"`+upstream.URL+`/v1","model":"optional-model","apiKeyOptional":true}`))
+	draftRequest := newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(`{"name":"draft-optional","type":"openai-compatible","baseUrl":"`+upstream.URL+`/v1","model":"optional-model","apiKeyOptional":true}`))
 	draftRequest.Header.Set("Content-Type", "application/json")
 	draftRequest.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(draft, draftRequest)
@@ -617,7 +620,7 @@ func TestProviderDraftTestUsesExistingRuntimeKeyWithoutMutation(t *testing.T) {
 
 	payload := `{"name":"relay","type":"openai-compatible","baseUrl":"` + upstream.URL + `/draft/v1","model":"draft-model"}`
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/providers/test", strings.NewReader(payload))
+	request := newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -655,7 +658,7 @@ func TestProviderDraftTestUsesExistingRuntimeKeyWithoutMutation(t *testing.T) {
 		`{"name":"relay","type":"openai-compatible","baseUrl":"` + upstream.URL + `/draft/v1","apiKey":"draft-secret","model":"draft-model","unknown":true}`,
 	} {
 		recorder = httptest.NewRecorder()
-		request = httptest.NewRequest(http.MethodPost, "/api/providers/test", strings.NewReader(body))
+		request = newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
@@ -676,7 +679,7 @@ func TestSavedProviderTestRejectsChunkedBody(t *testing.T) {
 		Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:65534/v1", APIKey: "fixture-key", Model: "model",
 	}}}}, nil, nil, nil, providers.NewRegistry())
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/providers/relay/test", strings.NewReader(`{}`))
+	request := newTestRequest(http.MethodPost, "/api/providers/relay/test", strings.NewReader(`{}`))
 	request.ContentLength = -1
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -697,7 +700,7 @@ func TestProviderLifecycleRequiresARealConfiguredFallback(t *testing.T) {
 	app := New(config.Config{Agent: config.AgentConfig{DefaultModel: "primary:primary-model"}, Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{primary, unconfigured}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/providers/primary", strings.NewReader(`{"enabled":false}`))
+	request := newTestRequest(http.MethodPatch, "/api/providers/primary", strings.NewReader(`{"enabled":false}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(localTokenHeader, app.localToken)
 	app.Routes().ServeHTTP(recorder, request)
@@ -735,7 +738,7 @@ func TestConcurrentProviderPUTsKeepAllMutations(t *testing.T) {
 			name := fmt.Sprintf("relay-%02d", index)
 			payload := fmt.Sprintf(`{"name":%q,"type":"openai-compatible","baseUrl":"http://127.0.0.1:%d/v1","apiKey":"key-%d","model":"model-%d"}`, name, 64000+index, index, index)
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPut, "/api/providers/"+name+"/config", strings.NewReader(payload))
+			request := newTestRequest(http.MethodPut, "/api/providers/"+name+"/config", strings.NewReader(payload))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set(localTokenHeader, app.localToken)
 			app.Routes().ServeHTTP(recorder, request)
@@ -786,7 +789,7 @@ func TestProviderMutationLockPreventsStalePutFromRevivingDelete(t *testing.T) {
 	putDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPut, "/api/providers/relay/config", strings.NewReader(`{"name":"relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:65520/v1","model":"new-model"}`))
+		request := newTestRequest(http.MethodPut, "/api/providers/relay/config", strings.NewReader(`{"name":"relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:65520/v1","model":"new-model"}`))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
@@ -799,7 +802,7 @@ func TestProviderMutationLockPreventsStalePutFromRevivingDelete(t *testing.T) {
 	go func() {
 		close(deleteStarted)
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodDelete, "/api/providers/relay", nil)
+		request := newTestRequest(http.MethodDelete, "/api/providers/relay", nil)
 		request.Header.Set(localTokenHeader, app.localToken)
 		app.Routes().ServeHTTP(recorder, request)
 		deleteDone <- recorder

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentpkg "autoto/internal/agent"
@@ -37,7 +38,7 @@ func TestAgentStreamStateUsesETagAndExecutionGeneration(t *testing.T) {
 	handler := app.Routes()
 	path := "/api/v2/agents/" + agentRecord.ID + "/stream-state"
 	first := httptest.NewRecorder()
-	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, path, nil))
+	handler.ServeHTTP(first, newTestRequest(http.MethodGet, path, nil))
 	if first.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", first.Code, first.Body.String())
 	}
@@ -52,7 +53,7 @@ func TestAgentStreamStateUsesETagAndExecutionGeneration(t *testing.T) {
 	if payload.ExecutionGeneration != 1 || payload.Protocol != agentpkg.ProtocolVersion {
 		t.Fatalf("unexpected stream state: %+v", payload)
 	}
-	secondRequest := httptest.NewRequest(http.MethodGet, path, nil)
+	secondRequest := newTestRequest(http.MethodGet, path, nil)
 	secondRequest.Header.Set("If-None-Match", etag)
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, secondRequest)
@@ -81,9 +82,12 @@ func TestAgentLiveSnapshotReturnsMissedExecutionsSpecAndChildren(t *testing.T) {
 	if _, err := store.CreateAgent(ctx, db.Agent{ParentAgentID: agentRecord.ID, Type: "subagent", Title: "child", Model: agentRecord.Model, PermissionMode: "readOnly", CWD: agentRecord.CWD}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.AddMessage(ctx, db.Message{AgentID: agentRecord.ID, Role: "assistant", ContentText: "visible progress", ContentJSON: json.RawMessage(`[{"type":"text","text":"visible progress"}]`)}); err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
 	path := "/api/v2/agents/" + agentRecord.ID + "/live-snapshot?afterExecutionGeneration=0"
-	app.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	app.Routes().ServeHTTP(response, newTestRequest(http.MethodGet, path, nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}
@@ -96,5 +100,8 @@ func TestAgentLiveSnapshotReturnsMissedExecutionsSpecAndChildren(t *testing.T) {
 	}
 	if payload.Spec == nil || len(payload.Spec.Tasks) != 1 || len(payload.ChildAgents) != 1 {
 		t.Fatalf("snapshot did not include spec/children: %+v", payload)
+	}
+	if len(payload.Messages) != 1 || payload.Messages[0].ContentText != "visible progress" || strings.Contains(string(payload.Messages[0].ContentJSON), "server_") {
+		t.Fatalf("snapshot did not recover only durable assistant progress: %+v", payload.Messages)
 	}
 }

@@ -1,10 +1,12 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { modelVisibilityPrefsKey, preferredModelKey, relayProtocolPrefsKey } from "./preferences-data.mjs";
-import { api } from "./runtime.mjs";
+import { api, apiDownload } from "./runtime.mjs";
 import { formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs";
+import { remoteAccessContext } from "./remote-access-capabilities.mjs";
 import {
   createProviderDraft,
+  isAnthropicAccountProvider,
   isBuiltinProvider,
   isProviderDeletable,
   modelProvidersForUIUnion,
@@ -12,10 +14,49 @@ import {
   providerConfigPayload,
   providerConsoleRequest,
   renderProviderConsolePage,
-} from "./model-provider-components.mjs";
+} from "./model-provider-components.mjs?v=provider-card-clean-1-provider-create-page-1";
 
 const providerConsoleInteractiveSelector = "button, input, select, textarea, a, details, summary, [role=\"switch\"], [contenteditable=\"true\"]";
 const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
+const codexBrowserLoginBasePath = "/api/providers/oauth/codex/login";
+const codexBrowserLoginActiveStatuses = new Set(["starting", "pending", "exchanging"]);
+
+export function codexBrowserLoginRequest(action, loginId = "") {
+  const id = encodeURIComponent(String(loginId || "").trim());
+  if (action === "start") return { path: `${codexBrowserLoginBasePath}/start`, options: { method: "POST" } };
+  if (!id) throw new Error("Codex browser login ID is required");
+  if (action === "status") return { path: `${codexBrowserLoginBasePath}/${id}`, options: {} };
+  if (action === "cancel") return { path: `${codexBrowserLoginBasePath}/${id}`, options: { method: "DELETE" } };
+  throw new Error(`unsupported Codex browser login action: ${action}`);
+}
+
+export function trustedCodexBrowserAuthURL(value) {
+  try {
+    const target = new URL(String(value || ""));
+    return target.protocol === "https:"
+      && target.hostname === "auth.openai.com"
+      && target.port === ""
+      && target.username === ""
+      && target.password === ""
+      && target.pathname === "/oauth/authorize";
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeCodexBrowserLoginStatus(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const account = source.account && typeof source.account === "object" && !Array.isArray(source.account) ? source.account : null;
+  const rawStatus = String(source.status || "idle").trim().toLowerCase();
+  return {
+    loginId: String(source.loginId || source.login_id || "").trim(),
+    status: rawStatus === "canceled" ? "cancelled" : rawStatus,
+    authUrl: String(source.authUrl || source.auth_url || "").trim(),
+    expiresAt: String(source.expiresAt || source.expires_at || "").trim(),
+    message: String(source.message || source.error || "").trim(),
+    account,
+  };
+}
 
 export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackType = "openai-compatible") {
   const fields = form?.elements || {};
@@ -100,6 +141,17 @@ export function providerPreflightResult(response, translate) {
   };
 }
 
+export function providerModelDiscovery(response, currentModel = "") {
+  const models = [...new Set((Array.isArray(response?.models) ? response.models : [])
+    .map((model) => String(model || "").trim())
+    .filter(Boolean))];
+  const current = String(currentModel || "").trim();
+  return {
+    models,
+    selectedModel: models.includes(current) ? current : (models[0] || current),
+  };
+}
+
 export function normalizeCodexAccountList(value) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
@@ -109,14 +161,188 @@ export function normalizeCodexAccountList(value) {
   return [];
 }
 
+export function codexAccountExportFilename(account = {}, id = "") {
+  const raw = String(account?.name || account?.alias || `codex-${id || "account"}`).trim();
+  const safe = raw
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .slice(0, 120)
+    .trim();
+  const base = safe || "codex-auth";
+  return /\.json$/i.test(base) ? base : `${base}.json`;
+}
+
+export function normalizeAnthropicAccountList(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  for (const key of ["accounts", "data", "items"]) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return [];
+}
+
+export const agentModelRoles = Object.freeze(["explore", "plan", "general", "search"]);
+export const defaultReasoningEffortValues = Object.freeze(["auto", "low", "medium", "high"]);
+
+export function normalizeDefaultReasoningEffort(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return defaultReasoningEffortValues.includes(normalized) ? normalized : "auto";
+}
+
+export function isAgentModelReference(value) {
+  const normalized = String(value || "").trim();
+  const separator = normalized.indexOf(":");
+  return separator > 0 && separator < normalized.length - 1 && !/[\0\r\n]/.test(normalized);
+}
+
+export function normalizeAgentModelSettings(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const defaultModel = String(source.defaultModel || "").trim();
+  const summaryModel = String(source.summaryModel || defaultModel).trim();
+  const defaultReasoningEffort = normalizeDefaultReasoningEffort(source.defaultReasoningEffort);
+  const rawModels = source.subagentModels && typeof source.subagentModels === "object" ? source.subagentModels : {};
+  const rawPools = source.subagentModelPools && typeof source.subagentModelPools === "object" ? source.subagentModelPools : {};
+  const subagentModels = {};
+  const subagentModelPools = {};
+  for (const role of agentModelRoles) {
+    const preferred = String(rawModels[role] || "").trim();
+    if (preferred) subagentModels[role] = preferred;
+    const pool = [...new Set((Array.isArray(rawPools[role]) ? rawPools[role] : [])
+      .map((model) => String(model || "").trim())
+      .filter(Boolean))];
+    if (pool.length) subagentModelPools[role] = pool;
+  }
+  return { defaultModel, summaryModel, defaultReasoningEffort, subagentModels, subagentModelPools };
+}
+
+export function agentModelSettingsPayload(value = {}) {
+  const normalized = normalizeAgentModelSettings(value);
+  const subagentModels = {};
+  const subagentModelPools = {};
+  for (const role of agentModelRoles) {
+    const preferred = normalized.subagentModels[role] || "";
+    const pool = [...(normalized.subagentModelPools[role] || [])];
+    if (preferred) subagentModels[role] = preferred;
+    if (pool.length) {
+      if (preferred && !pool.includes(preferred)) pool.unshift(preferred);
+      subagentModelPools[role] = pool;
+    }
+  }
+  return {
+    defaultModel: normalized.defaultModel,
+    summaryModel: normalized.summaryModel,
+    subagentModels,
+    subagentModelPools,
+  };
+}
+
+export function normalizeModelAggregateList(value) {
+  const items = Array.isArray(value) ? value : Array.isArray(value?.aggregates) ? value.aggregates : [];
+  return items.map((item) => ({
+    id: String(item?.id || ""),
+    name: String(item?.name || "").trim(),
+    mode: String(item?.mode || "priority").trim() || "priority",
+    members: (Array.isArray(item?.members) ? item.members : []).map((member) => String(member || "").trim()).filter(Boolean),
+    revision: Math.max(0, Math.trunc(Number(item?.revision) || 0)),
+    updatedAt: String(item?.updatedAt || item?.updated_at || ""),
+  })).filter((item) => item.name);
+}
+
+export function modelAggregateMembers(value) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  return source.map((member) => String(member || "").trim()).filter(Boolean);
+}
+
+export function modelAggregateActionRequest(action, aggregate = {}, values = {}) {
+  const name = String(values.name ?? aggregate?.name ?? "").trim();
+  const path = `/api/model-aggregates/${encodeURIComponent(name)}`;
+  const revision = Math.max(0, Math.trunc(Number(values.revision ?? aggregate?.revision) || 0));
+  if (action === "save") {
+    return {
+      path,
+      options: {
+        method: "PUT",
+        body: JSON.stringify({ mode: "priority", members: modelAggregateMembers(values.members), revision }),
+      },
+    };
+  }
+  if (action === "delete") return { path, options: { method: "DELETE", body: JSON.stringify({ revision }) } };
+  throw new Error(`unsupported model aggregate action: ${action}`);
+}
+
+export function runtimeReasoningSettingsRequest(value, runtimeSettings = {}) {
+  return {
+    path: "/api/runtime/model-settings",
+    options: {
+      method: "PATCH",
+      body: JSON.stringify({
+        defaultReasoningEffort: normalizeDefaultReasoningEffort(value),
+        revision: Math.max(0, Math.trunc(Number(runtimeSettings?.revision) || 0)),
+      }),
+    },
+  };
+}
+
 export function codexAccountActionRequest(action, id, values = {}) {
   const path = `/api/providers/oauth/codex/accounts/${encodeURIComponent(String(id || ""))}`;
   switch (action) {
     case "save": return { path, options: { method: "PATCH", body: JSON.stringify({ alias: String(values.alias || ""), priority: Number(values.priority) }) } };
     case "toggle": return { path, options: { method: "PATCH", body: JSON.stringify({ disabled: !Boolean(values.disabled) }) } };
     case "sync": return { path: `${path}/refresh`, options: { method: "POST" } };
+    case "export": return { path: `${path}/export`, options: { method: "GET", headers: { "X-Autoto-Confirm": "export-codex-account" } } };
     case "delete": return { path, options: { method: "DELETE" } };
     default: throw new Error(`unsupported Codex account action: ${action}`);
+  }
+}
+
+export function anthropicProfileLoginCommand(profile) {
+  const value = String(profile || "").trim();
+  if (!value) return "ant auth login --profile <name>";
+  if (/^[A-Za-z0-9._-]+$/.test(value)) return `ant auth login --profile ${value}`;
+  return `ant auth login --profile '${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function anthropicAccountsListRequest() {
+  return { path: "/api/providers/auth/anthropic/accounts", options: {} };
+}
+
+export function anthropicAccountCreateRequest(values = {}) {
+  const authType = values.authType === "api_key" ? "api_key" : "profile";
+  const priority = Number(values.priority);
+  const body = {
+    authType,
+    ...(authType === "api_key"
+      ? { apiKey: String(values.apiKey || "").trim() }
+      : { profile: String(values.profile || "").trim() }),
+  };
+  const alias = String(values.alias || "").trim();
+  if (alias) body.alias = alias;
+  if (Number.isInteger(priority)) body.priority = priority;
+  return { path: "/api/providers/auth/anthropic/accounts", options: { method: "POST", body: JSON.stringify(body) } };
+}
+
+export function consumeAnthropicAccountCreateRequest(form) {
+  const request = anthropicAccountCreateRequest({
+    authType: form?.elements?.authType?.value,
+    profile: form?.elements?.profile?.value,
+    apiKey: form?.elements?.apiKey?.value,
+    alias: form?.elements?.alias?.value,
+    priority: form?.elements?.priority?.value,
+  });
+  if (form?.elements?.apiKey) form.elements.apiKey.value = "";
+  return request;
+}
+
+export function anthropicAccountActionRequest(action, id, values = {}) {
+  const path = `/api/providers/auth/anthropic/accounts/${encodeURIComponent(String(id || ""))}`;
+  switch (action) {
+    case "save": return { path, options: { method: "PATCH", body: JSON.stringify({ alias: String(values.alias || ""), priority: Number(values.priority) }) } };
+    case "toggle": return { path, options: { method: "PATCH", body: JSON.stringify({ disabled: !Boolean(values.disabled) }) } };
+    case "sync": return { path: `${path}/sync`, options: { method: "POST" } };
+    case "delete": return { path, options: { method: "DELETE" } };
+    default: throw new Error(`unsupported Anthropic account action: ${action}`);
   }
 }
 
@@ -130,56 +356,231 @@ export function codexDeleteResultWarning(result, translate = (key, params) => t(
     : "";
 }
 
-export function renderCodexAccountManagementTable(accounts, { translate = (key, params) => t(`modelProvider.${key}`, params), now = Date.now() } = {}) {
+export function codexAccountStatus(account = {}, { now = Date.now() } = {}) {
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
+  const expiresAt = String(account?.expires_at || account?.expiresAt || "").trim();
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= now && !Boolean(account?.refreshable);
+  if (Boolean(account?.disabled)) return { key: "disabled", tone: "muted", expiresAt };
+  if (expired) return { key: "expired", tone: "danger", expiresAt };
+  if (codexQuotaIsLimited(quota)) return { key: "rateLimited", tone: "warn", expiresAt };
+  return { key: "available", tone: "ok", expiresAt };
+}
+
+export function codexAccountOverview(accounts, { now = Date.now() } = {}) {
+  const overview = { total: 0, available: 0, rateLimited: 0, disabled: 0, expired: 0 };
+  for (const account of Array.isArray(accounts) ? accounts : []) {
+    overview.total += 1;
+    const status = codexAccountStatus(account, { now });
+    if (Object.hasOwn(overview, status.key)) overview[status.key] += 1;
+  }
+  return overview;
+}
+
+export function anthropicAccountStatus(account = {}) {
+  if (Boolean(account?.disabled)) return { key: "disabled", tone: "muted" };
+  const limit = account?.rate_limit ?? account?.rateLimit ?? account?.quota;
+  if (anthropicRateLimitReached(limit)) return { key: "rateLimited", tone: "warn" };
+  if (account?.configured === false) return { key: "unconfigured", tone: "warn" };
+  return { key: "available", tone: "ok" };
+}
+
+export function anthropicAccountOverview(accounts) {
+  const overview = { total: 0, available: 0, rateLimited: 0, disabled: 0 };
+  for (const account of Array.isArray(accounts) ? accounts : []) {
+    overview.total += 1;
+    const status = anthropicAccountStatus(account);
+    if (Object.hasOwn(overview, status.key)) overview[status.key] += 1;
+  }
+  return overview;
+}
+
+export function renderCodexAccountManagementTable(accounts, {
+  translate = (key, params) => t(`modelProvider.${key}`, params),
+  now = Date.now(),
+  editing = null,
+  busy = {},
+} = {}) {
   const mt = translate;
-  if (!accounts.length) return `<div class="settings-empty-card compact">${escapeHtml(mt("noCodexCredentials"))}</div>`;
+  const items = Array.isArray(accounts) ? accounts : [];
+  if (!items.length) return `<div class="settings-empty-card settings-card settings-alert compact" role="status">${escapeHtml(mt("noCodexCredentials"))}</div>`;
   return `
-    <div class="codex-account-table-wrap">
-      <table class="codex-account-table">
+    <div class="codex-account-table-wrap settings-card-content">
+      <table class="codex-account-table" aria-label="${escapeAttr(mt("importedCredentials"))}">
         <thead><tr>
-          <th>${escapeHtml(mt("accountName"))}</th><th>${escapeHtml(mt("accountId"))}</th><th>${escapeHtml(mt("priority"))}</th><th>${escapeHtml(mt("status"))}</th>
-          <th>${escapeHtml(mt("successFailure"))}</th><th>${escapeHtml(mt("usage"))}</th><th>${escapeHtml(mt("lastUsed"))}</th><th>${escapeHtml(mt("actions"))}</th>
+          <th scope="col">${escapeHtml(mt("accountName"))}</th><th scope="col">${escapeHtml(mt("accountId"))}</th><th scope="col">${escapeHtml(mt("priority"))}</th><th scope="col">${escapeHtml(mt("status"))}</th>
+          <th scope="col">${escapeHtml(mt("successFailure"))}</th><th scope="col">${escapeHtml(mt("usage"))}</th><th scope="col">${escapeHtml(mt("lastUsed"))}</th><th scope="col">${escapeHtml(mt("actions"))}</th>
         </tr></thead>
-        <tbody>${accounts.map((account) => renderCodexAccountRow(account, mt, now)).join("")}</tbody>
+        <tbody>${items.map((account) => renderCodexAccountRow(account, mt, now, editing, busy)).join("")}</tbody>
       </table>
     </div>`;
 }
 
-function renderCodexAccountRow(account, mt, now) {
-  const id = String(account?.id || account?.auth_index || account?.authIndex || account?.name || "");
-  const alias = String(account?.alias || account?.email || "");
+export function renderAnthropicAccountManagementTable(accounts, {
+  translate = (key, params) => t(`modelProvider.${key}`, params),
+  editing = null,
+  busy = {},
+} = {}) {
+  const mt = translate;
+  const items = Array.isArray(accounts) ? accounts : [];
+  if (!items.length) return `<div class="settings-empty-card settings-card settings-alert compact" role="status">${escapeHtml(mt("anthropic.noAccounts"))}</div>`;
+  return `<div class="codex-account-table-wrap anthropic-account-table-wrap settings-card-content">
+    <table class="codex-account-table anthropic-account-table" aria-label="${escapeAttr(mt("anthropic.accountsTitle"))}">
+      <thead><tr>
+        <th scope="col">${escapeHtml(mt("accountName"))}</th><th scope="col">${escapeHtml(mt("anthropic.authType"))}</th><th scope="col">${escapeHtml(mt("priority"))}</th><th scope="col">${escapeHtml(mt("status"))}</th>
+        <th scope="col">${escapeHtml(mt("successFailure"))}</th><th scope="col">${escapeHtml(mt("usage"))}</th><th scope="col">${escapeHtml(mt("lastUsed"))}</th><th scope="col">${escapeHtml(mt("actions"))}</th>
+      </tr></thead>
+      <tbody>${items.map((account) => renderAnthropicAccountRow(account, mt, editing, busy)).join("")}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderAnthropicAccountRow(account, mt, editing, busy) {
+  const id = String(account?.id || "");
+  const alias = String(account?.alias || "");
   const priority = finiteNumber(account?.priority, 100);
   const disabled = Boolean(account?.disabled);
+  const managed = account?.managed !== false;
+  const isEditing = managed && editing?.id === id;
+  const isBusy = managed && Boolean(busy?.[id]);
+  const authType = String(account?.auth_type || account?.authType || "profile").toLowerCase();
+  const profile = String(account?.profile || "");
+  const source = managed ? String(account?.source || "") : mt("anthropic.existingConfigSource");
+  const fallbackName = profile || source || id || mt("unknown");
+  const displayName = alias || fallbackName;
+  const secondaryName = [alias && fallbackName !== alias ? fallbackName : "", source && source !== fallbackName ? source : ""].filter(Boolean).join(" · ");
+  const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
+  const success = Math.max(0, finiteNumber(stats.success_count ?? stats.successCount, 0));
+  const failure = Math.max(0, finiteNumber(stats.failure_count ?? stats.failureCount, 0));
+  const lastUsed = String(stats.last_use_at || stats.lastUseAt || stats.last_used_at || stats.lastUsedAt || stats.last_attempt_at || stats.lastAttemptAt || "");
+  const status = anthropicAccountStatus(account);
+  const disabledAttributes = isBusy ? ` disabled aria-busy="true"` : "";
+  const editAlias = String(isEditing ? editing.alias ?? alias : alias);
+  const editPriority = finiteNumber(isEditing ? editing.priority : priority, priority);
+  const modelCount = Array.isArray(account?.models) ? account.models.filter(Boolean).length : 0;
+  return `<tr data-anthropic-account-row="${escapeAttr(id)}" class="${isEditing ? "is-editing" : ""}" aria-busy="${isBusy ? "true" : "false"}">
+    <td data-label="${escapeAttr(mt("accountName"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("accountName"))}</span><input class="codex-account-alias settings-text-input settings-form-field" value="${escapeAttr(editAlias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-anthropic-edit-alias="${escapeAttr(id)}"${disabledAttributes}></label>`
+      : `<strong class="codex-account-name">${escapeHtml(displayName)}</strong>`}${secondaryName ? `<div class="codex-account-secondary">${escapeHtml(secondaryName)}</div>` : ""}${modelCount ? `<div class="codex-account-secondary">${escapeHtml(mt("anthropic.modelCount", { count: modelCount }))}</div>` : ""}</td>
+    <td data-label="${escapeAttr(mt("anthropic.authType"))}"><span class="settings-badge">${escapeHtml(mt(authType === "api_key" ? "anthropic.apiKeyAuth" : "anthropic.profileAuth"))}</span></td>
+    <td data-label="${escapeAttr(mt("priority"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("priority"))}</span><input class="codex-priority-input settings-text-input settings-form-field" type="number" min="1" max="1000000" step="1" value="${escapeAttr(editPriority)}" data-anthropic-edit-priority="${escapeAttr(id)}"${disabledAttributes}></label>`
+      : `<span class="codex-priority-value">${escapeHtml(String(priority))}</span>`}</td>
+    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill settings-badge ${escapeAttr(status.tone)}">${escapeHtml(mt(status.key))}</span></td>
+    <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
+    <td data-label="${escapeAttr(mt("usage"))}">${renderAnthropicQuota(account?.quota ?? account?.rate_limit ?? account?.rateLimit, mt)}</td>
+    <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
+    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions settings-inline-actions" role="group" aria-label="${escapeAttr(mt("accountActions", { account: displayName }))}">
+      ${!managed ? `<span class="settings-badge muted anthropic-readonly-badge">${escapeHtml(mt("anthropic.readOnly"))}</span>` : isEditing ? `<button class="codex-icon-action save" type="button" data-anthropic-save="${escapeAttr(id)}" aria-label="${escapeAttr(mt("saveAccount"))}" title="${escapeAttr(mt("saveAccount"))}"${disabledAttributes}>${codexActionIcon("save")}<span>${escapeHtml(mt("save"))}</span></button><button class="codex-icon-action cancel" type="button" data-anthropic-edit-cancel="${escapeAttr(id)}" aria-label="${escapeAttr(mt("cancelEdit"))}" title="${escapeAttr(mt("cancelEdit"))}"${disabledAttributes}>${codexActionIcon("cancel")}<span>${escapeHtml(mt("cancel"))}</span></button>` : `<button class="codex-icon-action edit" type="button" data-anthropic-edit="${escapeAttr(id)}" aria-label="${escapeAttr(mt("editAccount"))}" title="${escapeAttr(mt("editAccount"))}"${disabledAttributes}>${codexActionIcon("edit")}<span>${escapeHtml(mt("edit"))}</span></button><button class="codex-icon-action sync" type="button" data-anthropic-sync="${escapeAttr(id)}" aria-label="${escapeAttr(mt("syncAccount"))}" title="${escapeAttr(mt("syncAccount"))}"${disabledAttributes}>${codexActionIcon("sync")}<span>${escapeHtml(mt("sync"))}</span></button><button class="codex-icon-action toggle" type="button" data-anthropic-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}" aria-label="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}" title="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}"${disabledAttributes}>${codexActionIcon(disabled ? "enable" : "disable")}<span>${escapeHtml(disabled ? mt("enable") : mt("disable"))}</span></button><button class="codex-icon-action delete" type="button" data-anthropic-delete="${escapeAttr(id)}" aria-label="${escapeAttr(mt("deleteAccount"))}" title="${escapeAttr(mt("deleteAccount"))}"${disabledAttributes}>${codexActionIcon("delete")}<span>${escapeHtml(mt("delete"))}</span></button>`}
+    </div></td>
+  </tr>`;
+}
+
+function renderCodexAccountRow(account, mt, now, editing, busy) {
+  const id = String(account?.id || account?.auth_index || account?.authIndex || account?.name || "");
+  const alias = String(account?.alias || "");
+  const priority = finiteNumber(account?.priority, 100);
+  const disabled = Boolean(account?.disabled);
+  const isEditing = editing?.id === id;
+  const isBusy = Boolean(busy?.[id]);
   const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
   const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
   const plan = String(quota?.plan_type || quota?.planType || account?.plan_type || account?.planType || "").trim();
-  const limited = codexQuotaIsLimited(quota);
-  const statusClass = disabled ? "muted" : limited ? "warn" : "ok";
-  const statusText = disabled ? mt("disabled") : limited ? mt("rateLimited") : mt("available");
+  const status = codexAccountStatus(account, { now });
   const accountLabel = String(account?.account_id || account?.accountID || id || mt("unknown"));
   const fallbackName = String(account?.email || account?.name || mt("unknown"));
+  const displayName = alias || fallbackName;
   const success = Math.max(0, finiteNumber(stats.success_count ?? stats.successCount, 0));
   const failure = Math.max(0, finiteNumber(stats.failure_count ?? stats.failureCount, 0));
   const lastUsed = String(stats.last_use_at || stats.lastUseAt || stats.last_attempt_at || stats.lastAttemptAt || "");
-  const statusDetail = String(stats.last_error_code || stats.lastErrorCode || stats.last_status_code || stats.lastStatusCode || stats.last_http_status || stats.lastHTTPStatus || "");
-  return `<tr data-codex-account-row="${escapeAttr(id)}">
+  const disabledAttributes = isBusy ? ` disabled aria-busy="true"` : "";
+  const secondaryName = alias && fallbackName !== alias ? fallbackName : "";
+  const editAlias = String(isEditing ? editing.alias ?? alias : alias);
+  const editPriority = finiteNumber(isEditing ? editing.priority : priority, priority);
+  return `<tr data-codex-account-row="${escapeAttr(id)}" class="${isEditing ? "is-editing" : ""}" aria-busy="${isBusy ? "true" : "false"}">
     <td data-label="${escapeAttr(mt("accountName"))}">
-      <input class="codex-account-alias settings-text-input" value="${escapeAttr(alias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-codex-alias="${escapeAttr(id)}">
-      <div class="codex-account-secondary">${escapeHtml(fallbackName)}${plan ? ` <span class="codex-plan-badge">${escapeHtml(plan)}</span>` : ""}</div>
+      ${isEditing
+        ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("accountName"))}</span><input class="codex-account-alias settings-text-input settings-form-field" value="${escapeAttr(editAlias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-codex-edit-alias="${escapeAttr(id)}"${disabledAttributes}></label>`
+        : `<strong class="codex-account-name">${escapeHtml(displayName)}</strong>`}
+      ${(secondaryName || plan) ? `<div class="codex-account-secondary">${secondaryName ? escapeHtml(secondaryName) : ""}${plan ? `<span class="codex-plan-badge settings-badge">${escapeHtml(plan)}</span>` : ""}</div>` : ""}
     </td>
     <td data-label="${escapeAttr(mt("accountId"))}"><code class="codex-account-id">${escapeHtml(accountLabel)}</code></td>
-    <td data-label="${escapeAttr(mt("priority"))}"><input class="codex-priority-input settings-text-input" type="number" min="1" max="1000000" step="1" value="${escapeAttr(priority)}" data-codex-priority="${escapeAttr(id)}"></td>
-    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill ${statusClass}">${escapeHtml(statusText)}</span>${statusDetail ? `<div class="codex-account-secondary">${escapeHtml(statusDetail)}</div>` : ""}</td>
+    <td data-label="${escapeAttr(mt("priority"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("priority"))}</span><input class="codex-priority-input settings-text-input settings-form-field" type="number" min="1" max="1000000" step="1" value="${escapeAttr(editPriority)}" data-codex-edit-priority="${escapeAttr(id)}"${disabledAttributes}></label>`
+      : `<span class="codex-priority-value">${escapeHtml(String(priority))}</span>`}</td>
+    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill settings-badge ${escapeAttr(status.tone)}">${escapeHtml(mt(status.key))}</span></td>
     <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
     <td data-label="${escapeAttr(mt("usage"))}">${renderCodexQuota(quota, mt, now)}</td>
     <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
-    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions">
-      <button class="settings-action-btn subtle" type="button" data-codex-save="${escapeAttr(id)}">${escapeHtml(mt("save"))}</button>
-      <button class="settings-action-btn subtle" type="button" data-codex-sync="${escapeAttr(id)}">${escapeHtml(mt("sync"))}</button>
-      <button class="settings-action-btn subtle" type="button" data-codex-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}">${escapeHtml(disabled ? mt("enable") : mt("disable"))}</button>
-      <button class="settings-action-btn danger" type="button" data-codex-delete="${escapeAttr(id)}">${escapeHtml(mt("delete"))}</button>
+    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions settings-inline-actions" role="group" aria-label="${escapeAttr(mt("accountActions", { account: displayName }))}">
+      ${isEditing ? `
+        <button class="codex-icon-action save" type="button" data-codex-save="${escapeAttr(id)}" aria-label="${escapeAttr(mt("saveAccount"))}" title="${escapeAttr(mt("saveAccount"))}"${disabledAttributes}>${codexActionIcon("save")}<span>${escapeHtml(mt("save"))}</span></button>
+        <button class="codex-icon-action cancel" type="button" data-codex-edit-cancel="${escapeAttr(id)}" aria-label="${escapeAttr(mt("cancelEdit"))}" title="${escapeAttr(mt("cancelEdit"))}"${disabledAttributes}>${codexActionIcon("cancel")}<span>${escapeHtml(mt("cancel"))}</span></button>` : `
+        <button class="codex-icon-action edit" type="button" data-codex-edit="${escapeAttr(id)}" aria-label="${escapeAttr(mt("editAccount"))}" title="${escapeAttr(mt("editAccount"))}"${disabledAttributes}>${codexActionIcon("edit")}<span>${escapeHtml(mt("edit"))}</span></button>
+        <button class="codex-icon-action sync" type="button" data-codex-sync="${escapeAttr(id)}" aria-label="${escapeAttr(mt("syncAccount"))}" title="${escapeAttr(mt("syncAccount"))}"${disabledAttributes}>${codexActionIcon("sync")}<span>${escapeHtml(mt("sync"))}</span></button>
+        <button class="codex-icon-action export" type="button" data-codex-export="${escapeAttr(id)}" aria-label="${escapeAttr(mt("exportAccountJSON"))}" title="${escapeAttr(mt("exportAccountJSON"))}"${disabledAttributes}>${codexActionIcon("export")}<span>${escapeHtml(mt("exportAccount"))}</span></button>
+        <span class="codex-account-action-divider" aria-hidden="true"></span>
+        <button class="codex-icon-action toggle" type="button" data-codex-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}" aria-label="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}" title="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}"${disabledAttributes}>${codexActionIcon(disabled ? "enable" : "disable")}<span>${escapeHtml(disabled ? mt("enable") : mt("disable"))}</span></button>
+        <button class="codex-icon-action delete" type="button" data-codex-delete="${escapeAttr(id)}" aria-label="${escapeAttr(mt("deleteAccount"))}" title="${escapeAttr(mt("deleteAccount"))}"${disabledAttributes}>${codexActionIcon("delete")}<span>${escapeHtml(mt("delete"))}</span></button>`}
     </div></td>
   </tr>`;
+}
+
+function renderAnthropicQuota(value, mt) {
+  if (!value || typeof value !== "object") return `<span class="codex-no-quota">${escapeHtml(mt("anthropic.noQuotaData"))}</span>`;
+  const requests = value.requests && typeof value.requests === "object" ? value.requests : value;
+  const buckets = [
+    [mt("anthropic.quotaRequests"), requests],
+    [mt("anthropic.quotaInputTokens"), value.input_tokens || value.inputTokens],
+    [mt("anthropic.quotaOutputTokens"), value.output_tokens || value.outputTokens],
+  ].map(([label, bucket]) => renderAnthropicQuotaBucket(label, bucket, mt)).filter(Boolean);
+  const meta = [];
+  const retryAfter = value.retry_after ?? value.retryAfter;
+  const fetchedAt = value.fetched_at || value.fetchedAt;
+  if (retryAfter !== undefined && retryAfter !== null && retryAfter !== "") meta.push(mt("anthropic.quotaRetryAfter", { time: formatAnthropicLimitTime(retryAfter, { duration: true }) }));
+  if (fetchedAt) meta.push(mt("anthropic.quotaFetchedAt", { time: formatAnthropicLimitTime(fetchedAt) }));
+  if (!buckets.length && !meta.length) return `<span class="codex-no-quota">${escapeHtml(mt("anthropic.noQuotaData"))}</span>`;
+  return `<div class="codex-quota-stack anthropic-quota-stack">${buckets.join("")}${meta.map((row) => `<div class="codex-quota-meta">${escapeHtml(row)}</div>`).join("")}</div>`;
+}
+
+function renderAnthropicQuotaBucket(label, bucket, mt) {
+  if (!bucket || typeof bucket !== "object") return "";
+  const remainingValue = bucket.remaining ?? bucket.remaining_requests ?? bucket.remainingRequests ?? bucket.requests_remaining ?? bucket.requestsRemaining;
+  const limitValue = bucket.limit ?? bucket.request_limit ?? bucket.requestLimit ?? bucket.total;
+  const usedPercentValue = bucket.used_percent ?? bucket.usedPercent;
+  const resetValue = bucket.reset ?? bucket.reset_at ?? bucket.resetAt ?? bucket.resets_at ?? bucket.resetsAt;
+  const hasRemaining = remainingValue !== null && remainingValue !== "" && Number.isFinite(Number(remainingValue));
+  const hasLimit = limitValue !== null && limitValue !== "" && Number.isFinite(Number(limitValue));
+  const hasUsedPercent = usedPercentValue !== null && usedPercentValue !== "" && Number.isFinite(Number(usedPercentValue));
+  if (!hasRemaining && !hasLimit && !hasUsedPercent && (resetValue === undefined || resetValue === null || resetValue === "")) return "";
+  const rows = [];
+  if (hasRemaining) rows.push(mt("anthropic.quotaRemaining", { count: Math.max(0, Number(remainingValue)) }));
+  if (hasLimit) rows.push(mt("anthropic.quotaLimit", { count: Math.max(0, Number(limitValue)) }));
+  if (hasUsedPercent) rows.push(mt("anthropic.quotaUsed", { percent: formatPercent(Math.max(0, Math.min(100, Number(usedPercentValue)))) }));
+  if (resetValue !== undefined && resetValue !== null && resetValue !== "") rows.push(mt("anthropic.quotaResetAt", { time: formatAnthropicLimitTime(resetValue) }));
+  return `<div class="anthropic-quota-bucket"><strong>${escapeHtml(label)}</strong>${rows.map((row) => `<div class="codex-quota-meta">${escapeHtml(row)}</div>`).join("")}</div>`;
+}
+
+function formatAnthropicLimitTime(value, { duration = false } = {}) {
+  const number = Number(value);
+  if (Number.isFinite(number)) {
+    if (duration || number < 1000000000) return `${Math.max(0, number)}s`;
+    return formatCodexTimestamp(new Date(number > 1000000000000 ? number : number * 1000).toISOString());
+  }
+  const raw = String(value || "").trim();
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? formatCodexTimestamp(raw) : raw;
+}
+
+function anthropicRateLimitReached(value) {
+  if (!value || typeof value !== "object") return Boolean(value);
+  const hasRequestsBucket = Boolean(value.requests && typeof value.requests === "object");
+  const requests = hasRequestsBucket ? value.requests : value;
+  if (requests.limited === true || requests.rate_limited === true || requests.rateLimited === true || requests.reached === true) return true;
+  const remaining = requests.remaining ?? requests.remaining_requests ?? requests.remainingRequests ?? requests.requests_remaining ?? requests.requestsRemaining;
+  if (remaining !== undefined && remaining !== null && remaining !== "" && Number.isFinite(Number(remaining))) return Number(remaining) <= 0;
+  if (hasRequestsBucket) return false;
+  return value.limited === true || value.rate_limited === true || value.rateLimited === true || value.reached === true;
 }
 
 function renderCodexQuota(quota, mt, now) {
@@ -188,9 +589,8 @@ function renderCodexQuota(quota, mt, now) {
     [mt("primaryQuota"), quota.primary_window || quota.primaryWindow],
     [mt("secondaryQuota"), quota.secondary_window || quota.secondaryWindow],
   ].filter(([, window]) => window && typeof window === "object");
-  const credits = renderCodexCredits(quota.credits || quota.credit_balance || quota.creditBalance, mt);
-  if (!windows.length && !credits) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
-  return `<div class="codex-quota-stack">${windows.map(([label, window]) => renderCodexQuotaWindow(label, window, mt, now)).join("")}${credits}</div>`;
+  if (!windows.length) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
+  return `<div class="codex-quota-stack">${windows.map(([label, window]) => renderCodexQuotaWindow(label, window, mt, now)).join("")}</div>`;
 }
 
 function renderCodexQuotaWindow(label, window, mt, now) {
@@ -205,17 +605,18 @@ function renderCodexQuotaWindow(label, window, mt, now) {
   </div>`;
 }
 
-function renderCodexCredits(credits, mt) {
-  if (!credits || typeof credits !== "object") return "";
-  const unlimited = Boolean(credits.unlimited ?? credits.is_unlimited ?? credits.isUnlimited);
-  const hasCredits = Boolean(credits.has_credits ?? credits.hasCredits ?? credits.available);
-  const balance = finiteNumber(credits.balance ?? credits.amount ?? credits.remaining, 0);
-  const summary = unlimited
-    ? mt("creditsUnlimited")
-    : hasCredits
-      ? mt("creditsBalance", { balance: formatCreditBalance(balance) })
-      : mt("creditsUnavailable");
-  return `<div class="codex-credits-summary"><span>${escapeHtml(mt("credits"))}</span><strong>${escapeHtml(summary)}</strong></div>`;
+function codexActionIcon(name) {
+  const paths = {
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    sync: '<path d="M20 7h-5V2"/><path d="M20 7a8 8 0 0 0-14.9-2"/><path d="M4 17h5v5"/><path d="M4 17a8 8 0 0 0 14.9 2"/>',
+    enable: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
+    disable: '<path d="M5 5l14 14"/><path d="M18.4 6.6A9 9 0 0 1 6.6 18.4"/><path d="M5.6 5.6A9 9 0 0 1 18.4 18.4"/>',
+    delete: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/>',
+    save: '<path d="m5 12 4 4L19 6"/>',
+    cancel: '<path d="m6 6 12 12"/><path d="m18 6-12 12"/>',
+    export: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.edit}</svg>`;
 }
 
 function codexQuotaIsLimited(quota) {
@@ -228,10 +629,6 @@ function codexQuotaIsLimited(quota) {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
-}
-
-function formatCreditBalance(value) {
-  return value.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
 }
 
 function formatPercent(value) {
@@ -307,11 +704,40 @@ export function createModelProviderSettingsController({
     }
   }
 
+  async function loadModelAggregates({ force = false } = {}) {
+    if (state.modelAggregatesLoading) return false;
+    if (!force && state.modelAggregatesLoaded === true) return true;
+    const seq = (state.modelAggregateSeq || 0) + 1;
+    state.modelAggregateSeq = seq;
+    state.modelAggregatesLoading = true;
+    state.modelAggregatesError = "";
+    if (state.activeSettingsPanel === "models") refreshActiveSettingsPanel?.();
+    try {
+      const response = await api("/api/model-aggregates");
+      if (seq !== state.modelAggregateSeq) return false;
+      state.modelAggregates = normalizeModelAggregateList(response);
+      state.modelAggregatesLoaded = true;
+      return true;
+    } catch (error) {
+      if (seq !== state.modelAggregateSeq) return false;
+      state.modelAggregatesError = error?.message || mt("unknown");
+      state.modelAggregatesLoaded = true;
+      return false;
+    } finally {
+      if (seq === state.modelAggregateSeq) {
+        state.modelAggregatesLoading = false;
+        if (state.activeSettingsPanel === "models") refreshActiveSettingsPanel?.();
+      }
+    }
+  }
+
   async function loadProviderAuthFiles({ silent = false } = {}) {
     const seq = ++state.providerAuthSeq;
     const button = silent ? null : $("codexRefreshAuthBtn");
     let loaded = false;
+    state.providerAuthLoading = true;
     setButtonBusy(button, true, mt("refreshing"));
+    if (silent && providerConsoleState().view === "codex" && !extractAuthFiles(state.providerAuthFiles).length) refreshActiveSettingsPanel?.();
     try {
       const files = await api("/api/providers/oauth/codex/accounts");
       if (seq !== state.providerAuthSeq) return;
@@ -324,18 +750,50 @@ export function createModelProviderSettingsController({
       state.providerAuthError = err.message;
       if (!silent) notifyTerminal?.(`[warn] ${mt("authAccountsLoadFailed", { message: err.message })}\n`);
     } finally {
-      if (seq === state.providerAuthSeq) setButtonBusy(button, false, mt("refreshing"));
+      if (seq === state.providerAuthSeq) {
+        state.providerAuthLoading = false;
+        setButtonBusy(button, false, mt("refreshing"));
+      }
     }
     if (seq === state.providerAuthSeq) refreshActiveSettingsPanel?.();
     return loaded && seq === state.providerAuthSeq;
+  }
+
+  async function loadAnthropicAccounts({ silent = false } = {}) {
+    const seq = (state.anthropicAccountSeq || 0) + 1;
+    state.anthropicAccountSeq = seq;
+    let loaded = false;
+    state.anthropicAccountsLoading = true;
+    if (providerConsoleState().view === "anthropic") refreshActiveSettingsPanel?.();
+    try {
+      const request = anthropicAccountsListRequest();
+      const response = await api(request.path, request.options);
+      if (seq !== state.anthropicAccountSeq) return false;
+      state.anthropicAccounts = normalizeAnthropicAccountList(response);
+      state.anthropicAccountsError = "";
+      loaded = true;
+    } catch (error) {
+      if (seq !== state.anthropicAccountSeq) return false;
+      state.anthropicAccountsError = error?.message || mt("unknown");
+      if (!silent) notifyTerminal?.(`[warn] ${mt("anthropic.accountsLoadFailed", { message: state.anthropicAccountsError })}\n`);
+    } finally {
+      if (seq === state.anthropicAccountSeq) {
+        state.anthropicAccountsLoading = false;
+        refreshActiveSettingsPanel?.();
+      }
+    }
+    return loaded && seq === state.anthropicAccountSeq;
   }
 
   async function importCodexAuthFile() {
     const button = $("codexImportAuthBtn");
     if (button?.disabled) return;
     const textarea = $("codexAuthImportText");
-    const content = textarea?.value.trim() || "";
+    const consoleState = providerConsoleState();
+    const content = (textarea?.value || consoleState.codexImportDraft || "").trim();
     if (!content) throw new Error(mt("importContentRequired"));
+    consoleState.codexImportDraft = content;
+    setProviderConsoleResult("");
     setButtonBusy(button, true, mt("importing"));
     if (textarea) textarea.disabled = true;
     try {
@@ -346,14 +804,207 @@ export function createModelProviderSettingsController({
       const imported = Math.max(0, Number(result?.imported || 0));
       const skipped = Math.max(0, Number(result?.skipped || 0));
       const failed = Array.isArray(result?.errors) ? result.errors.length : 0;
-      if (!failed && textarea) textarea.value = "";
-      notifyTerminal?.(`[info] ${mt("importedCredentialsCount", { count: imported, skipped })}\n`);
+      const successMessage = mt("importedCredentialsCount", { count: imported, skipped });
+      notifyTerminal?.(`[info] ${successMessage}\n`);
+      if (!failed) {
+        consoleState.codexImportDraft = "";
+        setProviderConsoleResult(successMessage, "success");
+      } else {
+        setProviderConsoleResult(mt("importedCredentialsPartial", { count: imported, failed }), "attention");
+      }
       await loadProviderAuthFiles({ silent: true });
       await loadModelCatalog();
       if (failed) throw new Error(mt("importedCredentialsPartial", { count: imported, failed }));
     } finally {
       setButtonBusy(button, false, mt("importing"));
-      if (textarea) textarea.disabled = false;
+      if (textarea?.isConnected) textarea.disabled = false;
+    }
+  }
+
+  function codexBrowserLoginState() {
+    return providerConsoleState().codexBrowserLogin;
+  }
+
+  function codexBrowserLoginActive(status = codexBrowserLoginState().status) {
+    return codexBrowserLoginActiveStatuses.has(String(status || "").toLowerCase());
+  }
+
+  function codexBrowserLoginAccountLabel(account) {
+    if (!account || typeof account !== "object") return "";
+    return String(account.alias || account.email || account.name || account.account_id || account.accountId || "").trim();
+  }
+
+  function preopenCodexBrowserLoginWindow() {
+    try {
+      const popup = globalThis.open?.("about:blank", "autoto-codex-login", "popup,width=720,height=820");
+      if (popup) popup.opener = null;
+      return popup || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function openCodexBrowserAuthURL(authUrl, popup = null) {
+    if (!trustedCodexBrowserAuthURL(authUrl)) throw new Error(mt("browserLoginInvalidURL"));
+    try {
+      if (popup && !popup.closed) {
+        popup.location.replace(authUrl);
+        return true;
+      }
+      const opened = globalThis.open?.(authUrl, "_blank", "noopener,noreferrer");
+      return Boolean(opened);
+    } catch {
+      return false;
+    }
+  }
+
+  async function finishCodexBrowserLogin(status, seq) {
+    const login = codexBrowserLoginState();
+    if (seq !== login.seq) return;
+    const terminal = normalizeCodexBrowserLoginStatus(status);
+    Object.assign(login, terminal, { seq, popupBlocked: false });
+    const account = codexBrowserLoginAccountLabel(terminal.account) || mt("browserLoginAccountFallback");
+    if (terminal.status === "completed") {
+      const message = mt("browserLoginSuccess", { account });
+      const refreshFailures = [];
+      setProviderConsoleResult(message, "success");
+      notifyTerminal?.(`[info] ${message}\n`);
+      const accountID = String(terminal.account?.id || "").trim();
+      if (accountID) {
+        try {
+          const request = codexAccountActionRequest("sync", accountID);
+          await api(request.path, request.options);
+        } catch (error) {
+          refreshFailures.push(error?.message || mt("unknown"));
+        }
+      }
+      const accountsLoaded = await loadProviderAuthFiles({ silent: true });
+      if (!accountsLoaded && state.providerAuthError) refreshFailures.push(state.providerAuthError);
+      try {
+        await loadModelCatalog();
+      } catch (error) {
+        refreshFailures.push(error?.message || mt("unknown"));
+      }
+      if (refreshFailures.length) {
+        const warning = mt("browserLoginRefreshWarning", { message: [...new Set(refreshFailures)].join("; ") });
+        state.providerAuthMutationWarning = warning;
+        notifyTerminal?.(`[warn] ${warning}\n`);
+      }
+    } else if (terminal.status === "cancelled") {
+      setProviderConsoleResult(mt("browserLoginCancelled"), "info");
+    } else if (terminal.status === "expired") {
+      setProviderConsoleResult(mt("browserLoginExpired"), "attention");
+    } else {
+      setProviderConsoleResult(mt("browserLoginFailed", { message: terminal.message || mt("unknown") }), "attention");
+    }
+    refreshProviderConsole();
+  }
+
+  async function pollCodexBrowserLogin(loginId, seq) {
+    for (;;) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 1000));
+      const login = codexBrowserLoginState();
+      if (seq !== login.seq || login.loginId !== loginId) return;
+      const request = codexBrowserLoginRequest("status", loginId);
+      let status;
+      try {
+        status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+      } catch (error) {
+        if (seq !== codexBrowserLoginState().seq) return;
+        await finishCodexBrowserLogin({ loginId, status: "failed", message: error?.message || mt("unknown") }, seq);
+        return;
+      }
+      if (status.loginId && status.loginId !== loginId) return;
+      Object.assign(login, status, { loginId, seq, authUrl: status.authUrl || login.authUrl });
+      refreshProviderConsole();
+      if (codexBrowserLoginActive(status.status)) continue;
+      await finishCodexBrowserLogin(status, seq);
+      return;
+    }
+  }
+
+  async function startCodexBrowserLogin() {
+    const login = codexBrowserLoginState();
+    if (remoteAccessContext(state)) {
+      setProviderConsoleResult(mt("browserLoginLocalOnly"), "attention");
+      refreshProviderConsole();
+      return;
+    }
+    if (codexBrowserLoginActive(login.status) && login.authUrl) {
+      openCodexBrowserAuthURL(login.authUrl);
+      return;
+    }
+    const popup = preopenCodexBrowserLoginWindow();
+    const seq = Number(login.seq || 0) + 1;
+    Object.assign(login, {
+      seq,
+      loginId: "",
+      status: "starting",
+      authUrl: "",
+      expiresAt: "",
+      message: "",
+      account: null,
+      popupBlocked: !popup,
+    });
+    setProviderConsoleResult("");
+    refreshProviderConsole();
+    try {
+      const request = codexBrowserLoginRequest("start");
+      const status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+      if (seq !== codexBrowserLoginState().seq) {
+        popup?.close?.();
+        return;
+      }
+      if (!status.loginId) throw new Error(mt("browserLoginStartFailed"));
+      const active = codexBrowserLoginActive(status.status);
+      if (active && !trustedCodexBrowserAuthURL(status.authUrl)) throw new Error(mt("browserLoginInvalidURL"));
+      const opened = active ? openCodexBrowserAuthURL(status.authUrl, popup) : true;
+      if (!active) popup?.close?.();
+      Object.assign(login, status, {
+        seq,
+        loginId: status.loginId,
+        status: status.status || "pending",
+        popupBlocked: active && !opened,
+      });
+      refreshProviderConsole();
+      if (!codexBrowserLoginActive(login.status)) {
+        await finishCodexBrowserLogin(login, seq);
+        return;
+      }
+      await pollCodexBrowserLogin(login.loginId, seq);
+    } catch (error) {
+      popup?.close?.();
+      if (seq !== codexBrowserLoginState().seq) return;
+      Object.assign(login, { status: "failed", message: error?.message || mt("unknown"), popupBlocked: false });
+      setProviderConsoleResult(error?.status === 403 ? mt("browserLoginLocalOnly") : mt("browserLoginFailed", { message: login.message }), "attention");
+      refreshProviderConsole();
+    }
+  }
+
+  async function cancelCodexBrowserLogin() {
+    const login = codexBrowserLoginState();
+    if (!login.loginId || !codexBrowserLoginActive(login.status)) return;
+    const seq = Number(login.seq || 0) + 1;
+    login.seq = seq;
+    try {
+      const request = codexBrowserLoginRequest("cancel", login.loginId);
+      const status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+      Object.assign(login, status, { seq, status: status.status || "cancelled", popupBlocked: false });
+      setProviderConsoleResult(mt("browserLoginCancelled"), "info");
+    } catch (error) {
+      Object.assign(login, { seq, status: "failed", message: error?.message || mt("unknown"), popupBlocked: false });
+      setProviderConsoleResult(mt("browserLoginFailed", { message: login.message }), "attention");
+    }
+    refreshProviderConsole();
+  }
+
+  function reopenCodexBrowserLogin() {
+    const login = codexBrowserLoginState();
+    if (!login.authUrl || !codexBrowserLoginActive(login.status)) return;
+    if (!openCodexBrowserAuthURL(login.authUrl)) {
+      login.popupBlocked = true;
+      setProviderConsoleResult(mt("browserLoginPopupBlocked"), "attention");
+      refreshProviderConsole();
     }
   }
 
@@ -362,11 +1013,11 @@ export function createModelProviderSettingsController({
     if (!id || state.codexAccountBusy[id]) return;
     state.codexAccountBusy[id] = true;
     state.providerAuthMutationWarning = "";
-    const row = button?.closest?.("[data-codex-account-row]");
-    row?.querySelectorAll?.("button, input").forEach((node) => { node.disabled = true; });
+    setProviderConsoleResult("");
     setButtonBusy(button, true, busyLabel);
+    refreshProviderConsole();
     try {
-      const actionResult = await action(row);
+      const actionResult = await action();
       const refreshed = await loadProviderAuthFiles({ silent: true });
       const warnings = [
         actionResult?.warning || "",
@@ -374,21 +1025,25 @@ export function createModelProviderSettingsController({
       ].filter(Boolean);
       state.providerAuthMutationWarning = warnings.join(" ");
       warnings.forEach((warning) => notifyTerminal?.(`[warn] ${warning}\n`));
-      if (warnings.length) refreshActiveSettingsPanel?.();
     } finally {
       delete state.codexAccountBusy[id];
-      row?.querySelectorAll?.("button, input").forEach((node) => { node.disabled = false; });
       setButtonBusy(button, false, busyLabel);
+      refreshProviderConsole();
     }
   }
 
   async function saveCodexAccount(id, button) {
-    return runCodexAccountAction(id, button, mt("saving"), async (row) => {
-      const alias = row?.querySelector?.("[data-codex-alias]")?.value?.trim?.() || "";
-      const priority = Number(row?.querySelector?.("[data-codex-priority]")?.value || 0);
-      if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
+    const consoleState = providerConsoleState();
+    const edit = consoleState.codexEdit;
+    if (!edit || edit.id !== id) return;
+    const alias = String(edit.alias || "").trim();
+    const priority = Number(edit.priority);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
+    return runCodexAccountAction(id, button, mt("saving"), async () => {
       const request = codexAccountActionRequest("save", id, { alias, priority });
       await api(request.path, request.options);
+      consoleState.codexEdit = null;
+      setProviderConsoleResult(mt("accountSaved"), "success");
       notifyTerminal?.(`[info] ${mt("accountSaved")}\n`);
     });
   }
@@ -397,6 +1052,7 @@ export function createModelProviderSettingsController({
     return runCodexAccountAction(id, button, mt("syncing"), async () => {
       const request = codexAccountActionRequest("sync", id);
       await api(request.path, request.options);
+      setProviderConsoleResult(mt("accountSynced"), "success");
       notifyTerminal?.(`[info] ${mt("accountSynced")}\n`);
     });
   }
@@ -405,8 +1061,53 @@ export function createModelProviderSettingsController({
     return runCodexAccountAction(id, button, mt("saving"), async () => {
       const request = codexAccountActionRequest("toggle", id, { disabled });
       await api(request.path, request.options);
-      notifyTerminal?.(`[info] ${mt(disabled ? "accountEnabled" : "accountDisabled")}\n`);
+      const message = mt(disabled ? "accountEnabled" : "accountDisabled");
+      setProviderConsoleResult(message, "success");
+      notifyTerminal?.(`[info] ${message}\n`);
     });
+  }
+
+  function codexAccountById(id) {
+    const target = String(id || "");
+    return normalizeCodexAccountList(state.providerAuthFiles).find((account) => {
+      const accountId = String(account?.id || account?.auth_index || account?.authIndex || account?.name || "");
+      return accountId === target;
+    }) || null;
+  }
+
+  async function exportCodexAccount(id, button) {
+    state.codexAccountBusy ||= {};
+    if (!id || state.codexAccountBusy[id] || !globalThis.confirm?.(mt("exportAccountConfirm"))) return;
+    state.codexAccountBusy[id] = true;
+    state.providerAuthMutationWarning = "";
+    setProviderConsoleResult("");
+    setButtonBusy(button, true, mt("exporting"));
+    refreshProviderConsole();
+    try {
+      const request = codexAccountActionRequest("export", id);
+      const response = await apiDownload(request.path, request.options);
+      const blob = await response.blob();
+      const objectURL = globalThis.URL?.createObjectURL?.(blob);
+      if (!objectURL || !globalThis.document?.createElement) throw new Error(mt("accountExportFailed"));
+      const link = globalThis.document.createElement("a");
+      link.href = objectURL;
+      link.download = codexAccountExportFilename(codexAccountById(id), id);
+      link.hidden = true;
+      try {
+        globalThis.document.body?.appendChild(link);
+        link.click();
+      } finally {
+        link.remove();
+        const revoke = () => globalThis.URL?.revokeObjectURL?.(objectURL);
+        if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(revoke, 0);
+        else revoke();
+      }
+      setProviderConsoleResult(mt("accountExported"), "success");
+    } finally {
+      delete state.codexAccountBusy[id];
+      setButtonBusy(button, false, mt("exporting"));
+      refreshProviderConsole();
+    }
   }
 
   async function deleteCodexAccount(id, button) {
@@ -415,8 +1116,106 @@ export function createModelProviderSettingsController({
       const request = codexAccountActionRequest("delete", id);
       const result = await api(request.path, request.options);
       const warning = codexDeleteResultWarning(result, mt);
-      if (!warning) notifyTerminal?.(`[info] ${mt("accountDeleted")}\n`);
+      if (!warning) {
+        setProviderConsoleResult(mt("accountDeleted"), "success");
+        notifyTerminal?.(`[info] ${mt("accountDeleted")}\n`);
+      }
       return { warning };
+    });
+  }
+
+  function anthropicAccountById(id) {
+    return normalizeAnthropicAccountList(state.anthropicAccounts).find((account) => String(account?.id || "") === String(id || "")) || null;
+  }
+
+  function anthropicAccountIsManaged(id) {
+    const account = anthropicAccountById(id);
+    return Boolean(account && account.managed !== false);
+  }
+
+  async function runAnthropicAccountAction(id, button, busyLabel, action) {
+    if (!anthropicAccountIsManaged(id)) return;
+    state.anthropicAccountBusy ||= {};
+    if (!id || state.anthropicAccountBusy[id]) return;
+    state.anthropicAccountBusy[id] = true;
+    setProviderConsoleResult("");
+    setButtonBusy(button, true, busyLabel);
+    refreshProviderConsole();
+    try {
+      await action();
+      const refreshed = await loadAnthropicAccounts({ silent: true });
+      if (!refreshed) setProviderConsoleResult(mt("anthropic.mutationRefreshFailed", { message: state.anthropicAccountsError || mt("unknown") }), "attention");
+    } finally {
+      delete state.anthropicAccountBusy[id];
+      setButtonBusy(button, false, busyLabel);
+      refreshProviderConsole();
+    }
+  }
+
+  async function createAnthropicAccount(form) {
+    if (!form || state.anthropicAccountCreating) return;
+    const authType = form.elements?.authType?.value === "api_key" ? "api_key" : "profile";
+    const profile = String(form.elements?.profile?.value || "").trim();
+    const apiKey = String(form.elements?.apiKey?.value || "").trim();
+    const alias = String(form.elements?.alias?.value || "").trim();
+    const priority = Number(form.elements?.priority?.value || 100);
+    if (authType === "profile" && !profile) throw new Error(mt("anthropic.profileRequired"));
+    if (authType === "api_key" && !apiKey) throw new Error(mt("anthropic.apiKeyRequired"));
+    if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
+    const request = consumeAnthropicAccountCreateRequest(form);
+    state.anthropicAccountCreating = true;
+    refreshProviderConsole();
+    try {
+      await api(request.path, request.options);
+      const consoleState = providerConsoleState();
+      consoleState.anthropicProfile = "";
+      consoleState.anthropicAlias = "";
+      consoleState.anthropicPriority = 100;
+      setProviderConsoleResult(mt("anthropic.accountAdded"), "success");
+      notifyTerminal?.(`[info] ${mt("anthropic.accountAdded")}\n`);
+      await loadAnthropicAccounts({ silent: true });
+      await loadModelCatalog();
+    } finally {
+      state.anthropicAccountCreating = false;
+      refreshProviderConsole();
+    }
+  }
+
+  async function saveAnthropicAccount(id, button) {
+    const edit = providerConsoleState().anthropicEdit;
+    if (!edit || edit.id !== id) return;
+    const priority = Number(edit.priority);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
+    return runAnthropicAccountAction(id, button, mt("saving"), async () => {
+      const request = anthropicAccountActionRequest("save", id, { alias: String(edit.alias || "").trim(), priority });
+      await api(request.path, request.options);
+      providerConsoleState().anthropicEdit = null;
+      setProviderConsoleResult(mt("anthropic.accountSaved"), "success");
+    });
+  }
+
+  async function syncAnthropicAccount(id, button) {
+    return runAnthropicAccountAction(id, button, mt("syncing"), async () => {
+      const request = anthropicAccountActionRequest("sync", id);
+      await api(request.path, request.options);
+      setProviderConsoleResult(mt("anthropic.accountSynced"), "success");
+    });
+  }
+
+  async function toggleAnthropicAccount(id, disabled, button) {
+    return runAnthropicAccountAction(id, button, mt("saving"), async () => {
+      const request = anthropicAccountActionRequest("toggle", id, { disabled });
+      await api(request.path, request.options);
+      setProviderConsoleResult(mt(disabled ? "anthropic.accountEnabled" : "anthropic.accountDisabled"), "success");
+    });
+  }
+
+  async function deleteAnthropicAccount(id, button) {
+    if (state.anthropicAccountBusy?.[id] || !globalThis.confirm?.(mt("anthropic.deleteConfirm"))) return;
+    return runAnthropicAccountAction(id, button, mt("deleting"), async () => {
+      const request = anthropicAccountActionRequest("delete", id);
+      await api(request.path, request.options);
+      setProviderConsoleResult(mt("anthropic.accountDeleted"), "success");
     });
   }
 
@@ -514,53 +1313,172 @@ export function createModelProviderSettingsController({
       || null;
   }
 
+  function agentModelSettingsSource() {
+    return normalizeAgentModelSettings({
+      ...(state.settings?.agent || {}),
+      defaultReasoningEffort: state.settings?.runtimeSettings?.defaultReasoningEffort || "auto",
+    });
+  }
+
+  function agentModelSettingsState() {
+    const source = agentModelSettingsSource();
+    const sourceSignature = JSON.stringify(source);
+    const current = state.agentModelSettings;
+    if (!current || (!current.dirty && current.sourceSignature !== sourceSignature)) {
+      state.agentModelSettings = {
+        draft: source,
+        sourceSignature,
+        dirty: false,
+        saving: false,
+        result: null,
+      };
+    } else {
+      current.draft = normalizeAgentModelSettings(current.draft || source);
+      current.saving = Boolean(current.saving);
+    }
+    return state.agentModelSettings;
+  }
+
+  function agentSettingsAvailableModels(draft = {}) {
+    const referenced = new Set([
+      draft.defaultModel,
+      draft.summaryModel,
+      ...Object.values(draft.subagentModels || {}),
+      ...Object.values(draft.subagentModelPools || {}).flat(),
+    ].map((value) => String(value || "").trim()).filter(Boolean));
+    const records = [];
+    const seen = new Set();
+    for (const provider of modelProvidersForUI()) {
+      for (const model of providerModelList(provider)) {
+        const value = modelOptionValue(provider, model);
+        if (seen.has(value)) continue;
+        const available = Boolean(provider.enabled && provider.configured);
+        if (!available && !referenced.has(value)) continue;
+        seen.add(value);
+        records.push({ value, provider: providerLabel(provider), model, available });
+      }
+    }
+    for (const aggregate of normalizeModelAggregateList(state.modelAggregates)) {
+      const value = `aggregate:${aggregate.name}`;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      records.push({ value, provider: mt("routing.aggregateProvider"), model: aggregate.name, available: true, aggregate: true });
+    }
+    for (const value of referenced) {
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const [provider, ...modelParts] = value.split(":");
+      records.push({ value, provider, model: modelParts.join(":"), available: false });
+    }
+    return records;
+  }
+
+  function renderAgentModelSelectOptions(current, options, { allowInherited = false } = {}) {
+    const selected = String(current || "").trim();
+    const inherited = allowInherited
+      ? `<option value="" ${selected ? "" : "selected"}>${escapeHtml(mt("routing.inheritDefault"))}</option>`
+      : "";
+    return inherited + options.map((item) => {
+      const suffix = item.available ? "" : ` · ${mt("routing.currentlyUnavailable")}`;
+      return `<option value="${escapeAttr(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.value + suffix)}</option>`;
+    }).join("");
+  }
+
+  function agentModelPoolSummary(unrestricted, count) {
+    return unrestricted ? mt("routing.unrestricted") : mt("modelCount", { count });
+  }
+
+  function renderAgentRolePreferenceField(role, draft, options) {
+    const preferred = draft.subagentModels?.[role] || "";
+    return `<label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt(`routing.roles.${role}.label`))}</span><select name="subagentModel_${escapeAttr(role)}" data-agent-role-model="${escapeAttr(role)}">${renderAgentModelSelectOptions(preferred, options, { allowInherited: true })}</select><small>${escapeHtml(mt(`routing.roles.${role}.description`))}</small></label>`;
+  }
+
+  function renderAgentModelPoolControl(role, draft, options) {
+    const pool = draft.subagentModelPools?.[role] || [];
+    const unrestricted = pool.length === 0;
+    return `<details class="compact-multi-select agent-model-pool-details" data-agent-model-pool-details="${escapeAttr(role)}">
+      <summary class="compact-multi-select-summary"><span>${escapeHtml(mt(`routing.roles.${role}.label`))}</span><strong class="agent-model-pool-state ${unrestricted ? "muted" : "ok"}" data-agent-model-pool-summary="${escapeAttr(role)}">${escapeHtml(agentModelPoolSummary(unrestricted, pool.length))}</strong></summary>
+      <fieldset class="compact-multi-select-panel agent-model-pool-fieldset">
+        <legend class="sr-only">${escapeHtml(mt("routing.allowedModels"))}</legend>
+        <label class="compact-multi-select-all agent-model-pool-all"><input type="checkbox" data-agent-model-pool-all="${escapeAttr(role)}" ${unrestricted ? "checked" : ""}><span><strong>${escapeHtml(mt("routing.allowAllModels"))}</strong><small>${escapeHtml(mt("routing.allowAllModelsHelp"))}</small></span></label>
+        <div class="compact-multi-select-options agent-model-pool-options" data-agent-model-pool-options="${escapeAttr(role)}">
+          ${options.map((item) => `<label class="compact-multi-select-option agent-model-pool-option"><input type="checkbox" value="${escapeAttr(item.value)}" data-agent-model-pool-option="${escapeAttr(role)}" ${pool.includes(item.value) ? "checked" : ""} ${unrestricted ? "disabled" : ""}><span><strong>${escapeHtml(item.value)}</strong><small>${escapeHtml(item.available ? item.provider : mt("routing.currentlyUnavailable"))}</small></span></label>`).join("") || `<div class="settings-empty-card compact">${escapeHtml(mt("routing.noModelsForPool"))}</div>`}
+        </div>
+      </fieldset>
+    </details>`;
+  }
+
+  function renderDefaultReasoningOptions(current) {
+    const selected = normalizeDefaultReasoningEffort(current);
+    return defaultReasoningEffortValues.map((value) => `<option value="${escapeAttr(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(mt(value === "auto" ? "automatic" : value))}</option>`).join("");
+  }
+
+  function renderModelAggregateEditor(editor = {}) {
+    const editing = editor.mode === "edit";
+    const name = String(editor.name || "");
+    const members = modelAggregateMembers(editor.members).join("\n");
+    return `<form id="modelAggregateForm" class="model-aggregate-editor compact-settings-editor" data-model-aggregate-mode="${editing ? "edit" : "create"}">
+      <div class="compact-settings-grid two-column">
+        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateName"))}</span><input name="aggregateName" value="${escapeAttr(name)}" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,119}" ${editing ? "readonly" : "required"}><small>${escapeHtml(mt("routing.aggregateNameHelp"))}</small></label>
+        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateStrategy"))}</span><select name="aggregateMode" disabled><option value="priority" selected>${escapeHtml(mt("routing.aggregatePriority"))}</option></select><small>${escapeHtml(mt("routing.aggregateStrategyHelp"))}</small></label>
+        <label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("routing.aggregateMembers"))}</span><textarea name="aggregateMembers" rows="5" required placeholder="openai:gpt-5\ncodex:gpt-5.5">${escapeHtml(members)}</textarea><small>${escapeHtml(mt("routing.aggregateMembersHelp"))}</small></label>
+      </div>
+      <div class="compact-settings-editor-actions settings-inline-actions"><button class="settings-action-btn subtle" type="button" data-model-aggregate-cancel>${escapeHtml(mt("cancel"))}</button><button class="settings-action-btn primary" type="submit" data-model-aggregate-save>${escapeHtml(editing ? mt("routing.updateAggregate") : mt("routing.createAggregate"))}</button></div>
+    </form>`;
+  }
+
+  function renderModelAggregateSection() {
+    const aggregates = normalizeModelAggregateList(state.modelAggregates);
+    const editor = state.modelAggregateEditor && typeof state.modelAggregateEditor === "object" ? state.modelAggregateEditor : null;
+    const busy = Boolean(state.modelAggregateBusy);
+    let content = "";
+    if (state.modelAggregatesLoading || state.modelAggregatesLoaded !== true) content = `<div class="settings-empty-card compact" role="status">${escapeHtml(mt("routing.loadingAggregates"))}</div>`;
+    else if (state.modelAggregatesError) content = `<div class="settings-alert" role="alert">${escapeHtml(state.modelAggregatesError)}</div>`;
+    else if (!aggregates.length) content = `<div class="settings-empty-card compact" role="status">${escapeHtml(mt("routing.noAggregates"))}</div>`;
+    else content = `<div class="model-aggregate-list">${aggregates.map((aggregate) => `<article class="model-aggregate-row" data-model-aggregate-row="${escapeAttr(aggregate.name)}"><div class="model-aggregate-main"><strong>aggregate:${escapeHtml(aggregate.name)}</strong><ol>${aggregate.members.map((member) => `<li><code>${escapeHtml(member)}</code></li>`).join("")}</ol></div><div class="model-aggregate-actions settings-inline-actions"><button class="settings-action-btn subtle" type="button" data-model-aggregate-edit="${escapeAttr(aggregate.name)}" ${busy ? "disabled" : ""}>${escapeHtml(mt("edit"))}</button><button class="settings-action-btn danger" type="button" data-model-aggregate-delete="${escapeAttr(aggregate.name)}" ${busy ? "disabled" : ""}>${escapeHtml(mt("delete"))}</button></div></article>`).join("")}</div>`;
+    return `<section class="compact-settings-section model-aggregate-section" aria-labelledby="model-aggregate-title"><div class="compact-settings-section-copy"><h2 id="model-aggregate-title">${escapeHtml(mt("routing.aggregatesTitle"))}</h2><p>${escapeHtml(mt("routing.aggregatesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-section-toolbar"><span>${escapeHtml(mt("routing.aggregateCount", { count: aggregates.length }))}</span><button class="settings-action-btn subtle" type="button" data-model-aggregate-add ${busy || editor ? "disabled" : ""}>＋ ${escapeHtml(mt("routing.addAggregate"))}</button></div>${content}${editor ? renderModelAggregateEditor(editor) : ""}</div></section>`;
+  }
+
   function renderModelSettingsContent() {
     const providers = modelProvidersForUI();
-    const options = allModelOptions();
-    const current = currentModelValue();
+    const settingsState = agentModelSettingsState();
+    const draft = settingsState.draft;
+    const options = agentSettingsAvailableModels(draft);
     const preferred = getPreferredModel();
-    const codex = codexProvider();
-    return `
-    <div class="settings-live-page">
-      <section class="settings-hero-card">
-        <div>
-          <div class="settings-hero-kicker">${escapeHtml(mt("currentModel"))}</div>
-          <div class="settings-hero-title">${escapeHtml(current || mt("noneSelected"))}</div>
-          <p>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("noPreferred"))}</p>
-        </div>
-        <div class="settings-action-row">
-          <button id="settingsRefreshModelsBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("refreshModels"))}</button>
-          <button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button>
-          <button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button>
-          <button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button>
-        </div>
-      </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(String(options.length))}</strong><span>${escapeHtml(mt("availableModels"))}</span></div>
-        <div><strong>${escapeHtml(codex?.error ? mt("needsAttention") : (codex?.configured ? mt("ready") : mt("unconfigured")))}</strong><span>Codex OAuth</span></div>
-        <div><strong>${escapeHtml(codex?.baseUrl || "https://chatgpt.com/backend-api/codex")}</strong><span>${escapeHtml(mt("modelSource"))}</span></div>
-      </div>
-      <div class="settings-model-list">
-        ${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card">${escapeHtml(mt("noModelsLoaded"))}</div>`}
-      </div>
-    </div>
-  `;
+    const runtimeRevision = Math.max(0, Math.trunc(Number(state.settings?.runtimeSettings?.revision) || 0));
+    const result = settingsState.result && typeof settingsState.result === "object"
+      ? `<div class="agent-model-settings-result settings-alert ${escapeAttr(settingsState.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(settingsState.result.message || "")}</div>`
+      : "";
+    return `<div class="settings-live-page compact-settings-page agent-model-settings-page" aria-labelledby="settings-model-page-title">
+      <header class="compact-settings-header"><div class="compact-settings-heading"><div class="settings-hero-kicker">${escapeHtml(mt("routing.kicker"))}</div><h1 id="settings-model-page-title">${escapeHtml(mt("routing.title"))}</h1><p>${escapeHtml(mt("routing.description"))}</p></div><div class="compact-settings-header-actions settings-inline-actions"><button id="settingsRefreshModelsBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshModels"))}</button><button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button></div></header>
+      ${result}
+      <form id="agentModelSettingsForm" class="compact-settings-form agent-model-settings-form" aria-busy="${settingsState.saving ? "true" : "false"}">
+        <section class="compact-settings-section" aria-labelledby="agent-model-defaults-title"><div class="compact-settings-section-copy"><h2 id="agent-model-defaults-title">${escapeHtml(mt("routing.globalDefaults"))}</h2><p>${escapeHtml(mt("routing.globalDefaultsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column"><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.defaultModel"))}</span><select name="defaultModel" required>${renderAgentModelSelectOptions(draft.defaultModel, options)}</select><small>${escapeHtml(mt("routing.defaultModelHelp"))}</small></label><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.summaryModel"))}</span><select name="summaryModel" required>${renderAgentModelSelectOptions(draft.summaryModel, options)}</select><small>${escapeHtml(mt("routing.summaryModelHelp"))}</small></label><label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("defaultReasoningEffort"))}</span><select name="defaultReasoningEffort" ${runtimeRevision > 0 ? "" : "disabled"}>${renderDefaultReasoningOptions(draft.defaultReasoningEffort)}</select><small>${escapeHtml(runtimeRevision > 0 ? mt("routing.defaultReasoningHelp") : mt("routing.runtimeSettingsUnavailable"))}</small></label></div></div></section>
+        <section class="compact-settings-section" aria-labelledby="agent-model-preferences-title"><div class="compact-settings-section-copy"><h2 id="agent-model-preferences-title">${escapeHtml(mt("routing.subagentPreferences"))}</h2><p>${escapeHtml(mt("routing.subagentPreferencesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentRolePreferenceField(role, draft, options)).join("")}</div></div></section>
+        <section class="compact-settings-section" aria-labelledby="agent-model-pools-title"><div class="compact-settings-section-copy"><h2 id="agent-model-pools-title">${escapeHtml(mt("routing.subagentPools"))}</h2><p>${escapeHtml(mt("routing.subagentPoolsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentModelPoolControl(role, draft, options)).join("")}</div></div></section>
+        <footer class="compact-settings-footer agent-model-settings-footer"><div><span id="agentModelSettingsDirtyBadge" class="settings-badge ${settingsState.dirty ? "warn" : "ok"}">${escapeHtml(settingsState.dirty ? mt("routing.unsaved") : mt("routing.saved"))}</span><small>${escapeHtml(mt("routing.persistenceDescription"))}</small></div><div class="settings-inline-actions"><button id="resetAgentModelSettingsBtn" class="settings-action-btn subtle" type="button" ${settingsState.saving ? "disabled" : ""}>${escapeHtml(mt("routing.reset"))}</button><button id="saveAgentModelSettingsBtn" class="settings-action-btn primary" type="submit" ${settingsState.saving ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(settingsState.saving ? mt("saving") : mt("routing.save"))}</button></div></footer>
+      </form>
+      ${renderModelAggregateSection()}
+      <details class="compact-settings-disclosure agent-model-catalog-details"><summary><span>${escapeHtml(mt("routing.modelListToggle"))}</span><small>${escapeHtml(mt("routing.catalogDescription"))}</small></summary><section class="agent-model-catalog compact-settings-disclosure-panel" aria-labelledby="agent-model-catalog-title"><header class="compact-settings-section-toolbar"><div><h2 id="agent-model-catalog-title">${escapeHtml(mt("routing.catalogTitle"))}</h2><p>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("routing.catalogDescription"))}</p></div><div class="settings-inline-actions"><button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button><button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button></div></header><div class="settings-model-list">${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card settings-card settings-alert" role="status">${escapeHtml(mt("noModelsLoaded"))}</div>`}</div></section></details>
+    </div>`;
   }
 
   function renderModelProviderSection(provider) {
     const models = providerModelList(provider);
     return `
-    <section class="settings-provider-section">
-      <div class="settings-provider-section-head">
+    <section class="agent-model-catalog-provider settings-provider-section settings-card">
+      <header class="settings-provider-section-head settings-card-header">
         <div>
-          <div class="settings-provider-title">${escapeHtml(providerLabel(provider))}</div>
-          <div class="settings-provider-meta">${escapeHtml(provider.baseUrl || provider.type || "provider")}</div>
+          <h2 class="settings-provider-title settings-card-title">${escapeHtml(providerLabel(provider))}</h2>
+          <div class="settings-provider-meta settings-card-description">${escapeHtml(provider.baseUrl || provider.type || "provider")}</div>
         </div>
-        <span class="settings-status-pill ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
-      </div>
-      ${provider.error ? `<div class="settings-inline-alert">${escapeHtml(provider.error)}</div>` : ""}
-      <div class="settings-model-grid">
+        <span class="settings-status-pill settings-badge ${provider.error ? "warn" : (provider.configured ? "ok" : "muted")}">${escapeHtml(providerStatusText(provider))}</span>
+      </header>
+      <div class="settings-card-content">
+      ${provider.error ? `<div class="settings-inline-alert settings-alert" role="alert">${escapeHtml(provider.error)}</div>` : ""}
+      <div class="agent-model-catalog-grid settings-model-grid">
         ${models.map((model) => renderModelChoice(provider, model)).join("")}
+      </div>
       </div>
     </section>
   `;
@@ -575,20 +1493,20 @@ export function createModelProviderSettingsController({
     const disabled = !provider.configured;
     const icon = hidden || disabled ? "⊘" : "◉";
     const title = hidden ? mt("showModel") : mt("hideModel");
-    const modelMeta = `${model}${preferred ? ` · ${mt("preferred")}` : ""}${disabled ? ` · ${mt("unconfigured")}` : hidden ? ` · ${mt("hidden")}` : ""}`;
+    const status = disabled ? mt("unconfigured") : hidden ? mt("hidden") : preferred ? mt("preferred") : active ? mt("currentModel") : "";
     return `
-    <div class="settings-model-row ${active ? "active" : ""} ${hidden || disabled ? "muted" : ""}">
-      <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}" ${selectable ? "" : "disabled"}>
+    <div class="agent-model-catalog-item settings-model-row settings-card ${active ? "active" : ""} ${hidden || disabled ? "muted" : ""}">
+      <button class="settings-model-choice ${active ? "active" : ""}" type="button" data-apply-model="${escapeAttr(value)}" title="${escapeAttr(value)}" ${selectable ? "" : "disabled"}>
         <span class="settings-model-name">${escapeHtml(value)}</span>
-        <span class="settings-model-provider">${escapeHtml(modelMeta)}</span>
       </button>
-      <button class="settings-model-icon-btn" type="button" data-toggle-model-visibility="${escapeAttr(value)}" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}" ${disabled ? "disabled" : ""}>${escapeHtml(icon)}</button>
+      <div class="settings-inline-actions">${status ? `<span class="settings-badge ${disabled ? "muted" : hidden ? "warn" : "ok"}">${escapeHtml(status)}</span>` : ""}<button class="settings-model-icon-btn" type="button" data-toggle-model-visibility="${escapeAttr(value)}" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}" ${disabled ? "disabled" : ""}>${escapeHtml(icon)}</button></div>
     </div>
   `;
   }
 
   function providerConsoleState() {
     const fallback = {
+      view: "providers",
       search: "",
       category: "all",
       modal: "",
@@ -600,11 +1518,36 @@ export function createModelProviderSettingsController({
       dirty: false,
       busy: {},
       result: null,
+      codexImportDraft: "",
+      codexEdit: null,
+      codexBrowserLogin: {
+        seq: 0,
+        loginId: "",
+        status: "idle",
+        authUrl: "",
+        expiresAt: "",
+        message: "",
+        account: null,
+        popupBlocked: false,
+      },
+      anthropicAddMode: "profile",
+      anthropicProfile: "",
+      anthropicAlias: "",
+      anthropicPriority: 100,
+      anthropicEdit: null,
     };
     if (!state.providerConsole || typeof state.providerConsole !== "object") {
       state.providerConsole = fallback;
     } else {
-      state.providerConsole = { ...fallback, ...state.providerConsole, busy: state.providerConsole.busy || {} };
+      state.providerConsole = {
+        ...fallback,
+        ...state.providerConsole,
+        busy: state.providerConsole.busy || {},
+        codexBrowserLogin: {
+          ...fallback.codexBrowserLogin,
+          ...(state.providerConsole.codexBrowserLogin || {}),
+        },
+      };
     }
     return state.providerConsole;
   }
@@ -615,30 +1558,176 @@ export function createModelProviderSettingsController({
 
   function renderProviderSettingsContent() {
     const consoleState = providerConsoleState();
+    if (consoleState.view === "codex") return renderCodexConsolePage();
+    if (consoleState.view === "anthropic") return renderAnthropicConsolePage();
     return renderProviderConsolePage({
       providers: modelProvidersForUI(),
       consoleState,
-      codexDrawer: renderCodexConsoleDrawer(),
       relayDrawer: renderRelayConsoleDrawer(),
     });
   }
 
-  function renderCodexConsoleDrawer() {
+  function renderCodexConsolePage() {
     const consoleState = providerConsoleState();
-    if (consoleState.mode !== "codex") return "";
     const authFiles = extractAuthFiles(state.providerAuthFiles);
-    return `<header class="mp-drawer-head"><div><p class="mp-provider-kicker">Codex OAuth</p><h2 id="mp-drawer-title">${escapeHtml(ct("codex.title"))}</h2><p id="mp-drawer-description">${escapeHtml(ct("codex.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
-      <div class="mp-drawer-body">
-        <section class="mp-config-section" id="codexCredentialImportSection"><h3>${escapeHtml(mt("codexImportTitle"))}</h3><p>${escapeHtml(mt("codexImportDescription"))}</p>
-          <textarea id="codexAuthImportText" class="mp-textarea" placeholder="${escapeAttr(mt("codexImportPlaceholder"))}"></textarea>
-          <div class="mp-inline-actions"><button id="codexImportAuthBtn" class="mp-action primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
-        </section>
-        <section class="mp-config-section"><div class="mp-section-title"><div><h3>${escapeHtml(mt("importedCredentials"))}</h3><p>${escapeHtml(mt("importedCredentialsDescription"))}</p></div><button id="codexRefreshAuthBtn" class="mp-action" type="button" data-mp-codex-refresh>${escapeHtml(mt("refreshAccounts"))}</button></div>
-          ${state.providerAuthMutationWarning ? `<div class="mp-provider-result attention">${escapeHtml(state.providerAuthMutationWarning)}</div>` : state.providerAuthError ? `<div class="mp-provider-result attention">${escapeHtml(state.providerAuthError)}</div>` : ""}
-          ${renderCodexAccountManagementTable(authFiles, { translate: mt })}
-        </section>
-      </div>
-      <footer class="mp-drawer-foot"><span>${escapeHtml(ct("codex.footer"))}</span><button class="mp-action" type="button" data-mp-refresh-models>${escapeHtml(ct("actions.refreshModels"))}</button></footer>`;
+    const overview = codexAccountOverview(authFiles);
+    const provider = codexProvider();
+    const modelRefreshBusy = Boolean(consoleState.busy?.refresh);
+    const providerTone = provider?.error || !provider?.configured ? "warn" : provider?.enabled === false ? "muted" : "ok";
+    const providerState = provider?.error
+      ? mt("needsAttention")
+      : provider?.enabled === false
+        ? mt("disabled")
+        : provider?.configured
+          ? mt("ready")
+          : mt("unconfigured");
+    const result = consoleState.result && typeof consoleState.result === "object"
+      ? `<div class="codex-console-result settings-alert ${escapeAttr(consoleState.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(consoleState.result.message || "")}</div>`
+      : "";
+    const accountAlert = state.providerAuthMutationWarning
+      ? `<div class="settings-alert attention" role="status" aria-live="polite">${escapeHtml(state.providerAuthMutationWarning)}</div>`
+      : state.providerAuthError
+        ? `<div class="settings-alert attention" role="alert">${escapeHtml(state.providerAuthError)}</div>`
+        : "";
+    const browserLogin = consoleState.codexBrowserLogin;
+    const browserLoginActive = codexBrowserLoginActive(browserLogin.status);
+    const browserLoginLocalOnly = remoteAccessContext(state);
+    const browserLoginStatusKey = {
+      starting: "browserLoginStatusStarting",
+      pending: "browserLoginStatusWaiting",
+      exchanging: "browserLoginStatusExchanging",
+      completed: "browserLoginStatusCompleted",
+      failed: "browserLoginStatusFailed",
+      cancelled: "browserLoginStatusCancelled",
+      expired: "browserLoginStatusExpired",
+    }[browserLogin.status] || "";
+    const browserLoginPanel = `
+      <section class="codex-browser-login-panel settings-card" aria-labelledby="codex-browser-login-title" aria-busy="${browserLoginActive ? "true" : "false"}">
+        <div class="codex-console-section-head settings-card-header">
+          <div><h2 id="codex-browser-login-title" class="settings-card-title">${escapeHtml(mt("browserLoginTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("browserLoginDescription"))}</p></div>
+          <span class="settings-badge codex-browser-login-recommended">${escapeHtml(mt("browserLoginRecommended"))}</span>
+        </div>
+        <div class="codex-browser-login-body settings-card-content">
+          <div class="codex-browser-login-copy"><strong>${escapeHtml(mt("browserLoginAccountOnly"))}</strong><p>${escapeHtml(browserLoginLocalOnly ? mt("browserLoginLocalOnly") : mt("browserLoginSafety"))}</p></div>
+          <div class="codex-browser-login-actions settings-inline-actions">
+            ${browserLoginStatusKey ? `<span class="settings-status-pill ${browserLogin.status === "completed" ? "ok" : browserLogin.status === "failed" || browserLogin.status === "expired" ? "warn" : "muted"}" role="status" aria-live="polite">${escapeHtml(mt(browserLoginStatusKey))}</span>` : ""}
+            ${browserLoginActive && browserLogin.authUrl ? `<button class="settings-action-btn" type="button" data-mp-codex-browser-open>${escapeHtml(mt("browserLoginOpen"))}</button>` : ""}
+            ${browserLoginActive ? `<button class="settings-action-btn subtle" type="button" data-mp-codex-browser-cancel>${escapeHtml(mt("browserLoginCancel"))}</button>` : `<button class="settings-action-btn primary" type="button" data-mp-codex-browser-login ${browserLoginLocalOnly ? "disabled" : ""}>${escapeHtml(mt(browserLogin.status === "completed" ? "browserLoginAddAnother" : "browserLoginAction"))}</button>`}
+          </div>
+          ${browserLogin.popupBlocked ? `<div class="settings-alert attention codex-browser-login-alert" role="alert">${escapeHtml(mt("browserLoginPopupBlocked"))}</div>` : ""}
+        </div>
+      </section>`;
+    const importPanel = `
+      <section class="codex-import-panel settings-card" id="codexCredentialImportSection" aria-labelledby="codex-import-title">
+        <div class="codex-console-section-head settings-card-header">
+          <div><h2 id="codex-import-title" class="settings-card-title">${escapeHtml(mt("codexImportTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("codexImportDescription"))}</p></div>
+        </div>
+        <div class="codex-import-body settings-card-content">
+          <label class="settings-form-field"><span class="mp-visually-hidden">${escapeHtml(mt("codexImportTitle"))}</span><textarea id="codexAuthImportText" class="codex-import-textarea settings-text-input" data-codex-import-draft placeholder="${escapeAttr(mt("codexImportPlaceholder"))}">${escapeHtml(consoleState.codexImportDraft || "")}</textarea></label>
+          <div class="codex-import-footer"><p>${escapeHtml(mt("codexImportSuccess"))}</p><button id="codexImportAuthBtn" class="settings-action-btn primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
+        </div>
+      </section>`;
+    const accountContent = state.providerAuthLoading && !authFiles.length
+      ? `<div class="codex-console-loading settings-empty-card compact" role="status">${escapeHtml(mt("loadingAccounts"))}</div>`
+      : renderCodexAccountManagementTable(authFiles, {
+        translate: mt,
+        editing: consoleState.codexEdit,
+        busy: state.codexAccountBusy || {},
+      });
+    return `<div class="codex-account-console settings-page" tabindex="-1" aria-labelledby="codex-console-title">
+      <button class="codex-console-back" type="button" data-mp-close-codex-page>← ${escapeHtml(mt("backToProviders"))}</button>
+      <header class="codex-console-hero settings-card">
+        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Codex OAuth</p><h1 id="codex-console-title" class="settings-card-title">${escapeHtml(mt("accountConsoleTitle"))}</h1><p class="settings-card-description">${escapeHtml(mt("accountConsoleDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <div class="codex-console-actions settings-inline-actions">
+          <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button" data-mp-codex-refresh ${state.providerAuthLoading ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(state.providerAuthLoading ? mt("refreshing") : mt("refreshAccounts"))}</button>
+          <button class="settings-action-btn" type="button" data-mp-refresh-models ${modelRefreshBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelRefreshBusy ? mt("refreshing") : mt("refreshModels"))}</button>
+        </div>
+      </header>
+      <section class="codex-console-stats settings-stat-grid" aria-label="${escapeAttr(mt("accountSummary"))}">
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.total))}</strong><span>${escapeHtml(mt("totalAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.available))}</strong><span>${escapeHtml(mt("availableAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.rateLimited))}</strong><span>${escapeHtml(mt("limitedAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.disabled))}</strong><span>${escapeHtml(mt("disabledAccounts"))}</span></div>
+      </section>
+      ${result}${browserLoginPanel}${importPanel}
+      <section class="codex-accounts-panel settings-card" aria-labelledby="codex-accounts-title" aria-busy="${state.providerAuthLoading ? "true" : "false"}">
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="codex-accounts-title" class="settings-card-title">${escapeHtml(mt("importedCredentials"))}</h2><p class="settings-card-description">${escapeHtml(mt("importedCredentialsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: authFiles.length }))}</span></div>
+        ${accountAlert}
+        ${accountContent}
+      </section>
+    </div>`;
+  }
+
+  function renderAnthropicConsolePage() {
+    const consoleState = providerConsoleState();
+    const accounts = normalizeAnthropicAccountList(state.anthropicAccounts);
+    const overview = anthropicAccountOverview(accounts);
+    const provider = providerByName(consoleState.providerName || "anthropic") || modelProvidersForUI().find(isAnthropicAccountProvider) || normalizeConsoleProvider(consoleState.draft || createProviderDraft("anthropic"));
+    const draft = createProviderDraft("anthropic", consoleState.draft || provider);
+    const models = [...new Set((draft.models || provider.models || []).map((model) => String(model || "").trim()).filter(Boolean))];
+    const modelOptions = models.length ? `<datalist id="anthropic-model-options">${models.map((model) => `<option value="${escapeAttr(model)}"></option>`).join("")}</datalist>` : "";
+    const providerTone = provider?.error || !provider?.configured ? "warn" : provider?.enabled === false ? "muted" : "ok";
+    const providerState = provider?.error ? mt("needsAttention") : provider?.enabled === false ? mt("disabled") : provider?.configured ? mt("ready") : mt("unconfigured");
+    const mode = consoleState.anthropicAddMode === "api_key" ? "api_key" : "profile";
+    const loginCommand = anthropicProfileLoginCommand(consoleState.anthropicProfile);
+    const result = consoleState.result && typeof consoleState.result === "object"
+      ? `<div class="codex-console-result settings-alert ${escapeAttr(consoleState.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(consoleState.result.message || "")}</div>`
+      : "";
+    const accountAlert = state.anthropicAccountsError ? `<div class="settings-alert attention" role="alert">${escapeHtml(mt("anthropic.accountsLoadFailed", { message: state.anthropicAccountsError }))}</div>` : "";
+    const accountContent = state.anthropicAccountsLoading && !accounts.length
+      ? `<div class="codex-console-loading settings-empty-card compact" role="status">${escapeHtml(mt("anthropic.loadingAccounts"))}</div>`
+      : renderAnthropicAccountManagementTable(accounts, { translate: mt, editing: consoleState.anthropicEdit, busy: state.anthropicAccountBusy || {} });
+    const creating = Boolean(state.anthropicAccountCreating);
+    const modelBusy = Boolean(consoleState.busy?.["models:anthropic"]);
+    const saveBusy = Boolean(consoleState.busy?.["save:anthropic"]);
+    const refreshBusy = Boolean(consoleState.busy?.refresh);
+    return `<div class="anthropic-account-console codex-account-console settings-page" tabindex="-1" aria-labelledby="anthropic-console-title">
+      <button class="codex-console-back" type="button" data-mp-close-anthropic-page>← ${escapeHtml(mt("backToProviders"))}</button>
+      <header class="codex-console-hero anthropic-console-hero settings-card">
+        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Anthropic</p><h1 id="anthropic-console-title" class="settings-card-title">${escapeHtml(mt("anthropic.title"))}</h1><p class="settings-card-description">${escapeHtml(mt("anthropic.description"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <div class="codex-console-actions settings-inline-actions"><button class="settings-action-btn primary" type="button" data-anthropic-focus-add>${escapeHtml(mt("anthropic.addAccount"))}</button><button class="settings-action-btn" type="button" data-anthropic-refresh ${state.anthropicAccountsLoading ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(state.anthropicAccountsLoading ? mt("refreshing") : mt("refreshAccounts"))}</button></div>
+      </header>
+      <section class="codex-console-stats settings-stat-grid" aria-label="${escapeAttr(mt("anthropic.summary"))}">
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.total))}</strong><span>${escapeHtml(mt("totalAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.available))}</strong><span>${escapeHtml(mt("availableAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.rateLimited))}</strong><span>${escapeHtml(mt("limitedAccounts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(String(overview.disabled))}</strong><span>${escapeHtml(mt("disabledAccounts"))}</span></div>
+      </section>
+      ${result}
+      <section class="anthropic-add-panel settings-card" id="anthropic-add-account" aria-labelledby="anthropic-add-title">
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-add-title" class="settings-card-title">${escapeHtml(mt("anthropic.addAccount"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.addDescription"))}</p></div></div>
+        <div class="anthropic-add-body settings-card-content">
+          <div class="anthropic-auth-tabs settings-inline-actions" role="group" aria-label="${escapeAttr(mt("anthropic.authType"))}"><button class="settings-action-btn ${mode === "profile" ? "primary" : "subtle"}" type="button" data-anthropic-add-mode="profile" aria-pressed="${mode === "profile" ? "true" : "false"}">${escapeHtml(mt("anthropic.profileAuth"))}</button><button class="settings-action-btn ${mode === "api_key" ? "primary" : "subtle"}" type="button" data-anthropic-add-mode="api_key" aria-pressed="${mode === "api_key" ? "true" : "false"}">${escapeHtml(mt("anthropic.apiKeyAuth"))}</button></div>
+          <form class="anthropic-account-form" data-anthropic-account-form aria-busy="${creating ? "true" : "false"}">
+            <input type="hidden" name="authType" value="${escapeAttr(mode)}">
+            <div class="anthropic-add-grid">
+              ${mode === "profile" ? `<label class="settings-form-field"><span>${escapeHtml(mt("anthropic.profileName"))}</span><input name="profile" value="${escapeAttr(consoleState.anthropicProfile || "")}" autocomplete="off" placeholder="${escapeAttr(mt("anthropic.profilePlaceholder"))}" required data-anthropic-profile></label>` : `<label class="settings-form-field"><span>${escapeHtml(mt("apiKey"))}</span><input name="apiKey" type="password" value="" autocomplete="new-password" placeholder="${escapeAttr(mt("anthropic.apiKeyPlaceholder"))}" required></label>`}
+              <label class="settings-form-field"><span>${escapeHtml(mt("anthropic.alias"))}</span><input name="alias" value="${escapeAttr(consoleState.anthropicAlias || "")}" autocomplete="off" placeholder="${escapeAttr(mt("anthropic.aliasPlaceholder"))}" data-anthropic-alias></label>
+              <label class="settings-form-field"><span>${escapeHtml(mt("priority"))}</span><input name="priority" type="number" min="1" max="1000000" step="1" value="${escapeAttr(consoleState.anthropicPriority || 100)}" data-anthropic-priority></label>
+            </div>
+            ${mode === "profile" ? `<div class="anthropic-profile-command"><div><span>${escapeHtml(mt("anthropic.loginCommand"))}</span><code data-anthropic-command>${escapeHtml(loginCommand)}</code></div><button class="settings-action-btn subtle" type="button" data-anthropic-copy-command="${escapeAttr(loginCommand)}">${escapeHtml(mt("anthropic.copyCommand"))}</button></div>` : `<p class="anthropic-secret-note">${escapeHtml(mt("anthropic.apiKeySafety"))}</p>`}
+            <div class="settings-inline-actions"><button class="settings-action-btn primary" type="submit" ${creating ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(creating ? mt("saving") : mt("anthropic.addAccount"))}</button></div>
+          </form>
+        </div>
+      </section>
+      <section class="codex-accounts-panel settings-card" aria-labelledby="anthropic-accounts-title" aria-busy="${state.anthropicAccountsLoading ? "true" : "false"}">
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-accounts-title" class="settings-card-title">${escapeHtml(mt("anthropic.accountsTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.accountsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: accounts.length }))}</span></div>
+        ${accountAlert}${accountContent}
+      </section>
+      <section class="anthropic-config-panel settings-card" aria-labelledby="anthropic-config-title">
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-config-title" class="settings-card-title">${escapeHtml(mt("anthropic.configTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.configDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <form class="anthropic-config-form settings-card-content" data-mp-provider-form data-anthropic-provider-config>
+          <input type="hidden" name="name" value="anthropic"><input type="hidden" name="type" value="anthropic"><input type="hidden" name="apiKey" value=""><input type="checkbox" name="apiKeyOptional" hidden>
+          <div class="anthropic-config-grid">
+            <label class="settings-form-field"><span>${escapeHtml(mt("defaultModel"))}</span><input name="model" value="${escapeAttr(draft.model || "")}" autocomplete="off" ${models.length ? "list=\"anthropic-model-options\"" : ""} required>${modelOptions}</label>
+            <label class="settings-form-field"><span>${escapeHtml(mt("baseUrl"))}</span><input name="baseUrl" value="${escapeAttr(draft.baseUrl || "")}" autocomplete="url" placeholder="${escapeAttr(mt("anthropicOfficialEndpointPlaceholder"))}"></label>
+            <label class="settings-form-field"><span>${escapeHtml(mt("maxTokens"))}</span><input name="maxTokens" type="number" min="1" step="1" value="${escapeAttr(draft.maxTokens || 4096)}"></label>
+          </div>
+          <p class="anthropic-secret-note">${escapeHtml(mt("anthropic.configNote"))}</p>
+          <div class="anthropic-config-actions settings-inline-actions"><button class="settings-action-btn" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : mt("fetchModels"))}</button><button class="settings-action-btn" type="button" data-mp-refresh-models ${refreshBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(refreshBusy ? mt("refreshing") : mt("refreshModels"))}</button><button class="settings-action-btn primary" type="submit" ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? mt("saving") : ct("actions.saveAndEnable"))}</button></div>
+        </form>
+      </section>
+    </div>`;
   }
 
   function renderRelayConsoleDrawer() {
@@ -647,17 +1736,18 @@ export function createModelProviderSettingsController({
     const spec = relayProtocolSpec(getRelayProtocol());
     const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), baseUrl: "" };
     const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
-    return `<header class="mp-drawer-head"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description">${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
-      <div class="mp-drawer-body">
-        <section class="mp-config-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p>${escapeHtml(spec.help)}</p></section>
-        <section class="mp-config-section"><h3>${escapeHtml(ct("drawer.connection"))}</h3>
-          <label>${escapeHtml(ct("fields.providerName"))}<input id="relayProviderName" value="${escapeAttr(provider.name || spec.providerName)}" readonly></label>
-          <label>${escapeHtml(ct("fields.apiKey"))}<input id="relayApiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct("fields.apiKeyBlankKeepsCurrent"))}"></label>
-          <label>${escapeHtml(ct("fields.baseUrl"))}<input id="relayBaseUrl" value="${escapeAttr(provider.baseUrl || "")}" autocomplete="url" placeholder="https://api.example.com/v1"></label>
-          <label>${escapeHtml(ct("fields.defaultModel"))}<input id="relayCustomModel" value="${escapeAttr(modelValue)}" autocomplete="off"></label>
+    const busy = Object.values(consoleState.busy || {}).some(Boolean);
+    return `<header class="mp-drawer-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title" class="settings-card-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description" class="settings-card-description">${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
+      <div class="mp-drawer-body settings-card-content" aria-busy="${busy ? "true" : "false"}">
+        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols settings-inline-actions">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p>${escapeHtml(spec.help)}</p></section>
+        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("drawer.connection"))}</h3>
+          <label class="settings-form-field">${escapeHtml(ct("fields.providerName"))}<input id="relayProviderName" value="${escapeAttr(provider.name || spec.providerName)}" readonly></label>
+          <label class="settings-form-field">${escapeHtml(ct("fields.apiKey"))}<input id="relayApiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct("fields.apiKeyBlankKeepsCurrent"))}"></label>
+          <label class="settings-form-field">${escapeHtml(ct("fields.baseUrl"))}<input id="relayBaseUrl" value="${escapeAttr(provider.baseUrl || "")}" autocomplete="url" placeholder="https://api.example.com/v1"></label>
+          <label class="settings-form-field">${escapeHtml(ct("fields.defaultModel"))}<input id="relayCustomModel" value="${escapeAttr(modelValue)}" autocomplete="off"></label>
         </section>
       </div>
-      <footer class="mp-drawer-foot"><button id="relayFetchModelsBtn" class="mp-action" type="button" data-mp-fetch-models>${escapeHtml(ct("actions.fetchModels"))}</button><div><button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.cancel"))}</button><button id="relaySaveConfigBtn" class="mp-action primary" type="button" data-mp-relay-save>${escapeHtml(ct("relay.save"))}</button></div></footer>`;
+      <footer class="mp-drawer-foot settings-card-footer settings-inline-actions"><button id="relayFetchModelsBtn" class="mp-action" type="button" data-mp-fetch-models>${escapeHtml(ct("actions.fetchModels"))}</button><div class="settings-inline-actions"><button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.cancel"))}</button><button id="relaySaveConfigBtn" class="mp-action primary" type="button" data-mp-relay-save>${escapeHtml(ct("relay.save"))}</button></div></footer>`;
   }
 
   function renderCodexImportCard() {
@@ -1027,17 +2117,283 @@ export function createModelProviderSettingsController({
     }
   }
 
+  function readAgentModelSettingsForm(form) {
+    const current = agentModelSettingsState().draft;
+    const subagentModels = {};
+    const subagentModelPools = {};
+    for (const role of agentModelRoles) {
+      const preferred = String(form?.elements?.[`subagentModel_${role}`]?.value || "").trim();
+      if (preferred) subagentModels[role] = preferred;
+      const unrestricted = Boolean(form?.querySelector?.(`[data-agent-model-pool-all="${role}"]`)?.checked);
+      if (unrestricted) continue;
+      const pool = [...(form?.querySelectorAll?.(`[data-agent-model-pool-option="${role}"]:checked`) || [])]
+        .map((node) => String(node.value || "").trim())
+        .filter(Boolean);
+      if (pool.length) subagentModelPools[role] = pool;
+    }
+    return normalizeAgentModelSettings({
+      ...current,
+      defaultModel: form?.elements?.defaultModel?.value || "",
+      summaryModel: form?.elements?.summaryModel?.value || "",
+      defaultReasoningEffort: form?.elements?.defaultReasoningEffort?.value || current.defaultReasoningEffort || "auto",
+      subagentModels,
+      subagentModelPools,
+    });
+  }
+
+  function validateAgentModelSettings(draft) {
+    const checks = [
+      [mt("routing.defaultModel"), draft.defaultModel],
+      [mt("routing.summaryModel"), draft.summaryModel],
+    ];
+    for (const role of agentModelRoles) {
+      if (draft.subagentModels?.[role]) checks.push([mt(`routing.roles.${role}.label`), draft.subagentModels[role]]);
+      for (const model of draft.subagentModelPools?.[role] || []) checks.push([mt(`routing.roles.${role}.label`), model]);
+    }
+    const invalid = checks.find(([, model]) => !isAgentModelReference(model));
+    if (invalid) throw new Error(mt("routing.invalidModelReference", { field: invalid[0] }));
+  }
+
+  function updateAgentModelDirtyUI(dirty) {
+    const badge = $("agentModelSettingsDirtyBadge");
+    if (!badge) return;
+    badge.classList.toggle("warn", dirty);
+    badge.classList.toggle("ok", !dirty);
+    badge.textContent = mt(dirty ? "routing.unsaved" : "routing.saved");
+  }
+
+  function syncAgentModelSettingsForm(form) {
+    const settingsState = agentModelSettingsState();
+    settingsState.draft = readAgentModelSettingsForm(form);
+    settingsState.dirty = true;
+    settingsState.result = null;
+    updateAgentModelDirtyUI(true);
+    return settingsState.draft;
+  }
+
+  function updateAgentModelPoolSummary(form, role) {
+    if (!role) return;
+    const unrestricted = Boolean(form.querySelector(`[data-agent-model-pool-all="${role}"]`)?.checked);
+    const selectedCount = form.querySelectorAll(`[data-agent-model-pool-option="${role}"]:checked`).length;
+    const summary = form.querySelector(`[data-agent-model-pool-summary="${role}"]`);
+    if (!summary) return;
+    summary.textContent = agentModelPoolSummary(unrestricted, selectedCount);
+    summary.classList.toggle("muted", unrestricted);
+    summary.classList.toggle("ok", !unrestricted);
+  }
+
+  function handleAgentModelSettingsChange(event, form) {
+    const target = event.target;
+    const role = target?.dataset?.agentModelPoolAll || target?.dataset?.agentRoleModel || target?.dataset?.agentModelPoolOption || "";
+    if (target?.dataset?.agentModelPoolAll) {
+      const unrestricted = Boolean(target.checked);
+      const details = form.querySelector(`[data-agent-model-pool-details="${role}"]`);
+      if (details) details.open = !unrestricted;
+      form.querySelectorAll(`[data-agent-model-pool-option="${role}"]`).forEach((node) => { node.disabled = unrestricted; });
+      if (!unrestricted && !form.querySelector(`[data-agent-model-pool-option="${role}"]:checked`)) {
+        const preferred = String(form.elements?.[`subagentModel_${role}`]?.value || form.elements?.defaultModel?.value || "").trim();
+        const preferredOption = [...form.querySelectorAll(`[data-agent-model-pool-option="${role}"]`)].find((node) => node.value === preferred);
+        if (preferredOption) preferredOption.checked = true;
+      }
+    } else if (target?.dataset?.agentRoleModel) {
+      const unrestricted = form.querySelector(`[data-agent-model-pool-all="${role}"]`)?.checked;
+      if (!unrestricted && target.value) {
+        const preferredOption = [...form.querySelectorAll(`[data-agent-model-pool-option="${role}"]`)].find((node) => node.value === target.value);
+        if (preferredOption) preferredOption.checked = true;
+      }
+    }
+    updateAgentModelPoolSummary(form, role);
+    syncAgentModelSettingsForm(form);
+  }
+
+  async function persistDefaultReasoningEffort(value) {
+    const desired = normalizeDefaultReasoningEffort(value);
+    let runtimeSettings = state.settings?.runtimeSettings || {};
+    if (Math.max(0, Math.trunc(Number(runtimeSettings?.revision) || 0)) < 1) return runtimeSettings;
+    if (normalizeDefaultReasoningEffort(runtimeSettings.defaultReasoningEffort) === desired) return runtimeSettings;
+    let request = runtimeReasoningSettingsRequest(desired, runtimeSettings);
+    try {
+      return await api(request.path, request.options);
+    } catch (error) {
+      if (error?.status !== 409) throw error;
+      const latestSettings = await api("/api/settings");
+      runtimeSettings = latestSettings?.runtimeSettings || {};
+      state.settings = { ...(state.settings || {}), runtimeSettings };
+      if (normalizeDefaultReasoningEffort(runtimeSettings.defaultReasoningEffort) === desired) return runtimeSettings;
+      if (Math.max(0, Math.trunc(Number(runtimeSettings?.revision) || 0)) < 1) throw error;
+      request = runtimeReasoningSettingsRequest(desired, runtimeSettings);
+      return api(request.path, request.options);
+    }
+  }
+
+  async function saveAgentModelSettings(form) {
+    const settingsState = agentModelSettingsState();
+    if (settingsState.saving) return;
+    const draft = readAgentModelSettingsForm(form);
+    validateAgentModelSettings(draft);
+    const payload = agentModelSettingsPayload(draft);
+    settingsState.draft = draft;
+    settingsState.dirty = true;
+    settingsState.saving = true;
+    settingsState.result = null;
+    refreshActiveSettingsPanel?.();
+    try {
+      const response = await api(state.settings?.agentModelSettingsEndpoint || "/api/runtime/agent-model-settings", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      const savedAgent = response?.agent || payload;
+      state.settings = { ...(state.settings || {}), agent: { ...(state.settings?.agent || {}), ...savedAgent } };
+      const savedRuntime = await persistDefaultReasoningEffort(draft.defaultReasoningEffort);
+      state.settings = { ...(state.settings || {}), runtimeSettings: savedRuntime };
+      const saved = normalizeAgentModelSettings({ ...savedAgent, defaultReasoningEffort: savedRuntime?.defaultReasoningEffort || draft.defaultReasoningEffort });
+      state.agentModelSettings = {
+        draft: saved,
+        sourceSignature: JSON.stringify(saved),
+        dirty: false,
+        saving: false,
+        result: { tone: "success", message: mt("routing.savedMessage") },
+      };
+      renderModelOptions();
+      notifyTerminal?.(`[info] ${mt("routing.savedMessage")}\n`);
+    } catch (error) {
+      const latest = agentModelSettingsState();
+      latest.saving = false;
+      latest.result = { tone: "attention", message: mt("routing.saveFailed", { message: error?.message || mt("unknown") }) };
+      throw error;
+    } finally {
+      if (state.agentModelSettings) state.agentModelSettings.saving = false;
+      refreshActiveSettingsPanel?.();
+    }
+  }
+
+  function resetAgentModelSettings() {
+    const draft = agentModelSettingsSource();
+    state.agentModelSettings = {
+      draft,
+      sourceSignature: JSON.stringify(draft),
+      dirty: false,
+      saving: false,
+      result: null,
+    };
+    refreshActiveSettingsPanel?.();
+  }
+
+  function modelAggregateByName(name) {
+    return normalizeModelAggregateList(state.modelAggregates).find((aggregate) => aggregate.name === String(name || "")) || null;
+  }
+
+  function openModelAggregateEditor(name = "") {
+    const aggregate = modelAggregateByName(name);
+    state.modelAggregateEditor = aggregate
+      ? { mode: "edit", name: aggregate.name, members: [...aggregate.members], revision: aggregate.revision }
+      : { mode: "create", name: "", members: [], revision: 0 };
+    refreshActiveSettingsPanel?.();
+  }
+
+  function cancelModelAggregateEditor() {
+    state.modelAggregateEditor = null;
+    refreshActiveSettingsPanel?.();
+  }
+
+  function readModelAggregateForm(form) {
+    const name = String(form?.elements?.aggregateName?.value || "").trim();
+    const members = modelAggregateMembers(form?.elements?.aggregateMembers?.value || "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(name)) throw new Error(mt("routing.aggregateNameInvalid"));
+    if (!members.length) throw new Error(mt("routing.aggregateMembersRequired"));
+    if (new Set(members).size !== members.length) throw new Error(mt("routing.aggregateMembersUnique"));
+    if (members.some((member) => !/^[^:\s]+:.+$/.test(member) || member.toLowerCase().startsWith("aggregate:"))) throw new Error(mt("routing.aggregateMembersInvalid"));
+    return { name, members };
+  }
+
+  async function saveModelAggregate(form) {
+    if (state.modelAggregateBusy) return;
+    const values = readModelAggregateForm(form);
+    const current = state.modelAggregateEditor || {};
+    const editing = current.mode === "edit";
+    const aggregate = editing ? modelAggregateByName(current.name) || current : { revision: 0 };
+    state.modelAggregateEditor = { mode: editing ? "edit" : "create", name: values.name, members: values.members, revision: Math.max(0, Math.trunc(Number(aggregate.revision) || 0)) };
+    state.modelAggregateBusy = true;
+    refreshActiveSettingsPanel?.();
+    try {
+      const request = modelAggregateActionRequest("save", aggregate, { ...values, revision: aggregate.revision || 0 });
+      const response = await api(request.path, request.options);
+      const saved = normalizeModelAggregateList([response])[0];
+      const remaining = normalizeModelAggregateList(state.modelAggregates).filter((item) => item.name !== saved.name);
+      state.modelAggregates = [...remaining, saved].sort((left, right) => left.name.localeCompare(right.name));
+      state.modelAggregatesLoaded = true;
+      state.modelAggregatesError = "";
+      state.modelAggregateEditor = null;
+      notifyTerminal?.(`[info] ${mt("routing.aggregateSavedMessage", { name: saved.name })}\n`);
+    } catch (error) {
+      if (error?.status === 409) {
+        await loadModelAggregates({ force: true });
+        const latest = modelAggregateByName(values.name);
+        state.modelAggregateEditor = { mode: latest ? "edit" : "create", name: values.name, members: values.members, revision: latest?.revision || 0 };
+        throw new Error(mt("routing.aggregateConflict"));
+      }
+      throw error;
+    } finally {
+      state.modelAggregateBusy = false;
+      refreshActiveSettingsPanel?.();
+    }
+  }
+
+  async function deleteModelAggregate(name) {
+    if (state.modelAggregateBusy) return;
+    const aggregate = modelAggregateByName(name);
+    if (!aggregate) return;
+    if (typeof globalThis.confirm === "function" && !globalThis.confirm(mt("routing.deleteAggregateConfirm", { name: aggregate.name }))) return;
+    state.modelAggregateBusy = true;
+    refreshActiveSettingsPanel?.();
+    try {
+      const request = modelAggregateActionRequest("delete", aggregate, { revision: aggregate.revision });
+      await api(request.path, request.options);
+      state.modelAggregates = normalizeModelAggregateList(state.modelAggregates).filter((item) => item.name !== aggregate.name);
+      state.modelAggregatesLoaded = true;
+      if (state.modelAggregateEditor?.name === aggregate.name) state.modelAggregateEditor = null;
+      notifyTerminal?.(`[info] ${mt("routing.aggregateDeletedMessage", { name: aggregate.name })}\n`);
+    } catch (error) {
+      if (error?.status === 409) {
+        await loadModelAggregates({ force: true });
+        throw new Error(mt("routing.aggregateConflict"));
+      }
+      throw error;
+    } finally {
+      state.modelAggregateBusy = false;
+      refreshActiveSettingsPanel?.();
+    }
+  }
+
   function bindModelSettingsActions() {
     $("settingsRefreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
     $("settingsOpenLoginBtn")?.addEventListener("click", () => openSettingsModal?.("providers"));
     $("settingsClearPreferredModelBtn")?.addEventListener("click", () => applyPreferredModel("").catch(showError));
     $("settingsShowConfiguredModelsBtn")?.addEventListener("click", clearVisibleConfiguredModelHides);
-    $("settingsContentBody").querySelectorAll("[data-toggle-model-visibility]").forEach((node) => {
+    $("resetAgentModelSettingsBtn")?.addEventListener("click", resetAgentModelSettings);
+    const root = $("settingsContentBody");
+    const form = $("agentModelSettingsForm");
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveAgentModelSettings(form).catch(showError);
+    });
+    form?.addEventListener("change", (event) => handleAgentModelSettingsChange(event, form));
+    root?.querySelectorAll("[data-toggle-model-visibility]").forEach((node) => {
       node.addEventListener("click", () => setModelHidden(node.dataset.toggleModelVisibility, !isModelHidden(node.dataset.toggleModelVisibility)));
     });
-    $("settingsContentBody").querySelectorAll("[data-apply-model]").forEach((node) => {
+    root?.querySelectorAll("[data-apply-model]").forEach((node) => {
       node.addEventListener("click", () => applyPreferredModel(node.dataset.applyModel).catch(showError));
     });
+    root?.querySelector("[data-model-aggregate-add]")?.addEventListener("click", () => openModelAggregateEditor());
+    root?.querySelectorAll("[data-model-aggregate-edit]").forEach((node) => node.addEventListener("click", () => openModelAggregateEditor(node.dataset.modelAggregateEdit)));
+    root?.querySelectorAll("[data-model-aggregate-delete]").forEach((node) => node.addEventListener("click", () => deleteModelAggregate(node.dataset.modelAggregateDelete).catch(showError)));
+    root?.querySelector("[data-model-aggregate-cancel]")?.addEventListener("click", cancelModelAggregateEditor);
+    const aggregateForm = $("modelAggregateForm");
+    aggregateForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveModelAggregate(aggregateForm).catch(showError);
+    });
+    loadModelAggregates().catch(showError);
   }
 
   let providerConsoleEventRoot = null;
@@ -1089,9 +2445,30 @@ export function createModelProviderSettingsController({
     if (target) scheduleProviderConsoleFocus(() => restoreProviderConsoleFocus(target));
   }
 
-  function refreshProviderConsole({ focusLayer = false, restoreFocus = false } = {}) {
+  function focusCodexConsolePage() {
+    const page = providerConsoleEventRoot?.querySelector?.(".codex-account-console");
+    const backButton = page?.querySelector?.("[data-mp-close-codex-page]");
+    (backButton || page)?.focus?.();
+  }
+
+  function focusAnthropicConsolePage() {
+    const page = providerConsoleEventRoot?.querySelector?.(".anthropic-account-console");
+    const backButton = page?.querySelector?.("[data-mp-close-anthropic-page]");
+    (backButton || page)?.focus?.();
+  }
+
+  function focusProviderCreatePage() {
+    const page = providerConsoleEventRoot?.querySelector?.(".mp-provider-create-page");
+    const backButton = page?.querySelector?.("[data-mp-close-drawer]");
+    (backButton || page)?.focus?.();
+  }
+
+  function refreshProviderConsole({ focusLayer = false, focusCodex = false, focusAnthropic = false, focusCreate = false, restoreFocus = false } = {}) {
     refreshActiveSettingsPanel?.();
     if (focusLayer) scheduleProviderConsoleFocus(focusProviderConsoleLayer);
+    if (focusCodex) scheduleProviderConsoleFocus(focusCodexConsolePage);
+    if (focusAnthropic) scheduleProviderConsoleFocus(focusAnthropicConsolePage);
+    if (focusCreate) scheduleProviderConsoleFocus(focusProviderCreatePage);
     if (restoreFocus) restoreProviderConsoleLayerFocus();
   }
 
@@ -1112,15 +2489,69 @@ export function createModelProviderSettingsController({
       refreshProviderConsole({ restoreFocus: true });
       return true;
     }
+    if (consoleState.view === "codex" || consoleState.view === "anthropic") {
+      consoleState.view = "providers";
+      consoleState.mode = "";
+      consoleState.type = "";
+      consoleState.providerName = "";
+      consoleState.codexEdit = null;
+      consoleState.anthropicEdit = null;
+      setProviderConsoleResult("");
+      refreshProviderConsole({ restoreFocus: true });
+      return true;
+    }
     return false;
   }
 
-  function openProviderConsoleDrawer(provider) {
+  function openCodexConsolePage(provider = {}) {
     const consoleState = providerConsoleState();
+    const normalized = normalizeConsoleProvider(provider || createProviderDraft("codex"));
+    consoleState.view = "codex";
+    consoleState.modal = "";
+    consoleState.drawer = "";
+    consoleState.mode = "codex";
+    consoleState.type = "codex";
+    consoleState.providerName = normalized.name || "codex";
+    consoleState.draft = createProviderDraft("codex", normalized);
+    consoleState.dirty = false;
+    consoleState.codexEdit = null;
+    setProviderConsoleResult("");
+    refreshProviderConsole({ focusCodex: true });
+    if (!state.providerAuthLoading) loadProviderAuthFiles({ silent: true }).catch(showError);
+  }
+
+  function openAnthropicConsolePage(provider = {}) {
+    const consoleState = providerConsoleState();
+    const normalized = normalizeConsoleProvider(provider || createProviderDraft("anthropic"));
+    consoleState.view = "anthropic";
+    consoleState.modal = "";
+    consoleState.drawer = "";
+    consoleState.mode = "anthropic";
+    consoleState.type = "anthropic";
+    consoleState.providerName = normalized.name || "anthropic";
+    consoleState.draft = createProviderDraft("anthropic", normalized);
+    consoleState.dirty = false;
+    consoleState.anthropicEdit = null;
+    setProviderConsoleResult("");
+    refreshProviderConsole({ focusAnthropic: true });
+    if (!state.anthropicAccountsLoading) loadAnthropicAccounts({ silent: true }).catch(showError);
+  }
+
+  function openProviderConsoleDrawer(provider) {
     const normalized = normalizeConsoleProvider(provider || {});
+    if (normalized.type === "codex" || normalized.name === "codex") {
+      openCodexConsolePage(normalized);
+      return;
+    }
+    if (isAnthropicAccountProvider(normalized)) {
+      openAnthropicConsolePage(normalized);
+      return;
+    }
+    const consoleState = providerConsoleState();
+    consoleState.view = "providers";
     consoleState.modal = "";
     consoleState.drawer = "provider";
-    consoleState.mode = normalized.type === "codex" || normalized.name === "codex" ? "codex" : "edit";
+    consoleState.mode = "edit";
     consoleState.type = normalized.type;
     consoleState.providerName = normalized.name;
     consoleState.draft = createProviderDraft(normalized.type, normalized);
@@ -1130,21 +2561,31 @@ export function createModelProviderSettingsController({
   }
 
   function openProviderConsoleType(type) {
-    const consoleState = providerConsoleState();
     const draft = createProviderDraft(type);
+    if (type === "codex") {
+      openCodexConsolePage(draft);
+      return;
+    }
+    if (type === "anthropic") {
+      openAnthropicConsolePage(draft);
+      return;
+    }
+    const consoleState = providerConsoleState();
+    consoleState.view = "providers";
     consoleState.modal = "";
     consoleState.drawer = "provider";
-    consoleState.mode = type === "codex" ? "codex" : "create";
+    consoleState.mode = "create";
     consoleState.type = type;
     consoleState.providerName = draft.name;
     consoleState.draft = draft;
     consoleState.dirty = false;
     setProviderConsoleResult("");
-    refreshProviderConsole({ focusLayer: true });
+    refreshProviderConsole({ focusCreate: true });
   }
 
   function openRelayConsoleDrawer() {
     const consoleState = providerConsoleState();
+    consoleState.view = "providers";
     consoleState.modal = "";
     consoleState.drawer = "relay";
     consoleState.mode = "relay";
@@ -1205,21 +2646,63 @@ export function createModelProviderSettingsController({
     return providerConsoleDraftFromForm(current.draft || {}, form, current.type);
   }
 
-  function validateConsoleDraft(draft) {
+  function validateConsoleDraft(draft, { requireModel = true } = {}) {
     if (!draft.name) throw new Error(mt("selectProviderName"));
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(draft.name)) throw new Error(mt("invalidProviderName"));
-    if (!draft.model) throw new Error(mt("selectDefaultModel"));
+    if (requireModel && !draft.model) throw new Error(mt("selectDefaultModel"));
     if (draft.type === "openai-compatible" && !draft.baseUrl) throw new Error(mt("missingBaseUrl"));
   }
 
-  async function toggleConsoleProvider(provider) {
-    if (!provider || providerConsoleBusy(`toggle:${provider.name}`)) return;
-    await runProviderConsoleBusy(`toggle:${provider.name}`, async () => {
-      const enabled = !provider.enabled;
-      const request = providerConsoleRequest("toggle", provider, { enabled, model: provider.defaultModel || provider.model });
-      await api(request.path, request.options);
-      await refreshProviderDataAfterMutation(ct(enabled ? "messages.providerStarted" : "messages.providerStopped", { provider: providerDisplayName(provider) }));
+  function consoleDraftCanDiscoverModels(draft) {
+    if (!draft || draft.type === "codex") return false;
+    if (draft.type === "openai-compatible" && !draft.baseUrl) return false;
+    const existing = providerByName(draft.name);
+    return Boolean(draft.apiKey || draft.apiKeyOptional || existing?.configured);
+  }
+
+  async function discoverConsoleProviderModels(form, { automatic = false } = {}) {
+    const consoleState = providerConsoleState();
+    const rawDraft = consoleDraftFromForm(form);
+    const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    validateConsoleDraft(draft, { requireModel: false });
+    if (!consoleDraftCanDiscoverModels(draft) || providerConsoleBusy(`models:${draft.name}`)) return false;
+    consoleState.draft = draft;
+    consoleState.dirty = true;
+    await runProviderConsoleBusy(`models:${draft.name}`, async () => {
+      try {
+        const request = providerConsoleRequest("test", null, draft);
+        const response = await api(request.path, request.options);
+        const preflight = providerPreflightResult(response, ct);
+        if (preflight.tone !== "success") {
+          setProviderConsoleResult(preflight.message, preflight.tone);
+          notifyTerminal?.(`[${preflight.terminalLevel}] ${preflight.message}\n`);
+          return;
+        }
+        const discovery = providerModelDiscovery(response, draft.model);
+        if (!discovery.models.length) {
+          const message = ct("messages.noModelsDiscovered");
+          setProviderConsoleResult(message, "attention");
+          notifyTerminal?.(`[warn] ${message}\n`);
+          return;
+        }
+        consoleState.draft = {
+          ...draft,
+          models: discovery.models,
+          model: discovery.selectedModel,
+        };
+        const message = ct(automatic ? "messages.modelsDiscoveredAutomatically" : "messages.modelsDiscovered", {
+          count: discovery.models.length,
+          model: discovery.selectedModel,
+        });
+        setProviderConsoleResult(message, "success");
+        notifyTerminal?.(`[info] ${message}\n`);
+      } catch {
+        const message = ct("messages.currentDraftTestFailed", { message: ct("messages.requestFailed") });
+        setProviderConsoleResult(message, "attention");
+        notifyTerminal?.(`[warn] ${message}\n`);
+      }
     });
+    return true;
   }
 
   async function testConsoleProvider(form) {
@@ -1305,20 +2788,76 @@ export function createModelProviderSettingsController({
     const draft = syncProviderConsoleDraft(providerConsoleState(), form);
     if (!draft) return false;
     const example = form.querySelector?.("[data-mp-model-example]");
-    if (example) example.value = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+    if (example) {
+      const value = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+      if ("value" in example) example.value = value;
+      else example.textContent = value;
+    }
     return true;
   }
 
   function handleProviderConsoleInput(event) {
+    const rawTarget = event.target;
+    if (rawTarget?.matches?.("[data-anthropic-profile]")) {
+      const consoleState = providerConsoleState();
+      consoleState.anthropicProfile = rawTarget.value || "";
+      const form = rawTarget.closest?.("[data-anthropic-account-form]");
+      const command = anthropicProfileLoginCommand(consoleState.anthropicProfile);
+      const commandNode = form?.querySelector?.("[data-anthropic-command]");
+      const copyButton = form?.querySelector?.("[data-anthropic-copy-command]");
+      if (commandNode) commandNode.textContent = command;
+      if (copyButton) copyButton.dataset.anthropicCopyCommand = command;
+      return;
+    }
+    if (rawTarget?.matches?.("[data-anthropic-alias]")) {
+      providerConsoleState().anthropicAlias = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.matches?.("[data-anthropic-priority]")) {
+      providerConsoleState().anthropicPriority = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.dataset?.anthropicEditAlias) {
+      const edit = providerConsoleState().anthropicEdit;
+      if (edit?.id === rawTarget.dataset.anthropicEditAlias) edit.alias = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.dataset?.anthropicEditPriority) {
+      const edit = providerConsoleState().anthropicEdit;
+      if (edit?.id === rawTarget.dataset.anthropicEditPriority) edit.priority = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.matches?.("[data-codex-import-draft]")) {
+      providerConsoleState().codexImportDraft = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.dataset?.codexEditAlias) {
+      const edit = providerConsoleState().codexEdit;
+      if (edit?.id === rawTarget.dataset.codexEditAlias) edit.alias = rawTarget.value || "";
+      return;
+    }
+    if (rawTarget?.dataset?.codexEditPriority) {
+      const edit = providerConsoleState().codexEdit;
+      if (edit?.id === rawTarget.dataset.codexEditPriority) edit.priority = rawTarget.value || "";
+      return;
+    }
     if (updateProviderConsoleDraftFromEvent(event)) return;
-    const target = event.target?.closest?.("[data-mp-provider-search]");
+    const target = rawTarget?.closest?.("[data-mp-provider-search]");
     if (!target) return;
     providerConsoleState().search = target.value || "";
     refreshProviderConsole();
   }
 
   function handleProviderConsoleChange(event) {
-    updateProviderConsoleDraftFromEvent(event);
+    const updated = updateProviderConsoleDraftFromEvent(event);
+    const target = event.target;
+    if (!updated || !["baseUrl", "apiKey"].includes(target?.name)) return;
+    const form = target.closest?.("[data-mp-provider-form]");
+    if (!form) return;
+    const draft = providerConsoleState().draft;
+    if (consoleDraftCanDiscoverModels(draft)) {
+      discoverConsoleProviderModels(form, { automatic: true }).catch(showError);
+    }
   }
 
   function handleProviderConsoleKeydown(event) {
@@ -1338,6 +2877,12 @@ export function createModelProviderSettingsController({
   }
 
   function handleProviderConsoleSubmit(event) {
+    const anthropicAccountForm = event.target?.closest?.("[data-anthropic-account-form]");
+    if (anthropicAccountForm) {
+      event.preventDefault();
+      createAnthropicAccount(anthropicAccountForm).catch(showError);
+      return;
+    }
     const form = event.target?.closest?.("[data-mp-provider-form]");
     if (!form) return;
     event.preventDefault();
@@ -1352,12 +2897,90 @@ export function createModelProviderSettingsController({
       closeProviderConsoleLayer();
       return;
     }
+    if (target.dataset.mpCloseCodexPage !== undefined || target.dataset.mpCloseAnthropicPage !== undefined) {
+      closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.anthropicAddMode) {
+      consoleState.anthropicAddMode = target.dataset.anthropicAddMode === "api_key" ? "api_key" : "profile";
+      refreshProviderConsole();
+      scheduleProviderConsoleFocus(() => providerConsoleEventRoot?.querySelector?.("[data-anthropic-account-form] input:not([type=hidden])")?.focus?.());
+      return;
+    }
+    if (target.dataset.anthropicFocusAdd !== undefined) {
+      providerConsoleEventRoot?.querySelector?.("#anthropic-add-account")?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      scheduleProviderConsoleFocus(() => providerConsoleEventRoot?.querySelector?.("[data-anthropic-account-form] input:not([type=hidden])")?.focus?.());
+      return;
+    }
+    if (target.dataset.anthropicCopyCommand !== undefined) {
+      copyText?.(target.dataset.anthropicCopyCommand || "");
+      setProviderConsoleResult(mt("anthropic.commandCopied"), "success");
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.anthropicRefresh !== undefined) {
+      loadAnthropicAccounts().catch(showError);
+      return;
+    }
+    if (target.dataset.anthropicEdit) {
+      const id = target.dataset.anthropicEdit;
+      const account = anthropicAccountById(id);
+      if (!account || account.managed === false) return;
+      consoleState.anthropicEdit = { id, alias: String(account.alias || ""), priority: finiteNumber(account.priority, 100) };
+      refreshProviderConsole();
+      scheduleProviderConsoleFocus(() => [...(providerConsoleEventRoot?.querySelectorAll?.("[data-anthropic-edit-alias]") || [])].find((node) => node.dataset?.anthropicEditAlias === id)?.focus?.());
+      return;
+    }
+    if (target.dataset.anthropicEditCancel) {
+      if (consoleState.anthropicEdit?.id === target.dataset.anthropicEditCancel) consoleState.anthropicEdit = null;
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.anthropicSave) {
+      saveAnthropicAccount(target.dataset.anthropicSave, target).catch(showError);
+      return;
+    }
+    if (target.dataset.anthropicSync) {
+      syncAnthropicAccount(target.dataset.anthropicSync, target).catch(showError);
+      return;
+    }
+    if (target.dataset.anthropicToggle) {
+      toggleAnthropicAccount(target.dataset.anthropicToggle, target.dataset.disabled === "true", target).catch(showError);
+      return;
+    }
+    if (target.dataset.anthropicDelete) {
+      deleteAnthropicAccount(target.dataset.anthropicDelete, target).catch(showError);
+      return;
+    }
     if (target.dataset.mpCloseModal !== undefined) {
       closeProviderConsoleLayer();
       return;
     }
     if (target.dataset.mpCloseDrawer !== undefined) {
       closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.codexEdit) {
+      const id = target.dataset.codexEdit;
+      const account = extractAuthFiles(state.providerAuthFiles).find((item) => String(item?.id || item?.auth_index || item?.authIndex || item?.name || "") === id);
+      if (!account) return;
+      consoleState.codexEdit = {
+        id,
+        alias: String(account.alias || ""),
+        priority: finiteNumber(account.priority, 100),
+      };
+      refreshProviderConsole();
+      scheduleProviderConsoleFocus(() => {
+        const field = [...(providerConsoleEventRoot?.querySelectorAll?.("[data-codex-edit-alias]") || [])]
+          .find((node) => node.dataset?.codexEditAlias === id);
+        field?.focus?.();
+        field?.select?.();
+      });
+      return;
+    }
+    if (target.dataset.codexEditCancel) {
+      if (consoleState.codexEdit?.id === target.dataset.codexEditCancel) consoleState.codexEdit = null;
+      refreshProviderConsole();
       return;
     }
     if (target.dataset.mpOpenTypes !== undefined) {
@@ -1376,12 +2999,6 @@ export function createModelProviderSettingsController({
       refreshProviderConsole();
       return;
     }
-    if (target.dataset.mpProviderToggle) {
-      event.preventDefault();
-      event.stopPropagation();
-      toggleConsoleProvider(providerByName(target.dataset.mpProviderToggle)).catch(showError);
-      return;
-    }
     if (target.dataset.mpProviderCard) {
       rememberProviderConsoleFocus(target);
       openProviderConsoleDrawer(providerByName(target.dataset.mpProviderCard));
@@ -1392,7 +3009,18 @@ export function createModelProviderSettingsController({
       openRelayConsoleDrawer();
       return;
     }
-    if (target.dataset.mpRefreshModels !== undefined || target.dataset.mpFetchModels !== undefined) {
+    if (target.dataset.mpFetchModels !== undefined) {
+      const form = target.closest?.("[data-mp-provider-form]");
+      if (form) discoverConsoleProviderModels(form).catch(showError);
+      else {
+        runProviderConsoleBusy("refresh", async () => {
+          await refreshModelCatalog();
+          setProviderConsoleResult(ct("messages.modelsRefreshed"), "success");
+        }).catch(showError);
+      }
+      return;
+    }
+    if (target.dataset.mpRefreshModels !== undefined) {
       runProviderConsoleBusy("refresh", async () => {
         await refreshModelCatalog();
         setProviderConsoleResult(ct("messages.modelsRefreshed"), "success");
@@ -1412,6 +3040,18 @@ export function createModelProviderSettingsController({
       saveRelayProviderConfig().catch(showError);
       return;
     }
+    if (target.dataset.mpCodexBrowserLogin !== undefined) {
+      startCodexBrowserLogin().catch(showError);
+      return;
+    }
+    if (target.dataset.mpCodexBrowserOpen !== undefined) {
+      reopenCodexBrowserLogin();
+      return;
+    }
+    if (target.dataset.mpCodexBrowserCancel !== undefined) {
+      cancelCodexBrowserLogin().catch(showError);
+      return;
+    }
     if (target.dataset.mpCodexImport !== undefined) {
       importCodexAuthFile().catch(showError);
       return;
@@ -1426,6 +3066,10 @@ export function createModelProviderSettingsController({
     }
     if (target.dataset.codexSync) {
       syncCodexAccount(target.dataset.codexSync, target).catch(showError);
+      return;
+    }
+    if (target.dataset.codexExport) {
+      exportCodexAccount(target.dataset.codexExport, target).catch(showError);
       return;
     }
     if (target.dataset.codexToggle) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"autoto/internal/anthropicauth"
 	"autoto/internal/codexauth"
 	"autoto/internal/config"
 	"autoto/internal/db"
@@ -114,6 +115,13 @@ type runtimeModelSettingsRequest struct {
 	AccountEmail           strictString `json:"accountEmail"`
 	Revision               strictInt64  `json:"revision"`
 	ExpectedRevision       strictInt64  `json:"expectedRevision"`
+}
+
+type agentModelSettingsRequest struct {
+	DefaultModel       strictString        `json:"defaultModel"`
+	SummaryModel       strictString        `json:"summaryModel"`
+	SubagentModels     map[string]string   `json:"subagentModels"`
+	SubagentModelPools map[string][]string `json:"subagentModelPools"`
 }
 
 type agentReasoningRequest struct {
@@ -243,6 +251,63 @@ func (s *Server) deleteModelAggregate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "name": name, "revision": revision})
+}
+
+func (s *Server) updateAgentModelSettings(w http.ResponseWriter, r *http.Request) {
+	var request agentModelSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !request.DefaultModel.set || !request.SummaryModel.set {
+		writeError(w, http.StatusBadRequest, "defaultModel and summaryModel are required")
+		return
+	}
+	defaultModel, err := validateAgentModelReference("defaultModel", request.DefaultModel.value, true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	summaryModel, err := validateAgentModelReference("summaryModel", request.SummaryModel.value, true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	subagentModels, subagentPools, err := normalizeAgentRoleModelSettings(request.SubagentModels, request.SubagentModelPools)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
+	s.providerMutationMu.Lock()
+	defer s.providerMutationMu.Unlock()
+	s.cfgMu.RLock()
+	updated := s.cfg
+	configPath := s.configPath
+	s.cfgMu.RUnlock()
+	updated.Agent.DefaultModel = defaultModel
+	updated.Agent.SummaryModel = summaryModel
+	updated.Agent.SubagentModels = subagentModels
+	updated.Agent.SubagentModelPools = subagentPools
+	path := effectiveConfigPath(updated, configPath)
+	if strings.TrimSpace(path) == "" {
+		writeError(w, http.StatusInternalServerError, "agent model settings could not be persisted")
+		return
+	}
+	if err := config.Save(path, updated); err != nil {
+		writeError(w, http.StatusInternalServerError, "agent model settings could not be persisted")
+		return
+	}
+	s.refreshProviderDefault(updated)
+	s.cfgMu.Lock()
+	s.cfg = updated
+	s.cfgMu.Unlock()
+	if s.runner != nil {
+		s.runner.SetAgentModelSettings(updated.Agent)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": updated.Agent, "persisted": true})
 }
 
 func (s *Server) updateRuntimeModelSettings(w http.ResponseWriter, r *http.Request) {
@@ -510,12 +575,18 @@ func (s *Server) refreshProviderRuntimeIdentity(installationID string) {
 		if providerCfg.Type == config.ProviderTypeCodex {
 			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
 		}
+		if providerCfg.Name == anthropicauth.DefaultProviderName && providerCfg.Type == "anthropic" {
+			providerCfg.CredentialStorePath = anthropicauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
 		provider, err := providers.NewProvider(providerCfg)
 		if err != nil {
 			continue
 		}
 		if codexProvider, ok := provider.(*providers.CodexProvider); ok && s.store != nil {
 			codexProvider.SetAccountTelemetry(s.store)
+		}
+		if anthropicProvider, ok := provider.(*providers.AnthropicProvider); ok && s.store != nil {
+			anthropicProvider.SetAccountTelemetry(s.store)
 		}
 		s.providers.Register(provider)
 	}
@@ -569,6 +640,80 @@ func validateModelAggregateMembers(members []string) ([]string, error) {
 		normalized = append(normalized, member)
 	}
 	return normalized, nil
+}
+
+func validateAgentModelReference(field, value string, required bool) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		if required {
+			return "", fmt.Errorf("%s is required", field)
+		}
+		return "", nil
+	}
+	if len(value) > 256 || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") {
+		return "", fmt.Errorf("%s is invalid", field)
+	}
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("%s must be a provider:model reference", field)
+	}
+	return strings.TrimSpace(parts[0]) + ":" + strings.TrimSpace(parts[1]), nil
+}
+
+func normalizeAgentRoleModelSettings(models map[string]string, pools map[string][]string) (map[string]string, map[string][]string, error) {
+	allowedRoles := map[string]struct{}{"explore": {}, "plan": {}, "general": {}, "search": {}}
+	normalizedModels := make(map[string]string)
+	for rawRole, rawModel := range models {
+		role := strings.ToLower(strings.TrimSpace(rawRole))
+		if _, ok := allowedRoles[role]; !ok {
+			return nil, nil, fmt.Errorf("unsupported subagent role %q", rawRole)
+		}
+		model, err := validateAgentModelReference("subagentModels."+role, rawModel, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		if model != "" {
+			normalizedModels[role] = model
+		}
+	}
+	normalizedPools := make(map[string][]string)
+	for rawRole, rawPool := range pools {
+		role := strings.ToLower(strings.TrimSpace(rawRole))
+		if _, ok := allowedRoles[role]; !ok {
+			return nil, nil, fmt.Errorf("unsupported subagent role %q", rawRole)
+		}
+		if len(rawPool) > 64 {
+			return nil, nil, fmt.Errorf("subagentModelPools.%s must contain at most 64 models", role)
+		}
+		seen := make(map[string]struct{}, len(rawPool))
+		pool := make([]string, 0, len(rawPool))
+		for _, rawModel := range rawPool {
+			model, err := validateAgentModelReference("subagentModelPools."+role, rawModel, true)
+			if err != nil {
+				return nil, nil, err
+			}
+			if _, duplicate := seen[model]; duplicate {
+				continue
+			}
+			seen[model] = struct{}{}
+			pool = append(pool, model)
+		}
+		if preferred := normalizedModels[role]; preferred != "" && len(pool) > 0 {
+			if _, ok := seen[preferred]; !ok {
+				return nil, nil, fmt.Errorf("subagentModels.%s must be included in its model pool", role)
+			}
+		}
+		if len(pool) > 0 {
+			normalizedPools[role] = pool
+		}
+	}
+	if len(normalizedModels) == 0 {
+		normalizedModels = nil
+	}
+	if len(normalizedPools) == 0 {
+		normalizedPools = nil
+	}
+	return normalizedModels, normalizedPools, nil
 }
 
 func validAgentReasoningEffort(value string, allowEmpty bool) bool {

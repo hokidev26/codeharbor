@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -290,31 +291,9 @@ func (r *Runner) recoverTrackingRunGitCheckpoint(ctx context.Context, run db.Run
 		}
 		return "invalidated_tracking", nil
 	}
-	if strings.TrimSpace(run.BaseHead) == "" || strings.TrimSpace(run.CheckpointRepoRoot) == "" {
-		return invalidate("tracking checkpoint is missing repository metadata", nil)
-	}
-	agent, err := r.store.GetAgent(ctx, run.AgentID)
+	head, err := r.verifyTrackingRunGitCheckpoint(ctx, run)
 	if err != nil {
-		return invalidate("load agent during recovery failed", err)
-	}
-	repoRoot, ok := gitRepoRoot(ctx, agent.CWD)
-	if !ok || !sameCheckpointRepo(repoRoot, run.CheckpointRepoRoot) {
-		return invalidate("repository root changed during checkpoint recovery", nil)
-	}
-	head, ok := gitHead(ctx, repoRoot)
-	if !ok || head != strings.TrimSpace(run.BaseHead) {
-		return invalidate("HEAD changed during checkpoint recovery", nil)
-	}
-	persisted, err := r.store.ListRunGitChanges(ctx, run.ID)
-	if err != nil {
-		return "", err
-	}
-	current, err := gitRunChangeSnapshot(ctx, repoRoot)
-	if err != nil {
-		return invalidate("capture current git snapshot during recovery failed", err)
-	}
-	if !sameRunGitChangeMaps(runGitChangeMap(persisted), current) {
-		return invalidate("current git changes do not exactly match persisted checkpoint ownership", nil)
+		return invalidate("tracking checkpoint recovery verification failed", err)
 	}
 	ready, err := r.store.FinalizeRunGitCheckpoint(ctx, run.ID, head)
 	if err != nil {
@@ -324,6 +303,72 @@ func (r *Runner) recoverTrackingRunGitCheckpoint(ctx context.Context, run db.Run
 		return "", fmt.Errorf("tracking checkpoint was not available for finalization")
 	}
 	return "finalized_ready", nil
+}
+
+func (r *Runner) verifyTrackingRunGitCheckpoint(ctx context.Context, run db.Run) (string, error) {
+	if strings.TrimSpace(run.BaseHead) == "" || strings.TrimSpace(run.CheckpointRepoRoot) == "" {
+		return "", errors.New("tracking checkpoint is missing repository metadata")
+	}
+	agent, err := r.store.GetAgent(ctx, run.AgentID)
+	if err != nil {
+		return "", fmt.Errorf("load agent during checkpoint verification: %w", err)
+	}
+	repoRoot, ok := gitRepoRoot(ctx, agent.CWD)
+	if !ok || !sameCheckpointRepo(repoRoot, run.CheckpointRepoRoot) {
+		return "", errors.New("repository root changed during checkpoint verification")
+	}
+	head, ok := gitHead(ctx, repoRoot)
+	if !ok || head != strings.TrimSpace(run.BaseHead) {
+		return "", errors.New("HEAD changed during checkpoint verification")
+	}
+	persisted, err := r.store.ListRunGitChanges(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	current, err := gitRunChangeSnapshot(ctx, repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("capture current git snapshot during checkpoint verification: %w", err)
+	}
+	if !sameRunGitChangeMaps(runGitChangeMap(persisted), current) {
+		return "", errors.New("current git changes do not exactly match persisted checkpoint ownership")
+	}
+	return head, nil
+}
+
+func (r *Runner) validateContinuationRunGitCheckpoint(ctx context.Context, run db.Run) error {
+	switch run.CheckpointState {
+	case db.RunCheckpointNone:
+		return nil
+	case db.RunCheckpointTracking:
+		if _, err := r.verifyTrackingRunGitCheckpoint(ctx, run); err != nil {
+			reason := "continuation checkpoint verification failed: " + err.Error()
+			if invalidateErr := r.store.InvalidateRunGitCheckpoint(ctx, run.ID, reason); invalidateErr != nil {
+				return invalidateErr
+			}
+			return errors.New(reason)
+		}
+		return nil
+	case db.RunCheckpointCapturing:
+		reason := "process restarted while a continuation tool checkpoint capture was in progress"
+		if err := r.store.InvalidateRunGitCheckpoint(ctx, run.ID, reason); err != nil {
+			return err
+		}
+		return errors.New(reason)
+	case db.RunCheckpointRollingBack:
+		reason := "process restarted while continuation rollback was in progress"
+		if err := r.store.FailRunGitRollback(ctx, run.ID, reason); err != nil {
+			return err
+		}
+		return errors.New(reason)
+	case db.RunCheckpointReady:
+		return errors.New("continuation checkpoint was finalized before the run completed")
+	case db.RunCheckpointInvalid:
+		return errors.New("continuation checkpoint is invalid")
+	case db.RunCheckpointRolledBack:
+		return errors.New("continuation checkpoint was already rolled back")
+	default:
+		return fmt.Errorf("unknown continuation checkpoint state %q", run.CheckpointState)
+	}
 }
 
 func gitRepoRoot(ctx context.Context, cwd string) (string, bool) {

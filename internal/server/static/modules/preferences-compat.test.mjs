@@ -1,16 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
+  appearancePrefsKey,
+  appearanceStyleVersion,
+  defaultAppearancePrefs,
+  defaultPrimaryModePreference,
   defaultRegionalPrefs,
+  defaultSearchPrefs,
   legacyLocalPreferenceBackupKind,
   localPreferenceBackupKind,
   normalizeImportedRegionalPreferences,
+  normalizePrimaryModePreference,
   normalizeRegionalPreferences,
+  primaryModePrefsKey,
   profilePrefsKey,
   regionalPrefsKey,
 } from "./preferences-data.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
+import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 
 class MemoryStorage {
   constructor(entries = []) {
@@ -40,25 +49,39 @@ function replaceGlobal(name, value) {
 }
 
 function withBrowserStorage(storage, callback) {
+  const body = {
+    dataset: {},
+    classList: {
+      values: new Set(),
+      toggle(name, enabled) {
+        if (enabled) this.values.add(name);
+        else this.values.delete(name);
+      },
+      contains(name) {
+        return this.values.has(name);
+      },
+    },
+  };
   const restoreStorage = replaceGlobal("localStorage", storage);
   const restoreDocument = replaceGlobal("document", {
     title: "",
-    body: { classList: { toggle() {} } },
+    body,
     getElementById() {
       return null;
     },
   });
   try {
-    return callback();
+    return callback(body);
   } finally {
     restoreDocument();
     restoreStorage();
   }
 }
 
-function createController(state = {}) {
+function createController(state = {}, options = {}) {
   return createSettingsPreferencesController({
     state,
+    ...options,
     loadChatDrafts: () => ({}),
     loadPromptHistory: () => [],
     loadTerminalPreferences: () => ({}),
@@ -103,6 +126,30 @@ test("canonical Autoto preference takes priority over its legacy value", () => {
   });
 });
 
+test("primary mode migrates from the legacy CodeHarbor key", () => {
+  const legacyKey = "codeharbor.ui.primaryMode";
+  const storage = new MemoryStorage([[legacyKey, "workbench"]]);
+
+  withBrowserStorage(storage, () => {
+    const controller = createController();
+
+    assert.equal(controller.loadPrimaryModePreference(), "workbench");
+    assert.equal(controller.currentPrimaryModePreference(), "workbench");
+    assert.equal(storage.getItem(primaryModePrefsKey), "workbench");
+    assert.equal(storage.getItem(legacyKey), "workbench");
+  });
+});
+
+test("primary mode backup normalizes invalid stored values", () => {
+  const storage = new MemoryStorage([[primaryModePrefsKey, "kanban"]]);
+
+  withBrowserStorage(storage, () => {
+    const backup = createController().createLocalPreferencesBackup();
+
+    assert.equal(backup.preferences[primaryModePrefsKey], defaultPrimaryModePreference);
+  });
+});
+
 test("backup export uses Autoto format and import accepts legacy CodeHarbor format", () => {
   const storage = new MemoryStorage();
 
@@ -129,6 +176,51 @@ test("backup export uses Autoto format and import accepts legacy CodeHarbor form
     const backup = controller.createLocalPreferencesBackup();
     assert.equal(backup.kind, localPreferenceBackupKind);
     assert.ok(Object.keys(backup.preferences).every((key) => key.startsWith("autoto.")));
+  });
+});
+
+test("primary mode import reloads state and reapplies the injected UI callback", () => {
+  const storage = new MemoryStorage();
+  const appliedModes = [];
+
+  withBrowserStorage(storage, () => {
+    const state = {};
+    const controller = createController(state, { applyPrimaryMode: (mode) => appliedModes.push(mode) });
+    const imported = controller.restoreLocalPreferencesBackup(JSON.stringify({
+      kind: legacyLocalPreferenceBackupKind,
+      version: 1,
+      preferences: {
+        "codeharbor.ui.primaryMode": "workbench",
+      },
+    }));
+
+    assert.equal(imported, 1);
+    assert.equal(storage.getItem(primaryModePrefsKey), "workbench");
+    assert.equal(state.primaryModePreference, "workbench");
+    assert.equal(controller.currentPrimaryModePreference(), "workbench");
+    assert.equal(appliedModes.at(-1), "workbench");
+  });
+});
+
+test("primary mode rejects invalid values as conversation", () => {
+  const storage = new MemoryStorage([[primaryModePrefsKey, "kanban"]]);
+  const appliedModes = [];
+
+  withBrowserStorage(storage, () => {
+    const controller = createController({}, { applyPrimaryMode: (mode) => appliedModes.push(mode) });
+
+    assert.equal(normalizePrimaryModePreference("workbench"), "workbench");
+    assert.equal(normalizePrimaryModePreference("CONVERSATION"), defaultPrimaryModePreference);
+    assert.equal(controller.loadPrimaryModePreference(), defaultPrimaryModePreference);
+    assert.equal(controller.setPrimaryModePreference("invalid"), defaultPrimaryModePreference);
+    assert.equal(storage.getItem(primaryModePrefsKey), defaultPrimaryModePreference);
+    assert.equal(appliedModes.at(-1), defaultPrimaryModePreference);
+
+    controller.restoreLocalPreferencesBackup(JSON.stringify({
+      preferences: { [primaryModePrefsKey]: "invalid" },
+    }));
+    assert.equal(controller.currentPrimaryModePreference(), defaultPrimaryModePreference);
+    assert.equal(storage.getItem(primaryModePrefsKey), defaultPrimaryModePreference);
   });
 });
 
@@ -176,6 +268,139 @@ test("regional preferences default to auto and import legacy field names", () =>
       timezone: "UTC",
     });
   });
+});
+
+test("appearance presets default to light and migrate version 2 and unversioned preferences", () => {
+  assert.equal(appearanceStyleVersion, 3);
+  assert.deepEqual(defaultAppearancePrefs, {
+    styleVersion: 3,
+    themePreset: "light",
+    theme: "light",
+    density: "comfortable",
+    terminalDefaultOpen: false,
+    showEventLog: true,
+  });
+
+  withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({
+    styleVersion: 2,
+    theme: "dark",
+    density: "compact",
+  })]]), () => {
+    const appearance = createController().loadAppearancePreferences();
+    assert.equal(appearance.themePreset, "dark");
+    assert.equal(appearance.theme, "dark");
+  });
+
+  withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({ theme: "dark" })]]), () => {
+    const appearance = createController().loadAppearancePreferences();
+    assert.equal(appearance.themePreset, "light");
+    assert.equal(appearance.theme, "light");
+  });
+});
+
+test("appearance preset derives the palette, rejects unknown values, and updates body markers", () => {
+  withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({
+    styleVersion: 3,
+    themePreset: "solar",
+    theme: "dark",
+  })]]), () => {
+    const controller = createController();
+    assert.deepEqual(controller.loadAppearancePreferences(), { ...defaultAppearancePrefs });
+    assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)), { ...defaultAppearancePrefs });
+  });
+
+  withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({
+    styleVersion: 3,
+    themePreset: "cyber",
+    theme: "light",
+  })]]), (body) => {
+    const controller = createController();
+    assert.deepEqual(controller.normalizeAppearancePreferences({ styleVersion: 3, themePreset: "solar", theme: "dark" }), {
+      ...defaultAppearancePrefs,
+    });
+
+    controller.applyAppearancePreferences();
+    assert.equal(controller.currentAppearancePreferences().theme, "dark");
+    assert.equal(body.dataset.themePreset, "cyber");
+    assert.equal(body.classList.contains("theme-light"), true);
+    assert.equal(body.classList.contains("theme-dark"), true);
+
+    controller.setAppearancePreference("themePreset", "cream");
+    assert.equal(body.dataset.themePreset, "cream");
+    assert.equal(body.classList.contains("theme-dark"), false);
+    assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)).themePreset, "cream");
+  });
+});
+
+test("appearance backup retains the normalized theme preset", () => {
+  withBrowserStorage(new MemoryStorage(), () => {
+    const controller = createController();
+    controller.restoreLocalPreferencesBackup(JSON.stringify({
+      kind: localPreferenceBackupKind,
+      version: 1,
+      preferences: {
+        [appearancePrefsKey]: { styleVersion: 3, themePreset: "cyber", density: "compact" },
+      },
+    }));
+
+    assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)), {
+      styleVersion: 3,
+      themePreset: "cyber",
+      theme: "dark",
+      density: "compact",
+      terminalDefaultOpen: false,
+      showEventLog: true,
+    });
+    assert.equal(controller.createLocalPreferencesBackup().preferences[appearancePrefsKey].themePreset, "cyber");
+  });
+});
+
+test("network search settings render one compact strategy form without summary cards", () => {
+  const settings = createLocalPreferencesSettingsController({
+    currentSearchPreferences: () => ({ ...defaultSearchPrefs, provider: "custom", customEndpoint: "https://search.example.test/api" }),
+  });
+  const markup = settings.renderNetworkSearchSettingsContent();
+
+  assert.match(markup, /compact-settings-page network-search-page/);
+  assert.match(markup, /id="searchSettingsForm" class="compact-settings-section-controls"/);
+  assert.match(markup, /compact-settings-switch-list/);
+  assert.match(markup, /compact-settings-grid two-column/);
+  assert.match(markup, /id="searchCustomEndpoint"/);
+  assert.doesNotMatch(markup, /settings-stat-grid|settings-stat-card|settings-hero-card|appearance-choice/);
+});
+
+test("appearance settings render a flat compact form with four accessible preset previews", async () => {
+  const settings = createLocalPreferencesSettingsController({
+    currentAppearancePreferences: () => ({ ...defaultAppearancePrefs, themePreset: "cream" }),
+    currentRegionalPreferences: () => ({ locale: "en-US", timezone: "auto" }),
+  });
+  const markup = settings.renderAppearanceSettingsContent();
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+
+  assert.match(markup, /compact-settings-page appearance-page/);
+  assert.match(markup, /compact-settings-section/);
+  assert.match(markup, /compact-settings-choice-grid four-column/);
+  assert.doesNotMatch(markup, /settings-stat-grid|settings-stat-card|settings-hero-card/);
+  assert.match(markup, /role="radiogroup" aria-label=/);
+  for (const preset of ["light", "dark", "cyber", "cream"]) {
+    assert.match(markup, new RegExp(`data-appearance-field="themePreset" data-appearance-value="${preset}"`));
+    assert.match(markup, new RegExp(`theme-preset-preview-${preset}`));
+  }
+  assert.match(markup, /theme-preset-preview-cream[\s\S]*?aria-checked="true"|aria-checked="true"[\s\S]*?theme-preset-preview-cream/);
+  assert.match(styles, /data-theme-preset="cyber"[\s\S]*?--ws-primary: #a7ff32/);
+  assert.match(styles, /data-theme-preset="cream"[\s\S]*?--ws-canvas: #fff9ee/);
+  assert.match(styles, /\.theme-preset-preview-cyber/);
+  assert.match(styles, /\.theme-preset-preview-cream/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?#settingsContentBody \.appearance-theme-grid \{ grid-template-columns: 1fr; \}/);
+});
+
+test("global theme toggle returns cyber and cream presets to the binary themes", async () => {
+  const appMain = await readFile(new URL("./app-main.mjs", import.meta.url), "utf8");
+
+  assert.match(appMain, /updateGlobalThemeToggle,/);
+  assert.match(appMain, /themePreset === "cream"\s*\? "dark"/);
+  assert.match(appMain, /themePreset === "cyber"\s*\? "light"/);
+  assert.match(appMain, /setAppearancePreference\("themePreset", nextPreset\)/);
 });
 
 test("runtime prefers the Autoto token and falls back to the CodeHarbor token", async () => {

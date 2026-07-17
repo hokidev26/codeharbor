@@ -132,14 +132,14 @@ func (s *Server) forkWorkline(w http.ResponseWriter, r *http.Request) {
 		writeGitError(w, err)
 		return
 	}
+	cfg := s.configSnapshot()
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		cfg := s.configSnapshot()
 		model = cfg.Agent.DefaultModel
 	}
 	permissionMode := strings.TrimSpace(req.PermissionMode)
 	if permissionMode == "" {
-		permissionMode = s.safeDefaultPermissionModeForRequest(r, s.configSnapshot().Agent.DefaultPermissionMode)
+		permissionMode = s.safeDefaultPermissionModeForRequest(r, cfg.Agent.DefaultPermissionMode)
 	} else {
 		var ok bool
 		var message string
@@ -155,6 +155,13 @@ func (s *Server) forkWorkline(w http.ResponseWriter, r *http.Request) {
 		_ = removeGitWorktree(context.Background(), repoRoot, worktreePath)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if cfg.Agent.DefaultStartInPlanMode {
+		agent, err = s.updatePersistedAgentPlanMode(r.Context(), agent.ID, true)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "workline fork was created but its default plan mode could not be applied")
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, forkWorklineResponse{Workline: workline, Agent: agent, ForkPoint: forkPoint})
 }

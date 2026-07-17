@@ -155,7 +155,7 @@ func TestDeviceActionRequiresDirectLoopbackSecondConfirmationAndBlocksUnknown(t 
 		t.Fatalf("action must be pending before local confirmation: %+v count=%d", action, adapter.count())
 	}
 
-	remote := httptest.NewRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
+	remote := newTestRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
 	remote.RemoteAddr = "203.0.113.10:1234"
 	remoteRecorder := httptest.NewRecorder()
 	routes.ServeHTTP(remoteRecorder, remote)
@@ -163,7 +163,7 @@ func TestDeviceActionRequiresDirectLoopbackSecondConfirmationAndBlocksUnknown(t 
 		t.Fatalf("remote approval should be denied, status=%d count=%d", remoteRecorder.Code, adapter.count())
 	}
 
-	forwarded := httptest.NewRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
+	forwarded := newTestRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
 	forwarded.RemoteAddr = "127.0.0.1:1234"
 	forwarded.Header.Set("X-Forwarded-For", "127.0.0.1")
 	forwardedRecorder := httptest.NewRecorder()
@@ -172,7 +172,7 @@ func TestDeviceActionRequiresDirectLoopbackSecondConfirmationAndBlocksUnknown(t 
 		t.Fatalf("forwarded approval should be denied, status=%d count=%d", forwardedRecorder.Code, adapter.count())
 	}
 
-	local := httptest.NewRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
+	local := newTestRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
 	local.RemoteAddr = "127.0.0.1:1234"
 	localRecorder := httptest.NewRecorder()
 	routes.ServeHTTP(localRecorder, local)
@@ -180,7 +180,7 @@ func TestDeviceActionRequiresDirectLoopbackSecondConfirmationAndBlocksUnknown(t 
 		t.Fatalf("direct loopback approval should execute once, status=%d count=%d body=%s", localRecorder.Code, adapter.count(), localRecorder.Body.String())
 	}
 
-	again := httptest.NewRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
+	again := newTestRequest(http.MethodPost, "/api/device-actions/"+action.ID+"/approve", nil)
 	again.RemoteAddr = "127.0.0.1:1234"
 	againRecorder := httptest.NewRecorder()
 	routes.ServeHTTP(againRecorder, again)
@@ -218,7 +218,7 @@ func TestMonitoringSnapshotAggregatesAutomationStats(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/monitoring/snapshot", nil))
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/monitoring/snapshot", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected monitoring 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -240,7 +240,7 @@ func serveJSON(t *testing.T, handler http.Handler, method, path string, payload 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(method, path, bytes.NewReader(body))
+	request := newTestRequest(method, path, bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)

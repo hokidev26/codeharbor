@@ -92,7 +92,7 @@ func TestApproveToolCallRouteReleasesPendingApproval(t *testing.T) {
 
 	payload := []byte(`{"decision":"allow_once","reason":"route ok"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/tool-calls/bash-route/approval", bytes.NewReader(payload))
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/tool-calls/bash-route/approval", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -160,7 +160,7 @@ func TestInterruptAgentRouteCancelsActiveRun(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/interrupt", nil)
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/interrupt", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

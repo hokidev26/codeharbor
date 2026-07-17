@@ -370,7 +370,7 @@ INSERT INTO api_requests (
 func requestUsageHistory(t *testing.T, fixture usageHistoryTestFixture, target string) (int, []byte) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request := newTestRequest(http.MethodGet, target, nil)
 	fixture.app.Routes().ServeHTTP(recorder, request)
 	return recorder.Code, recorder.Body.Bytes()
 }

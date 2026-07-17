@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	codexOAuthClientID           = "app_EMoamEEZ73f0CkXaXp7hrann"
-	codexOAuthRefreshURL         = "https://auth.openai.com/oauth/token"
+	codexOAuthClientID           = codexauth.OAuthClientID
+	codexOAuthRefreshURL         = codexauth.OAuthTokenEndpoint
 	codexAccessTokenRefreshAhead = 5 * time.Minute
 	codexUnknownExpiryRefreshAge = 8 * 24 * time.Hour
 	codexMaxResponseBytes        = 4 << 20

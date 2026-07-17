@@ -4,13 +4,46 @@ import assert from "node:assert/strict";
 import {
   addRecentConversation,
   buildNavigationView,
+  createNavigationRefreshController,
   createNavigationTargetId,
+  navigationAgentStatusClass,
+  navigationRefreshDefaults,
   normalizeNavigationPayload,
   normalizeRecentConversations,
   renderNavigationHTML,
   renderRecentConversationsHTML,
+  resolveInitialNavigationTarget,
 } from "./conversation-navigation.mjs";
 import { localPreferenceBackupKeys, recentConversationsKey } from "./preferences-data.mjs";
+
+class FakeTimers {
+  constructor() {
+    this.nextId = 1;
+    this.tasks = [];
+  }
+
+  setTimeout(callback, delay) {
+    const id = this.nextId++;
+    this.tasks.push({ id, callback, delay });
+    return id;
+  }
+
+  clearTimeout(id) {
+    this.tasks = this.tasks.filter((task) => task.id !== id);
+  }
+
+  async runNext() {
+    const task = this.tasks.shift();
+    assert.ok(task, "expected a scheduled navigation refresh");
+    task.callback();
+    for (let index = 0; index < 6; index += 1) await Promise.resolve();
+    return task;
+  }
+
+  nextDelay() {
+    return this.tasks[0]?.delay;
+  }
+}
 
 const payload = {
   projects: [
@@ -50,6 +83,46 @@ test("normalizeNavigationPayload normalizes the backend contract and target ids"
   assert.equal(normalized.conversations[0].targetId, createNavigationTargetId({ projectId: "p1", worklineId: "w1", agentId: "a1" }));
 });
 
+test("navigation status classes remain safe for live agent state styling", () => {
+  assert.equal(navigationAgentStatusClass("RUNNING"), "running");
+  assert.equal(navigationAgentStatusClass("agent error"), "agent-error");
+  assert.equal(navigationAgentStatusClass(`\"><script>`), "script");
+  assert.equal(navigationAgentStatusClass(""), "idle");
+});
+
+test("navigation refresh runs immediately on demand and pauses network work while hidden", async () => {
+  const timers = new FakeTimers();
+  const reasons = [];
+  let visible = true;
+  const controller = createNavigationRefreshController({
+    timers,
+    intervalMs: navigationRefreshDefaults.intervalMs,
+    shouldRefresh: () => visible,
+    refresh: ({ reason }) => reasons.push(reason),
+  });
+
+  assert.equal(controller.intervalMs, 2000);
+  assert.equal(controller.start(), true);
+  assert.equal(timers.nextDelay(), 2000);
+  assert.equal(controller.request("agent.started"), true);
+  assert.equal(timers.nextDelay(), 0);
+  await timers.runNext();
+  assert.deepEqual(reasons, ["agent.started"]);
+  assert.equal(timers.nextDelay(), 2000);
+
+  visible = false;
+  await timers.runNext();
+  assert.deepEqual(reasons, ["agent.started"]);
+  assert.equal(timers.nextDelay(), 2000);
+
+  visible = true;
+  controller.request("visible");
+  await timers.runNext();
+  assert.deepEqual(reasons, ["agent.started", "visible"]);
+  assert.equal(controller.stop(), true);
+  assert.equal(timers.tasks.length, 0);
+});
+
 test("project groups contain every conversation once and preserve recent ordering", () => {
   const duplicatedPayload = {
     ...payload,
@@ -65,6 +138,11 @@ test("project groups contain every conversation once and preserve recent orderin
   assert.equal((html.match(/data-navigation-target="p1::w1::a1"/g) || []).length, 1);
   assert.equal((html.match(/data-navigation-target="p1::w2::a2"/g) || []).length, 1);
   assert.match(html, /navigation-conversation-row nested active/);
+  assert.match(html, /project-card-top"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span><span class="project-agent-count"[^>]*>AGENT 2<\/span>/);
+  assert.match(html, /navigation-conversation-row nested[^\"]*status-idle/);
+  assert.match(html, /data-agent-status="idle"/);
+  assert.match(html, /navigation-conversation-meta" title="feat\/login · claude-sonnet · idle ·/);
+  assert.doesNotMatch(html, /navigation-breadcrumb/);
 });
 
 test("buildNavigationView supports all, projects, and conversations modes", () => {
@@ -83,6 +161,20 @@ test("buildNavigationView supports all, projects, and conversations modes", () =
   const conversations = buildNavigationView(payload, { mode: "conversations" });
   assert.deepEqual(conversations.conversations.map((item) => item.agentId), ["a1", "a3", "a2"]);
   assert.deepEqual(conversations.projects, []);
+});
+
+test("task navigation keeps project and agent context without exposing project creation", () => {
+  const taskHTML = renderNavigationHTML(buildNavigationView(payload, { mode: "projects" }), { taskContext: true });
+  const taskEmptyHTML = renderNavigationHTML(buildNavigationView({}, { mode: "projects" }), { taskContext: true });
+  const conversationEmptyHTML = renderNavigationHTML(buildNavigationView({}, { mode: "projects" }));
+
+  assert.match(taskHTML, /data-navigation-context="tasks"/);
+  assert.match(taskHTML, /navigation-conversation-row nested task-context/);
+  assert.doesNotMatch(taskHTML, /12 (?:条消息|條訊息|messages)/);
+  assert.match(taskEmptyHTML, /data-task-project-boundary="true"/);
+  assert.match(taskEmptyHTML, /data-primary-workbench-target="conversation"/);
+  assert.doesNotMatch(taskEmptyHTML, /data-open-directory-shortcut/);
+  assert.match(conversationEmptyHTML, /data-open-directory-shortcut="new"/);
 });
 
 test("navigation search matches project path, workline, agent title, and model", () => {
@@ -106,6 +198,20 @@ test("recent conversations deduplicate newest targets and truncate to eight", ()
   assert.equal(recent[0].targetId, createNavigationTargetId(targets[3]));
   assert.equal(recent.filter((item) => item.targetId === recent[0].targetId).length, 1);
   assert.deepEqual(normalizeRecentConversations([recent[0], recent[0], { targetId: "bad" }]), [recent[0]]);
+});
+
+test("initial navigation restores the newest valid recent conversation before backend fallback", () => {
+  const conversations = normalizeNavigationPayload(payload).conversations;
+  const targetA = conversations.find((conversation) => conversation.agentId === "a1").targetId;
+  const targetB = conversations.find((conversation) => conversation.agentId === "a3").targetId;
+
+  assert.equal(resolveInitialNavigationTarget([
+    { targetId: "missing::workline::agent", openedAt: "2026-03-02T00:00:00Z" },
+    { targetId: targetB, openedAt: "2026-03-01T00:00:00Z" },
+    { targetId: targetA, openedAt: "2026-02-01T00:00:00Z" },
+  ], conversations), targetB);
+  assert.equal(resolveInitialNavigationTarget([], conversations), conversations[0].targetId);
+  assert.equal(resolveInitialNavigationTarget([], []), "");
 });
 
 test("global recent conversations do not duplicate project-grouped conversations", () => {

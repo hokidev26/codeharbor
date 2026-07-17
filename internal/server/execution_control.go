@@ -245,7 +245,11 @@ func (s *Server) listRemoteExecutionTasks(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to list remote execution tasks")
 		return
 	}
-	writeJSON(w, http.StatusOK, tasks)
+	filtered, ok := s.filterRemoteExecutionTasksForRequest(w, r, tasks)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, filtered)
 }
 
 func (s *Server) getRemoteExecutionTask(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +268,9 @@ func (s *Server) getRemoteExecutionTask(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load remote execution task")
+		return
+	}
+	if !s.requireExecutionTaskAccess(w, r, task.ProjectID, task.AgentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, makeRemoteExecutionTaskLedger(task))
@@ -290,6 +297,9 @@ func (s *Server) createRemoteExecutionTask(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "remote execution task identity is invalid")
 		return
 	}
+	if !s.requireExecutionTaskAccess(w, r, task.ProjectID, task.AgentID) {
+		return
+	}
 	created, err := s.store.CreateRemoteExecutionTask(r.Context(), task)
 	if err != nil {
 		switch {
@@ -302,6 +312,12 @@ func (s *Server) createRemoteExecutionTask(w http.ResponseWriter, r *http.Reques
 			// details. Payloads can contain user-controlled sensitive material.
 			writeError(w, http.StatusBadRequest, "remote execution task request was rejected")
 		}
+		return
+	}
+	// A duplicate idempotency key returns the previously persisted task. Check
+	// that record too, otherwise a caller authorized for its requested target
+	// could receive another tenant's task payload via a key collision.
+	if !s.requireExecutionTaskAccess(w, r, created.ProjectID, created.AgentID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, makeRemoteExecutionTaskLedger(created))
@@ -365,6 +381,78 @@ func decodeOptionalEmptyJSON(r *http.Request) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) requireExecutionTaskAccess(w http.ResponseWriter, r *http.Request, projectID, agentID string) bool {
+	projectID = strings.TrimSpace(projectID)
+	agentID = strings.TrimSpace(agentID)
+	if projectID == "" || agentID == "" {
+		writeError(w, http.StatusNotFound, "remote execution task not found")
+		return false
+	}
+	if !s.requireProjectResourceAccess(w, r, projectAccessTarget{kind: projectAccessProject, id: projectID}) {
+		return false
+	}
+	if !s.requireProjectResourceAccess(w, r, projectAccessTarget{kind: projectAccessAgent, id: agentID}) {
+		return false
+	}
+	return true
+}
+
+func (s *Server) filterRemoteExecutionTasksForRequest(w http.ResponseWriter, r *http.Request, tasks []remoteExecutionTaskLedgerResponse) ([]remoteExecutionTaskLedgerResponse, bool) {
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	var userID string
+	if hasUsers {
+		user, ok, err := s.currentUser(r)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return nil, false
+		}
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "login required")
+			return nil, false
+		}
+		userID = user.ID
+	}
+
+	filtered := make([]remoteExecutionTaskLedgerResponse, 0, len(tasks))
+	for _, task := range tasks {
+		if s.executionTaskVisibleForRequest(r, userID, task.ProjectID, task.AgentID) {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered, true
+}
+
+func (s *Server) executionTaskVisibleForRequest(r *http.Request, userID, projectID, agentID string) bool {
+	projectID = strings.TrimSpace(projectID)
+	agentID = strings.TrimSpace(agentID)
+	if projectID == "" || agentID == "" {
+		return false
+	}
+	if s.capabilitiesForRequest(r).FilesystemScope == "project" {
+		project, err := s.store.GetProject(r.Context(), projectID)
+		if err != nil || !s.filesystemPathWithinProjectRoot(project.GitPath) {
+			return false
+		}
+		agent, err := s.store.GetAgent(r.Context(), agentID)
+		if err != nil || !s.filesystemPathWithinProjectRoot(agent.CWD) {
+			return false
+		}
+	}
+	if userID == "" {
+		return true
+	}
+	projectAllowed, err := s.store.CanAccessProject(r.Context(), userID, projectID)
+	if err != nil || !projectAllowed {
+		return false
+	}
+	agentAllowed, err := s.store.CanAccessAgent(r.Context(), userID, agentID)
+	return err == nil && agentAllowed
 }
 
 func (s *Server) executionStoreAvailable(w http.ResponseWriter) bool {

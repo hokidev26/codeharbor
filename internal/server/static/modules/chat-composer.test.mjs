@@ -13,6 +13,7 @@ const {
   maxChatDraftCharacters,
   mentionTrigger,
   normalizeChatDrafts,
+  normalizeMessageMode,
   normalizeReasoningEffort,
   reasoningEffortValuesForCapabilities,
   resizeMessageInputElement,
@@ -164,6 +165,7 @@ test("reasoning effort control crops unsupported values when the selected model 
     assert.equal(elements.reasoningEffort.value, "auto");
     assert.equal(elements.reasoningEffort.disabled, true);
     assert.equal(elements.reasoningEffortDisplay.textContent, "自动");
+    assert.equal(elements.reasoningEffortDisplay.dataset.mobileLabel, "Auto");
     assert.equal(controller.selectedReasoningEffort("basic:model"), "auto");
   } finally {
     globalThis.document = previousDocument;
@@ -215,6 +217,7 @@ test("reasoning effort control persists the selected Agent override", async () =
     });
     assert.equal(state.agent.reasoningEffort, "high");
     assert.equal(elements.reasoningEffortDisplay.textContent, "高");
+    assert.equal(elements.reasoningEffortDisplay.dataset.mobileLabel, "High");
     assert.ok(pillClasses.some(([name]) => name === "reasoning-effort-saving"));
   } finally {
     globalThis.document = previousDocument;
@@ -488,5 +491,58 @@ test("message textarea Enter submission preserves IME and Shift+Enter behavior",
     assert.equal(submitted, 1);
   } finally {
     globalThis.document = previousDocument;
+  }
+});
+
+test("Composer sends its per-message Plan or Execute mode with JSON requests", async () => {
+  const previousDocument = globalThis.document;
+  const previousGetComputedStyle = globalThis.getComputedStyle;
+  const input = {
+    value: "Review the auth flow",
+    scrollHeight: 46,
+    style: {},
+    classList: { toggle() {} },
+    focus() {},
+  };
+  const elements = {
+    messageText: input,
+    promptHistoryHint: { textContent: "" },
+    slashCommandPalette: { classList: { add() {}, remove() {} }, innerHTML: "" },
+  };
+  const requests = [];
+  globalThis.document = { getElementById(id) { return elements[id] || null; } };
+  globalThis.getComputedStyle = () => ({ minHeight: "46px", maxHeight: "128px", getPropertyValue() { return ""; } });
+  try {
+    const state = {
+      agent: { id: "agent-1", planMode: false },
+      pendingAttachments: [],
+      promptHistory: [],
+      serverSkills: [],
+      messageSendingByAgent: {},
+    };
+    const controller = createChatComposerController({
+      state,
+      currentSkillsPreferences: () => ({ commands: [] }),
+      isCurrentModelConfigured: () => true,
+      loadMessages: async () => {},
+      onMessageAccepted: async () => {},
+      request: async (path, options) => {
+        requests.push({ path, options });
+        return { accepted: true };
+      },
+      scheduleMessageRefresh() {},
+    });
+
+    assert.equal(normalizeMessageMode("PLAN"), "plan");
+    assert.equal(normalizeMessageMode("unknown", "plan"), "plan");
+    assert.equal(controller.setMessageMode("plan"), "plan");
+    await controller.sendMessage({ preventDefault() {} });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, "/api/agents/agent-1/messages");
+    assert.deepEqual(JSON.parse(requests[0].options.body), { text: "Review the auth flow", mode: "plan" });
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.getComputedStyle = previousGetComputedStyle;
   }
 });

@@ -46,7 +46,7 @@ func TestUsageSummaryRouteReturnsDatabaseStats(t *testing.T) {
 	}
 	app := New(config.Config{}, store, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/usage/summary", nil)
+	request := newTestRequest(http.MethodGet, "/api/usage/summary", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())

@@ -1,17 +1,21 @@
 import { createAgentStreamController } from "./agent-stream.mjs";
 import { createAutomationControlController } from "./automation-control.mjs";
+import { createBackgroundTasksController } from "./background-tasks.mjs";
+import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs";
-import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs";
-import { createChatRenderingController } from "./chat-rendering.mjs";
+import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1";
+import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1";
 import {
   addRecentConversation,
   buildNavigationView,
+  createNavigationRefreshController,
   normalizeNavigationPayload,
   normalizeRecentConversations,
   parseNavigationTargetId,
   renderNavigationHTML,
   renderRecentConversationsHTML,
-} from "./conversation-navigation.mjs";
+  resolveInitialNavigationTarget,
+} from "./conversation-navigation.mjs?v=mode-boundaries-1";
 import {
   basename,
   canonicalLocalPath,
@@ -19,33 +23,37 @@ import {
   normalizePath,
   normalizeRecentDirectories,
   shortPath,
-} from "./directory-browser.mjs";
+} from "./directory-browser.mjs?v=folder-picker-remote-2";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs";
-import { appMainT as am } from "./messages-app-main-extra.mjs";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1";
+import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
-import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
+import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-1-codex-browser-login-1";
+import { createPageLifecycleController } from "./page-lifecycle.mjs";
+import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
 import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs";
+import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
+import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
-import { api, webSocketURL } from "./runtime.mjs";
-import { firstSettingsItemForCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs";
-import { settingsItems, settingsSections } from "./settings-data.mjs";
+import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
+import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1";
+import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
-import { createSystemSettingsController } from "./system-settings.mjs";
-import { createSkillsWorkbenchController } from "./skills-workbench.mjs";
-import { createTerminalController } from "./terminal.mjs";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1";
+import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
+import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
+import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-1";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1";
 import { createUsageHistoryController } from "./usage-history.mjs";
-import { createWorkspaceSettingsController } from "./workspace-settings.mjs";
+import { createWorkspaceSettingsController } from "./workspace-settings.mjs?v=plan-mode-1";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 
 let backendRegistry = null;
@@ -92,7 +100,10 @@ const state = {
   modelCatalogSeq: 0,
   providerAuthFiles: null,
   providerAuthError: "",
+  providerAuthLoading: false,
+  providerAuthMutationWarning: "",
   providerAuthSeq: 0,
+  codexAccountBusy: {},
   providerConfigStatus: "",
   providerConfigExpanded: {},
   providerConsole: {},
@@ -107,12 +118,12 @@ const state = {
   updateSeq: 0,
   usageHistory: null,
   runtimeSummary: null,
+  remoteAccess: null,
+  remoteAccessError: "",
+  remoteAccessLoading: false,
   runtimeError: "",
   runtimeSeq: 0,
-  authStatus: null,
   authUser: undefined,
-  authError: "",
-  authSeq: 0,
   profile: null,
   searchPrefs: null,
   skillsPrefs: null,
@@ -140,6 +151,8 @@ const state = {
   serverNotificationSaving: false,
   serverNotificationTesting: false,
   appearance: null,
+  primaryModePreference: "conversation",
+  activeWorkbench: "conversation",
   terminalPrefs: null,
   chatDrafts: null,
   pendingAttachments: [],
@@ -153,10 +166,19 @@ const state = {
   agentRefreshing: false,
   agentSaving: false,
   agentSavePending: false,
+  titleEditing: false,
+  titleSaving: false,
+  titleDraft: "",
+  titleEditSurface: "conversation",
   reasoningEffortSaving: false,
   reasoningEffortPending: undefined,
+  messageModes: {},
   messageSendingByAgent: {},
   messageRefreshTimersByAgent: {},
+  activePlan: null,
+  pendingPlanApproval: null,
+  planActionBusy: {},
+  chatHydrating: false,
   currentMessages: [],
   messageCopyTexts: [],
   messageHasMoreBefore: false,
@@ -164,6 +186,8 @@ const state = {
   messageOlderLoading: false,
   activeRunSummary: null,
   activeRunSummaryRunId: "",
+  activeRunToolCalls: [],
+  activeRunToolCallsRunId: "",
   runSummaryLoading: false,
   runSummaryError: "",
   runRollbackBusy: false,
@@ -192,6 +216,7 @@ const state = {
   modelRefreshing: false,
   modelApplying: false,
   modelApplySeq: 0,
+  agentModelSettings: null,
   projectCreating: false,
   projectCreateSeq: 0,
   projectSelectSeq: 0,
@@ -251,6 +276,7 @@ const workspaceExplorer = createWorkspaceExplorerController({
   showError,
   showToast,
   onPreviewOpen: () => {
+    backgroundTasks?.closeTray?.("preview-open");
     closeConversationDetails();
     toggleTerminal(true);
     $("appShell")?.classList.add("preview-open");
@@ -285,6 +311,7 @@ const {
   connectTerminal,
   copyTerminalOutput,
   currentTerminalPreferences,
+  enforceAccessPolicy: enforceTerminalAccessPolicy,
   focusTerminalPanel,
   handleTerminalKeydown,
   loadTerminalPreferences,
@@ -302,6 +329,28 @@ const {
   toggleTerminal,
   trimTerminalOutput,
 } = terminal;
+
+onAPIAuthorizationFailure(({ status, path, error }) => {
+  if (!remoteAccessContext(state)) return;
+  remoteAccessSettings.invalidatePendingLoads({ status });
+  applyRemoteAccessFailClosed(state, { status });
+  state.remoteAccessError = error?.message || String(error || "remote authorization failed");
+  disconnectAgentTransports();
+  updateSecurityModeUI();
+  if (state.activeSettingsPanel === "remote-access") refreshActiveSettingsPanel();
+  if (state.remoteAccessAuthRefreshPending) return;
+  // The controller handling its own failed authority request will commit the
+  // fail-closed state in catch/finally. Other authorization failures start a
+  // fresh authority read even if an older settings request is still in flight.
+  if (state.remoteAccessLoading && path === "/api/security/remote-access") return;
+  state.remoteAccessAuthRefreshPending = true;
+  Promise.resolve()
+    .then(() => remoteAccessSettings.load())
+    .catch(() => {})
+    .finally(() => {
+      state.remoteAccessAuthRefreshPending = false;
+    });
+});
 
 const {
   closeGitModal,
@@ -321,8 +370,10 @@ const {
   appendLiveAssistantText,
   appendToolOutput,
   applyMessageSnapshot,
+  applyPlanEvent,
   beginLiveAssistantGeneration,
   clearCurrentAgentApprovals,
+  clearPlanState,
   clearLiveAssistantText,
   clearMessageRefreshTimer,
   clearRunSummary,
@@ -336,10 +387,63 @@ const {
   rememberToolApproval,
   rememberToolStarted,
   replacePendingApprovals,
+  replacePlanState,
   scheduleMessageRefresh,
   updateConversationCopyButton,
   updateLiveAssistantPerformance,
 } = chatRendering;
+
+function executionNoticeMessage(notice) {
+  const raw = notice?.raw || {};
+  const data = raw.data && typeof raw.data === "object" ? raw.data : {};
+  if (notice?.family === "task_terminal") return t("backgroundTasks.notifications.taskCompleted", { task: raw.title || data.title || notice.taskId || t("backgroundTasks.task") });
+  if (notice?.family === "continuation_blocked") return t("backgroundTasks.continuation.blocked", { reason: notice.reason || data.reason || "—" });
+  if (notice?.family === "budget_exhausted") return t("backgroundTasks.continuation.budgetExhausted", { reason: notice.reason || data.reason || notice.budget || "—" });
+  if (notice?.family === "approval_required") return t("backgroundTasks.notifications.approvalRequired");
+  if (notice?.family === "completed") return t("backgroundTasks.notifications.completed");
+  if (notice?.family === "error") return t("backgroundTasks.notifications.error");
+  if (notice?.family === "interrupted") return t("backgroundTasks.notifications.interrupted");
+  return t("backgroundTasks.notifications.truncated");
+}
+
+const executionNotifications = createExecutionNotifications({
+  notifier: (notice) => {
+    const taskStatus = String(notice?.raw?.status || notice?.raw?.data?.status || "").toLowerCase();
+    const taskFailed = notice.family === "task_terminal" && ["failed", "error", "interrupted", "cancelled", "canceled"].includes(taskStatus);
+    const variant = taskFailed || ["error", "budget_exhausted"].includes(notice.family) ? "error" : ["approval_required", "continuation_blocked", "interrupted", "truncated"].includes(notice.family) ? "warn" : "success";
+    showToast(executionNoticeMessage(notice), variant);
+  },
+  onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
+});
+
+const backgroundTasks = createBackgroundTasksController({
+  request: api,
+  onChange: () => {
+    if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
+  },
+  onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
+  onOpenChange: (open) => {
+    const shell = $("appShell");
+    shell?.classList.toggle("background-tasks-open", open);
+    if (!open) return;
+    closeConversationDetails();
+    closeWorkspace();
+    toggleTerminal(true);
+  },
+  onNavigateAgent: (childAgentId) => {
+    const conversation = state.navigationConversations.find((item) => item.agentId === childAgentId);
+    if (conversation?.targetId) selectNavigationConversation(conversation.targetId).catch(showError);
+    else showToast(t("backgroundTasks.openChildAgent"), "warn");
+  },
+  onNavigateRun: async (childAgentId, childRunId) => {
+    if (childAgentId && childAgentId !== state.agent?.id) {
+      const conversation = state.navigationConversations.find((item) => item.agentId === childAgentId);
+      if (conversation?.targetId) await selectNavigationConversation(conversation.targetId);
+    }
+    if (childRunId && (!childAgentId || childAgentId === state.agent?.id)) await loadRunSummary(childRunId, { agentId: state.agent?.id });
+  },
+});
+backgroundTasks.bind();
 
 const agentStream = createAgentStreamController({
   api,
@@ -347,6 +451,21 @@ const agentStream = createAgentStreamController({
   onEvent: handleAgentStreamEvent,
   onSnapshot: applyAgentLiveSnapshot,
   onStatus: updateAgentStreamStatus,
+  onError: (error) => notifyTerminal(`[warn] ${am("agentStreamRestoreFailed", { message: error?.message || error })}\n`),
+  getExecutionCheckpoint: (agentId) => executionNotifications.checkpoint(agentId),
+});
+
+const navigationRefresh = createNavigationRefreshController({
+  refresh: () => loadProjects(),
+  shouldRefresh: () => globalThis.navigator?.onLine !== false && globalThis.document?.visibilityState !== "hidden",
+});
+
+const pageLifecycle = createPageLifecycleController({
+  onResume: (detail) => {
+    navigationRefresh.request(detail?.reason || "lifecycle_resume");
+    return agentStream.resume(detail);
+  },
+  onOffline: (detail) => agentStream.pause(detail?.reason || "browser_offline"),
   onError: (error) => notifyTerminal(`[warn] ${am("agentStreamRestoreFailed", { message: error?.message || error })}\n`),
 });
 
@@ -412,6 +531,7 @@ const uiShell = createUIShellController({
 });
 
 const {
+  beginSettingsDialogFocus,
   bindComposerSelectMenus,
   bindSidebarResizer,
   closeMobileSidebar,
@@ -420,6 +540,7 @@ const {
   focusMobileSearch,
   handleDirectoryShortcutClick,
   handleGlobalEscape,
+  handleSettingsDialogKeydown,
   handleSettingsSearchShortcut,
   handleSidebarSettingsMenuDocumentClick,
   openMobileSidebar,
@@ -479,6 +600,15 @@ const { bindSetupWizardActions, openSetupWizard } = setupWizard;
 const specBoard = createSpecBoardController({ request: api, showError, showToast });
 specBoard.bind();
 
+const projectKanban = createProjectKanbanController({
+  specBoard,
+  host: "#projectKanbanBody",
+  translate: projectKanbanTranslation,
+  showError,
+  showToast,
+});
+projectKanban.bind();
+
 const chatComposer = createChatComposerController({
   state,
   attachmentKind,
@@ -512,12 +642,14 @@ const {
   loadPromptHistory,
   openAttachmentPicker,
   refreshFastModeControl,
+  refreshMessageModeControl,
   refreshReasoningEffortControl,
   restoreCurrentChatDraft,
   saveCurrentChatDraft,
   saveReasoningEffort,
   scheduleMessageInputResize,
   selectedReasoningEffort,
+  setMessageMode,
   sendMessage,
   setMessageInputValue,
   syncMessageComposerBusy,
@@ -531,6 +663,7 @@ settingsPreferences = createSettingsPreferencesController({
   state,
   activeBackend,
   appendTerminal,
+  applyPrimaryMode: applyPrimaryWorkbench,
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -548,6 +681,7 @@ settingsPreferences = createSettingsPreferencesController({
   trimTerminalOutput,
   updatePromptHistoryHint,
   updateSlashCommandPalette,
+  updateGlobalThemeToggle,
 });
 
 const mcpRegistryUI = createMCPRegistryUIController({
@@ -582,11 +716,13 @@ const {
   applyProfilePreferences,
   currentAppearancePreferences,
   currentNotificationPreferences,
+  currentPrimaryModePreference,
   currentProfilePreferences,
   currentRegionalPreferences,
   currentSearchPreferences,
   loadAppearancePreferences,
   loadNotificationPreferences,
+  loadPrimaryModePreference,
   loadProfilePreferences,
   loadSearchPreferences,
   loadSkillsPreferences,
@@ -613,6 +749,7 @@ const {
   searchProviderLabel,
   setAppearancePreference,
   setNotificationPreference,
+  setPrimaryModePreference,
   shouldLogAgentEvents,
   skillsPrefsExport,
 } = settingsPreferences;
@@ -659,7 +796,6 @@ const {
 const systemSettings = createSystemSettingsController({
   state,
   copyText,
-  loadAuthStatus,
   loadLicenseSummary,
   loadRuntimeSummary,
   loadStorageSummary,
@@ -677,13 +813,11 @@ const {
   bindAboutSettingsActions,
   bindRuntimeSettingsActions,
   bindStorageSettingsActions,
-  bindUserSettingsActions,
   renderAboutSettingsContent,
   renderRuntimeSettingsContent,
   renderServerSystemSettingsContent,
   renderStorageSettingsContent,
   renderUsageMetricCard,
-  renderUserSettingsContent,
 } = systemSettings;
 
 const workspaceSettings = createWorkspaceSettingsController({
@@ -849,6 +983,33 @@ const automationControl = createAutomationControlController({
   showToast,
 });
 
+function terminalSocketUsable(socket = state.terminalWS) {
+  if (!socket) return false;
+  const readyState = Number(socket.readyState);
+  return !Number.isFinite(readyState) || readyState === 0 || readyState === 1;
+}
+
+function restoreAuthorizedAgentTransports() {
+  if (state.remoteAccessFailClosed || !state.agent?.id || state.agentStreamStatus !== "idle") return false;
+  backgroundTasks.setAgent(state.agent.id);
+  connectWS();
+  if (terminalAccessAllowed(state) && !terminalSocketUsable()) connectTerminal();
+  return true;
+}
+
+const remoteAccessSettings = createRemoteAccessSettingsController({
+  state,
+  request: api,
+  copyText: copyToClipboard,
+  onChange: () => {
+    updateSecurityModeUI();
+    restoreAuthorizedAgentTransports();
+    if (state.activeSettingsPanel === "remote-access") refreshActiveSettingsPanel();
+  },
+  showError,
+  showToast,
+});
+
 const usageHistory = createUsageHistoryController({
   state,
   request: api,
@@ -861,7 +1022,7 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
 [
   ["profile", { render: renderProfileSettingsContent, bind: bindProfileSettingsActions }],
   ["memory", { render: memorySettings.render, bind: memorySettings.bind }],
-  ["skills", { render: () => renderSkillSettingsContent(state.activeSkillTab || "commands"), bind: () => bindSkillTabs("commands") }],
+  ["skills", { render: () => renderSkillSettingsContent(state.activeSkillTab || "commands"), bind: () => bindSkillTabs(state.activeSkillTab || "commands") }],
   ["models", { render: renderModelSettingsContent, bind: bindModelSettingsActions }],
   ["agents", { render: renderAgentSettingsContent, bind: bindAgentSettingsActions }],
   ["providers", { render: renderProviderSettingsContent, bind: bindProviderSettingsActions }],
@@ -875,9 +1036,9 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["usage", { render: usageHistory.render, bind: usageHistory.bind }],
   ["servers-system", { render: renderServerSystemSettingsContent, bind: bindRuntimeSettingsActions }],
   ["runtime", { render: renderRuntimeSettingsContent, bind: bindRuntimeSettingsActions }],
-  ["users", { render: renderUserSettingsContent, bind: bindUserSettingsActions }],
+  ["remote-access", { render: remoteAccessSettings.render, bind: remoteAccessSettings.bind }],
   ["terminals", { render: renderTerminalSettingsContent, bind: bindTerminalSettingsActions }],
-  ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions }],
+  ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions, layout: "about" }],
 ].forEach(([key, panel]) => settingsPanelRegistry.register(key, panel));
 
 function updateRuntimeStatusButton() {
@@ -930,6 +1091,7 @@ function renderConversationDetails() {
   ];
   body.innerHTML = `
     <section class="conversation-detail-hero"><div><h2>${escapeHtml(state.project?.name || state.agent?.title || sx("app.noConversationSelected"))}</h2><p>${escapeHtml(state.agent?.title || sx("app.selectConversationHint"))}</p></div><span class="conversation-detail-status">${escapeHtml(state.agent?.status || t("chat.idle"))}</span></section>
+    ${backgroundTasks.renderContinuationStatusHTML()}
     <section class="conversation-metric-grid">
       ${[["Messages", metrics.messages], ["Cost", `$${metrics.cost.toFixed(4)}`], [sx("app.inputTokens"), metrics.inputTokens], [sx("app.outputTokens"), metrics.outputTokens], [sx("app.cacheTokens"), metrics.cacheTokens], [sx("app.tools"), metrics.tools], [t("terminal.title"), metrics.terminal], [sx("app.browser"), metrics.browser], [sx("app.pendingApprovals"), metrics.approvals]].map(([label, value]) => `<div class="conversation-metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(typeof value === "number" ? formatNumber(value) : value)}</strong></div>`).join("")}
     </section>
@@ -945,6 +1107,7 @@ function renderConversationDetails() {
 
 function openConversationDetails() {
   if (!state.agent) showToast(am("selectConversationFirst"), "warn");
+  backgroundTasks.closeTray("details-open");
   closeWorkspace();
   toggleTerminal(true);
   $("appShell")?.classList.add("details-open");
@@ -1437,27 +1600,6 @@ async function loadWorklineContainerData({ notify = false } = {}) {
   if (seq === state.worklinesSeq && state.activeSettingsPanel === "worklines-containers") refreshActiveSettingsPanel();
 }
 
-async function loadAuthStatus({ notify = false } = {}) {
-  const seq = ++state.authSeq;
-  const button = $("refreshAuthStatusBtn");
-  setButtonBusy(button, true, am("refreshing"));
-  try {
-    const status = await api("/api/auth/status");
-    if (seq !== state.authSeq) return;
-    state.authStatus = status;
-    state.authError = "";
-    if (notify) notifyTerminal(`[info] ${am("userRegistrationRefreshed")}\n`);
-  } catch (err) {
-    if (seq !== state.authSeq) return;
-    state.authStatus = null;
-    state.authError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] ${am("userRegistrationRefreshFailed", { message: state.authError })}\n`);
-  } finally {
-    if (seq === state.authSeq) setButtonBusy(button, false, am("refreshing"));
-  }
-  if (seq === state.authSeq && state.activeSettingsPanel === "users") refreshActiveSettingsPanel();
-}
-
 async function loadRuntimeSummary({ notify = false } = {}) {
   const seq = ++state.runtimeSeq;
   const button = $("refreshRuntimeSummaryBtn");
@@ -1486,8 +1628,8 @@ function warmSettingsData() {
   state.settingsWarmupStarted = true;
   const tasks = [];
   if (!state.runtimeSummary && !state.runtimeError) tasks.push(loadRuntimeSummary());
+  if (!state.remoteAccess && !state.remoteAccessError) tasks.push(remoteAccessSettings.load());
   if (!state.storageSummary && !state.storageError) tasks.push(loadStorageSummary());
-  if (!state.authStatus && !state.authError) tasks.push(loadAuthStatus());
   if (!state.licenseSummary && !state.licenseError) tasks.push(loadLicenseSummary());
   if (!state.providerAuthFiles && !state.providerAuthError) tasks.push(loadProviderAuthFiles({ silent: true }));
   if (!state.serverNotificationSettings && !state.serverNotificationError) tasks.push(loadServerNotificationSettings());
@@ -1497,7 +1639,171 @@ function warmSettingsData() {
   Promise.allSettled(tasks).catch(() => {});
 }
 
-const globalRailSettingsTargets = new Set(["skills", "runtime", "im-gateway", "agents", "profile"]);
+function projectKanbanTranslation(key, params = {}, fallback = "") {
+  const translationKey = String(key || "").startsWith("projectKanban.") ? String(key) : `projectKanban.${key}`;
+  const translated = t(translationKey, params);
+  return translated === translationKey ? fallback : translated;
+}
+
+function normalizedPrimaryWorkbench(value) {
+  return value === "workbench" ? "workbench" : "conversation";
+}
+
+function primaryWorkbenchRailTarget(value = state.activeWorkbench) {
+  return normalizedPrimaryWorkbench(value) === "workbench" ? "tasks" : "conversation";
+}
+
+function setTranslatedText(element, key) {
+  if (!element) return;
+  element.dataset.i18n = key;
+  element.textContent = t(key);
+}
+
+function setTranslatedAttribute(element, attribute, key) {
+  if (!element) return;
+  element.setAttribute(`data-i18n-${attribute}`, key);
+  element.setAttribute(attribute, t(key));
+}
+
+function renderPrimaryModeSidebar() {
+  const taskMode = state.activeWorkbench === "workbench";
+  const sidebar = $("sessionSidebar");
+  const title = $("sessionSidebarTitle");
+  const actions = $("sessionSidebarActions");
+  const resizeHandle = $("sidebarResizeHandle");
+  const searchToggle = $("projectSearchToggleBtn");
+  const mobileSearch = $("mobileDrawerSearchBtn");
+  const searchInput = $("projectSearch");
+  const refreshButton = $("refreshBtn");
+  const newProjectButton = $("newProjectBtn");
+  const newTaskButton = $("newTaskBtn");
+  const sidebarLabelKey = taskMode ? "workbench.sidebarLabel" : "shell.sessionSidebar";
+  const sidebarTitleKey = taskMode ? "workbench.sidebarTitle" : "shell.sessionTitle";
+  const sidebarActionsKey = taskMode ? "workbench.sidebarActions" : "shell.sessionActions";
+  const searchLabelKey = taskMode ? "workbench.searchContextLabel" : "shell.searchProjectsLabel";
+  const searchPlaceholderKey = taskMode ? "workbench.searchContext" : "shell.searchProjects";
+  const refreshKey = taskMode ? "workbench.refreshTasks" : "shell.refreshSessions";
+
+  setTranslatedAttribute(sidebar, "aria-label", sidebarLabelKey);
+  setTranslatedText(title, sidebarTitleKey);
+  setTranslatedAttribute(actions, "aria-label", sidebarActionsKey);
+  setTranslatedAttribute(resizeHandle, "aria-label", taskMode ? "workbench.resizeSidebar" : "shell.resizeSidebar");
+  [searchToggle, mobileSearch].forEach((button) => {
+    setTranslatedAttribute(button, "title", searchLabelKey);
+    setTranslatedAttribute(button, "aria-label", searchLabelKey);
+  });
+  setTranslatedAttribute(searchInput, "placeholder", searchPlaceholderKey);
+  setTranslatedAttribute(searchInput, "aria-label", searchLabelKey);
+  if (refreshButton?.getAttribute("aria-busy") !== "true") {
+    setTranslatedAttribute(refreshButton, "title", refreshKey);
+    setTranslatedAttribute(refreshButton, "aria-label", refreshKey);
+  }
+
+  newProjectButton?.classList.toggle("hidden", taskMode);
+  newTaskButton?.classList.toggle("hidden", !taskMode);
+  if (newTaskButton) {
+    const enabled = Boolean(state.agent?.id);
+    const taskActionKey = enabled ? "workbench.createTask" : "workbench.selectAgentToCreate";
+    newTaskButton.disabled = !enabled;
+    setTranslatedAttribute(newTaskButton, "title", taskActionKey);
+    setTranslatedAttribute(newTaskButton, "aria-label", taskActionKey);
+  }
+}
+
+function renderWorkbenchShell() {
+  const agent = state.agent;
+  const project = state.project;
+  const meta = $("workbenchMeta");
+  const status = $("workbenchAgentStatus");
+  const agentTitle = String(agent?.title || agent?.id || "").trim();
+  const projectTitle = String(project?.name || "").trim();
+  renderWorkbenchHeaderIdentity();
+  if (meta) {
+    meta.textContent = agent
+      ? `${t("workbench.currentAgent", { agent: agentTitle })} · ${t("workbench.currentProject", { project: projectTitle || "—" })}`
+      : t("workbench.selectAgent");
+  }
+  if (status) {
+    status.textContent = agent?.status || "idle";
+    status.classList.toggle("ok", Boolean(agent && agent.status === "idle"));
+    status.classList.toggle("warn", Boolean(agent && ["running", "interrupted"].includes(agent.status)));
+  }
+  const enabled = Boolean(agent?.id);
+  ["workbenchFilesBtn", "workbenchGitBtn", "workbenchRunBtn", "workbenchPreviewBtn"].forEach((id) => {
+    const button = $(id);
+    if (button) button.disabled = !enabled;
+  });
+  const terminalButton = $("workbenchTerminalBtn");
+  const security = currentSecuritySummary();
+  const terminalLocked = !terminalAccessAllowed(state);
+  if (terminalButton) terminalButton.disabled = !enabled || terminalLocked;
+  const gitCount = Array.isArray(state.gitStatus?.files) ? state.gitStatus.files.length : 0;
+  const gitBadge = document.querySelector("[data-workbench-git-badge]");
+  if (gitBadge) {
+    gitBadge.textContent = gitCount > 99 ? "99+" : String(gitCount);
+    gitBadge.classList.toggle("hidden", !enabled || gitCount === 0);
+  }
+  const mobileButton = $("mobileWorkbenchBtn");
+  if (mobileButton) {
+    const active = state.activeWorkbench === "workbench";
+    mobileButton.setAttribute("aria-pressed", active ? "true" : "false");
+    mobileButton.classList.toggle("active", active);
+  }
+  renderPrimaryModeSidebar();
+}
+
+function applyPrimaryWorkbench(value) {
+  const mode = normalizedPrimaryWorkbench(value);
+  const previousMode = state.activeWorkbench;
+  state.primaryModePreference = mode;
+  state.activeWorkbench = mode;
+  const workbench = mode === "workbench";
+  if (previousMode !== mode) {
+    state.projectQuery = "";
+    if ($("projectSearch")) $("projectSearch").value = "";
+    $("projectSearchWrap")?.classList.add("hidden");
+    $("projectSearchToggleBtn")?.classList.remove("active");
+  }
+  $("conversationPanel")?.classList.toggle("hidden", workbench);
+  $("workbenchPanel")?.classList.toggle("hidden", !workbench);
+  document.body.classList.toggle("workbench-mode", workbench);
+  const modalOpen = elementVisible("settingsModal") || elementVisible("employeeOverviewModal");
+  if (!modalOpen) setGlobalRailActive(primaryWorkbenchRailTarget(mode));
+  renderWorkbenchShell();
+  renderProjects();
+  if (workbench && state.agent?.id) specBoard.load().catch(showError);
+  return mode;
+}
+
+function switchPrimaryWorkbench(value) {
+  backgroundTasks.closeTray("workbench-switch");
+  closeConversationDetails();
+  closeSettingsModal({ restoreWorkbench: false });
+  closeEmployeeOverview({ restoreWorkbench: false });
+  return setPrimaryModePreference(normalizedPrimaryWorkbench(value));
+}
+
+async function focusTaskCreation() {
+  if (state.activeWorkbench !== "workbench") return false;
+  if (!state.agent?.id) {
+    showToast(t("workbench.selectAgentToCreate"), "info", { force: true });
+    return false;
+  }
+  closeMobileSidebar();
+  if (projectKanban.focusCreate()) return true;
+  await specBoard.load();
+  if (projectKanban.focusCreate()) return true;
+  showToast(t("projectKanban.unavailable"), "info", { force: true });
+  return false;
+}
+
+async function refreshPrimaryMode() {
+  await init();
+  if (state.activeWorkbench === "workbench" && state.agent?.id) await specBoard.load();
+  renderProjects();
+}
+
+const globalRailSettingsTargets = new Set(["profile"]);
 
 function setGlobalRailActive(target = "conversation") {
   document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
@@ -1507,24 +1813,32 @@ function setGlobalRailActive(target = "conversation") {
   });
 }
 
-function openSettingsModal(key = "providers") {
-  closeEmployeeOverview();
+function openSettingsModal(key = "providers", { trigger = document.activeElement } = {}) {
+  backgroundTasks.closeTray("settings-open");
+  closeEmployeeOverview({ restoreWorkbench: false });
   closeConversationDetails();
   if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
-  const itemKey = settingsItems.some((item) => item.key === key) ? key : "providers";
+  const itemKey = settingsItemByKey(key)?.key || "providers";
+  const modal = $("settingsModal");
+  const wasOpen = !modal?.classList.contains("hidden");
   state.settingsSearchQuery = "";
   state.activeSettingsCategory = settingsCategoryForItem(itemKey, "api");
-  $("settingsModal").classList.remove("hidden");
-  setGlobalRailActive(globalRailSettingsTargets.has(key) ? key : "profile");
+  modal?.classList.remove("hidden");
+  if (!wasOpen) beginSettingsDialogFocus(trigger);
+  setGlobalRailActive("profile");
   syncSettingsSearchInput();
   warmSettingsData();
   renderSettingsNav(itemKey);
   selectSettingsPanel(itemKey);
 }
 
-function closeSettingsModal() {
-  $("settingsModal").classList.add("hidden");
-  setGlobalRailActive("conversation");
+function closeSettingsModal({ restoreWorkbench = true } = {}) {
+  const modal = $("settingsModal");
+  const wasOpen = Boolean(modal && !modal.classList.contains("hidden"));
+  if (wasOpen) remoteAccessSettings.consumeGeneratedPassword();
+  modal?.classList.add("hidden");
+  if (wasOpen) restoreSettingsDialogFocus();
+  if (restoreWorkbench) setGlobalRailActive(primaryWorkbenchRailTarget());
 }
 
 function employeeAgentRecords() {
@@ -1595,26 +1909,29 @@ function renderEmployeeOverview() {
 }
 
 async function openEmployeeOverview() {
-  closeSettingsModal();
-  setGlobalRailActive("agents");
+  backgroundTasks.closeTray("employee-overview-open");
+  closeConversationDetails();
+  closeSettingsModal({ restoreWorkbench: false });
+  setGlobalRailActive("profile");
   $("employeeOverviewModal")?.classList.remove("hidden");
   renderEmployeeOverview();
   await automationControl.load();
   renderEmployeeOverview();
 }
 
-function closeEmployeeOverview() {
+function closeEmployeeOverview({ restoreWorkbench = true } = {}) {
   $("employeeOverviewModal")?.classList.add("hidden");
-  if (!$("settingsModal") || $("settingsModal").classList.contains("hidden")) setGlobalRailActive("conversation");
+  if (restoreWorkbench && (!$("settingsModal") || $("settingsModal").classList.contains("hidden"))) {
+    setGlobalRailActive(primaryWorkbenchRailTarget());
+  }
 }
 
 function activateGlobalRailTarget(target) {
   const key = String(target || "conversation");
   closeSidebarSettingsMenu();
   closeMobileSidebar();
-  if (key === "conversation") {
-    closeSettingsModal();
-    closeEmployeeOverview();
+  if (key === "conversation" || key === "tasks") {
+    switchPrimaryWorkbench(key === "tasks" ? "workbench" : "conversation");
     return;
   }
   if (key === "agents") {
@@ -1628,8 +1945,8 @@ function normalizedSettingsSearchQuery() {
   return String(state.settingsSearchQuery || "").trim().toLowerCase();
 }
 
-function settingsSearchText(section, item) {
-  return [section.title, item.key, item.label, item.subtitle]
+function settingsSearchText(category, item) {
+  return [category.label, category.key, item.key, item.label, item.subtitle]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -1637,10 +1954,7 @@ function settingsSearchText(section, item) {
 
 function filteredSettingsSections() {
   const query = normalizedSettingsSearchQuery();
-  return settingsSections.map((section) => ({
-    ...section,
-    items: section.items.filter((item) => !query || settingsSearchText(section, item).includes(query)),
-  })).filter((section) => section.items.length);
+  return groupSettingsItemsByLegacyCategory(settingsItems, (item, category) => !query || settingsSearchText(category, item).includes(query));
 }
 
 function firstFilteredSettingsItem(sections = filteredSettingsSections()) {
@@ -1657,20 +1971,31 @@ function syncSettingsSearchInput() {
   $("clearSettingsSearchBtn")?.classList.toggle("visible", Boolean(normalizedSettingsSearchQuery()));
 }
 
-function settingsItemsForCategory(categoryKey) {
-  const category = settingsCategoryByKey(categoryKey);
-  return category.items.map((key) => settingsItems.find((item) => item.key === key)).filter(Boolean);
+function bindSettingsArrowNavigation(nav, selector, keys) {
+  nav.querySelectorAll(selector).forEach((node) => {
+    node.addEventListener("keydown", (event) => {
+      const direction = keys[event.key];
+      if (direction == null) return;
+      const nodes = [...nav.querySelectorAll(selector)];
+      const index = nodes.indexOf(event.currentTarget);
+      if (index < 0 || !nodes.length) return;
+      const nextIndex = direction === "first" ? 0 : direction === "last" ? nodes.length - 1 : (index + direction + nodes.length) % nodes.length;
+      nodes[nextIndex]?.focus();
+      event.preventDefault();
+    });
+  });
 }
 
 function renderSettingsCategoryNav(activeCategory = "api") {
   const nav = $("settingsCategoryNav");
   if (!nav) return;
   nav.innerHTML = legacySettingsCategories.map((category) => `
-    <button class="legacy-settings-category ${category.key === activeCategory ? "active" : ""}" type="button" role="tab" aria-selected="${category.key === activeCategory ? "true" : "false"}" data-settings-category="${escapeAttr(category.key)}">${escapeHtml(category.label)}</button>
+    <button class="legacy-settings-category ${category.key === activeCategory ? "active" : ""}" type="button" aria-pressed="${category.key === activeCategory ? "true" : "false"}" data-settings-category="${escapeAttr(category.key)}">${escapeHtml(category.label)}</button>
   `).join("");
   nav.querySelectorAll("[data-settings-category]").forEach((node) => {
     node.addEventListener("click", () => selectSettingsCategory(node.dataset.settingsCategory));
   });
+  bindSettingsArrowNavigation(nav, "[data-settings-category]", { ArrowLeft: -1, ArrowRight: 1, Home: "first", End: "last" });
 }
 
 function selectSettingsCategory(categoryKey) {
@@ -1680,7 +2005,6 @@ function selectSettingsCategory(categoryKey) {
   syncSettingsSearchInput();
   const current = state.activeSettingsPanel || "";
   const nextKey = category.items.includes(current) ? current : firstSettingsItemForCategory(category.key);
-  renderSettingsNav(nextKey);
   selectSettingsPanel(nextKey);
 }
 
@@ -1688,26 +2012,29 @@ function renderSettingsNav(activeKey = "providers") {
   const nav = $("settingsNav");
   if (!nav) return;
   syncSettingsSearchInput();
-  const query = normalizedSettingsSearchQuery();
-  const categoryKey = query ? settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api") : settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api");
+  const categoryKey = settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api");
   state.activeSettingsCategory = categoryKey;
   renderSettingsCategoryNav(categoryKey);
-  const items = query
-    ? filteredSettingsSections().flatMap((section) => section.items)
-    : settingsItemsForCategory(categoryKey);
-  nav.closest(".legacy-settings-subbar")?.classList.remove("hidden");
-  if (!items.length) {
+  const groups = filteredSettingsSections();
+  if (!groups.length) {
     nav.innerHTML = `<div class="settings-nav-empty"><strong>${escapeHtml(am("noMatchingSettings"))}</strong><span>${escapeHtml(am("matchingSettingsHint"))}</span></div>`;
     return;
   }
-  nav.innerHTML = items.map((item) => `
-    <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" role="tab" aria-selected="${item.key === activeKey ? "true" : "false"}" data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.subtitle)}">
-      <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong></span>
-    </button>
+  nav.innerHTML = groups.map((category) => `
+    <section class="settings-nav-group" aria-label="${escapeAttr(category.label)}">
+      <div class="settings-nav-group-label">${escapeHtml(category.label)}</div>
+      ${category.items.map((item) => `
+        <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" ${item.key === activeKey ? 'aria-current="page"' : ""} data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.subtitle)}">
+          <span class="settings-nav-icon" aria-hidden="true">${escapeHtml(item.icon)}</span>
+          <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.subtitle)}</small></span>
+        </button>
+      `).join("")}
+    </section>
   `).join("");
   nav.querySelectorAll("[data-settings-key]").forEach((node) => {
     node.addEventListener("click", () => selectSettingsPanel(node.dataset.settingsKey));
   });
+  bindSettingsArrowNavigation(nav, "[data-settings-key]", { ArrowUp: -1, ArrowDown: 1, Home: "first", End: "last" });
 }
 
 function updateSettingsSearchQuery(value) {
@@ -1733,25 +2060,20 @@ function focusSettingsSearchInput({ select = false } = {}) {
 }
 
 function selectSettingsPanel(key) {
-  const item = settingsItems.find((entry) => entry.key === key) || settingsItems[0];
+  const item = settingsItemByKey(key) || settingsItems[0];
   const panel = settingsPanelRegistry.resolve(item.key);
   const categoryKey = settingsCategoryForItem(item.key, state.activeSettingsCategory || "api");
   state.activeSettingsCategory = categoryKey;
   state.activeSettingsPanel = item.key;
-  renderSettingsCategoryNav(categoryKey);
-  const nav = $("settingsNav");
-  if (!normalizedSettingsSearchQuery() && !nav?.querySelector(`[data-settings-key="${item.key}"]`)) renderSettingsNav(item.key);
+  renderSettingsNav(item.key);
   const isAboutPanel = item.key === "about";
   $("settingsContentTitle")?.closest(".settings-content-head")?.classList.toggle("hidden", isAboutPanel);
   $("settingsContentBody")?.closest(".settings-content")?.classList.toggle("about-panel-active", isAboutPanel);
   $("settingsContentTitle").textContent = item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
-  $("settingsContentBody").innerHTML = panel ? panel.render(item) : renderGenericSettingsContent(item);
-  nav?.querySelectorAll(".settings-nav-item").forEach((node) => {
-    const active = node.dataset.settingsKey === item.key;
-    node.classList.toggle("active", active);
-    node.setAttribute("aria-selected", active ? "true" : "false");
-  });
+  const layout = panel?.layout || (isAboutPanel ? "about" : "");
+  const content = panel ? panel.render(item) : renderGenericSettingsContent(item);
+  $("settingsContentBody").innerHTML = `<div class="settings-page-frame" data-settings-page="${escapeAttr(item.key)}"${layout ? ` data-panel-layout="${escapeAttr(layout)}"` : ""}>${content}</div>`;
   panel?.bind?.(item);
 }
 
@@ -1871,8 +2193,30 @@ function renderEmptyWorkspaceCard({ title = t("chat.emptyTitle"), text = t("chat
 function showEmptyWorkspaceState(options = {}) {
   const el = $("messages");
   if (!el) return;
+  const busy = options.busy === true;
   el.classList.add("empty");
   el.innerHTML = renderEmptyWorkspaceCard(options);
+  if (busy) {
+    el.setAttribute("aria-busy", "true");
+    el.dataset.initialChatState = "loading";
+  } else {
+    el.removeAttribute("aria-busy");
+    delete el.dataset.initialChatState;
+  }
+}
+
+function markMessageViewportBusy() {
+  const el = $("messages");
+  if (!el) return;
+  el.setAttribute("aria-busy", "true");
+  el.dataset.initialChatState = "loading";
+}
+
+function clearMessageViewportBusy() {
+  const el = $("messages");
+  if (!el) return;
+  el.removeAttribute("aria-busy");
+  delete el.dataset.initialChatState;
 }
 
 function permissionLabel(value) {
@@ -1886,6 +2230,16 @@ function permissionLabel(value) {
   return labels[value] || value || t("chat.permission.automatic");
 }
 
+function permissionMobileLabel(value) {
+  return {
+    readOnly: "RO",
+    acceptEdits: "RW",
+    bypassPermissions: "ALL",
+    dontAsk: "NA",
+    default: "AUTO",
+  }[value] || "AUTO";
+}
+
 function updatePermissionModeDisplay() {
   const select = $("permissionMode");
   const display = document.querySelector(".permission-toolbar-pill .mode-display");
@@ -1893,6 +2247,7 @@ function updatePermissionModeDisplay() {
   const permission = effectivePermissionForDisplay(select.value);
   const label = permissionLabel(permission);
   display.textContent = label;
+  (display.dataset ||= {}).mobileLabel = permissionMobileLabel(permission);
   const badge = $("permissionRiskBadge");
   if (badge) {
     badge.textContent = label;
@@ -1901,18 +2256,50 @@ function updatePermissionModeDisplay() {
 }
 
 function currentSecuritySummary() {
-  return state.runtimeSummary?.security || null;
+  const runtimeSecurity = state.runtimeSummary?.security || null;
+  const access = state.remoteAccess || null;
+  if (!runtimeSecurity && !access) return null;
+  return {
+    ...(runtimeSecurity || {}),
+    currentRequestRemote: access?.session?.remote ?? runtimeSecurity?.currentRequestRemote,
+    remoteAccessRequired: access?.session?.remote ?? runtimeSecurity?.remoteAccessRequired,
+    bypassPermissionsAllowed: fullAccessAllowed(state),
+    remoteTerminalAllowed: terminalAccessAllowed(state),
+    maxPermissionMode: access?.capabilities?.maxPermissionMode || runtimeSecurity?.maxPermissionMode,
+    accessPasswordConfigured: access?.credential?.configured ?? runtimeSecurity?.accessPasswordConfigured,
+    capabilities: access?.capabilities || runtimeSecurity?.capabilities,
+  };
 }
 
 function remoteSecurityHardeningActive() {
   const security = currentSecuritySummary();
-  if (!security) return false;
-  return Boolean(security.remoteAccessRequired || security.exposed || security.currentRequestRemote || security.bypassPermissionsAllowed === false);
+  const remoteSession = Boolean(state.remoteAccess?.session?.remote);
+  return Boolean(state.remoteAccessFailClosed || remoteSession || security?.remoteAccessRequired || security?.exposed || security?.currentRequestRemote || security?.bypassPermissionsAllowed === false);
+}
+
+function connectionModeSummary() {
+  const remote = remoteAccessContext(state);
+  if (!remote) {
+    return { remote: false, restricted: false, label: am("localConnection"), title: am("localConnectionTitle"), tone: "ok" };
+  }
+  const restricted = !fullAccessAllowed(state);
+  const mode = restricted ? am("tunnelRestrictedConnection") : am("tunnelFullConnection");
+  return {
+    remote: true,
+    restricted,
+    label: mode,
+    title: am("tunnelConnectionTitle", { mode }),
+    tone: restricted ? "warn" : "ok",
+  };
+}
+
+function connectionMobileLabel(connection) {
+  if (!connection?.remote) return "LAN";
+  return connection.restricted ? "T−" : "T+";
 }
 
 function bypassDisabledBySecurity() {
-  const security = currentSecuritySummary();
-  return remoteSecurityHardeningActive() && security?.bypassPermissionsAllowed === false;
+  return !fullAccessAllowed(state);
 }
 
 function effectivePermissionForDisplay(value) {
@@ -1948,30 +2335,20 @@ async function logoutRemoteAccess() {
 
 function updateSecurityModeUI() {
   const security = currentSecuritySummary();
-  const active = remoteSecurityHardeningActive();
-  const terminalLocked = Boolean(security?.remoteAccessRequired && security?.remoteTerminalAllowed === false);
+  const terminalLocked = !terminalAccessAllowed(state);
+  if (terminalLocked) enforceTerminalAccessPolicy();
+  const connection = connectionModeSummary();
   const badge = $("securityModeBadge");
   if (badge) {
-    badge.textContent = active ? t("workspace.main.remoteHardened") : t("workspace.main.local");
-    badge.title = security?.message || (active ? t("workspace.main.remoteHardened") : t("workspace.main.local"));
-    badge.classList.toggle("warn", active);
-    badge.classList.toggle("ok", !active);
+    badge.textContent = connection.label;
+    badge.title = [connection.title, security?.message].filter(Boolean).join(" · ");
+    (badge.dataset ||= {}).mobileLabel = connectionMobileLabel(connection);
+    badge.classList.toggle("warn", connection.tone === "warn");
+    badge.classList.toggle("ok", connection.tone === "ok");
+    badge.classList.toggle("tunnel", connection.remote);
+    badge.dataset.connectionMode = connection.remote ? (connection.restricted ? "tunnel-restricted" : "tunnel-full") : "local";
   }
-  const banner = $("remoteSecurityBanner");
-  if (banner) {
-    if (active) {
-      const passwordText = security?.accessPasswordConfigured ? t("workspace.main.passwordEnabled") : t("workspace.main.passwordMissing");
-      const terminalText = terminalLocked ? t("workspace.main.terminalLocked") : t("workspace.main.terminalOpen");
-      banner.innerHTML = `<strong>${escapeHtml(t("workspace.main.remoteHardened"))}</strong><span>${escapeHtml(passwordText)} · ${escapeHtml(t("workspace.main.autoExecutionDisabled"))} · ${escapeHtml(terminalText)}</span>`;
-      banner.classList.remove("hidden");
-      banner.classList.toggle("danger", !security?.accessPasswordConfigured);
-    } else {
-      banner.classList.add("hidden");
-      banner.innerHTML = "";
-      banner.classList.remove("danger");
-    }
-  }
-  [$("toggleTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn")].forEach((button) => {
+  [$("toggleTerminalBtn"), $("workbenchTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn")].forEach((button) => {
     if (!button) return;
     if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.title || "";
     button.disabled = terminalLocked;
@@ -1987,6 +2364,170 @@ function currentWorkspaceModel() {
   return state.agent?.model || selectedModelValue() || currentModelValue() || am("noModelSelected");
 }
 
+function conversationHeaderTitle() {
+  return state.agent?.title || state.project?.name || t("chat.noAgent");
+}
+
+function titleEditorElements(surface) {
+  const workbench = surface === "workbench";
+  return {
+    display: $(workbench ? "workbenchTitle" : "currentTitle"),
+    input: $(workbench ? "workbenchTitleInput" : "currentTitleInput"),
+    edit: $(workbench ? "editWorkbenchTitleBtn" : "editConversationTitleBtn"),
+    save: $(workbench ? "saveWorkbenchTitleBtn" : "saveConversationTitleBtn"),
+    cancel: $(workbench ? "cancelWorkbenchTitleBtn" : "cancelConversationTitleBtn"),
+    editLabel: am(workbench ? "editWorkbenchTitle" : "editConversationTitle"),
+    fieldLabel: am(workbench ? "workbenchTitleLabel" : "conversationTitle"),
+  };
+}
+
+function titleForSurface(surface) {
+  if (surface === "workbench") return state.agent?.title || state.project?.name || t("workbench.title");
+  return conversationHeaderTitle();
+}
+
+function renderAgentTitleEditor(surface) {
+  const { display, input, edit, save, cancel, editLabel, fieldLabel } = titleEditorElements(surface);
+  const editable = Boolean(state.agent?.id);
+  if (!editable) {
+    state.titleEditing = false;
+    state.titleSaving = false;
+    state.titleDraft = "";
+  }
+  const editing = editable && state.titleEditing;
+  const title = titleForSurface(surface);
+  if (display) {
+    display.textContent = title;
+    display.disabled = !editable || state.titleSaving;
+    display.title = editable ? editLabel : title;
+    display.setAttribute("aria-label", editable ? editLabel : title);
+    display.classList.toggle("hidden", editing);
+  }
+  if (input) {
+    input.classList.toggle("hidden", !editing);
+    input.disabled = state.titleSaving;
+    input.setAttribute("aria-label", fieldLabel);
+    if (editing && input.value !== state.titleDraft) input.value = state.titleDraft;
+  }
+  if (edit) {
+    edit.disabled = !editable || state.titleSaving;
+    edit.classList.toggle("hidden", editing);
+    edit.title = editLabel;
+    edit.setAttribute("aria-label", editLabel);
+  }
+  if (save) {
+    save.disabled = state.titleSaving;
+    save.classList.toggle("hidden", !editing);
+    save.toggleAttribute("aria-busy", state.titleSaving);
+    save.title = am("saveConversationTitle");
+    save.setAttribute("aria-label", am("saveConversationTitle"));
+  }
+  if (cancel) {
+    cancel.disabled = state.titleSaving;
+    cancel.classList.toggle("hidden", !editing);
+    cancel.title = am("cancelConversationTitle");
+    cancel.setAttribute("aria-label", am("cancelConversationTitle"));
+  }
+}
+
+function renderConversationHeaderIdentity() {
+  renderAgentTitleEditor("conversation");
+}
+
+function renderWorkbenchHeaderIdentity() {
+  renderAgentTitleEditor("workbench");
+}
+
+function renderAllTitleEditors() {
+  renderConversationHeaderIdentity();
+  renderWorkbenchHeaderIdentity();
+}
+
+function normalizedTitleEditSurface(surface) {
+  return surface === "workbench" ? "workbench" : "conversation";
+}
+
+function beginConversationTitleEdit(surface = "conversation") {
+  if (!state.agent?.id || state.titleSaving) return;
+  state.titleEditSurface = normalizedTitleEditSurface(surface);
+  state.titleDraft = String(state.agent.title || state.project?.name || "");
+  state.titleEditing = true;
+  renderAllTitleEditors();
+  queueMicrotask(() => {
+    const input = titleEditorElements(state.titleEditSurface).input;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelConversationTitleEdit() {
+  if (state.titleSaving) return;
+  state.titleEditing = false;
+  state.titleDraft = "";
+  renderAllTitleEditors();
+}
+
+function updateTitleDraft(surface, event) {
+  state.titleEditSurface = normalizedTitleEditSurface(surface);
+  state.titleDraft = event.target.value;
+}
+
+function handleTitleEditorKeydown(surface, event) {
+  if (isComposingInput(event)) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveConversationTitle(surface).catch(showError);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelConversationTitleEdit();
+  }
+}
+
+async function saveConversationTitle(surface = state.titleEditSurface) {
+  const agentId = state.agent?.id || "";
+  if (!agentId || state.titleSaving) return;
+  const target = normalizedTitleEditSurface(surface);
+  const workbench = target === "workbench";
+  const input = titleEditorElements(target).input;
+  const title = String(input ? input.value : state.titleDraft || "").trim();
+  if (!title) throw new Error(am(workbench ? "workbenchTitleRequired" : "conversationTitleRequired"));
+  const byteLength = globalThis.TextEncoder ? new TextEncoder().encode(title).length : title.length;
+  if (byteLength > 200 || /[\0\r\n]/.test(title)) throw new Error(am(workbench ? "workbenchTitleInvalid" : "conversationTitleInvalid"));
+  if (title === String(state.agent?.title || "").trim()) {
+    cancelConversationTitleEdit();
+    return;
+  }
+  const generation = Number(state.agent?.entityGeneration);
+  state.titleEditSurface = target;
+  state.titleDraft = title;
+  state.titleSaving = true;
+  renderAllTitleEditors();
+  try {
+    const updated = await api(`/api/agents/${encodeURIComponent(agentId)}/title`, {
+      method: "PATCH",
+      body: JSON.stringify({ title, ...(Number.isInteger(generation) ? { entityGeneration: generation } : {}) }),
+    });
+    if (state.agent?.id !== agentId) return;
+    state.agent = updated;
+    state.worklineAgents = (state.worklineAgents || []).map((agent) => agent.id === agentId ? updated : agent);
+    state.titleEditing = false;
+    state.titleDraft = "";
+    syncNavigationConversationFromAgent(updated, { reason: "agent-title" });
+    navigationRefresh.request("agent-title");
+    renderConversationHeaderIdentity();
+    renderWorkbenchShell();
+    rememberCurrentConversation();
+    showToast(am(workbench ? "workbenchTitleSaved" : "conversationTitleSaved"), "success");
+    notifyTerminal(`[info] ${am(workbench ? "workbenchTitleSavedTerminal" : "conversationTitleSavedTerminal", { title })}\n`);
+  } finally {
+    if (state.agent?.id === agentId) {
+      state.titleSaving = false;
+      renderAllTitleEditors();
+    }
+  }
+}
+
 function updateWorkspaceMetaPills() {
   const el = $("workspaceMetaPills");
   if (!el) return;
@@ -1998,7 +2539,7 @@ function updateWorkspaceMetaPills() {
   const cwd = canonicalLocalPath(state.agent?.cwd || state.project?.gitPath || "");
   const permission = effectivePermissionForDisplay(state.agent?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
   const model = currentWorkspaceModel();
-  const securityText = remoteSecurityHardeningActive() ? t("workspace.main.remoteHardened") : t("workspace.main.local");
+  const securityText = connectionModeSummary().label;
   el.innerHTML = `
     <span class="workspace-pill" title="${escapeAttr(cwd)}">${escapeHtml(t("workspace.main.directoryLabel", { path: shortPath(cwd) }))}</span>
     <span class="workspace-pill">${escapeHtml(t("workspace.main.permissionLabel", { permission: permissionLabel(permission) }))}</span>
@@ -2052,18 +2593,54 @@ async function loadProjects() {
   }
 }
 
+function syncNavigationConversationFromAgent(agent, options = {}) {
+  const agentId = String(agent?.id || "").trim();
+  if (!agentId) return false;
+  const index = state.navigationConversations.findIndex((item) => item.agentId === agentId);
+  if (index < 0) {
+    navigationRefresh.request(options.reason || "agent-discovered");
+    return false;
+  }
+  const current = state.navigationConversations[index];
+  const messageCount = Number(agent?.messageCount);
+  const updated = {
+    ...current,
+    agentTitle: String(agent?.title || current.agentTitle),
+    agentType: String(agent?.type || current.agentType),
+    agentStatus: String(options.status || agent?.status || current.agentStatus || "idle"),
+    model: String(agent?.model || current.model),
+    permissionMode: String(agent?.permissionMode || current.permissionMode),
+    cwd: String(agent?.cwd || current.cwd),
+    messageCount: Number.isFinite(messageCount) ? Math.max(0, Math.trunc(messageCount)) : current.messageCount,
+    lastActivityAt: String(agent?.lastMessageAt || agent?.updatedAt || current.lastActivityAt),
+  };
+  state.navigationConversations = [
+    ...state.navigationConversations.slice(0, index),
+    updated,
+    ...state.navigationConversations.slice(index + 1),
+  ];
+  renderProjects();
+  return true;
+}
+
 function renderProjects() {
   const el = $("projects");
   if (!el) return;
+  const taskContext = state.activeWorkbench === "workbench";
+  const effectiveNavigationMode = taskContext ? "projects" : state.navigationMode;
+  renderPrimaryModeSidebar();
   const view = buildNavigationView({ projects: state.projects, conversations: state.navigationConversations }, {
-    mode: state.navigationMode,
+    mode: effectiveNavigationMode,
     query: state.projectQuery,
   });
   const heading = $("navigationListHeading");
-  if (heading) heading.textContent = t(state.navigationMode === "conversations" ? "shell.filters.conversations" : "shell.filters.projects");
+  setTranslatedText(heading, taskContext
+    ? "workbench.contextHeading"
+    : (state.navigationMode === "conversations" ? "shell.filters.conversations" : "shell.filters.projects"));
   el.innerHTML = renderNavigationHTML(view, {
     activeProjectId: state.project?.id || "",
     activeAgentId: state.agent?.id || "",
+    taskContext,
   });
   $("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node) => {
     const active = node.dataset.navigationMode === state.navigationMode;
@@ -2075,6 +2652,9 @@ function renderProjects() {
   });
   el.querySelectorAll("[data-navigation-target]").forEach((node) => {
     node.addEventListener("click", () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
+  });
+  el.querySelectorAll("[data-primary-workbench-target]").forEach((node) => {
+    node.addEventListener("click", () => switchPrimaryWorkbench(node.dataset.primaryWorkbenchTarget));
   });
   renderRecentSidebarConversations();
   renderRecentSidebarDirectories();
@@ -2148,8 +2728,15 @@ function beginNavigationSelection(project) {
   state.project = project || null;
   state.workline = null;
   state.agent = null;
+  state.titleEditing = false;
+  state.titleSaving = false;
+  state.titleDraft = "";
+  renderConversationHeaderIdentity();
+  state.chatHydrating = true;
   clearLiveAssistantText();
   setWorkspaceExplorerAgent(null);
+  projectKanban.setAgent(null);
+  renderWorkbenchShell();
   syncMessageComposerBusy();
   refreshReasoningEffortControl();
   refreshFastModeControl();
@@ -2167,31 +2754,34 @@ function beginNavigationSelection(project) {
   return seq;
 }
 
-async function selectProject(id) {
+async function selectProject(id, options = {}) {
   const seq = beginNavigationSelection(state.projects.find((project) => project.id === id) || null);
   if (!state.project) {
+    state.chatHydrating = false;
     updateWorkspaceMetaPills();
     showEmptyWorkspaceState();
     return;
   }
   $("currentTitle").textContent = state.project.name;
-  $("currentMeta").textContent = am("projectLoading");
   updateWorkspaceMetaPills();
-  showEmptyWorkspaceState({
-    title: am("projectLoadingTitle"),
-    text: am("projectLoadingDescription"),
-    action: am("chooseAnotherFolder"),
-    hint: state.project.gitPath || "",
-    icon: "…",
-  });
+  if (!options.preserveMessageState) {
+    showEmptyWorkspaceState({
+      title: am("projectLoadingTitle"),
+      text: am("projectLoadingDescription"),
+      action: am("chooseAnotherFolder"),
+      hint: state.project.gitPath || "",
+      icon: "…",
+      busy: true,
+    });
+  }
   try {
     const worklines = await api(`/api/projects/${id}/worklines`);
     if (seq !== state.projectSelectSeq || state.project?.id !== id) return;
     state.projectWorklines = Array.isArray(worklines) ? worklines : [];
     state.workline = state.projectWorklines[0] || null;
     if (!state.workline) {
+      state.chatHydrating = false;
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = am("noWorklines");
       updateWorkspaceMetaPills();
       showEmptyWorkspaceState({ title: am("noWorklines"), text: am("noWorklinesDescription"), action: am("chooseAnotherFolder"), icon: "◇" });
       return;
@@ -2202,8 +2792,8 @@ async function selectProject(id) {
     state.worklineAgents = Array.isArray(agents) ? agents : [];
     state.agent = state.worklineAgents.find((agent) => agent.type === "primary") || state.worklineAgents[0] || null;
     if (!state.agent) {
+      state.chatHydrating = false;
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = am("noAgent");
       updateWorkspaceMetaPills();
       showEmptyWorkspaceState({ title: am("noAgents"), text: am("noAgentsDescription"), action: am("chooseAnotherFolder"), icon: "♧" });
       return;
@@ -2211,11 +2801,14 @@ async function selectProject(id) {
     await enterAgent();
     if (seq !== state.projectSelectSeq) return;
   } catch (err) {
-    if (seq === state.projectSelectSeq && state.project?.id === id) throw err;
+    if (seq === state.projectSelectSeq && state.project?.id === id) {
+      state.chatHydrating = false;
+      throw err;
+    }
   }
 }
 
-async function selectNavigationConversation(target) {
+async function selectNavigationConversation(target, options = {}) {
   const parsed = typeof target === "string" ? parseNavigationTargetId(target) : parseNavigationTargetId(target?.targetId || "");
   if (!parsed) throw new Error(am("invalidConversationTarget"));
   const navigationConversation = state.navigationConversations.find((item) => item.targetId === parsed.targetId) || null;
@@ -2227,20 +2820,16 @@ async function selectNavigationConversation(target) {
   } : null);
   const seq = beginNavigationSelection(project);
   if (!state.project) {
+    state.chatHydrating = false;
     showEmptyWorkspaceState();
     throw new Error(am("projectNoLongerExists"));
   }
 
   $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
-  $("currentMeta").textContent = am("conversationOpening");
   updateWorkspaceMetaPills();
-  showEmptyWorkspaceState({
-    title: am("conversationOpeningTitle"),
-    text: am("conversationOpeningDescription"),
-    action: am("chooseAnotherFolder"),
-    hint: [navigationConversation?.worklineTitle, navigationConversation?.agentTitle].filter(Boolean).join(" / "),
-    icon: "…",
-  });
+  // Keep the previous conversation in place while the next one hydrates. Replacing
+  // it with a full-screen loading card causes a distracting flash on every switch.
+  markMessageViewportBusy();
 
   try {
     const [worklines, agents] = await Promise.all([
@@ -2253,8 +2842,9 @@ async function selectNavigationConversation(target) {
     state.worklineAgents = Array.isArray(agents) ? agents : [];
     state.agent = state.worklineAgents.find((item) => item.id === parsed.agentId) || null;
     if (!state.workline || !state.agent) {
+      state.chatHydrating = false;
+      clearMessageViewportBusy();
       $("currentTitle").textContent = state.project.name;
-      $("currentMeta").textContent = am("conversationUnavailable");
       updateWorkspaceMetaPills();
       showEmptyWorkspaceState({
         title: am("conversationUnavailable"),
@@ -2266,9 +2856,14 @@ async function selectNavigationConversation(target) {
     }
     await enterAgent();
     if (seq !== state.projectSelectSeq) return;
+    clearMessageViewportBusy();
     renderProjects();
   } catch (err) {
-    if (seq === state.projectSelectSeq && state.project?.id === parsed.projectId) throw err;
+    if (seq === state.projectSelectSeq && state.project?.id === parsed.projectId) {
+      state.chatHydrating = false;
+      clearMessageViewportBusy();
+      throw err;
+    }
   }
 }
 
@@ -2276,26 +2871,49 @@ async function enterAgent() {
   if (!state.agent) return;
   closeConversationDetails();
   const agentId = state.agent.id;
+  backgroundTasks.setAgent(agentId);
   setWorkspaceExplorerAgent(state.agent);
-  specBoard.setAgent(state.agent);
-  $("currentTitle").textContent = state.project?.name || state.agent.title;
-  $("currentMeta").textContent = state.agent.title || am("agentReady");
+  projectKanban.setAgent(state.agent);
+  renderWorkbenchShell();
+  if (state.activeWorkbench === "workbench") specBoard.load().catch(showError);
+  renderConversationHeaderIdentity();
   $("permissionMode").value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
   updateWorkspaceMetaPills();
   renderModelOptions();
   refreshReasoningEffortControl();
   refreshFastModeControl();
+  refreshMessageModeControl();
   await restoreCurrentChatDraft();
   syncMessageComposerBusy();
+  state.chatHydrating = true;
   clearRunSummary();
-  connectWS();
+  clearPlanState(agentId);
   connectTerminal();
-  loadGitStatus({ silent: true }).catch(() => {});
-  const effectiveSkillsPromise = refreshEffectiveSkillsPolicy();
-  await loadLatestRunSummary(agentId);
-  await Promise.all([loadMessages(agentId), effectiveSkillsPromise]);
+  loadGitStatus({ silent: true }).then(renderWorkbenchShell).catch(() => {});
+  let effectiveSkillsError = null;
+  const effectiveSkillsPromise = refreshEffectiveSkillsPolicy().catch((error) => {
+    effectiveSkillsError = error;
+  });
+  let messagesLoaded = false;
+  try {
+    [messagesLoaded] = await Promise.all([
+      loadMessages(agentId),
+      loadLatestRunSummary(agentId),
+      backgroundTasks.loadAgent(agentId),
+    ]);
+    if (state.agent?.id !== agentId) return;
+    state.chatHydrating = false;
+    if (messagesLoaded) applyMessageSnapshot(state.currentMessages, agentId, { forceRender: true });
+  } finally {
+    if (state.agent?.id === agentId) {
+      state.chatHydrating = false;
+      connectWS();
+    }
+  }
+  await effectiveSkillsPromise;
   if (state.agent?.id !== agentId) return;
+  if (effectiveSkillsError) throw effectiveSkillsError;
   rememberCurrentConversation();
   renderProjects();
 }
@@ -2327,6 +2945,7 @@ function setComposerConnectionStatus(text, ok = false) {
 function disconnectAgentTransports() {
   clearMessageRefreshTimer(state.agent?.id);
   agentStream.disconnect();
+  backgroundTasks.setAgent("");
   state.ws = null;
   if (state.terminalWS) {
     const socket = state.terminalWS;
@@ -2345,7 +2964,7 @@ function disconnectAgentTransports() {
 }
 
 function connectWS() {
-  if (!state.agent?.id) return;
+  if (!state.agent?.id || state.remoteAccessFailClosed) return;
   agentStream.connect(state.agent.id).catch((error) => {
     if (state.agent?.id) notifyTerminal(`[warn] ${am("agentLiveSnapshotFailed", { message: error?.message || error })}\n`);
   });
@@ -2371,15 +2990,28 @@ function updateAgentStreamStatus(detail = {}) {
   }
   setComposerConnectionStatus(composerText, ok);
   updateRuntimeStatusButton();
+  renderWorkbenchShell();
 }
 
-function applyAgentLiveSnapshot(snapshot) {
+async function applyAgentLiveSnapshot(snapshot, detail = {}) {
   const agentId = snapshot?.agent?.id || "";
   if (!agentId || state.agent?.id !== agentId) return;
+  backgroundTasks.applySnapshot(snapshot, { agentId });
+  if (detail.source === "initial") await executionNotifications.initial(snapshot, { agentId });
+  else await executionNotifications.snapshot(snapshot, { agentId });
   state.agent = snapshot.agent;
+  renderConversationHeaderIdentity();
+  syncNavigationConversationFromAgent(state.agent, { reason: "agent-snapshot" });
+  navigationRefresh.request("agent-snapshot");
   clearLiveAssistantText();
-  state.liveToolOutputs = Object.fromEntries(Object.entries(state.liveToolOutputs || {}).filter(([, value]) => value?.agentId && value.agentId !== agentId));
+  const recoveredToolOutputs = Object.fromEntries(Object.entries(state.liveToolOutputs || {}).filter(([, value]) => value?.agentId && value.agentId !== agentId));
+  for (const call of Array.isArray(snapshot.toolActivity) ? snapshot.toolActivity : []) {
+    const toolUseId = String(call?.toolUseId || call?.tool_use_id || "").trim();
+    if (toolUseId) recoveredToolOutputs[toolUseId] = { ...call, agentId, toolUseId };
+  }
+  state.liveToolOutputs = recoveredToolOutputs;
   clearRunSummary();
+  replacePlanState(snapshot.activePlan, snapshot.pendingPlanApproval ?? snapshot.pendingPlan, agentId);
   replacePendingApprovals(snapshot.pendingApprovals, agentId);
   applyMessageSnapshot(snapshot.messages, agentId, {
     hasMoreBefore: snapshot.messageHasMoreBefore,
@@ -2391,7 +3023,9 @@ function applyAgentLiveSnapshot(snapshot) {
   renderModelOptions();
   refreshReasoningEffortControl();
   refreshFastModeControl();
+  refreshMessageModeControl();
   updateWorkspaceMetaPills();
+  renderWorkbenchShell();
   syncMessageComposerBusy();
   const latestRun = snapshot.latestRun;
   if (latestRun?.id && ["completed", "error", "failed", "interrupted", "superseded"].includes(latestRun.status)) {
@@ -2399,13 +3033,21 @@ function applyAgentLiveSnapshot(snapshot) {
   }
 }
 
-function handleAgentStreamEvent(event) {
+async function handleAgentStreamEvent(event) {
   const agentId = state.agent?.id || "";
   if (!agentId || (event.agentId && event.agentId !== agentId)) return;
+  backgroundTasks.handleEvent(event);
+  await executionNotifications.live(event, { agentId });
   if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
+  applyPlanEvent(event);
   const runId = event.data?.runId || "";
   const requestId = event.data?.requestId || "";
+  const completedMessageEvents = ["message.created", "message.completed"];
+  const terminalAgentEvents = ["agent.done", "agent.error", "agent.interrupted"];
+  const navigationRefreshEvents = ["agent.started", ...completedMessageEvents, ...terminalAgentEvents];
   if (event.type === "agent.started") {
+    state.agent = { ...state.agent, status: "running" };
+    syncNavigationConversationFromAgent(state.agent, { status: "running", reason: "agent-started" });
     clearRunSummary();
     clearLiveAssistantText();
   }
@@ -2440,10 +3082,14 @@ function handleAgentStreamEvent(event) {
     finishToolOutput(event);
   }
   if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
-  const completedMessageEvents = ["message.created", "message.completed"];
-  const terminalAgentEvents = ["agent.done", "agent.error", "agent.interrupted"];
+  if (terminalAgentEvents.includes(event.type)) {
+    const status = event.type === "agent.error" ? "error" : "idle";
+    state.agent = { ...state.agent, status };
+    syncNavigationConversationFromAgent(state.agent, { status, reason: event.type });
+  }
   if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) clearLiveAssistantText();
   if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) scheduleMessageRefresh(80, agentId);
+  if (navigationRefreshEvents.includes(event.type)) navigationRefresh.request(event.type);
   if (terminalAgentEvents.includes(event.type) && runId) {
     loadRunSummary(runId, { agentId }).catch((error) => notifyTerminal(`[warn] ${am("runSummaryLoadFailed", { message: error?.message || error })}\n`));
   }
@@ -2546,6 +3192,7 @@ document.addEventListener("keydown", handleGlobalEscape);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("employeeOverviewModal")?.classList.contains("hidden")) closeEmployeeOverview();
+  if ($("appShell")?.classList.contains("background-tasks-open")) backgroundTasks.closeTray("escape");
   if ($("appShell")?.classList.contains("details-open")) closeConversationDetails();
 });
 document.addEventListener("keydown", handleSettingsSearchShortcut);
@@ -2555,11 +3202,28 @@ document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
   node.addEventListener("click", () => activateGlobalRailTarget(node.dataset.globalRailTarget));
 });
 $("globalThemeToggleBtn")?.addEventListener("click", () => {
-  const nextTheme = currentAppearancePreferences().theme === "dark" ? "light" : "dark";
-  setAppearancePreference("theme", nextTheme);
-  updateGlobalThemeToggle();
+  const { themePreset, theme } = currentAppearancePreferences();
+  const nextPreset = themePreset === "cream"
+    ? "dark"
+    : themePreset === "cyber"
+      ? "light"
+      : theme === "dark" ? "light" : "dark";
+  setAppearancePreference("themePreset", nextPreset);
 });
-$("refreshBtn").addEventListener("click", () => init().catch(showError));
+$("refreshBtn").addEventListener("click", () => refreshPrimaryMode().catch(showError));
+$("newTaskBtn")?.addEventListener("click", () => focusTaskCreation().catch(showError));
+$("currentTitle")?.addEventListener("click", () => beginConversationTitleEdit("conversation"));
+$("editConversationTitleBtn")?.addEventListener("click", () => beginConversationTitleEdit("conversation"));
+$("saveConversationTitleBtn")?.addEventListener("click", () => saveConversationTitle("conversation").catch(showError));
+$("cancelConversationTitleBtn")?.addEventListener("click", cancelConversationTitleEdit);
+$("currentTitleInput")?.addEventListener("input", (event) => updateTitleDraft("conversation", event));
+$("currentTitleInput")?.addEventListener("keydown", (event) => handleTitleEditorKeydown("conversation", event));
+$("workbenchTitle")?.addEventListener("click", () => beginConversationTitleEdit("workbench"));
+$("editWorkbenchTitleBtn")?.addEventListener("click", () => beginConversationTitleEdit("workbench"));
+$("saveWorkbenchTitleBtn")?.addEventListener("click", () => saveConversationTitle("workbench").catch(showError));
+$("cancelWorkbenchTitleBtn")?.addEventListener("click", cancelConversationTitleEdit);
+$("workbenchTitleInput")?.addEventListener("input", (event) => updateTitleDraft("workbench", event));
+$("workbenchTitleInput")?.addEventListener("keydown", (event) => handleTitleEditorKeydown("workbench", event));
 $("sidebarAccountBtn")?.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleSidebarSettingsMenu();
@@ -2582,6 +3246,7 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
 $("settingsIdentityBtn")?.addEventListener("click", () => selectSettingsPanel("profile"));
 $("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
+$("settingsModal").addEventListener("keydown", handleSettingsDialogKeydown);
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
 $("closeEmployeeOverviewBtn")?.addEventListener("click", closeEmployeeOverview);
 $("employeeOverviewModal")?.addEventListener("click", (event) => { if (event.target.id === "employeeOverviewModal") closeEmployeeOverview(); });
@@ -2596,6 +3261,9 @@ $("backendsModal").addEventListener("click", (event) => { if (event.target.id ==
 $("backendForm").addEventListener("submit", (event) => saveBackend(event).catch(showError));
 $("resetBackendFormBtn").addEventListener("click", resetBackendForm);
 $("mobileMenuBtn").addEventListener("click", openMobileSidebar);
+$("mobileWorkbenchBtn")?.addEventListener("click", () => {
+  switchPrimaryWorkbench(state.activeWorkbench === "workbench" ? "conversation" : "workbench");
+});
 $("mobileSidebarCloseBtn")?.addEventListener("click", closeMobileSidebar);
 $("mobileSidebarBackdrop").addEventListener("click", closeMobileSidebar);
 $("mobileTerminalBtn").addEventListener("click", toggleMobileTerminal);
@@ -2640,6 +3308,15 @@ $("runtimeStatusBtn")?.addEventListener("click", () => {
   else openConversationDetails();
 });
 $("gitWorkflowBtn")?.addEventListener("click", openGitModal);
+$("workbenchBoardBtn")?.addEventListener("click", () => {
+  projectKanban.render();
+  $("projectKanbanBody")?.scrollTo?.({ top: 0, behavior: "smooth" });
+});
+$("workbenchFilesBtn")?.addEventListener("click", () => openWorkspace("files"));
+$("workbenchGitBtn")?.addEventListener("click", openGitModal);
+$("workbenchRunBtn")?.addEventListener("click", openConversationDetails);
+$("workbenchTerminalBtn")?.addEventListener("click", () => toggleTerminalDock());
+$("workbenchPreviewBtn")?.addEventListener("click", () => openWorkspace("preview"));
 $("closeGitModalBtn")?.addEventListener("click", closeGitModal);
 $("gitModal")?.addEventListener("click", (event) => { if (event.target.id === "gitModal") closeGitModal(); });
 $("closeFolderModalBtn").addEventListener("click", closeDirectoryModal);
@@ -2682,6 +3359,9 @@ $("manualDirectoryPath").addEventListener("keydown", (event) => {
 });
 $("chooseDirectoryBtn").addEventListener("click", () => createProjectFromDirectory(state.directoryPath).catch(showError));
 $("messageForm").addEventListener("submit", (event) => sendMessage(event).catch(showError));
+document.querySelectorAll("[data-message-mode]").forEach((button) => {
+  button.addEventListener("click", () => setMessageMode(button.dataset.messageMode));
+});
 $("attachFileBtn")?.addEventListener("click", openAttachmentPicker);
 $("attachFileInput")?.addEventListener("change", (event) => importAttachmentFiles(event).catch(showError));
 $("composerInputShell")?.addEventListener("dragover", handleAttachmentDragOver);
@@ -2707,10 +3387,35 @@ window.addEventListener("resize", () => {
   autoResizeMessageInput();
 });
 window.addEventListener("autoto:auth-changed", () => {
+  saveCurrentChatDraft();
+  navigationRefresh.stop();
   state.serverDrafts = {};
-  if (state.agent?.id) restoreCurrentChatDraft().catch(showError);
+  disconnectAgentTransports();
+  closeWorkspace();
+  closeConversationDetails();
+  state.project = null;
+  state.workline = null;
+  state.agent = null;
+  state.projectWorklines = [];
+  state.worklineAgents = [];
+  state.chatHydrating = false;
+  state.currentMessages = [];
+  state.messageCopyTexts = [];
+  clearRunSummary();
+  clearPlanState();
+  clearLiveAssistantText();
+  setWorkspaceExplorerAgent(null);
+  projectKanban.setAgent(null);
+  resetGitWorkflowState();
+  renderWorkbenchShell();
+  renderProjects();
+  showEmptyWorkspaceState();
+  init().catch(showError);
 });
-window.addEventListener("beforeunload", saveCurrentChatDraft);
+window.addEventListener("beforeunload", () => {
+  navigationRefresh.stop();
+  saveCurrentChatDraft();
+});
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));
 $("openProviderLoginBtn")?.addEventListener("click", () => toggleFastMode().catch(showError));
 $("modelSelect").addEventListener("change", () => {
@@ -2729,6 +3434,7 @@ $("permissionMode").addEventListener("change", () => {
 });
 function toggleTerminalDock(collapsed) {
   if (collapsed !== true) {
+    backgroundTasks.closeTray("terminal-open");
     closeConversationDetails();
     if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
   }
@@ -2771,28 +3477,39 @@ async function init() {
     state.skillsPrefs = loadSkillsPreferences();
     state.notifications = loadNotificationPreferences();
     state.appearance = loadAppearancePreferences();
+    state.primaryModePreference = loadPrimaryModePreference();
     state.terminalPrefs = loadTerminalPreferences();
     state.chatDrafts = loadChatDrafts();
     state.promptHistory = loadPromptHistory();
     state.recentConversations = loadRecentConversations();
     applyAppearancePreferences({ applyTerminalDefault: true });
+    applyPrimaryWorkbench(currentPrimaryModePreference());
     updateGlobalThemeToggle();
     if (!state.agent) {
       $("currentTitle").textContent = t("chat.noAgent");
-      $("currentMeta").textContent = t("chat.startHint");
       $("composerStatusText").textContent = t("chat.idle");
       const terminalOutput = $("terminalOutput");
       if (terminalOutput && terminalOutput.textContent.startsWith("Terminal ready.")) terminalOutput.textContent = t("terminal.ready");
     }
+    renderConversationHeaderIdentity();
     updatePermissionModeDisplay();
     autoResizeMessageInput();
     renderRecentSidebarConversations();
     renderRecentSidebarDirectories();
     await loadHealth();
-    await Promise.all([loadSettings(), loadRuntimeSummary(), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);
+    await Promise.all([loadSettings(), loadRuntimeSummary(), remoteAccessSettings.load().catch(() => {}), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);
     if (seq !== state.initSeq) return;
-    if (!state.agent && state.projects.length) {
-      await selectProject(state.projects[0].id);
+    navigationRefresh.start();
+    if (!state.agent) {
+      const initialTarget = resolveInitialNavigationTarget(state.recentConversations, state.navigationConversations);
+      if (initialTarget) {
+        await selectNavigationConversation(initialTarget, { preserveMessageState: true });
+      } else if (state.projects.length) {
+        await selectProject(state.projects[0].id, { preserveMessageState: true });
+      } else {
+        state.chatHydrating = false;
+        showEmptyWorkspaceState();
+      }
     }
   } finally {
     if (seq === state.initSeq) {
@@ -2801,7 +3518,7 @@ async function init() {
         refreshButton.disabled = false;
         refreshButton.classList.remove("loading");
         refreshButton.removeAttribute("aria-busy");
-        refreshButton.title = t("shell.refreshSessions");
+        renderPrimaryModeSidebar();
       }
     }
   }

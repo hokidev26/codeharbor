@@ -1,12 +1,16 @@
 package server
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"autoto/internal/audit"
 	"autoto/internal/db"
 )
 
@@ -34,7 +38,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+	agents, ok := s.filterAgentsByMembership(w, r, agents)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.filterAgentsForRequest(r, agents))
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -71,19 +79,20 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	if worklineID != "" {
-		if _, err := s.store.GetWorkline(r.Context(), worklineID); err != nil {
-			writeStoreError(w, err)
-			return
-		}
+	if worklineID != "" && !s.requireProjectResourceAccess(w, r, projectAccessTarget{kind: projectAccessWorkline, id: worklineID}) {
+		return
 	}
 	agentType := "primary"
 	if parentAgentID != "" {
-		if _, err := s.store.GetAgent(r.Context(), parentAgentID); err != nil {
-			writeStoreError(w, err)
+		if !s.requireProjectResourceAccess(w, r, projectAccessTarget{kind: projectAccessAgent, id: parentAgentID}) {
 			return
 		}
 		agentType = "subagent"
+	}
+	cwd, err := s.resolveCWDForRequest(r, cwd)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	info, err := os.Stat(cwd)
 	if err != nil {
@@ -97,12 +106,84 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	created, err := s.store.CreateAgent(r.Context(), db.Agent{
 		WorklineID: worklineID, ParentAgentID: parentAgentID, Type: agentType,
 		Title: title, Model: model, PermissionMode: permissionMode, Status: "idle", CWD: cwd,
+		PlanMode: s.configSnapshot().Agent.DefaultStartInPlanMode,
 	})
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+type updatePlanModeRequest struct {
+	PlanMode *bool `json:"planMode"`
+}
+
+func (s *Server) updateAgentPlanMode(w http.ResponseWriter, r *http.Request) {
+	var req updatePlanModeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.PlanMode == nil {
+		writeError(w, http.StatusBadRequest, "planMode is required")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	agent, err := s.updatePersistedAgentPlanMode(r.Context(), agentID, *req.PlanMode)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	if s.runner != nil {
+		s.runner.InvalidateAgentApprovals(agentID, "tool approval invalidated because plan mode changed")
+	}
+	actor, actorErr := s.reviewActor(r)
+	if actorErr != nil {
+		writeError(w, http.StatusInternalServerError, actorErr.Error())
+		return
+	}
+	if err := s.recordAudit(r.Context(), audit.Event{
+		Category: "review", Action: "agent.plan_mode.update", Actor: actor, AgentID: agent.ID,
+		SubjectType: "agent", SubjectID: agent.ID, Outcome: "success", Risk: "medium",
+		Details: map[string]any{"planMode": agent.PlanMode, "entityGeneration": agent.EntityGeneration, "permissionGeneration": agent.PermissionGeneration},
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "plan mode was updated but audit persistence failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
+}
+
+// updatePersistedAgentPlanMode is a compatibility bridge for the existing
+// agents.plan_mode column. It keeps entity and permission generations in sync
+// until the Agent workflow owns a first-class mode mutation API.
+func (s *Server) updatePersistedAgentPlanMode(ctx context.Context, agentID string, planMode bool) (db.Agent, error) {
+	if s == nil || s.store == nil {
+		return db.Agent{}, errors.New("agent store is unavailable")
+	}
+	agentID = strings.TrimSpace(agentID)
+	if err := validateAPIIdentifier("agent id", agentID); err != nil {
+		return db.Agent{}, err
+	}
+	result, err := s.store.DB().ExecContext(ctx, `UPDATE agents SET plan_mode = ?, entity_generation = entity_generation + 1, permission_generation = permission_generation + 1, updated_at = ? WHERE id = ?`, boolToInt(planMode), db.Now(), agentID)
+	if err != nil {
+		return db.Agent{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return db.Agent{}, err
+	}
+	if affected != 1 {
+		return db.Agent{}, sql.ErrNoRows
+	}
+	return s.store.GetAgent(ctx, agentID)
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (s *Server) listAgentChildren(w http.ResponseWriter, r *http.Request) {
@@ -124,5 +205,9 @@ func (s *Server) listAgentChildren(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, children)
+	children, ok := s.filterAgentsByMembership(w, r, children)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.filterAgentsForRequest(r, children))
 }

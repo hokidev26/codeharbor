@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import automationMessages from "./messages-automation.mjs";
 import appMainExtraMessages from "./messages-app-main-extra.mjs";
-import chatRenderingExtraMessages from "./messages-chat-rendering-extra.mjs";
+import chatRenderingExtraMessages, { t as chatRenderingExtraT } from "./messages-chat-rendering-extra.mjs";
 import shellExtraMessages from "./messages-shell-extra.mjs";
 import skillsMessages from "./messages-skills.mjs";
 import {
@@ -79,6 +79,26 @@ test("model provider console interpolates model, count, and failure details", ()
     t("modelProvider.console.messages.mutationRefreshWarning", { message: "offline" }, "en"),
     "The change succeeded, but refreshing the provider list failed: offline",
   );
+});
+
+test("chat activity timeline has concise, safe copy in every locale", () => {
+  const keys = [
+    "processTitle", "processProtected", "input", "output", "noOutput", "localService",
+    "details", "diff", "running", "completed", "failed", "searching", "reading",
+    "editing", "writing", "runningCommand", "genericStep", "truncated",
+  ];
+
+  for (const locale of uiLocales) {
+    const activity = chatRenderingExtraMessages[locale].chatRenderingExtra.activity;
+    for (const key of keys) assert.equal(typeof activity[key], "string", `${locale}:${key}`);
+    assert.ok(activity.processProtected.length > 0, `${locale}:processProtected`);
+    assert.equal(chatRenderingExtraT("activity.processTitle", { count: 3 }, locale).includes("3"), true, locale);
+
+    const copy = Object.values(activity).join(" ").toLowerCase();
+    assert.doesNotMatch(copy, /chain of thought|思维链已加密/);
+  }
+
+  assert.equal(chatRenderingExtraT("activity.input", {}, "fr-FR"), "输入");
 });
 
 test("document locale updates lang and data-ui-locale", () => {

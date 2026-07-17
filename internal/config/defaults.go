@@ -40,14 +40,23 @@ type PathsConfig struct {
 }
 
 type AgentConfig struct {
-	DefaultModel           string `json:"defaultModel"`
-	SummaryModel           string `json:"summaryModel"`
-	DefaultPermissionMode  string `json:"defaultPermissionMode"`
-	DefaultStartInPlanMode bool   `json:"defaultStartInPlanMode"`
-	MaxTurns               int    `json:"maxTurns"`
-	ContextTokenLimit      int    `json:"contextTokenLimit"`
-	FirstTokenTimeoutMs    int    `json:"firstTokenTimeoutMs"`
-	MaxTransientRetries    int    `json:"maxTransientRetries"`
+	DefaultModel             string              `json:"defaultModel"`
+	SummaryModel             string              `json:"summaryModel"`
+	ReviewModel              string              `json:"reviewModel"`
+	SubagentModels           map[string]string   `json:"subagentModels,omitempty"`
+	SubagentModelPools       map[string][]string `json:"subagentModelPools,omitempty"`
+	DefaultPermissionMode    string              `json:"defaultPermissionMode"`
+	DefaultStartInPlanMode   bool                `json:"defaultStartInPlanMode"`
+	MaxTurns                 int                 `json:"maxTurns"`
+	ContextTokenLimit        int                 `json:"contextTokenLimit"`
+	FirstTokenTimeoutMs      int                 `json:"firstTokenTimeoutMs"`
+	MaxTransientRetries      int                 `json:"maxTransientRetries"`
+	AutoContinuationMode     string              `json:"autoContinuationMode"`
+	ContinuationSegmentTurns int                 `json:"continuationSegmentTurns"`
+	MaxContinuations         int                 `json:"maxContinuations"`
+	MaxTotalTurns            int                 `json:"maxTotalTurns"`
+	MaxRunDurationMs         int64               `json:"maxRunDurationMs"`
+	MaxRunTokens             int64               `json:"maxRunTokens"`
 }
 
 type AuthConfig struct {
@@ -56,9 +65,18 @@ type AuthConfig struct {
 }
 
 type SecurityConfig struct {
-	Exposed             bool   `json:"exposed"`
-	AccessPassword      string `json:"accessPassword,omitempty"`
-	AllowRemoteTerminal bool   `json:"allowRemoteTerminal,omitempty"`
+	Exposed bool `json:"exposed"`
+	// AccessPassword is an environment-only compatibility input. It is never
+	// written to disk; durable credentials use AccessPasswordHash.
+	AccessPassword          string `json:"accessPassword,omitempty"`
+	AccessPasswordHash      string `json:"accessPasswordHash,omitempty"`
+	AllowRemoteFullAccess   bool   `json:"allowRemoteFullAccess,omitempty"`
+	DefaultRemoteAccessMode string `json:"defaultRemoteAccessMode,omitempty"`
+	AllowRemoteNativePicker bool   `json:"allowRemoteNativePicker,omitempty"`
+	CredentialRevision      int64  `json:"credentialRevision,omitempty"`
+	// AllowRemoteTerminal is retained only to read older configurations. New
+	// remote terminal access is granted exclusively by a full remote session.
+	AllowRemoteTerminal bool `json:"allowRemoteTerminal,omitempty"`
 }
 
 type ProvidersConfig struct {
@@ -157,20 +175,31 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 			DefaultProjectDir: filepath.Join(home, "projects"),
 		},
 		Agent: AgentConfig{
-			DefaultModel:           defaultModel,
-			SummaryModel:           summaryModel,
-			DefaultPermissionMode:  "acceptEdits",
-			DefaultStartInPlanMode: false,
-			MaxTurns:               200,
-			ContextTokenLimit:      getenvIntFallbackReported(report, []string{"AUTOTO_CONTEXT_TOKEN_LIMIT", "CODEHARBOR_CONTEXT_TOKEN_LIMIT"}, 120000),
-			FirstTokenTimeoutMs:    60000,
-			MaxTransientRetries:    10,
+			DefaultModel:             defaultModel,
+			SummaryModel:             summaryModel,
+			ReviewModel:              defaultModel,
+			DefaultPermissionMode:    "acceptEdits",
+			DefaultStartInPlanMode:   false,
+			MaxTurns:                 200,
+			ContextTokenLimit:        getenvIntFallbackReported(report, []string{"AUTOTO_CONTEXT_TOKEN_LIMIT", "CODEHARBOR_CONTEXT_TOKEN_LIMIT"}, 120000),
+			FirstTokenTimeoutMs:      60000,
+			MaxTransientRetries:      10,
+			AutoContinuationMode:     "safe",
+			ContinuationSegmentTurns: 40,
+			MaxContinuations:         8,
+			MaxTotalTurns:            200,
+			MaxRunDurationMs:         3600000,
+			MaxRunTokens:             500000,
 		},
 		Auth: AuthConfig{RegistrationOpen: true},
 		Security: SecurityConfig{
-			Exposed:             getenvBoolFallbackReported(report, []string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
-			AccessPassword:      firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
-			AllowRemoteTerminal: getenvBoolFallbackReported(report, []string{"AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"}, false),
+			Exposed:                 getenvBoolFallbackReported(report, []string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
+			AccessPassword:          firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
+			AllowRemoteFullAccess:   getenvBoolFallbackReported(report, []string{"AUTOTO_ALLOW_REMOTE_FULL_ACCESS", "CODEHARBOR_ALLOW_REMOTE_FULL_ACCESS"}, false),
+			DefaultRemoteAccessMode: firstEnvFallback(report, "AUTOTO_DEFAULT_REMOTE_ACCESS_MODE", "CODEHARBOR_DEFAULT_REMOTE_ACCESS_MODE"),
+			AllowRemoteNativePicker: getenvBoolFallbackReported(report, []string{"AUTOTO_ALLOW_REMOTE_NATIVE_PICKER", "CODEHARBOR_ALLOW_REMOTE_NATIVE_PICKER"}, false),
+			CredentialRevision:      1,
+			AllowRemoteTerminal:     getenvBoolFallbackReported(report, []string{"AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"}, false),
 		},
 		Providers: ProvidersConfig{Instances: []ProviderConfig{
 			{
@@ -276,6 +305,15 @@ decode:
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, report, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	migratedSecurityPassword, err := migrateLegacySecurityPassword(&cfg, data)
+	if err != nil {
+		return Config{}, report, fmt.Errorf("migrate security credential in %s: %w", path, err)
+	}
+	if migratedSecurityPassword {
+		if err := persistMigratedSecurityPassword(path, data, cfg.Security.AccessPasswordHash); err != nil {
+			return Config{}, report, fmt.Errorf("persist migrated security credential in %s: %w", path, err)
+		}
 	}
 	cfg = normalizeConfigWithReport(cfg, &report)
 	if explicitLegacyPath {
@@ -410,7 +448,10 @@ func normalizeConfig(cfg Config) Config {
 
 func normalizeConfigWithReport(cfg Config, report *compat.Report) Config {
 	cfg = migrateConfig(cfg)
+	cfg.Agent = normalizeAgentConfig(cfg.Agent)
+	cfg.Security = normalizeSecurityConfig(cfg.Security)
 	applySecurityEnvOverrides(&cfg.Security, report)
+	cfg.Security = normalizeSecurityConfig(cfg.Security)
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)
 	return cfg
@@ -423,12 +464,126 @@ func migrateConfig(cfg Config) Config {
 	return cfg
 }
 
+func normalizeAgentConfig(agent AgentConfig) AgentConfig {
+	agent.DefaultModel = strings.TrimSpace(agent.DefaultModel)
+	agent.SummaryModel = strings.TrimSpace(agent.SummaryModel)
+	agent.ReviewModel = strings.TrimSpace(agent.ReviewModel)
+	if agent.ReviewModel == "" {
+		agent.ReviewModel = agent.DefaultModel
+	}
+	agent.SubagentModels = normalizeSubagentModels(agent.SubagentModels)
+	agent.SubagentModelPools = normalizeSubagentModelPools(agent.SubagentModelPools)
+	agent.AutoContinuationMode = strings.ToLower(strings.TrimSpace(agent.AutoContinuationMode))
+	if agent.AutoContinuationMode != "off" && agent.AutoContinuationMode != "safe" {
+		agent.AutoContinuationMode = "safe"
+	}
+	if agent.ContinuationSegmentTurns <= 0 {
+		agent.ContinuationSegmentTurns = 40
+	}
+	if agent.ContinuationSegmentTurns > 1000 {
+		agent.ContinuationSegmentTurns = 1000
+	}
+	if agent.MaxContinuations == 0 {
+		agent.MaxContinuations = 8
+	} else if agent.MaxContinuations < 0 {
+		agent.MaxContinuations = 0
+	} else if agent.MaxContinuations > 64 {
+		agent.MaxContinuations = 64
+	}
+	if agent.MaxTotalTurns <= 0 {
+		agent.MaxTotalTurns = 200
+	}
+	if agent.MaxTotalTurns > 10000 {
+		agent.MaxTotalTurns = 10000
+	}
+	if agent.ContinuationSegmentTurns > agent.MaxTotalTurns {
+		agent.ContinuationSegmentTurns = agent.MaxTotalTurns
+	}
+	if agent.MaxRunDurationMs <= 0 {
+		agent.MaxRunDurationMs = 3600000
+	} else if agent.MaxRunDurationMs < 1000 {
+		agent.MaxRunDurationMs = 1000
+	} else if agent.MaxRunDurationMs > 86400000 {
+		agent.MaxRunDurationMs = 86400000
+	}
+	if agent.MaxRunTokens <= 0 {
+		agent.MaxRunTokens = 500000
+	} else if agent.MaxRunTokens < 1000 {
+		agent.MaxRunTokens = 1000
+	} else if agent.MaxRunTokens > 10000000 {
+		agent.MaxRunTokens = 10000000
+	}
+	return agent
+}
+
+func normalizeSubagentModels(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(values))
+	for role, model := range values {
+		role = strings.ToLower(strings.TrimSpace(role))
+		model = strings.TrimSpace(model)
+		if role != "" && model != "" {
+			normalized[role] = model
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeSubagentModelPools(values map[string][]string) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make(map[string][]string, len(values))
+	for role, models := range values {
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(models))
+		pool := make([]string, 0, len(models))
+		for _, model := range models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				continue
+			}
+			if _, exists := seen[model]; exists {
+				continue
+			}
+			seen[model] = struct{}{}
+			pool = append(pool, model)
+		}
+		if len(pool) > 0 {
+			normalized[role] = pool
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
 func applySecurityEnvOverrides(security *SecurityConfig, report *compat.Report) {
 	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"); ok {
 		security.Exposed = value
 	}
 	if value := firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
+		// Environment credentials deliberately override a persisted hash but are
+		// never saved by sanitizeConfigForDisk.
 		security.AccessPassword = value
+	}
+	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_ALLOW_REMOTE_FULL_ACCESS", "CODEHARBOR_ALLOW_REMOTE_FULL_ACCESS"); ok {
+		security.AllowRemoteFullAccess = value
+	}
+	if value := firstEnvFallback(report, "AUTOTO_DEFAULT_REMOTE_ACCESS_MODE", "CODEHARBOR_DEFAULT_REMOTE_ACCESS_MODE"); value != "" {
+		security.DefaultRemoteAccessMode = value
+	}
+	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_ALLOW_REMOTE_NATIVE_PICKER", "CODEHARBOR_ALLOW_REMOTE_NATIVE_PICKER"); ok {
+		security.AllowRemoteNativePicker = value
 	}
 	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL"); ok {
 		security.AllowRemoteTerminal = value
@@ -647,10 +802,60 @@ func Save(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if cfg.SchemaVersion > CurrentConfigVersion {
+		return fmt.Errorf("config schema version %d is newer than supported version %d", cfg.SchemaVersion, CurrentConfigVersion)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	cfg, err = preserveSecurityEnvOverrides(path, cfg)
+	if err != nil {
+		return err
+	}
 	return writeDefaultConfig(path, cfg)
+}
+
+// preserveSecurityEnvOverrides keeps security settings supplied by the
+// environment out of ordinary saves. When a config already exists, its durable
+// values win; when it does not, the zero values are the secure defaults.
+func preserveSecurityEnvOverrides(path string, cfg Config) (Config, error) {
+	_, exposedFromEnv := lookupBoolEnvFallback("AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED")
+	_, fullAccessFromEnv := lookupBoolEnvFallback("AUTOTO_ALLOW_REMOTE_FULL_ACCESS", "CODEHARBOR_ALLOW_REMOTE_FULL_ACCESS")
+	accessModeFromEnv := firstEnv("AUTOTO_DEFAULT_REMOTE_ACCESS_MODE", "CODEHARBOR_DEFAULT_REMOTE_ACCESS_MODE") != ""
+	_, nativePickerFromEnv := lookupBoolEnvFallback("AUTOTO_ALLOW_REMOTE_NATIVE_PICKER", "CODEHARBOR_ALLOW_REMOTE_NATIVE_PICKER")
+	_, terminalFromEnv := lookupBoolEnvFallback("AUTOTO_REMOTE_TERMINAL", "CODEHARBOR_REMOTE_TERMINAL")
+	if !exposedFromEnv && !fullAccessFromEnv && !accessModeFromEnv && !nativePickerFromEnv && !terminalFromEnv {
+		return cfg, nil
+	}
+
+	data, err := os.ReadFile(path)
+	var persisted struct {
+		Security SecurityConfig `json:"security"`
+	}
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return Config{}, err
+		}
+	} else if err := json.Unmarshal(data, &persisted); err != nil {
+		return Config{}, fmt.Errorf("parse existing config before save: %w", err)
+	}
+
+	if exposedFromEnv {
+		cfg.Security.Exposed = persisted.Security.Exposed
+	}
+	if fullAccessFromEnv {
+		cfg.Security.AllowRemoteFullAccess = persisted.Security.AllowRemoteFullAccess
+	}
+	if accessModeFromEnv {
+		cfg.Security.DefaultRemoteAccessMode = persisted.Security.DefaultRemoteAccessMode
+	}
+	if nativePickerFromEnv {
+		cfg.Security.AllowRemoteNativePicker = persisted.Security.AllowRemoteNativePicker
+	}
+	if terminalFromEnv {
+		cfg.Security.AllowRemoteTerminal = persisted.Security.AllowRemoteTerminal
+	}
+	return cfg, nil
 }
 
 func writeDefaultConfig(path string, cfg Config) error {
@@ -658,11 +863,55 @@ func writeDefaultConfig(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
+	return writeConfigAtomically(path, append(data, '\n'))
+}
+
+func writeConfigAtomically(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	temporary, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	completed := false
+	defer func() {
+		if !completed {
+			_ = temporary.Close()
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+
+	if err := temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	completed = true
+
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func sanitizeConfigForDisk(cfg Config) Config {
-	cfg = normalizeConfig(cfg)
+	cfg = migrateConfig(cfg)
+	cfg.Agent = normalizeAgentConfig(cfg.Agent)
+	cfg.Security = normalizeSecurityConfig(cfg.Security)
+	cfg.Providers = normalizeProviders(cfg.Providers)
+	cfg.Backends = normalizeBackends(cfg.Backends)
 	cfg.Auth.JWTSecret = ""
 	cfg.Security.AccessPassword = ""
 	if len(cfg.Providers.Instances) > 0 {

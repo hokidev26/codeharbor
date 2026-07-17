@@ -133,6 +133,37 @@ test("agent stream applies ordered events once and snapshots on a sequence gap",
   controller.disconnect();
 });
 
+test("a failed websocket handshake probes authority and stops on 401", async () => {
+  FakeWebSocket.instances = [];
+  const timers = new FakeTimers();
+  let apiCalls = 0;
+  const controller = createAgentStreamController({
+    api: async () => {
+      apiCalls += 1;
+      if (apiCalls === 1) return snapshot("session-a", 0);
+      const error = new Error("remote session expired");
+      error.status = 401;
+      throw error;
+    },
+    webSocketURL: (path) => `ws://example.test${path}`,
+    WebSocketImpl: FakeWebSocket,
+    timers,
+    random: () => 0,
+    onError: () => {},
+  });
+
+  await controller.connect("agent-1");
+  FakeWebSocket.instances[0].serverClose();
+  timers.advance(0);
+  await settle();
+  await settle();
+
+  assert.equal(apiCalls, 2);
+  assert.equal(FakeWebSocket.instances.length, 1);
+  assert.equal(controller.currentAgentId(), "");
+  assert.equal(timers.tasks.size, 0);
+});
+
 test("short connections retain retry pressure until stable traffic", async () => {
   FakeWebSocket.instances = [];
   const timers = new FakeTimers();
@@ -193,6 +224,7 @@ test("a connection must remain healthy for ten seconds before retry pressure cle
   FakeWebSocket.instances[0].serverClose();
   assert.equal(controller.retryAttempt(), 1);
   timers.advance(50);
+  await settle();
   FakeWebSocket.instances[1].message({ type: "connected", protocol: 2, streamSession: "session-a" });
   await settle();
 

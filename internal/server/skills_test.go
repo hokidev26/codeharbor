@@ -270,7 +270,7 @@ func TestSkillsAPIStrictSizeAndJSONDecoding(t *testing.T) {
 		t.Fatalf("expected oversized body rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}{"content":"extra"}`))
+	request := newTestRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}{"content":"extra"}`))
 	request.Header.Set("Content-Type", "application/json")
 	routes.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
@@ -286,14 +286,14 @@ func TestSkillsAPIStrictSizeAndJSONDecoding(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
+	request = newTestRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
 	routes.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("expected missing Content-Type rejection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
+	request = newTestRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
 	request.Header.Set("Content-Type", "text/plain")
 	routes.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnsupportedMediaType {
@@ -301,7 +301,7 @@ func TestSkillsAPIStrictSizeAndJSONDecoding(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
+	request = newTestRequest(http.MethodPost, "/api/skills/import/preview", bytes.NewBufferString(`{"content":"safe"}`))
 	request.Header.Set("Content-Type", "application/json; charset=utf-8")
 	routes.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -332,7 +332,7 @@ func skillJSONRequest(t *testing.T, routes http.Handler, method, path string, pa
 		body = bytes.NewReader(encoded)
 	}
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(method, path, body)
+	request := newTestRequest(method, path, body)
 	request.Header.Set("Content-Type", "application/json")
 	routes.ServeHTTP(recorder, request)
 	return recorder

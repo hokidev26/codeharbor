@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 )
 
 func authenticatedProviderRequest(app *Server, method, target string, body io.Reader) *http.Request {
-	request := httptest.NewRequest(method, target, body)
+	request := newTestRequest(method, target, body)
 	request.Header.Set(localTokenHeader, app.localToken)
 	return request
 }
@@ -70,7 +71,7 @@ func TestSensitiveProviderAPIsRequireCanonicalTokenWithoutBrowserHeaders(t *test
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			newRequest := func() *http.Request {
-				request := httptest.NewRequest(test.method, test.target, strings.NewReader(test.body))
+				request := newTestRequest(test.method, test.target, strings.NewReader(test.body))
 				if test.contentType != "" {
 					request.Header.Set("Content-Type", test.contentType)
 				}
@@ -457,7 +458,7 @@ func TestGenericProviderAuthHandlerUsesURLProviderName(t *testing.T) {
 	}}}}, nil, nil, nil)
 	routeContext := chi.NewRouteContext()
 	routeContext.URLParams.Add("name", "local-codex")
-	request := httptest.NewRequest(http.MethodGet, "/api/providers/local-codex/auth-files", nil).WithContext(context.WithValue(context.Background(), chi.RouteCtxKey, routeContext))
+	request := newTestRequest(http.MethodGet, "/api/providers/local-codex/auth-files", nil).WithContext(context.WithValue(context.Background(), chi.RouteCtxKey, routeContext))
 	recorder := httptest.NewRecorder()
 	app.listProviderAuthFiles(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -648,6 +649,49 @@ func TestCLIProxyAPIManagementRejectsNonLoopbackImportBeforeCredentialsLeave(t *
 	case <-received:
 		t.Fatal("non-loopback receiver received a management request")
 	default:
+	}
+}
+
+func TestNativeCodexCredentialStoreConcurrentInitialization(t *testing.T) {
+	app := New(config.Config{Paths: config.PathsConfig{HomeDir: t.TempDir()}}, nil, nil, nil)
+	app.codexCredentialsMu.Lock()
+	app.codexCredentials = nil
+	app.codexCredentialsMu.Unlock()
+
+	const workers = 32
+	stores := make(chan any, workers)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store, err := app.nativeCodexCredentialStore()
+			if err != nil {
+				errs <- err
+				return
+			}
+			stores <- store
+		}()
+	}
+	wg.Wait()
+	close(stores)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var first any
+	for store := range stores {
+		if first == nil {
+			first = store
+			continue
+		}
+		if store != first {
+			t.Fatal("concurrent credential-store initialization returned different stores")
+		}
+	}
+	if first == nil {
+		t.Fatal("expected initialized Codex credential store")
 	}
 }
 

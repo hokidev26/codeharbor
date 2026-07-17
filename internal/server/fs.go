@@ -21,7 +21,7 @@ type fsEntry struct {
 }
 
 func (s *Server) fsBrowse(w http.ResponseWriter, r *http.Request) {
-	path, err := s.resolveFSPath(r.URL.Query().Get("path"))
+	path, err := s.resolveFSPathForRequest(r, r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -34,7 +34,7 @@ func (s *Server) fsBrowse(w http.ResponseWriter, r *http.Request) {
 	items := make([]fsEntry, 0, len(entries))
 	for _, entry := range entries {
 		childPath := filepath.Join(path, entry.Name())
-		resolvedChild, err := s.resolveFSPath(childPath)
+		resolvedChild, err := s.resolveFSPathForRequest(r, childPath)
 		if err != nil { // Do not expose metadata for symlinks outside the project boundary.
 			continue
 		}
@@ -60,10 +60,11 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 	}
 	var abs string
 	var err error
-	if s.remoteHardeningActive(r) {
-		abs, err = s.resolveFSPath(path)
+	capabilities := s.capabilitiesForRequest(r)
+	if capabilities.FilesystemScope == "project" {
+		abs, err = s.resolveFSPathForRequest(r, path)
 	} else {
-		abs, err = filepath.Abs(path)
+		abs, err = s.resolveFSPathForRequest(r, path)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -84,14 +85,14 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]fsEntry, 0, len(entries))
-	remote := s.remoteHardeningActive(r)
+	remote := capabilities.FilesystemScope == "project"
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		childPath := filepath.Join(abs, entry.Name())
 		if remote {
-			resolved, err := s.resolveFSPath(childPath)
+			resolved, err := s.resolveFSPathForRequest(r, childPath)
 			if err != nil {
 				continue
 			}
@@ -108,13 +109,13 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 	if parentDir := filepath.Dir(abs); parentDir != abs {
 		if !remote {
 			parent = parentDir
-		} else if resolvedParent, err := s.resolveFSPath(parentDir); err == nil {
+		} else if resolvedParent, err := s.resolveFSPathForRequest(r, parentDir); err == nil {
 			parent = resolvedParent
 		}
 	}
 	shortcuts := directoryShortcuts(defaultProjectDir)
 	if remote {
-		base, _ := s.resolveFSPath("")
+		base, _ := s.resolveFSPathForRequest(r, "")
 		shortcuts = []fsDirectoryShortcut{{Name: "Projects", Path: base}}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -127,8 +128,9 @@ func (s *Server) fsDirectories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
-	if s.remoteHardeningActive(r) {
-		writeError(w, http.StatusForbidden, "native directory selection is unavailable for remote requests")
+	capabilities := s.capabilitiesForRequest(r)
+	if s.remoteAccessGateRequired(r) && !capabilities.NativePickerAllowed {
+		writeError(w, http.StatusForbidden, "native directory selection requires a full remote session and policy approval")
 		return
 	}
 	if runtime.GOOS != "darwin" {
@@ -225,7 +227,7 @@ func directoryShortcuts(defaultProjectDir string) []fsDirectoryShortcut {
 }
 
 func (s *Server) fsPreview(w http.ResponseWriter, r *http.Request) {
-	path, err := s.resolveFSPath(r.URL.Query().Get("path"))
+	path, err := s.resolveFSPathForRequest(r, r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -268,7 +270,7 @@ func (s *Server) fsMkdir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.resolveFSPath(req.Path)
+	path, err := s.resolveFSPathForRequest(r, req.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -297,7 +299,7 @@ func (s *Server) resolveFSPath(input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	baseReal, err := filepath.EvalSymlinks(baseAbs)
+	baseReal, err := resolvePhysicalFSPath(baseAbs)
 	if err != nil {
 		return "", err
 	}

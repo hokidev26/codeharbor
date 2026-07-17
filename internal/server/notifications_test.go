@@ -47,7 +47,7 @@ func TestNotificationSettingsAPIAndTestWebhook(t *testing.T) {
 	putJSON(t, routes, http.MethodPut, "/api/notifications/settings", notificationSettingsPayload{Enabled: true, WebhookURL: webhook.URL, NotifyOnApproval: true, NotifyOnDone: true, NotifyOnError: true}, http.StatusOK)
 
 	recorder := httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/notifications/settings", nil))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/notifications/settings", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected settings 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -60,7 +60,7 @@ func TestNotificationSettingsAPIAndTestWebhook(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	routes.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/notifications/test", nil))
+	routes.ServeHTTP(recorder, newTestRequest(http.MethodPost, "/api/notifications/test", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected test 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -147,7 +147,7 @@ func putJSON(t *testing.T, handler http.Handler, method, path string, payload an
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(method, path, stringsReader(body))
+	request := newTestRequest(method, path, stringsReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)

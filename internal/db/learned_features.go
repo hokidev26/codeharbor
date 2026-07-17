@@ -31,6 +31,16 @@ type SpecBoard struct {
 	Confirmations []GoalConfirmation `json:"goalConfirmations"`
 }
 
+// SpecReminderSnapshot is a bounded, read-only projection for runtime Agent
+// reminders. It intentionally omits task IDs, source metadata, timestamps, and
+// confirmations so the reminder cannot become a mutation or audit surface.
+type SpecReminderSnapshot struct {
+	AgentID  string
+	Revision int64
+	Tasks    []SpecTask
+	Omitted  int
+}
+
 type SpecTask struct {
 	ID         string `json:"id"`
 	AgentID    string `json:"agentId"`
@@ -406,6 +416,68 @@ func (s *Store) GetSpecBoard(ctx context.Context, agentID string) (SpecBoard, er
 		return SpecBoard{}, err
 	}
 	return board, nil
+}
+
+// ReadSpecReminderSnapshot returns active tasks only and never mutates the Spec
+// board. The caller controls the bounded task count; Omitted reports how many
+// additional active tasks were not returned.
+func (s *Store) ReadSpecReminderSnapshot(ctx context.Context, agentID string, limit int) (SpecReminderSnapshot, error) {
+	agentID = strings.TrimSpace(agentID)
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > SpecTaskMaxCount {
+		limit = SpecTaskMaxCount
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return SpecReminderSnapshot{}, err
+	}
+	defer tx.Rollback()
+
+	snapshot := SpecReminderSnapshot{AgentID: agentID}
+	if err := tx.QueryRowContext(ctx, `SELECT revision FROM spec_boards WHERE agent_id = ?`, agentID).Scan(&snapshot.Revision); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return SpecReminderSnapshot{}, err
+		}
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ?`, agentID).Scan(&exists); err != nil {
+			return SpecReminderSnapshot{}, err
+		}
+	}
+
+	var activeCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM spec_tasks WHERE agent_id = ? AND status IN ('todo','doing','blocked')`, agentID).Scan(&activeCount); err != nil {
+		return SpecReminderSnapshot{}, err
+	}
+	if limit > 0 && activeCount > 0 {
+		rows, err := tx.QueryContext(ctx, `SELECT id, agent_id, text, status, protected, position, revision, source_type, COALESCE(source_id,''), created_at, updated_at FROM spec_tasks WHERE agent_id = ? AND status IN ('todo','doing','blocked') ORDER BY position ASC, id ASC LIMIT ?`, agentID, limit)
+		if err != nil {
+			return SpecReminderSnapshot{}, err
+		}
+		for rows.Next() {
+			var task SpecTask
+			var protected int
+			if err := rows.Scan(&task.ID, &task.AgentID, &task.Text, &task.Status, &protected, &task.Position, &task.Revision, &task.SourceType, &task.SourceID, &task.CreatedAt, &task.UpdatedAt); err != nil {
+				rows.Close()
+				return SpecReminderSnapshot{}, err
+			}
+			task.Protected = protected != 0
+			snapshot.Tasks = append(snapshot.Tasks, task)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return SpecReminderSnapshot{}, err
+		}
+		if err := rows.Close(); err != nil {
+			return SpecReminderSnapshot{}, err
+		}
+	}
+	snapshot.Omitted = activeCount - len(snapshot.Tasks)
+	if err := tx.Commit(); err != nil {
+		return SpecReminderSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func readSpecBoardTx(ctx context.Context, tx *sql.Tx, agentID string) (SpecBoard, error) {

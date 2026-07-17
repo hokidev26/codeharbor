@@ -82,6 +82,11 @@ function notModifiedResponse(value) {
     || Number(value?.statusCode) === 304;
 }
 
+function authorizationFailure(value) {
+  const status = Number(value?.status ?? value?.statusCode);
+  return status === 401 || status === 403;
+}
+
 function streamStatePayload(value) {
   if (!value || typeof value !== "object") return {};
   if (value.changed && typeof value.changed === "object") return value.changed;
@@ -289,6 +294,10 @@ export function createAgentStreamController({
         openSocket(expectedEpoch);
         return snapshot;
       } catch (error) {
+        if (authorizationFailure(error)) {
+          if (current(expectedEpoch, expectedAgentId)) disconnect();
+          throw error;
+        }
         if (current(expectedEpoch, expectedAgentId)) {
           status("offline", { reason, error: error?.message || String(error) });
           scheduleReconnect(expectedEpoch, { snapshot: true, reason });
@@ -311,7 +320,7 @@ export function createAgentStreamController({
     Promise.resolve(recoverFromSnapshot(expectedEpoch, reason)).catch((error) => onError?.(error));
   }
 
-  async function processMessage(raw, expectedEpoch, expectedSocket) {
+  async function processMessage(raw, expectedEpoch, expectedSocket, onConnected) {
     if (!current(expectedEpoch) || socket !== expectedSocket) return;
     let frame;
     try {
@@ -329,6 +338,7 @@ export function createAgentStreamController({
         requestSnapshot(expectedEpoch, "session_mismatch");
         return;
       }
+      onConnected?.();
       status("connected", { resume: frame.resume || "live", stable: false });
       armStableConnection(expectedEpoch, expectedSocket);
       return;
@@ -376,10 +386,11 @@ export function createAgentStreamController({
       throw error;
     }
     socket = nextSocket;
+    let handshakeComplete = false;
     let messageQueue = Promise.resolve();
     nextSocket.onmessage = (message) => {
       messageQueue = messageQueue
-        .then(() => processMessage(message.data, expectedEpoch, nextSocket))
+        .then(() => processMessage(message.data, expectedEpoch, nextSocket, () => { handshakeComplete = true; }))
         .catch((error) => {
           onError?.(error);
           requestSnapshot(expectedEpoch, "message_processing_failed");
@@ -392,7 +403,9 @@ export function createAgentStreamController({
       if (!current(expectedEpoch) || socket !== nextSocket) return;
       clearStableTimer();
       socket = null;
-      scheduleReconnect(expectedEpoch);
+      scheduleReconnect(expectedEpoch, handshakeComplete
+        ? { reason: "connection_closed" }
+        : { snapshot: true, reason: "handshake_closed" });
     };
     return nextSocket;
   }
@@ -450,6 +463,10 @@ export function createAgentStreamController({
           if (notModifiedResponse(error)) {
             response = { notModified: true };
           } else {
+            if (authorizationFailure(error)) {
+              if (current(expectedEpoch, expectedAgentId)) disconnect();
+              throw error;
+            }
             if (!current(expectedEpoch, expectedAgentId)) return null;
             if (!online()) {
               pauseForOffline(expectedEpoch);

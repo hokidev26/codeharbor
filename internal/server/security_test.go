@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"nhooyr.io/websocket"
 
 	agentpkg "autoto/internal/agent"
@@ -19,6 +20,14 @@ import (
 	"autoto/internal/config"
 	"autoto/internal/db"
 )
+
+type requestLogCapture struct {
+	messages []string
+}
+
+func (c *requestLogCapture) Print(values ...interface{}) {
+	c.messages = append(c.messages, fmt.Sprint(values...))
+}
 
 type legacyWarningCapture struct {
 	mu     sync.Mutex
@@ -50,6 +59,7 @@ func TestSensitiveProviderRoutesAlwaysRequireCanonicalLocalToken(t *testing.T) {
 		path   string
 	}{
 		{http.MethodGet, "/api/providers/oauth/codex/accounts"},
+		{http.MethodGet, "/api/providers/oauth/codex/accounts/codex_fixture/export"},
 		{http.MethodPatch, "/api/providers/oauth/codex/accounts/codex_fixture"},
 		{http.MethodPost, "/api/providers/oauth/codex/accounts/codex_fixture/refresh"},
 		{http.MethodDelete, "/api/providers/oauth/codex/accounts/codex_fixture"},
@@ -64,11 +74,11 @@ func TestSensitiveProviderRoutesAlwaysRequireCanonicalLocalToken(t *testing.T) {
 	for _, route := range routes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			missing := httptest.NewRecorder()
-			app.Routes().ServeHTTP(missing, httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`)))
+			app.Routes().ServeHTTP(missing, newTestRequest(route.method, route.path, strings.NewReader(`{}`)))
 			if missing.Code != http.StatusUnauthorized {
 				t.Fatalf("expected 401 without canonical token, got %d: %s", missing.Code, missing.Body.String())
 			}
-			legacy := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
+			legacy := newTestRequest(route.method, route.path, strings.NewReader(`{}`))
 			legacy.Header.Set(legacyLocalTokenHeader, app.localToken)
 			legacyRecorder := httptest.NewRecorder()
 			app.Routes().ServeHTTP(legacyRecorder, legacy)
@@ -78,16 +88,31 @@ func TestSensitiveProviderRoutesAlwaysRequireCanonicalLocalToken(t *testing.T) {
 		})
 	}
 	health := httptest.NewRecorder()
-	app.Routes().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	app.Routes().ServeHTTP(health, newTestRequest(http.MethodGet, "/api/health", nil))
 	if health.Code != http.StatusOK {
 		t.Fatalf("health route should remain available without token, got %d", health.Code)
+	}
+}
+
+func TestRequestLoggerRedactsLocalTokenQuery(t *testing.T) {
+	capture := &requestLogCapture{}
+	formatter := &redactingLogFormatter{delegate: &middleware.DefaultLogFormatter{Logger: capture, NoColor: true}}
+	request := newTestRequest(http.MethodGet, "/ws/agent?id=agent-1&token=local-secret-token", nil)
+	entry := formatter.NewLogEntry(request)
+	entry.Write(http.StatusUnauthorized, 0, http.Header{}, time.Millisecond, nil)
+	output := strings.Join(capture.messages, "\n")
+	if strings.Contains(output, "local-secret-token") {
+		t.Fatalf("request log leaked the local token: %s", output)
+	}
+	if !strings.Contains(output, "token=%5BREDACTED%5D") || !strings.Contains(output, "id=agent-1") {
+		t.Fatalf("request log did not preserve a redacted URL: %s", output)
 	}
 }
 
 func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
 	request.Header.Set("Origin", "http://evil.test")
 
@@ -101,7 +126,7 @@ func TestLocalRequestGuardRejectsCrossOriginAPI(t *testing.T) {
 func TestLocalRequestGuardRejectsFetchSiteCrossSiteWithoutOrigin(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
 	request.Header.Set("Sec-Fetch-Site", "cross-site")
 
@@ -116,7 +141,7 @@ func TestLocalRequestGuardRequiresTokenForFetchSiteBrowserAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 
 	missing := httptest.NewRecorder()
-	missingReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	missingReq := newTestRequest(http.MethodGet, "/api/health", nil)
 	missingReq.Host = "localhost:7788"
 	missingReq.Header.Set("Sec-Fetch-Site", "same-origin")
 	app.Routes().ServeHTTP(missing, missingReq)
@@ -125,7 +150,7 @@ func TestLocalRequestGuardRequiresTokenForFetchSiteBrowserAPI(t *testing.T) {
 	}
 
 	ok := httptest.NewRecorder()
-	okReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	okReq := newTestRequest(http.MethodGet, "/api/health", nil)
 	okReq.Host = "localhost:7788"
 	okReq.Header.Set("Sec-Fetch-Site", "same-origin")
 	okReq.Header.Set(localTokenHeader, app.localToken)
@@ -139,7 +164,7 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 
 	missing := httptest.NewRecorder()
-	missingReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	missingReq := newTestRequest(http.MethodGet, "/api/health", nil)
 	missingReq.Header.Set("Origin", "http://localhost:7788")
 	missingReq.Host = "localhost:7788"
 	app.Routes().ServeHTTP(missing, missingReq)
@@ -148,7 +173,7 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 	}
 
 	ok := httptest.NewRecorder()
-	okReq := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	okReq := newTestRequest(http.MethodGet, "/api/health", nil)
 	okReq.Header.Set("Origin", "http://localhost:7788")
 	okReq.Header.Set(localTokenHeader, app.localToken)
 	okReq.Host = "localhost:7788"
@@ -161,7 +186,7 @@ func TestLocalRequestGuardRequiresTokenForBrowserAPI(t *testing.T) {
 func TestLocalRequestGuardAcceptsLegacyTokenHeader(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
 	request.Header.Set("Origin", "http://localhost:7788")
 	request.Header.Set(legacyLocalTokenHeader, app.localToken)
@@ -174,7 +199,7 @@ func TestLocalRequestGuardAcceptsLegacyTokenHeader(t *testing.T) {
 func TestLocalRequestGuardCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
 	request.Header.Set("Origin", "http://localhost:7788")
 	request.Header.Set(localTokenHeader, "wrong-token")
@@ -188,7 +213,7 @@ func TestLocalRequestGuardCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
 func TestLegacyLocalTokenWarningOnceCanonicalPriorityAndNoSecret(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	capture := captureLegacyWarnings(app)
-	legacyRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyRequest := newTestRequest(http.MethodGet, "/api/health", nil)
 	legacyRequest.Header.Set(legacyLocalTokenHeader, app.localToken)
 	if !app.validHeaderToken(legacyRequest) || !app.validHeaderToken(legacyRequest) {
 		t.Fatal("expected valid legacy local token")
@@ -203,7 +228,7 @@ func TestLegacyLocalTokenWarningOnceCanonicalPriorityAndNoSecret(t *testing.T) {
 
 	canonicalApp := New(config.Config{}, nil, nil, nil)
 	canonicalCapture := captureLegacyWarnings(canonicalApp)
-	canonicalRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	canonicalRequest := newTestRequest(http.MethodGet, "/api/health", nil)
 	canonicalRequest.Header.Set(localTokenHeader, canonicalApp.localToken)
 	canonicalRequest.Header.Set(legacyLocalTokenHeader, canonicalApp.localToken)
 	if !canonicalApp.validHeaderToken(canonicalRequest) {
@@ -215,7 +240,7 @@ func TestLegacyLocalTokenWarningOnceCanonicalPriorityAndNoSecret(t *testing.T) {
 
 	invalidApp := New(config.Config{}, nil, nil, nil)
 	invalidCapture := captureLegacyWarnings(invalidApp)
-	invalidRequest := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	invalidRequest := newTestRequest(http.MethodGet, "/api/health", nil)
 	invalidRequest.Header.Set(legacyLocalTokenHeader, "invalid-secret")
 	if invalidApp.validHeaderToken(invalidRequest) {
 		t.Fatal("expected invalid legacy local token to fail")
@@ -234,7 +259,7 @@ func TestLegacyLocalTokenWarningConcurrentOnce(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
-			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			request := newTestRequest(http.MethodGet, "/api/health", nil)
 			request.Header.Set(legacyLocalTokenHeader, app.localToken)
 			if !app.validHeaderToken(request) {
 				panic("valid legacy local token rejected")
@@ -250,7 +275,7 @@ func TestLegacyLocalTokenWarningConcurrentOnce(t *testing.T) {
 func TestLocalRequestGuardAllowsNonBrowserLocalAPI(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -263,7 +288,7 @@ func TestLocalRequestGuardAllowsNonBrowserLocalAPI(t *testing.T) {
 func TestIndexInjectsLocalToken(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request := newTestRequest(http.MethodGet, "/", nil)
 	request.Host = "localhost:7788"
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -278,6 +303,217 @@ func TestIndexInjectsLocalToken(t *testing.T) {
 	cookies := recorder.Result().Cookies()
 	if len(cookies) == 0 || cookies[0].Name != localTokenCookieName {
 		t.Fatalf("expected canonical local token cookie, got %+v", cookies)
+	}
+}
+
+func TestExposedLoopbackRemainsLocalButRemotePeerCannotSpoofHost(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, nil, nil, nil)
+
+	local := newTestRequest(http.MethodGet, "/", nil)
+	local.Host = "localhost:7788"
+	local.RemoteAddr = "127.0.0.1:4567"
+	if app.remoteAccessGateRequired(local) {
+		t.Fatal("a true loopback request must retain the local administrator boundary")
+	}
+	localRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(localRecorder, local)
+	if localRecorder.Code != http.StatusOK || !strings.Contains(localRecorder.Body.String(), app.localToken) {
+		t.Fatalf("loopback administrator page did not receive the canonical local token: %d", localRecorder.Code)
+	}
+
+	spoofed := newTestRequest(http.MethodGet, "/", nil)
+	spoofed.Host = "localhost:7788"
+	spoofed.RemoteAddr = "203.0.113.90:4567"
+	if !app.remoteAccessGateRequired(spoofed) {
+		t.Fatal("a remote peer must not bypass authentication with Host: localhost")
+	}
+
+	forwarded := newTestRequest(http.MethodGet, "/", nil)
+	forwarded.Host = "localhost:7788"
+	forwarded.RemoteAddr = "127.0.0.1:4567"
+	forwarded.Header.Set("CF-Connecting-IP", "203.0.113.91")
+	if !app.remoteAccessGateRequired(forwarded) {
+		t.Fatal("a tunneled request with a remote forwarding identity must stay remote")
+	}
+}
+
+func TestLoopbackForwardingMetadataCannotFallBackToLocalAuthority(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	tests := []struct {
+		name    string
+		headers http.Header
+	}{
+		{
+			name:    "forwarded scheme alone marks a proxy boundary",
+			headers: http.Header{"X-Forwarded-Proto": []string{"https"}},
+		},
+		{
+			name: "remote host on a later header line remains remote",
+			headers: http.Header{
+				"X-Forwarded-Proto": []string{"https"},
+				"X-Forwarded-Host":  []string{"localhost:7788", "demo.trycloudflare.com"},
+			},
+		},
+		{
+			name: "remote forwarded hop on a later header line remains remote",
+			headers: http.Header{
+				"Forwarded": []string{
+					`for=127.0.0.1;host="localhost:7788";proto=https`,
+					`for=203.0.113.88;host="demo.trycloudflare.com";proto=https`,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := newTestRequest(http.MethodGet, "/api/health", nil)
+			request.Host = "localhost:7788"
+			request.RemoteAddr = "127.0.0.1:4321"
+			request.Header = tt.headers.Clone()
+			if !app.remoteAccessGateRequired(request) {
+				t.Fatal("loopback proxy metadata must not retain local administrator authority")
+			}
+			recorder := httptest.NewRecorder()
+			app.Routes().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("uncredentialed loopback proxy request got %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestDirectRemoteAbsoluteHTTPSURLDoesNotSpoofTLS(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
+	request.Host = "remote.example.test"
+	request.RemoteAddr = "203.0.113.89:4321"
+	request.URL.Scheme = "https"
+	request.URL.Host = request.Host
+	request.TLS = nil
+
+	if requestIsHTTPS(request) {
+		t.Fatal("an absolute-form https URL over plaintext must not count as transport TLS")
+	}
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("plaintext absolute-form remote request got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestForwardedProxyHeadersRequireLoopbackPeerAndPreserveCloudflareHTTPS(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+
+	for _, header := range []string{"X-Real-IP", "True-Client-IP"} {
+		t.Run("loopback proxy "+header, func(t *testing.T) {
+			request := newTestRequest(http.MethodGet, "/", nil)
+			request.Host = "localhost:7788"
+			request.RemoteAddr = "127.0.0.1:4321"
+			request.Header.Set(header, "203.0.113.91")
+			if !app.remoteAccessGateRequired(request) {
+				t.Fatalf("%s from a loopback proxy must classify request as remote", header)
+			}
+		})
+	}
+
+	for _, header := range []string{"X-Forwarded-Host", "Forwarded", "X-Real-IP", "True-Client-IP", "X-Forwarded-Proto"} {
+		t.Run("direct remote ignores "+header, func(t *testing.T) {
+			request := newTestRequest(http.MethodGet, "/api/health", nil)
+			request.Host = "localhost:7788"
+			request.RemoteAddr = "203.0.113.92:4321"
+			switch header {
+			case "Forwarded":
+				request.Header.Set(header, `for=127.0.0.1;host=localhost:7788;proto=https`)
+			case "X-Forwarded-Host":
+				request.Header.Set(header, "localhost:7788")
+			case "X-Forwarded-Proto":
+				request.Header.Set(header, "https")
+			default:
+				request.Header.Set(header, "127.0.0.1")
+			}
+			if !app.remoteAccessGateRequired(request) {
+				t.Fatalf("direct remote peer must remain remote despite forged %s", header)
+			}
+			recorder := httptest.NewRecorder()
+			app.Routes().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("direct plaintext remote request with forged %s got %d: %s", header, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	cloudflare := newTestRequest(http.MethodGet, "/api/health", nil)
+	cloudflare.Host = "localhost:7788"
+	cloudflare.RemoteAddr = "127.0.0.1:4321"
+	cloudflare.Header.Set("CF-Connecting-IP", "203.0.113.93")
+	cloudflare.Header.Set("X-Forwarded-Host", "demo.trycloudflare.com")
+	cloudflare.Header.Set("X-Forwarded-Proto", "https")
+	cloudflare.Header.Set("Origin", "https://demo.trycloudflare.com")
+	cloudflare.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, cloudflare)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("trusted loopback Cloudflare HTTPS request got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteLoginAndLogoutRejectCrossSiteForms(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	login := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret"))
+	login.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(login)
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	login.Header.Set("Origin", "https://evil.example")
+	loginRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-site login form got %d: %s", loginRecorder.Code, loginRecorder.Body.String())
+	}
+
+	logout := newTestRequest(http.MethodPost, remoteAccessLogoutPath, nil)
+	logout.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(logout)
+	logout.Header.Set("Origin", "https://evil.example")
+	logoutRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(logoutRecorder, logout)
+	if logoutRecorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-site logout form got %d: %s", logoutRecorder.Code, logoutRecorder.Body.String())
+	}
+}
+
+func TestSameOriginAcceptsBrowserSignalAndRootPath(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	rootPath := newTestRequest(http.MethodPost, remoteAccessPath, nil)
+	rootPath.Header.Set("Origin", "http://localhost:7788/")
+	if !app.sameOriginRequest(rootPath) {
+		t.Fatal("an Origin root path must be treated as the same serialized origin")
+	}
+
+	browserSignal := newTestRequest(http.MethodPost, remoteAccessPath, nil)
+	browserSignal.Header.Set("Origin", "null")
+	browserSignal.Header.Set("Sec-Fetch-Site", "same-origin")
+	if !app.sameOriginRequest(browserSignal) {
+		t.Fatal("a browser-controlled same-origin signal must permit privacy-preserving Origin serialization")
+	}
+
+	crossSite := newTestRequest(http.MethodPost, remoteAccessPath, nil)
+	crossSite.Header.Set("Origin", "http://localhost:7788")
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	if app.sameOriginRequest(crossSite) {
+		t.Fatal("cross-site fetch metadata must override an otherwise matching Origin")
+	}
+}
+
+func TestSameOriginRequiresExactSchemeHostAndPort(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	for _, origin := range []string{"https://localhost:7788", "http://localhost", "http://localhost:7789", "http://localhost:7788/not-an-origin"} {
+		request := newTestRequest(http.MethodGet, "/api/health", nil)
+		request.Host = "localhost:7788"
+		request.Header.Set("Origin", origin)
+		if app.sameOriginRequest(request) {
+			t.Fatalf("origin %q must not match http://localhost:7788", origin)
+		}
 	}
 }
 
@@ -302,8 +538,9 @@ func TestWebSocketRejectsBadOriginAndMissingToken(t *testing.T) {
 func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request := newTestRequest(http.MethodGet, "/", nil)
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	request.Header.Set("Accept", "text/html")
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -318,9 +555,35 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	if !strings.Contains(body, "Autoto 远程访问保护") || strings.Contains(body, "NarraFork") {
 		t.Fatalf("expected Autoto remote access branding, got %s", body)
 	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := recorder.Header().Get(header); !strings.Contains(got, want) {
+			t.Fatalf("expected %s to contain %q, got %q", header, want, got)
+		}
+	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+	} {
+		if recorder.Header().Get(header) != want {
+			t.Fatalf("expected login security header %s=%q, got %q", header, want, recorder.Header().Get(header))
+		}
+	}
 	for _, fragment := range []string{
 		`color-scheme: light`,
+		`<label class="password-label" for="remoteAccessPassword">访问密码</label>`,
+		`.password-label {`,
 		`--page:#f4f6fb`,
+		`--radius:8px`,
+		`--radius-xl:calc(var(--radius) * 1.4)`,
+		`border-radius: var(--radius-xl)`,
+		`border-radius: var(--radius-lg)`,
 		`class="remote-access-shell remote-access-card"`,
 		`class="card-content"`,
 		`.remote-access-card { position: relative; z-index: 1; width: min(100%, 488px)`,
@@ -328,11 +591,43 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 		`form method="post" action="/auth/remote-access"`,
 		`id="remoteAccessPassword" name="password"`,
 		`autocomplete="current-password"`,
+		`aria-label="访问密码"`,
+		`<label class="password-label" for="remoteAccessPassword">访问密码</label>`,
+		`<circle cx="16" cy="16" r="12.5"></circle>`,
+		`@keyframes connection-bounce`,
+		`animation: connection-bounce 1.15s`,
+		`gap: 5px`,
+		`@media (prefers-reduced-motion: reduce)`,
 		`@media (max-width: 520px)`,
-		`bypassPermissions 自动禁用`,
+		`body { justify-content: center; padding: max(16px, env(safe-area-inset-top))`,
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected redesigned responsive login page fragment %q, got %s", fragment, body)
+		}
+	}
+	for _, removed := range []string{
+		`当前请求来自非可信 localhost`,
+		`密码只用于验证当前浏览器的远程会话`,
+		`class="remote-policy"`,
+		`运行主机已设为受限权限`,
+		`最高 acceptEdits`,
+		`通过 localhost 打开设置`,
+		`class="page-footer"`,
+		`本机 localhost 访问不受影响`,
+		`aria-describedby="passwordHint"`,
+		`class="field-hint"`,
+		`<label for="remoteAccessPassword">`,
+		`class="protection-pill"`,
+		`>远程访问保护</span>`,
+		`name="mode"`,
+		`class="access-mode"`,
+		`选择本次会话权限`,
+		`border-radius: 26px`,
+		`border-radius: 22px`,
+		`border-radius: 15px`,
+	} {
+		if strings.Contains(body, removed) {
+			t.Fatalf("expected compact login page to remove %q, got %s", removed, body)
 		}
 	}
 	if strings.Contains(body, "<script") || strings.Contains(body, "window.CODEHARBOR_LOCAL_TOKEN=") {
@@ -340,12 +635,186 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	}
 }
 
+func TestRemoteAccessLoginPageOmitsHostConfiguredModeAndSelector(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          "secret",
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeFull,
+	}}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodGet, remoteAccessPath, nil)
+	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
+	request.Header.Set("Accept", "text/html")
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected login form, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, forbidden := range []string{
+		`运行主机已设为完整权限`,
+		`登录后可访问主机目录、终端与 bypassPermissions`,
+		`只能在运行 Autoto 的主机本地更改`,
+		`class="remote-policy"`,
+		`class="page-footer"`,
+		`name="mode"`,
+		`<fieldset class="access-mode"`,
+		`选择本次会话权限`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("remote login form must omit %q", forbidden)
+		}
+	}
+	if strings.Contains(body, app.localToken) || strings.Contains(body, "window.AUTOTO_LOCAL_TOKEN") {
+		t.Fatal("remote login form must not expose the canonical local token")
+	}
+}
+
+func TestRemoteAccessLoginPageRejectsPlainRemoteHTTP(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	request := newTestRequest(http.MethodGet, remoteAccessPath, nil)
+	request.Host = "demo.trycloudflare.com"
+	markRemotePlainHTTP(request)
+	request.Header.Set("Accept", "text/html")
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "HTTPS") {
+		t.Fatalf("expected remote login page HTTP rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLoginIgnoresClientModeAndUsesHostPolicy(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          "secret",
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeFull,
+	}}, nil, nil, nil)
+	login := httptest.NewRecorder()
+	loginRequest := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret&mode=restricted"))
+	loginRequest.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(loginRequest)
+	loginRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %d: %s", login.Code, login.Body.String())
+	}
+
+	settingsRequest := newTestRequest(http.MethodGet, "/api/security/remote-access", nil)
+	settingsRequest.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(settingsRequest)
+	for _, cookie := range login.Result().Cookies() {
+		settingsRequest.AddCookie(cookie)
+	}
+	settings := httptest.NewRecorder()
+	app.Routes().ServeHTTP(settings, settingsRequest)
+	if settings.Code != http.StatusOK || !strings.Contains(settings.Body.String(), `"mode":"full"`) {
+		t.Fatalf("host-configured full mode must ignore the client request, got %d: %s", settings.Code, settings.Body.String())
+	}
+}
+
+func TestAuthenticatedRemoteIndexDoesNotExposeCanonicalLocalToken(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          "secret",
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeRestricted,
+	}}, nil, nil, nil)
+	login := httptest.NewRecorder()
+	loginRequest := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret&mode=restricted"))
+	loginRequest.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(loginRequest)
+	loginRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %d: %s", login.Code, login.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodGet, "/", nil)
+	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
+	for _, cookie := range login.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected authenticated remote index, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, app.localToken) || strings.Contains(body, "window.AUTOTO_LOCAL_TOKEN=") || strings.Contains(body, "window.CODEHARBOR_LOCAL_TOKEN=") {
+		t.Fatal("authenticated remote index must not expose the canonical local token")
+	}
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == localTokenCookieName {
+			t.Fatal("authenticated remote index must not set the canonical local token cookie")
+		}
+	}
+}
+
+func TestRemoteAccessLoginRejectsCrossOriginAndPlainHTTP(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+
+	crossOrigin := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret"))
+	crossOrigin.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(crossOrigin)
+	crossOrigin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossOrigin.Header.Set("Origin", "https://evil.test")
+	crossOrigin.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossOriginRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(crossOriginRecorder, crossOrigin)
+	if crossOriginRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-origin login rejection, got %d: %s", crossOriginRecorder.Code, crossOriginRecorder.Body.String())
+	}
+
+	plainHTTP := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret"))
+	plainHTTP.Host = "demo.trycloudflare.com"
+	markRemotePlainHTTP(plainHTTP)
+	plainHTTP.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	plainHTTP.Header.Set("Origin", "http://demo.trycloudflare.com")
+	plainRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(plainRecorder, plainHTTP)
+	if plainRecorder.Code != http.StatusForbidden || !strings.Contains(plainRecorder.Body.String(), "HTTPS") {
+		t.Fatalf("expected explicit remote HTTP rejection, got %d: %s", plainRecorder.Code, plainRecorder.Body.String())
+	}
+
+	https := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=secret"))
+	https.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(https)
+	https.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	https.Header.Set("Origin", "https://demo.trycloudflare.com")
+	httpsRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(httpsRecorder, https)
+	if httpsRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("expected HTTPS login to pass, got %d: %s", httpsRecorder.Code, httpsRecorder.Body.String())
+	}
+	for _, cookie := range httpsRecorder.Result().Cookies() {
+		if cookie.Name == remoteAccessCookieName && !cookie.Secure {
+			t.Fatal("HTTPS remote login must issue a Secure cookie")
+		}
+	}
+}
+
+func TestRemoteAccessLogoutRejectsCrossOrigin(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	request := newTestRequest(http.MethodPost, remoteAccessLogoutPath, nil)
+	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
+	request.Header.Set("Origin", "https://evil.test")
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-origin logout rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestRemoteAccessGateAllowsRemoteRequestAfterPasswordLogin(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 
 	login := httptest.NewRecorder()
-	loginReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	loginReq := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
 	loginReq.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(loginReq)
 	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	app.Routes().ServeHTTP(login, loginReq)
 	if login.Code != http.StatusSeeOther {
@@ -357,10 +826,11 @@ func TestRemoteAccessGateAllowsRemoteRequestAfterPasswordLogin(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "demo.trycloudflare.com"
-	request.Header.Set("Origin", "http://demo.trycloudflare.com")
-	request.Header.Set(localTokenHeader, app.localToken)
+	markRemoteHTTPS(request)
+	request.Header.Set("Origin", "https://demo.trycloudflare.com")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	for _, cookie := range cookies {
 		request.AddCookie(cookie)
 	}
@@ -372,6 +842,10 @@ func TestRemoteAccessGateAllowsRemoteRequestAfterPasswordLogin(t *testing.T) {
 
 func TestRemoteAccessGateAcceptsCanonicalAndLegacyHeadersAndCookie(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	legacyToken, _, err := app.newRemoteAccessSession(remoteAccessModeRestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name   string
 		header string
@@ -380,13 +854,14 @@ func TestRemoteAccessGateAcceptsCanonicalAndLegacyHeadersAndCookie(t *testing.T)
 	}{
 		{name: "canonical header", header: remoteAccessHeader, value: "secret"},
 		{name: "legacy header", header: legacyRemoteAccessHeader, value: "secret"},
-		{name: "legacy cookie", cookie: legacyRemoteAccessCookieName, value: app.remoteAccessToken},
+		{name: "legacy cookie", cookie: legacyRemoteAccessCookieName, value: legacyToken},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			request := newTestRequest(http.MethodGet, "/api/health", nil)
 			request.Host = "demo.trycloudflare.com"
+			markRemoteHTTPS(request)
 			if tt.header != "" {
 				request.Header.Set(tt.header, tt.value)
 			}
@@ -403,7 +878,7 @@ func TestRemoteAccessGateAcceptsCanonicalAndLegacyHeadersAndCookie(t *testing.T)
 
 func TestRemoteAccessGateCanonicalHeaderTakesPriorityOverLegacy(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Header.Set(remoteAccessHeader, "wrong-secret")
 	request.Header.Set(legacyRemoteAccessHeader, "secret")
 	if app.validRemoteAccess(request) {
@@ -415,13 +890,17 @@ func TestLegacyRemoteAccessWarningsAreSuccessfulKeyedAndLogoutSilent(t *testing.
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
 	capture := captureLegacyWarnings(app)
 
-	legacyHeader := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyHeader := newTestRequest(http.MethodGet, "/api/health", nil)
 	legacyHeader.Header.Set(legacyRemoteAccessHeader, "remote-secret")
 	if !app.validRemoteAccess(legacyHeader) || !app.validRemoteAccess(legacyHeader) {
 		t.Fatal("expected valid legacy remote access header")
 	}
-	legacyCookie := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-	legacyCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: app.remoteAccessToken})
+	legacyToken, _, err := app.newRemoteAccessSession(remoteAccessModeRestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyCookie := newTestRequest(http.MethodGet, "/api/health", nil)
+	legacyCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: legacyToken})
 	if !app.validRemoteAccess(legacyCookie) || !app.validRemoteAccess(legacyCookie) {
 		t.Fatal("expected valid legacy remote access cookie")
 	}
@@ -430,15 +909,19 @@ func TestLegacyRemoteAccessWarningsAreSuccessfulKeyedAndLogoutSilent(t *testing.
 		t.Fatalf("expected one warning per legacy credential, got %+v", usages)
 	}
 	serialized := fmt.Sprint(usages)
-	if strings.Contains(serialized, "remote-secret") || strings.Contains(serialized, app.remoteAccessToken) {
+	if strings.Contains(serialized, "remote-secret") || strings.Contains(serialized, legacyToken) {
 		t.Fatalf("legacy warnings leaked credentials: %+v", usages)
 	}
 
 	logoutApp := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
 	logoutCapture := captureLegacyWarnings(logoutApp)
-	logoutRequest := httptest.NewRequest(http.MethodPost, remoteAccessLogoutPath, nil)
+	logoutToken, _, err := logoutApp.newRemoteAccessSession(remoteAccessModeRestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutRequest := newTestRequest(http.MethodPost, remoteAccessLogoutPath, nil)
 	logoutRequest.Header.Set("Accept", "application/json")
-	logoutRequest.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: logoutApp.remoteAccessToken})
+	logoutRequest.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: logoutToken})
 	logoutRecorder := httptest.NewRecorder()
 	logoutApp.handleRemoteAccessLogout(logoutRecorder, logoutRequest)
 	if logoutRecorder.Code != http.StatusOK {
@@ -453,22 +936,26 @@ func TestLegacyRemoteAccessInvalidAndCanonicalPriorityDoNotWarn(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "remote-secret"}}, nil, nil, nil)
 	capture := captureLegacyWarnings(app)
 
-	invalid := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	invalid := newTestRequest(http.MethodGet, "/api/health", nil)
 	invalid.Header.Set(legacyRemoteAccessHeader, "invalid-secret")
 	if app.validRemoteAccess(invalid) {
 		t.Fatal("expected invalid legacy remote access header to fail")
 	}
 
-	canonical := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	canonical := newTestRequest(http.MethodGet, "/api/health", nil)
 	canonical.Header.Set(remoteAccessHeader, "remote-secret")
 	canonical.Header.Set(legacyRemoteAccessHeader, "remote-secret")
 	if !app.validRemoteAccess(canonical) {
 		t.Fatal("expected canonical remote access header to pass")
 	}
 
-	canonicalCookie := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	legacyToken, _, err := app.newRemoteAccessSession(remoteAccessModeRestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalCookie := newTestRequest(http.MethodGet, "/api/health", nil)
 	canonicalCookie.AddCookie(&http.Cookie{Name: remoteAccessCookieName, Value: "invalid-secret"})
-	canonicalCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: app.remoteAccessToken})
+	canonicalCookie.AddCookie(&http.Cookie{Name: legacyRemoteAccessCookieName, Value: legacyToken})
 	if app.validRemoteAccess(canonicalCookie) {
 		t.Fatal("expected canonical cookie to take priority over legacy cookie")
 	}
@@ -480,8 +967,9 @@ func TestLegacyRemoteAccessInvalidAndCanonicalPriorityDoNotWarn(t *testing.T) {
 func TestRemoteAccessGateAllowsBearerPasswordForAPI(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	request.Header.Set("Authorization", "Bearer secret")
 
 	app.Routes().ServeHTTP(recorder, request)
@@ -491,64 +979,79 @@ func TestRemoteAccessGateAllowsBearerPasswordForAPI(t *testing.T) {
 	}
 }
 
-func TestRemoteAccessGateDetectsForwardedRemoteHost(t *testing.T) {
+func TestRemoteAccessGateTrustsForwardedRemoteIdentityOnlyFromLoopbackProxy(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.Host = "localhost:7788"
-	request.Header.Set("X-Forwarded-Host", "demo.trycloudflare.com")
-	request.Header.Set("Accept", "text/html")
 
-	app.Routes().ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 forwarded remote login page, got %d: %s", recorder.Code, recorder.Body.String())
+	trusted := newTestRequest(http.MethodGet, "/", nil)
+	trusted.Host = "localhost:7788"
+	trusted.RemoteAddr = "127.0.0.1:4567"
+	trusted.Header.Set("X-Real-IP", "203.0.113.9")
+	if !app.remoteAccessGateRequired(trusted) {
+		t.Fatal("loopback proxy with X-Real-IP must be treated as remote")
 	}
-	if strings.Contains(recorder.Body.String(), "window.CODEHARBOR_LOCAL_TOKEN=") {
-		t.Fatal("forwarded remote page must not leak local token")
-	}
-}
 
-func TestRemoteAccessGateUsesForwardedHostForSameOrigin(t *testing.T) {
-	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-	request.Host = "localhost:7788"
-	request.Header.Set("X-Forwarded-Host", "demo.trycloudflare.com")
-	request.Header.Set("Origin", "https://demo.trycloudflare.com")
-	request.Header.Set("Authorization", "Bearer secret")
-	request.Header.Set(localTokenHeader, app.localToken)
-
-	app.Routes().ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected 200 with forwarded same-origin host, got %d: %s", recorder.Code, recorder.Body.String())
+	for _, header := range []string{"X-Real-IP", "True-Client-IP"} {
+		spoofed := newTestRequest(http.MethodGet, "/", nil)
+		spoofed.Host = "localhost:7788"
+		spoofed.RemoteAddr = "203.0.113.20:4567"
+		spoofed.Header.Set(header, "127.0.0.1")
+		if !app.remoteAccessGateRequired(spoofed) {
+			t.Fatalf("direct remote client must not bypass the gate with forged %s", header)
+		}
 	}
 }
 
-func TestRemoteAccessGateUsesStandardForwardedHostForSameOrigin(t *testing.T) {
+func TestSameOriginTrustsForwardedHostOnlyFromLoopbackProxy(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+
+	trusted := newTestRequest(http.MethodGet, "/api/health", nil)
+	trusted.Host = "localhost:7788"
+	trusted.RemoteAddr = "127.0.0.1:4567"
+	trusted.Header.Set("X-Forwarded-Host", "demo.trycloudflare.com")
+	trusted.Header.Set("X-Forwarded-Proto", "https")
+	trusted.Header.Set("Origin", "https://demo.trycloudflare.com")
+	trusted.Header.Set("Authorization", "Bearer secret")
+	app.Routes().ServeHTTP(httptest.NewRecorder(), trusted)
+	if !app.sameOriginRequest(trusted) {
+		t.Fatal("trusted proxy forwarded origin should pass")
+	}
+
+	forged := newTestRequest(http.MethodGet, "/api/health", nil)
+	forged.Host = "localhost:7788"
+	forged.RemoteAddr = "203.0.113.21:4567"
+	forged.Header.Set("X-Forwarded-Host", "demo.trycloudflare.com")
+	forged.Header.Set("X-Forwarded-Proto", "https")
+	forged.Header.Set("Origin", "https://demo.trycloudflare.com")
+	if app.sameOriginRequest(forged) {
+		t.Fatal("direct remote client must not pass same-origin with forged forwarding headers")
+	}
+}
+
+func TestSameOriginComparesSchemeAndEffectivePort(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	request := newTestRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "localhost:7788"
-	request.Header.Set("Forwarded", `for=203.0.113.7;host="demo.trycloudflare.com";proto=https`)
-	request.Header.Set("Origin", "https://demo.trycloudflare.com")
-	request.Header.Set("Authorization", "Bearer secret")
-	request.Header.Set(localTokenHeader, app.localToken)
-
-	app.Routes().ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected 200 with standard Forwarded host, got %d: %s", recorder.Code, recorder.Body.String())
+	request.Header.Set("Origin", "https://localhost:7788")
+	if app.sameOriginRequest(request) {
+		t.Fatal("same host with a different scheme must be denied")
+	}
+	request.Header.Set("Origin", "http://localhost:7789")
+	if app.sameOriginRequest(request) {
+		t.Fatal("same host with a different effective port must be denied")
 	}
 }
 
 func postRemoteAccessPassword(app *Server, remoteAddr string, password string, headers http.Header) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password="+password))
+	request := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password="+password))
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	if remoteAddr != "" {
 		request.RemoteAddr = remoteAddr
+	}
+	if trustedLoopbackPeer(request) {
+		request.TLS = nil
+		request.Header.Set("X-Forwarded-Proto", "https")
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for name, values := range headers {
@@ -562,10 +1065,15 @@ func postRemoteAccessPassword(app *Server, remoteAddr string, password string, h
 
 func postRemoteAccessLogout(app *Server, remoteAddr string, headers http.Header) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access/logout", nil)
+	request := newTestRequest(http.MethodPost, "/auth/remote-access/logout", nil)
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	if remoteAddr != "" {
 		request.RemoteAddr = remoteAddr
+	}
+	if trustedLoopbackPeer(request) {
+		request.TLS = nil
+		request.Header.Set("X-Forwarded-Proto", "https")
 	}
 	for name, values := range headers {
 		for _, value := range values {
@@ -580,8 +1088,9 @@ func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	for i := 0; i < remoteAccessMaxFailures; i++ {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+		request := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
 		request.Host = "demo.trycloudflare.com"
+		markRemoteHTTPS(request)
 		request.RemoteAddr = "203.0.113.10:5555"
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		app.Routes().ServeHTTP(recorder, request)
@@ -594,8 +1103,9 @@ func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	request := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	request.RemoteAddr = "203.0.113.10:5555"
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	app.Routes().ServeHTTP(recorder, request)
@@ -606,8 +1116,8 @@ func TestRemoteAccessLoginLocksAfterTenBadPasswords(t *testing.T) {
 
 func TestRemoteAccessLockoutUsesForwardedClientIPFromLocalProxy(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
-	a := http.Header{"CF-Connecting-IP": []string{"203.0.113.21"}}
-	b := http.Header{"CF-Connecting-IP": []string{"203.0.113.22"}}
+	a := http.Header{"CF-Connecting-IP": []string{"203.0.113.21"}, "Cf-Ray": []string{"ray-a"}}
+	b := http.Header{"CF-Connecting-IP": []string{"203.0.113.22"}, "Cf-Ray": []string{"ray-b"}}
 
 	for i := 0; i < remoteAccessMaxFailures; i++ {
 		recorder := postRemoteAccessPassword(app, "127.0.0.1:5555", "wrong", a)
@@ -622,6 +1132,20 @@ func TestRemoteAccessLockoutUsesForwardedClientIPFromLocalProxy(t *testing.T) {
 	recorder := postRemoteAccessPassword(app, "127.0.0.1:5555", "secret", b)
 	if recorder.Code != http.StatusSeeOther {
 		t.Fatalf("expected different forwarded client to avoid shared tunnel lock, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRemoteAccessLockoutUsesProxyAppendedForwardedForValue(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	for i := 0; i < remoteAccessMaxFailures; i++ {
+		headers := http.Header{"X-Forwarded-For": []string{fmt.Sprintf("198.51.100.%d, 203.0.113.77", i+1)}}
+		recorder := postRemoteAccessPassword(app, "127.0.0.1:5555", "wrong", headers)
+		if i < remoteAccessMaxFailures-1 && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
+		if i == remoteAccessMaxFailures-1 && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d expected 429 despite changing client-controlled XFF prefix, got %d: %s", i+1, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 
@@ -688,7 +1212,7 @@ func TestRemoteAccessFailureTrimPreservesLockedEntries(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	app.clock = func() time.Time { return current }
 
-	lockedReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	lockedReq := newTestRequest(http.MethodPost, "/auth/remote-access", nil)
 	lockedReq.RemoteAddr = "203.0.113.30:5555"
 	for i := 0; i < remoteAccessMaxFailures; i++ {
 		app.recordRemoteAccessFailure(lockedReq)
@@ -698,7 +1222,7 @@ func TestRemoteAccessFailureTrimPreservesLockedEntries(t *testing.T) {
 	}
 
 	for i := 1; i <= remoteAccessFailureMaxEntries+25; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+		req := newTestRequest(http.MethodPost, "/auth/remote-access", nil)
 		req.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:5555", (i/65536)%256, (i/256)%256, i%256)
 		app.recordRemoteAccessFailure(req)
 	}
@@ -723,13 +1247,13 @@ func TestRemoteAccessFailurePrunesExpiredEntries(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	app.clock = func() time.Time { return current }
 
-	expiredReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	expiredReq := newTestRequest(http.MethodPost, "/auth/remote-access", nil)
 	expiredReq.RemoteAddr = "203.0.113.31:5555"
 	app.recordRemoteAccessFailure(expiredReq)
 	expiredKey := remoteAccessClientKey(expiredReq)
 
 	current = current.Add(remoteAccessFailureWindow + time.Second)
-	freshReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", nil)
+	freshReq := newTestRequest(http.MethodPost, "/auth/remote-access", nil)
 	freshReq.RemoteAddr = "203.0.113.32:5555"
 	app.recordRemoteAccessFailure(freshReq)
 
@@ -774,8 +1298,9 @@ func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	for i := 0; i < remoteAccessMaxFailures-1; i++ {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+		request := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
 		request.Host = "demo.trycloudflare.com"
+		markRemoteHTTPS(request)
 		request.RemoteAddr = "203.0.113.11:5555"
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		app.Routes().ServeHTTP(recorder, request)
@@ -785,8 +1310,9 @@ func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
 	}
 
 	success := httptest.NewRecorder()
-	successReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
+	successReq := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=secret"))
 	successReq.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(successReq)
 	successReq.RemoteAddr = "203.0.113.11:5555"
 	successReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	app.Routes().ServeHTTP(success, successReq)
@@ -795,8 +1321,9 @@ func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
 	}
 
 	badAgain := httptest.NewRecorder()
-	badAgainReq := httptest.NewRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
+	badAgainReq := newTestRequest(http.MethodPost, "/auth/remote-access", strings.NewReader("password=wrong"))
 	badAgainReq.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(badAgainReq)
 	badAgainReq.RemoteAddr = "203.0.113.11:5555"
 	badAgainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	app.Routes().ServeHTTP(badAgain, badAgainReq)
@@ -811,8 +1338,9 @@ func TestRemoteAccessLoginSuccessClearsBadPasswordCount(t *testing.T) {
 func TestRemoteAccessLogoutClearsCookie(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/auth/remote-access/logout", nil)
+	request := newTestRequest(http.MethodPost, "/auth/remote-access/logout", nil)
 	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
 	request.Header.Set("Authorization", "Bearer secret")
 	request.Header.Set("Accept", "application/json")
 
@@ -847,13 +1375,14 @@ func TestRemoteHardeningRejectsTerminalWebSocketByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, store, nil, nil)
-	server := httptest.NewServer(app.Routes())
-	defer server.Close()
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/terminal?agentId=" + agent.ID + "&token=" + app.localToken
-
-	_, _, err = websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer secret"}}})
-	if err == nil {
-		t.Fatal("expected remote terminal websocket to be rejected by default")
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodGet, "/ws/terminal?agentId="+agent.ID+"&token="+app.localToken, nil)
+	request.Host = "remote.example.test"
+	markRemoteHTTPS(request)
+	request.Header.Set("Authorization", "Bearer secret")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected restricted remote terminal websocket to be rejected, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -871,7 +1400,7 @@ func TestRemoteHardeningRejectsBypassPermissionMode(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"}}, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/permission-mode", strings.NewReader(`{"permissionMode":"bypassPermissions"}`))
+	request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/permission-mode", strings.NewReader(`{"permissionMode":"bypassPermissions"}`))
 	request.Host = "localhost:7788"
 	request.Header.Set("Authorization", "Bearer secret")
 	request.Header.Set("Content-Type", "application/json")
@@ -892,16 +1421,17 @@ func TestRemoteHardeningClampsDefaultBypassForNewProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	projectDir := filepath.Join(t.TempDir(), "project")
+	projectRoot := t.TempDir()
+	projectDir := filepath.Join(projectRoot, "project")
 	cfg := config.Config{
-		Paths:    config.PathsConfig{DefaultProjectDir: t.TempDir()},
+		Paths:    config.PathsConfig{DefaultProjectDir: projectRoot},
 		Agent:    config.AgentConfig{DefaultModel: "fake:test", DefaultPermissionMode: "bypassPermissions"},
 		Security: config.SecurityConfig{Exposed: true, AccessPassword: "secret"},
 	}
 	app := New(cfg, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/projects", strings.NewReader(`{"name":"Demo","gitPath":"`+projectDir+`"}`))
+	request := newTestRequest(http.MethodPost, "/api/projects", strings.NewReader(`{"name":"Demo","gitPath":"`+projectDir+`"}`))
 	request.Host = "localhost:7788"
 	request.Header.Set("Authorization", "Bearer secret")
 	request.Header.Set("Content-Type", "application/json")

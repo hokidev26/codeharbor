@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -109,6 +110,52 @@ func (s *Server) listCodexOAuthAccounts(w http.ResponseWriter, r *http.Request) 
 		response = append(response, item)
 	}
 	writeJSON(w, http.StatusOK, codexOAuthAccountsResponse{Accounts: response, Count: len(response)})
+}
+
+// exportCodexOAuthAccount is deliberately stricter than the normal sensitive
+// provider routes: credential downloads are local-only, even when a full
+// remote session exists. The response is an attachment and is never logged or
+// included in an API envelope.
+func (s *Server) exportCodexOAuthAccount(w http.ResponseWriter, r *http.Request) {
+	if auth := s.remoteAccessAuthentication(r); auth.Remote {
+		writeError(w, http.StatusForbidden, "Codex 凭据只能在本机导出")
+		return
+	}
+	if r.Header.Get("X-Autoto-Confirm") != "export-codex-account" {
+		writeError(w, http.StatusBadRequest, "导出 Codex 凭据需要明确确认")
+		return
+	}
+	store, err := s.nativeCodexCredentialStore()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	document, err := store.ExportByID(chi.URLParam(r, "id"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "Codex 账号不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	filename := strings.TrimSpace(document.Filename)
+	if filename == "" {
+		filename = "codex-auth.json"
+	}
+	if !strings.HasSuffix(strings.ToLower(filename), ".json") {
+		filename += ".json"
+	}
+	contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if contentDisposition == "" {
+		contentDisposition = `attachment; filename="codex-auth.json"`
+	}
+	setNoStore(w)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", contentDisposition)
+	w.Header().Set("Content-Length", strconv.Itoa(len(document.Content)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(document.Content)
 }
 
 func (s *Server) patchCodexOAuthAccount(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +274,11 @@ func (s *Server) deleteCodexOAuthAccount(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) nativeCodexProvider() (*providers.CodexProvider, error) {
+	// Provider creation may persist a missing built-in provider. Keep the global
+	// config transaction lock ahead of the runtime registry lock, matching every
+	// other read-modify-save-publish path.
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	if provider, ok := s.codexProviderConfig(); ok && provider.Disabled {
@@ -307,8 +359,10 @@ func (s *Server) importCodexOAuthCredentials(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) nativeCodexCredentialStore() (*codexauth.Store, error) {
+	path := codexauth.DefaultStoreDir(s.configSnapshot().Paths.HomeDir)
+	s.codexCredentialsMu.Lock()
+	defer s.codexCredentialsMu.Unlock()
 	if s.codexCredentials == nil || strings.TrimSpace(s.codexCredentials.Dir()) == "" {
-		path := codexauth.DefaultStoreDir(s.configSnapshot().Paths.HomeDir)
 		if path == "" {
 			return nil, fmt.Errorf("Autoto HomeDir 未配置，无法保存 Codex 凭据")
 		}
@@ -318,6 +372,8 @@ func (s *Server) nativeCodexCredentialStore() (*codexauth.Store, error) {
 }
 
 func (s *Server) ensureNativeCodexProvider() error {
+	s.configMutationMu.Lock()
+	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	return s.ensureNativeCodexProviderLocked()

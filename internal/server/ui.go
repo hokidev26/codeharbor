@@ -35,8 +35,14 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setNoStore(w)
-	setLocalTokenCookie(w, r, s.localToken)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if s.remoteAccessGateRequired(r) {
+		// Remote sessions authenticate with their own HttpOnly cookie. Never expose
+		// the process-wide canonical local token through a tunneled or exposed page.
+		_, _ = w.Write(data)
+		return
+	}
+	setLocalTokenCookie(w, r, s.localToken)
 	_, _ = w.Write(injectLocalToken(data, s.localToken))
 }
 

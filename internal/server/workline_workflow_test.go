@@ -29,11 +29,11 @@ func TestForkWorklineCreatesGitWorktreeAgentAndAllowsGitStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Config{Agent: config.AgentConfig{DefaultModel: "openai:test", DefaultPermissionMode: "acceptEdits"}}, store, nil, nil)
+	app := New(config.Config{Agent: config.AgentConfig{DefaultModel: "openai:test", DefaultPermissionMode: "acceptEdits", DefaultStartInPlanMode: true}}, store, nil, nil)
 
 	body := strings.NewReader(`{"title":"Feature Branch","branch":"feature/autoto-test"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/worklines/"+root.ID+"/fork", body)
+	request := newTestRequest(http.MethodPost, "/api/worklines/"+root.ID+"/fork", body)
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
@@ -46,7 +46,7 @@ func TestForkWorklineCreatesGitWorktreeAgentAndAllowsGitStatus(t *testing.T) {
 	if response.Workline.ProjectID != project.ID || response.Workline.ParentWorklineID != root.ID || response.Workline.Branch != "feature/autoto-test" || response.Workline.WorktreePath == "" {
 		t.Fatalf("unexpected fork response: %+v", response)
 	}
-	if response.Agent.WorklineID != response.Workline.ID || response.Agent.CWD != response.Workline.WorktreePath {
+	if response.Agent.WorklineID != response.Workline.ID || response.Agent.CWD != response.Workline.WorktreePath || !response.Agent.PlanMode {
 		t.Fatalf("unexpected fork agent: %+v", response.Agent)
 	}
 	if pathWithin(repo, response.Workline.WorktreePath) {
@@ -61,7 +61,7 @@ func TestForkWorklineCreatesGitWorktreeAgentAndAllowsGitStatus(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/agents/"+response.Agent.ID+"/git/status", nil)
+	request = newTestRequest(http.MethodGet, "/api/agents/"+response.Agent.ID+"/git/status", nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected fork agent git status 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -93,7 +93,7 @@ func TestLegacyAgentWorklineRoutesAliasCanonicalHandlers(t *testing.T) {
 		"/api/narrators/" + agent.ID,
 	} {
 		recorder := httptest.NewRecorder()
-		app.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, path, nil))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("legacy alias %s returned %d: %s", path, recorder.Code, recorder.Body.String())
 		}
@@ -123,7 +123,7 @@ func TestWorklineMergeMergesCleanSourceIntoTarget(t *testing.T) {
 	runGitTestCommand(t, fork.Workline.WorktreePath, "commit", "-m", "feature change")
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/worklines/"+fork.Workline.ID+"/merge", strings.NewReader(`{"targetWorklineId":"`+root.ID+`","message":"Merge feature workline"}`))
+	request := newTestRequest(http.MethodPost, "/api/worklines/"+fork.Workline.ID+"/merge", strings.NewReader(`{"targetWorklineId":"`+root.ID+`","message":"Merge feature workline"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -174,7 +174,7 @@ func TestWorklineMergeRejectsConflictsAndAborts(t *testing.T) {
 	runGitTestCommand(t, fork.Workline.WorktreePath, "commit", "-m", "source change")
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/worklines/"+fork.Workline.ID+"/merge", strings.NewReader(`{"targetWorklineId":"`+root.ID+`"}`))
+	request := newTestRequest(http.MethodPost, "/api/worklines/"+fork.Workline.ID+"/merge", strings.NewReader(`{"targetWorklineId":"`+root.ID+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
@@ -226,7 +226,7 @@ func TestWorklineMergeCheckReportsConflicts(t *testing.T) {
 	runGitTestCommand(t, fork.Workline.WorktreePath, "commit", "-m", "source change")
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/worklines/"+fork.Workline.ID+"/merge-check?targetWorklineId="+root.ID, nil)
+	request := newTestRequest(http.MethodGet, "/api/worklines/"+fork.Workline.ID+"/merge-check?targetWorklineId="+root.ID, nil)
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
@@ -247,7 +247,7 @@ func forkWorklineForTest(t *testing.T, app *Server, worklineID, branch string) f
 	t.Helper()
 	body := strings.NewReader(`{"title":"` + branch + `","branch":"` + branch + `"}`)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/worklines/"+worklineID+"/fork", body)
+	request := newTestRequest(http.MethodPost, "/api/worklines/"+worklineID+"/fork", body)
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {

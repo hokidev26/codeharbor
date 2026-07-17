@@ -19,7 +19,7 @@ import (
 )
 
 func authenticatedCodexRequest(app *Server, method, target string, body io.Reader) *http.Request {
-	request := httptest.NewRequest(method, target, body)
+	request := newTestRequest(method, target, body)
 	request.Header.Set(localTokenHeader, app.localToken)
 	return request
 }
@@ -34,10 +34,13 @@ func TestNativeCodexCredentialRoutesRequireCanonicalToken(t *testing.T) {
 		validCodes []int
 	}{
 		{name: "accounts list", method: http.MethodGet, target: "/api/providers/oauth/codex/accounts", validCodes: []int{http.StatusOK}},
+		{name: "account export", method: http.MethodGet, target: "/api/providers/oauth/codex/accounts/codex_fixture/export", validCodes: []int{http.StatusBadRequest}},
 		{name: "account patch", method: http.MethodPatch, target: "/api/providers/oauth/codex/accounts/codex_fixture", body: `{}`, validCodes: []int{http.StatusBadRequest}},
 		{name: "account refresh", method: http.MethodPost, target: "/api/providers/oauth/codex/accounts/codex_fixture/refresh", validCodes: []int{http.StatusNotFound}},
 		{name: "account delete", method: http.MethodDelete, target: "/api/providers/oauth/codex/accounts/codex_fixture", validCodes: []int{http.StatusOK}},
 		{name: "native import", method: http.MethodPost, target: "/api/providers/oauth/codex/import", body: `{}`, validCodes: []int{http.StatusBadRequest}},
+		{name: "oauth login status", method: http.MethodGet, target: "/api/providers/oauth/codex/login/codex_login_fixture", validCodes: []int{http.StatusNotFound}},
+		{name: "oauth login cancel", method: http.MethodDelete, target: "/api/providers/oauth/codex/login/codex_login_fixture", validCodes: []int{http.StatusNotFound}},
 		{name: "generic codex list", method: http.MethodGet, target: "/api/providers/codex/auth-files", validCodes: []int{http.StatusOK}},
 		{name: "generic codex import", method: http.MethodPost, target: "/api/providers/codex/auth-files/import", body: `{}`, validCodes: []int{http.StatusBadRequest}},
 	}
@@ -45,7 +48,7 @@ func TestNativeCodexCredentialRoutesRequireCanonicalToken(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			newRequest := func() *http.Request {
-				request := httptest.NewRequest(test.method, test.target, strings.NewReader(test.body))
+				request := newTestRequest(test.method, test.target, strings.NewReader(test.body))
 				if test.body != "" {
 					request.Header.Set("Content-Type", "application/json")
 				}
@@ -95,6 +98,15 @@ func TestNativeCodexCredentialRoutesRequireCanonicalToken(t *testing.T) {
 	app.Routes().ServeHTTP(crossOrigin, crossOriginRequest)
 	if crossOrigin.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for cross-origin Codex credential request, got %d: %s", crossOrigin.Code, crossOrigin.Body.String())
+	}
+	crossOriginExport := authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts/codex_fixture/export", nil)
+	crossOriginExport.Header.Set("X-Autoto-Confirm", "export-codex-account")
+	crossOriginExport.Host = "localhost:7788"
+	crossOriginExport.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossOriginExportRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(crossOriginExportRecorder, crossOriginExport)
+	if crossOriginExportRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin Codex export, got %d: %s", crossOriginExportRecorder.Code, crossOriginExportRecorder.Body.String())
 	}
 }
 
@@ -146,7 +158,7 @@ func TestNativeCodexImportStoresLocallyAndRegistersProvider(t *testing.T) {
 		t.Fatal("native Codex provider was not registered")
 	}
 	settingsRecorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(settingsRecorder, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	app.Routes().ServeHTTP(settingsRecorder, newTestRequest(http.MethodGet, "/api/settings", nil))
 	if settingsRecorder.Code != http.StatusOK {
 		t.Fatalf("expected settings 200, got %d: %s", settingsRecorder.Code, settingsRecorder.Body.String())
 	}
@@ -247,6 +259,39 @@ func TestNativeCodexAccountManagementEndpointsAndSecretSafety(t *testing.T) {
 	id := listed.Accounts[0].ID
 	if !strings.HasPrefix(id, "codex_") || listed.Accounts[0].Priority != codexauth.DefaultPriority {
 		t.Fatalf("missing stable account metadata: %+v", listed.Accounts[0])
+	}
+
+	missingConfirmation := httptest.NewRecorder()
+	app.Routes().ServeHTTP(missingConfirmation, authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts/"+id+"/export", nil))
+	if missingConfirmation.Code != http.StatusBadRequest {
+		t.Fatalf("export without explicit confirmation should be rejected, got %d: %s", missingConfirmation.Code, missingConfirmation.Body.String())
+	}
+
+	exportRequest := authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts/"+id+"/export", nil)
+	exportRequest.Header.Set("X-Autoto-Confirm", "export-codex-account")
+	exportRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(exportRecorder, exportRequest)
+	if exportRecorder.Code != http.StatusOK {
+		t.Fatalf("export failed: %d %s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+	if got := exportRecorder.Header().Get("Content-Disposition"); !strings.Contains(got, `attachment`) || !strings.Contains(got, listed.Accounts[0].Name) {
+		t.Fatalf("unexpected export disposition: %q", got)
+	}
+	if exportRecorder.Header().Get("Cache-Control") == "" || !strings.Contains(exportRecorder.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("export response is cacheable: %q", exportRecorder.Header().Get("Cache-Control"))
+	}
+	if !json.Valid(exportRecorder.Body.Bytes()) || !strings.Contains(exportRecorder.Body.String(), "fixture-management-access") || !strings.Contains(exportRecorder.Body.String(), "rt_management_fixture") {
+		t.Fatalf("export did not contain a valid complete credential: %s", exportRecorder.Body.String())
+	}
+
+	remoteExport := authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts/"+id+"/export", nil)
+	remoteExport.Header.Set("X-Autoto-Confirm", "export-codex-account")
+	remoteExport.Host = "remote.example.test"
+	markRemoteHTTPS(remoteExport)
+	remoteRecorder := httptest.NewRecorder()
+	app.exportCodexOAuthAccount(remoteRecorder, remoteExport)
+	if remoteRecorder.Code != http.StatusForbidden {
+		t.Fatalf("remote export should be denied, got %d: %s", remoteRecorder.Code, remoteRecorder.Body.String())
 	}
 
 	patchBody := bytes.NewBufferString(`{"alias":"Primary <script>","priority":7,"disabled":false}`)
@@ -366,7 +411,7 @@ func TestNativeCodexImportFeedsModelCatalogWithoutProxy(t *testing.T) {
 	}
 
 	modelsRecorder := httptest.NewRecorder()
-	app.Routes().ServeHTTP(modelsRecorder, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	app.Routes().ServeHTTP(modelsRecorder, newTestRequest(http.MethodGet, "/api/models", nil))
 	if modelsRecorder.Code != http.StatusOK {
 		t.Fatalf("expected models 200, got %d: %s", modelsRecorder.Code, modelsRecorder.Body.String())
 	}

@@ -93,13 +93,20 @@ export function formatTimestamp(value, options = {}) {
   if (value === null || value === undefined || value === "") return emptyFallback;
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return invalidFallback;
-  return getDateTimeFormatter({
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }, regionalOptions(options)).format(date);
+  const dateTimeOptions = options.timeOnly
+    ? {
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }
+    : {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      };
+  return getDateTimeFormatter(dateTimeOptions, regionalOptions(options)).format(date);
 }

@@ -2,6 +2,136 @@ import { t } from "./i18n.mjs";
 
 const navigationModes = new Set(["all", "projects", "conversations"]);
 
+export const navigationRefreshDefaults = Object.freeze({
+  intervalMs: 2000,
+  minIntervalMs: 250,
+});
+
+function navigationRefreshTimerFunctions(timers) {
+  const source = timers || globalThis;
+  return {
+    setTimeout: (typeof source?.setTimeout === "function" ? source.setTimeout : globalThis.setTimeout).bind(source),
+    clearTimeout: (typeof source?.clearTimeout === "function" ? source.clearTimeout : globalThis.clearTimeout).bind(source),
+  };
+}
+
+export function createNavigationRefreshController({
+  refresh,
+  shouldRefresh = () => true,
+  onError,
+  timers = globalThis,
+  intervalMs = navigationRefreshDefaults.intervalMs,
+  autoStart = false,
+} = {}) {
+  if (typeof refresh !== "function") throw new Error("createNavigationRefreshController requires refresh");
+  const timer = navigationRefreshTimerFunctions(timers);
+  const interval = Math.max(navigationRefreshDefaults.minIntervalMs, Number(intervalMs) || navigationRefreshDefaults.intervalMs);
+  let started = false;
+  let timerId = null;
+  let scheduledReason = "interval";
+  let inFlight = null;
+  let pendingReason = "";
+
+  function clearScheduled() {
+    if (timerId === null) return;
+    timer.clearTimeout(timerId);
+    timerId = null;
+  }
+
+  function schedule(delay = interval, reason = "interval") {
+    if (!started) return false;
+    clearScheduled();
+    scheduledReason = String(reason || "interval");
+    timerId = timer.setTimeout(() => {
+      timerId = null;
+      run(scheduledReason);
+    }, Math.max(0, Number(delay) || 0));
+    return true;
+  }
+
+  function finish(operation) {
+    if (inFlight !== operation) return;
+    inFlight = null;
+    if (!started) return;
+    const nextReason = pendingReason;
+    pendingReason = "";
+    schedule(nextReason ? 0 : interval, nextReason || "interval");
+  }
+
+  function run(reason = "interval") {
+    if (!started) return Promise.resolve(null);
+    if (inFlight) {
+      pendingReason = String(reason || "pending");
+      return inFlight;
+    }
+    let allowed = false;
+    try {
+      allowed = shouldRefresh() !== false;
+    } catch (error) {
+      onError?.(error);
+    }
+    if (!allowed) {
+      schedule(interval, "interval");
+      return Promise.resolve(null);
+    }
+    const operation = Promise.resolve()
+      .then(() => refresh({ reason: String(reason || "interval") }))
+      .catch((error) => {
+        onError?.(error);
+        return null;
+      })
+      .finally(() => finish(operation));
+    inFlight = operation;
+    return operation;
+  }
+
+  function start({ immediate = false } = {}) {
+    if (started) return false;
+    started = true;
+    schedule(immediate ? 0 : interval, immediate ? "start" : "interval");
+    return true;
+  }
+
+  function request(reason = "manual") {
+    if (!started) return false;
+    if (inFlight) {
+      pendingReason = String(reason || "manual");
+      return true;
+    }
+    return schedule(0, reason);
+  }
+
+  function stop() {
+    if (!started) return false;
+    started = false;
+    clearScheduled();
+    pendingReason = "";
+    return true;
+  }
+
+  async function flush() {
+    if (!started) return null;
+    clearScheduled();
+    await run("flush");
+    while (inFlight) await inFlight;
+    return null;
+  }
+
+  if (autoStart) start();
+
+  return {
+    start,
+    stop,
+    dispose: stop,
+    request,
+    refreshNow: request,
+    flush,
+    isStarted: () => started,
+    isRefreshing: () => inFlight !== null,
+    intervalMs: interval,
+  };
+}
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -196,6 +326,18 @@ export function normalizeRecentConversations(value, limit = 8) {
   }).slice(0, Math.max(0, limit));
 }
 
+export function resolveInitialNavigationTarget(recent, conversations) {
+  const knownTargets = new Set((Array.isArray(conversations) ? conversations : [])
+    .map((conversation) => text(conversation?.targetId))
+    .filter((targetId) => parseNavigationTargetId(targetId)));
+  const recentMatch = normalizeRecentConversations(recent)
+    .find((entry) => knownTargets.has(entry.targetId));
+  if (recentMatch) return recentMatch.targetId;
+  return (Array.isArray(conversations) ? conversations : [])
+    .map((conversation) => text(conversation?.targetId))
+    .find((targetId) => knownTargets.has(targetId)) || "";
+}
+
 export function addRecentConversation(recent, target, openedAt = new Date().toISOString(), limit = 8) {
   const targetId = typeof target === "string" ? parseNavigationTargetId(target)?.targetId : createNavigationTargetId(target);
   if (!parseNavigationTargetId(targetId)) return normalizeRecentConversations(recent, limit);
@@ -205,32 +347,47 @@ export function addRecentConversation(recent, target, openedAt = new Date().toIS
   ], limit);
 }
 
-function renderProject(project, activeProjectId) {
+export function navigationAgentStatusClass(value) {
+  return text(value).toLocaleLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "idle";
+}
+
+function renderProject(project, activeProjectId, agentCount = 0) {
   const active = project.id === activeProjectId;
   const path = project.gitPath || project.id;
   const displayPath = compactDisplayPath(path);
+  const count = Math.max(0, Math.trunc(Number(agentCount) || 0));
+  const countLabel = `${count} Agent${count === 1 ? "" : "s"}`;
   return `
     <button class="project-card navigation-project-row ${active ? "active" : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}">
       <span class="project-active-dot" aria-hidden="true"></span>
       <span class="project-card-main">
-        <span class="project-card-top"><span class="project-kind-badge">PROJECT</span></span>
-        <span class="project-name">${escapeNavigationHtml(project.name)}</span>
+        <span class="project-card-top"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span><span class="project-agent-count" title="${escapeNavigationHtml(countLabel)}">AGENT ${escapeNavigationHtml(String(count))}</span></span>
         <span class="project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
       </span>
     </button>`;
 }
 
-function renderConversation(conversation, activeAgentId, nested = false) {
+function renderConversation(conversation, activeAgentId, nested = false, options = {}) {
   const active = conversation.agentId === activeAgentId;
-  const breadcrumb = [conversation.projectName, conversation.worklineTitle].filter(Boolean).join(" / ");
-  const meta = [conversation.model, conversation.agentStatus, t("workspace.navigation.messageCount", { count: conversation.messageCount })].filter(Boolean).join(" · ");
+  const taskContext = options.taskContext === true;
+  const statusClass = navigationAgentStatusClass(conversation.agentStatus);
+  const worklineContext = conversation.worklineBranch || conversation.worklineTitle;
+  const projectContext = compactDisplayPath(conversation.projectPath) || conversation.projectName;
+  const context = nested
+    ? worklineContext
+    : [projectContext, worklineContext].filter((value, index, items) => value && items.indexOf(value) === index).join(" / ");
+  const metaParts = [context, conversation.model, conversation.agentStatus];
+  if (!taskContext) metaParts.push(t("workspace.navigation.messageCount", { count: conversation.messageCount }));
+  const meta = metaParts.filter(Boolean).join(" · ");
+  const icon = taskContext
+    ? `<svg viewBox="0 0 20 20"><circle cx="10" cy="6.5" r="3"></circle><path d="M4.5 17c.7-3.5 2.5-5.2 5.5-5.2s4.8 1.7 5.5 5.2"></path></svg>`
+    : `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <button class="navigation-conversation-row ${nested ? "nested" : ""} ${active ? "active" : ""}" type="button" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}">
-      <span class="navigation-agent-icon" aria-hidden="true">☻</span>
+    <button class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass}" type="button" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
+      <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title">${escapeNavigationHtml(conversation.agentTitle)}</span>
-        <span class="navigation-breadcrumb" title="${escapeNavigationHtml(breadcrumb)}">${escapeNavigationHtml(breadcrumb)}</span>
-        <span class="navigation-conversation-meta">${escapeNavigationHtml(meta)}</span>
+        <span class="navigation-conversation-meta" title="${escapeNavigationHtml(meta)}">${escapeNavigationHtml(meta)}</span>
       </span>
     </button>`;
 }
@@ -239,20 +396,28 @@ export function renderNavigationHTML(view = {}, options = {}) {
   const mode = navigationModes.has(view.mode) ? view.mode : "all";
   const activeProjectId = text(options.activeProjectId);
   const activeAgentId = text(options.activeAgentId);
+  const taskContext = options.taskContext === true;
   let html = "";
   if (mode === "all" || mode === "projects") {
     html = (view.groups || []).map((group) => `
-      <section class="navigation-project-group" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}">
-        ${renderProject(group.project, activeProjectId)}
+      <section class="navigation-project-group ${taskContext ? "task-context" : ""}" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
+        ${renderProject(group.project, activeProjectId, group.conversations.length)}
         <div class="navigation-project-conversations" data-project-conversations="${escapeNavigationHtml(group.project.id)}">
-          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true)).join("")}
+          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true, { taskContext })).join("")}
         </div>
       </section>`).join("");
   } else {
-    html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId)).join("");
+    html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId, false, { taskContext })).join("");
   }
   if (html) return html;
   if (view.query) return `<div class="empty-list">${escapeNavigationHtml(t("workspace.navigation.noResults", { query: view.query }))}</div>`;
+  if (!view.totalProjectCount && taskContext) {
+    return `<div class="navigation-boundary-empty" data-task-project-boundary="true">
+      <strong>${escapeNavigationHtml(t("workbench.noProjectsTitle"))}</strong>
+      <span>${escapeNavigationHtml(t("workbench.noProjectsDescription"))}</span>
+      <button type="button" data-primary-workbench-target="conversation">${escapeNavigationHtml(t("workbench.goToConversation"))}</button>
+    </div>`;
+  }
   if (!view.totalProjectCount) {
     return `
       <button class="project-card project-card-empty" type="button" data-open-directory-shortcut="new">

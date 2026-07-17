@@ -20,6 +20,26 @@ export function orderPermissionMenuOptions(options = []) {
   return ordered;
 }
 
+export function compactComposerModelLabel(value, fallback = "模型") {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  let model = raw.includes(":") ? raw.slice(raw.lastIndexOf(":") + 1) : raw;
+  model = model
+    .replace(/^claude-/i, "")
+    .replace(/-(latest|\d{8})$/i, "")
+    .replace(/-(\d+)-(\d+)(?=$|-)/, "-$1.$2")
+    .trim();
+  if (!model) return fallback;
+  const anthropicFamily = model.match(/^(sonnet|opus|haiku)/i)?.[1];
+  if (anthropicFamily) return anthropicFamily.toLowerCase();
+  const gptFamily = model.match(/^(gpt[-_.]?\d+(?:[-_.]\d+)?)/i)?.[1];
+  if (gptFamily) return gptFamily.replace(/_/g, "-");
+  if (model.length <= 9) return model;
+  const family = model.split("-")[0];
+  if (family.length >= 4 && family.length <= 9) return family;
+  return `${model.slice(0, 8)}…`;
+}
+
 const permissionMenuIconMarkup = Object.freeze({
   default: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.5-2.5 7.8-7 10-4.5-2.2-7-5.5-7-10V6z"></path><path d="M9.5 12h5"></path></svg>',
   acceptEdits: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 5.3 4 4"></path><path d="M5 19h4l9.7-9.7a2.8 2.8 0 0 0-4-4L5 15z"></path><path d="M13 7 17 11"></path></svg>',
@@ -62,6 +82,69 @@ export function createUIShellController({
   showError,
   translate = (key) => key,
 } = {}) {
+  let settingsDialogFocusReturn = null;
+
+  function isVisibleDialog(node) {
+    if (!node || node.classList?.contains("hidden") || node.getAttribute?.("aria-hidden") === "true" || node.closest?.("[hidden], .hidden, [aria-hidden=\"true\"]")) return false;
+    const view = node.ownerDocument?.defaultView || globalThis.window;
+    const style = view?.getComputedStyle?.(node);
+    return !style || (style.display !== "none" && style.visibility !== "hidden");
+  }
+
+  function settingsDialogHasNestedModal() {
+    const dialog = $("settingsModal");
+    if (!isVisibleDialog(dialog)) return false;
+    return [...(dialog.querySelectorAll?.('[role="dialog"][aria-modal="true"]') || [])]
+      .some((node) => node !== dialog && isVisibleDialog(node));
+  }
+
+  function focusableDialogElements(dialog) {
+    if (!dialog?.querySelectorAll) return [];
+    return [...dialog.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter((node) => isVisibleDialog(node) && !node.closest?.(".hidden, [aria-hidden=\"true\"]"));
+  }
+
+  function focusSettingsDialogInitialTarget() {
+    const dialog = $("settingsModal");
+    if (!isVisibleDialog(dialog) || settingsDialogHasNestedModal()) return;
+    const input = $("settingsSearchInput");
+    const [first] = focusableDialogElements(dialog);
+    (isVisibleDialog(input) ? input : first || dialog).focus?.();
+  }
+
+  function beginSettingsDialogFocus(trigger = document.activeElement) {
+    settingsDialogFocusReturn = trigger?.isConnected === false ? null : trigger || null;
+    const schedule = globalThis.queueMicrotask || ((callback) => Promise.resolve().then(callback));
+    schedule(focusSettingsDialogInitialTarget);
+  }
+
+  function restoreSettingsDialogFocus() {
+    const target = settingsDialogFocusReturn;
+    settingsDialogFocusReturn = null;
+    if (target?.isConnected !== false) target?.focus?.();
+  }
+
+  function handleSettingsDialogKeydown(event) {
+    if (event.key !== "Tab" || settingsDialogHasNestedModal()) return;
+    const dialog = $("settingsModal");
+    if (!isVisibleDialog(dialog)) return;
+    const items = focusableDialogElements(dialog);
+    if (!items.length) {
+      event.preventDefault();
+      dialog.focus?.();
+      return;
+    }
+    const current = document.activeElement;
+    const index = items.indexOf(current);
+    const next = event.shiftKey
+      ? items[index <= 0 ? items.length - 1 : index - 1]
+      : items[index === items.length - 1 ? 0 : index + 1];
+    if (index === -1 || next) {
+      event.preventDefault();
+      next?.focus?.();
+    }
+  }
+
   function sidebarSettingsMenuOpen() {
     const menu = $("sidebarSettingsMenu");
     return Boolean(menu && !menu.classList.contains("hidden"));
@@ -104,7 +187,7 @@ export function createUIShellController({
   }
 
   function handleGlobalEscape(event) {
-    if (event.key !== "Escape" || isComposingInput(event)) return;
+    if (event.defaultPrevented || event.key !== "Escape" || isComposingInput(event)) return;
     if (sidebarSettingsMenuOpen()) {
       closeSidebarSettingsMenu();
       event.preventDefault();
@@ -121,6 +204,7 @@ export function createUIShellController({
       return;
     }
     if (elementVisible("settingsModal")) {
+      if (settingsDialogHasNestedModal()) return;
       if (normalizedSettingsSearchQuery()) {
         clearSettingsSearchQuery({ focus: document.activeElement?.id === "settingsSearchInput" });
         event.preventDefault();
@@ -202,7 +286,15 @@ export function createUIShellController({
       const binding = { trigger, select, valueNode, label };
       const sync = () => {
         const option = select?.selectedOptions?.[0] || select?.options?.[select?.selectedIndex];
-        if (valueNode && option) valueNode.textContent = option.textContent?.trim() || option.value;
+        if (valueNode && option) {
+          const optionText = option.textContent?.trim() || option.value;
+          valueNode.textContent = optionText;
+          if (trigger.dataset.composerSelect === "modelSelect") {
+            valueNode.dataset.mobileLabel = compactComposerModelLabel(option.value || option.textContent);
+          }
+          const fieldLabel = label?.textContent?.trim();
+          trigger.setAttribute("aria-label", fieldLabel ? `${fieldLabel}：${optionText}` : optionText);
+        }
         trigger.disabled = Boolean(select?.disabled);
       };
       binding.sync = sync;
@@ -467,6 +559,7 @@ export function createUIShellController({
   }
 
   return {
+    beginSettingsDialogFocus,
     bindComposerSelectMenus,
     bindSidebarResizer,
     closeMobileSidebar,
@@ -475,9 +568,12 @@ export function createUIShellController({
     focusMobileSearch,
     handleDirectoryShortcutClick,
     handleGlobalEscape,
+    handleSettingsDialogKeydown,
     handleSettingsSearchShortcut,
     handleSidebarSettingsMenuDocumentClick,
     openMobileSidebar,
+    restoreSettingsDialogFocus,
+    settingsDialogHasNestedModal,
     toggleMobileTerminal,
     toggleProjectSearch,
     toggleSidebarSettingsMenu,

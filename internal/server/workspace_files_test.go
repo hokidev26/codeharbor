@@ -170,7 +170,7 @@ func TestWorkspaceRoutesRemainBehindLocalRequestGuard(t *testing.T) {
 	root := t.TempDir()
 	app, agentID := newWorkspaceServer(t, root, "acceptEdits")
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/agents/"+agentID+"/workspace/tree", nil)
+	request := newTestRequest(http.MethodGet, "/api/agents/"+agentID+"/workspace/tree", nil)
 	request.Host = "localhost:7788"
 	request.Header.Set("Origin", "http://localhost:7788")
 	app.Routes().ServeHTTP(recorder, request)
@@ -223,9 +223,9 @@ func serveWorkspaceRequest(t *testing.T, app *Server, method, target string, bod
 	t.Helper()
 	var request *http.Request
 	if body == nil {
-		request = httptest.NewRequest(method, target, nil)
+		request = newTestRequest(method, target, nil)
 	} else {
-		request = httptest.NewRequest(method, target, body)
+		request = newTestRequest(method, target, body)
 		request.Header.Set("Content-Type", "application/json")
 	}
 	recorder := httptest.NewRecorder()

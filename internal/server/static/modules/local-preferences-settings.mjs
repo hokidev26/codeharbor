@@ -40,53 +40,53 @@ export function createLocalPreferencesSettingsController({
     const gitConfigured = Boolean(profile.gitName && profile.gitEmail);
     return `
     <div class="settings-live-page profile-page">
-      <section class="settings-hero-card profile-hero-card">
-        <div class="profile-hero-main">
+      <section class="settings-hero-card profile-hero-card settings-page-section settings-card">
+        <div class="profile-hero-main settings-card-header">
           <div class="profile-avatar-preview">${escapeHtml(profile.avatarInitials)}</div>
           <div>
             <div class="settings-hero-kicker">${escapeHtml(t("profile.heroKicker"))}</div>
-            <div class="settings-hero-title">${escapeHtml(profileDisplayName())}</div>
-            <p>${escapeHtml(profile.roleLabel)} · ${escapeHtml(profile.workspaceLabel)}</p>
+            <div class="settings-hero-title settings-card-title">${escapeHtml(profileDisplayName())}</div>
+            <p class="settings-card-description">${escapeHtml(profile.roleLabel)} · ${escapeHtml(profile.workspaceLabel)}</p>
           </div>
         </div>
-        <div class="settings-action-row">
+        <div class="settings-action-row settings-toolbar">
           <button id="resetProfilePrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.reset"))}</button>
         </div>
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(profile.avatarInitials)}</strong><span>${escapeHtml(t("profile.avatarInitials"))}</span></div>
-        <div><strong>${escapeHtml(gitConfigured ? t("profile.filled") : t("profile.notFilled"))}</strong><span>${escapeHtml(t("profile.gitIdentity"))}</span></div>
-        <div><strong>${escapeHtml(t("profile.localBrowser"))}</strong><span>${escapeHtml(t("profile.saveLocation"))}</span></div>
+      <div class="settings-status-strip settings-stat-grid">
+        <div class="settings-stat-card"><strong>${escapeHtml(profile.avatarInitials)}</strong><span>${escapeHtml(t("profile.avatarInitials"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(gitConfigured ? t("profile.filled") : t("profile.notFilled"))}</strong><span>${escapeHtml(t("profile.gitIdentity"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(t("profile.localBrowser"))}</strong><span>${escapeHtml(t("profile.saveLocation"))}</span></div>
       </div>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section highlighted settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("profile.displaySectionTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("profile.displaySectionMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("profile.displaySectionTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("profile.displaySectionMeta"))}</div>
           </div>
         </div>
-        <form id="profileSettingsForm" class="settings-profile-form">
-          <div class="settings-provider-form-grid">
-            <label>${escapeHtml(t("profile.displayName"))}
+        <form id="profileSettingsForm" class="settings-profile-form settings-card-content">
+          <div class="settings-provider-form-grid settings-form-grid">
+            <label class="settings-form-field">${escapeHtml(t("profile.displayName"))}
               <input id="profileDisplayName" class="settings-field" value="${escapeAttr(profile.displayName)}" placeholder="${escapeAttr(t("profile.displayNamePlaceholder"))}" />
             </label>
-            <label>${escapeHtml(t("profile.avatarInitialsLabel"))}
+            <label class="settings-form-field">${escapeHtml(t("profile.avatarInitialsLabel"))}
               <input id="profileAvatarInitials" class="settings-field" value="${escapeAttr(profile.avatarInitials)}" placeholder="${escapeAttr(t("profile.avatarInitialsPlaceholder"))}" maxlength="4" />
             </label>
-            <label>${escapeHtml(t("profile.roleLabel"))}
+            <label class="settings-form-field">${escapeHtml(t("profile.roleLabel"))}
               <input id="profileRoleLabel" class="settings-field" value="${escapeAttr(profile.roleLabel)}" placeholder="${escapeAttr(t("profile.roleLabelPlaceholder"))}" />
             </label>
-            <label>${escapeHtml(t("profile.workspaceLabel"))}
+            <label class="settings-form-field">${escapeHtml(t("profile.workspaceLabel"))}
               <input id="profileWorkspaceLabel" class="settings-field" value="${escapeAttr(profile.workspaceLabel)}" placeholder="${escapeAttr(t("profile.workspaceLabelPlaceholder"))}" />
             </label>
-            <label>${escapeHtml(t("profile.gitName"))}
+            <label class="settings-form-field">${escapeHtml(t("profile.gitName"))}
               <input id="profileGitName" class="settings-field" value="${escapeAttr(profile.gitName)}" placeholder="${escapeAttr(t("profile.gitNamePlaceholder"))}" />
             </label>
-            <label>${escapeHtml(t("profile.gitEmail"))}
+            <label class="settings-form-field">${escapeHtml(t("profile.gitEmail"))}
               <input id="profileGitEmail" class="settings-field" value="${escapeAttr(profile.gitEmail)}" placeholder="${escapeAttr(t("profile.gitEmailPlaceholder"))}" />
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-card-footer settings-inline-actions">
             <button id="copyProfileGitEnvBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.copyGit"))}</button>
             <button class="settings-action-btn primary" type="submit">${escapeHtml(t("profile.save"))}</button>
           </div>
@@ -103,9 +103,9 @@ export function createLocalPreferencesSettingsController({
 
   function renderProfileInfoCard(title, description) {
     return `
-    <section class="profile-info-card">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(description)}</span>
+    <section class="profile-info-card settings-card settings-card-content">
+      <strong class="settings-card-title">${escapeHtml(title)}</strong>
+      <span class="settings-card-description">${escapeHtml(description)}</span>
     </section>
   `;
   }
@@ -133,107 +133,72 @@ export function createLocalPreferencesSettingsController({
     const allowedCount = prefs.allowedDomains ? prefs.allowedDomains.split("\n").filter(Boolean).length : 0;
     const blockedCount = prefs.blockedDomains ? prefs.blockedDomains.split("\n").filter(Boolean).length : 0;
     return `
-    <div class="settings-live-page network-search-page">
-      <section class="settings-hero-card network-search-hero-card">
-        <div>
+    <div class="settings-live-page compact-settings-page network-search-page">
+      <header class="compact-settings-header">
+        <div class="compact-settings-heading">
           <div class="settings-hero-kicker">${escapeHtml(t("networkSearch.heroKicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(prefs.enabled ? searchProviderLabel(prefs.provider) : t("networkSearch.disabledTitle"))}</div>
+          <h1>${escapeHtml(prefs.enabled ? t("networkSearch.strategyTitle") : t("networkSearch.disabledTitle"))}</h1>
           <p>${escapeHtml(t("networkSearch.heroDescription"))}</p>
         </div>
-        <div class="settings-action-row">
+        <div class="compact-settings-header-actions">
           <button id="copySearchPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("networkSearch.copyConfig"))}</button>
           <button id="resetSearchPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("networkSearch.reset"))}</button>
         </div>
-      </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.enabled ? t("networkSearch.on") : t("networkSearch.off"))}</strong><span>${escapeHtml(t("networkSearch.permission"))}</span></div>
-        <div><strong>${escapeHtml(searchProviderLabel(prefs.provider))}</strong><span>${escapeHtml(t("networkSearch.provider"))}</span></div>
-        <div><strong>${escapeHtml(formatNumber(prefs.maxResults))}</strong><span>${escapeHtml(t("networkSearch.maxResults"))}</span></div>
-      </div>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("networkSearch.strategyTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("networkSearch.strategyMeta"))}</div>
-          </div>
-          <span class="settings-status-pill ${prefs.enabled ? "ok" : "muted"}">${escapeHtml(prefs.enabled ? t("networkSearch.allowSearch") : t("networkSearch.localOnly"))}</span>
+      </header>
+      <section class="compact-settings-section">
+        <div class="compact-settings-section-copy">
+          <h3>${escapeHtml(t("networkSearch.strategyTitle"))}</h3>
+          <p>${escapeHtml(t("networkSearch.strategyMeta"))}</p>
         </div>
-        <form id="searchSettingsForm" class="settings-search-form">
-          <div class="appearance-toggle-list">
+        <form id="searchSettingsForm" class="compact-settings-section-controls">
+          <div class="compact-settings-switch-list">
             ${renderSearchToggle("enabled", t("networkSearch.enabled"), t("networkSearch.enabledDesc"), prefs.enabled)}
             ${renderSearchToggle("confirmBeforeSearch", t("networkSearch.confirmBeforeSearch"), t("networkSearch.confirmBeforeSearchDesc"), prefs.confirmBeforeSearch)}
             ${renderSearchToggle("safeSearch", t("networkSearch.safeSearch"), t("networkSearch.safeSearchDesc"), prefs.safeSearch)}
             ${renderSearchToggle("preferGitHub", t("networkSearch.preferGitHub"), t("networkSearch.preferGitHubDesc"), prefs.preferGitHub)}
           </div>
-          <div class="settings-provider-form-grid search-form-grid">
-            <label>${escapeHtml(t("networkSearch.maxResultsLabel"))}
+          <div class="compact-settings-grid two-column">
+            <label class="settings-form-field">${escapeHtml(t("networkSearch.providersTitle"))}
+              <select id="searchProviderSelect" class="settings-field">
+                ${[["duckduckgo", "providerDuckDuckGo"], ["brave", "providerBrave"], ["tavily", "providerTavily"], ["searxng", "providerSearXNG"], ["custom", "providerCustom"]].map(([value, key]) => `<option value="${value}" ${prefs.provider === value ? "selected" : ""}>${escapeHtml(t(`networkSearch.${key}`))}</option>`).join("")}
+              </select>
+            </label>
+            <label class="settings-form-field">${escapeHtml(t("networkSearch.maxResultsLabel"))}
               <select id="searchMaxResults" class="settings-field">
                 ${[3, 5, 10, 20].map((value) => `<option value="${value}" ${prefs.maxResults === value ? "selected" : ""}>${value}</option>`).join("")}
               </select>
             </label>
-            <label>${escapeHtml(t("networkSearch.customEndpoint"))}
-              <input id="searchCustomEndpoint" class="settings-field" value="${escapeAttr(prefs.customEndpoint)}" placeholder="${escapeAttr(t("networkSearch.customEndpointPlaceholder"))}" />
-            </label>
-            <label class="settings-form-span-2">${escapeHtml(t("networkSearch.allowedDomains"))}
+            ${prefs.provider === "custom" ? `<label class="settings-form-field full-width">${escapeHtml(t("networkSearch.customEndpoint"))}<input id="searchCustomEndpoint" class="settings-field" value="${escapeAttr(prefs.customEndpoint)}" placeholder="${escapeAttr(t("networkSearch.customEndpointPlaceholder"))}" /></label>` : ""}
+            <label class="settings-form-field">${escapeHtml(t("networkSearch.allowedDomains"))} <span class="compact-settings-field-meta">${escapeHtml(formatNumber(allowedCount))}</span>
               <textarea id="searchAllowedDomains" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("networkSearch.allowedDomainsPlaceholder"))}">${escapeHtml(prefs.allowedDomains)}</textarea>
             </label>
-            <label class="settings-form-span-2">${escapeHtml(t("networkSearch.blockedDomains"))}
+            <label class="settings-form-field">${escapeHtml(t("networkSearch.blockedDomains"))} <span class="compact-settings-field-meta">${escapeHtml(formatNumber(blockedCount))}</span>
               <textarea id="searchBlockedDomains" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("networkSearch.blockedDomainsPlaceholder"))}">${escapeHtml(prefs.blockedDomains)}</textarea>
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="compact-settings-footer">
             <button class="settings-action-btn primary" type="submit">${escapeHtml(t("networkSearch.saveStrategy"))}</button>
           </div>
         </form>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("networkSearch.providersTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("networkSearch.providersMeta"))}</div>
-          </div>
-        </div>
-        <div class="search-provider-grid">
-          ${renderSearchProviderChoice("duckduckgo", t("networkSearch.providerDuckDuckGo"), t("networkSearch.providerDuckDuckGoDesc"), prefs.provider)}
-          ${renderSearchProviderChoice("brave", t("networkSearch.providerBrave"), t("networkSearch.providerBraveDesc"), prefs.provider)}
-          ${renderSearchProviderChoice("tavily", t("networkSearch.providerTavily"), t("networkSearch.providerTavilyDesc"), prefs.provider)}
-          ${renderSearchProviderChoice("searxng", t("networkSearch.providerSearXNG"), t("networkSearch.providerSearXNGDesc"), prefs.provider)}
-          ${renderSearchProviderChoice("custom", t("networkSearch.providerCustom"), t("networkSearch.providerCustomDesc"), prefs.provider)}
-        </div>
-      </section>
-      <div class="search-policy-grid">
-        ${renderSearchPolicyCard(t("networkSearch.policyAllowed"), formatNumber(allowedCount), allowedCount ? t("networkSearch.policyAllowedSet") : t("networkSearch.policyAllowedEmpty"))}
-        ${renderSearchPolicyCard(t("networkSearch.policyBlocked"), formatNumber(blockedCount), blockedCount ? t("networkSearch.policyBlockedSet") : t("networkSearch.policyBlockedEmpty"))}
-        ${renderSearchPolicyCard(t("networkSearch.policyPrivacy"), prefs.confirmBeforeSearch ? t("networkSearch.privacyConfirm") : t("networkSearch.privacyDirect"), t("networkSearch.privacyHint"))}
-      </div>
     </div>
   `;
   }
 
   function renderSearchToggle(field, title, description, checked) {
     return `
-    <label class="appearance-toggle-row search-toggle-row">
+    <label class="compact-settings-switch-row settings-switch-row">
       <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
       <input type="checkbox" data-search-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>
   `;
   }
 
-  function renderSearchProviderChoice(value, title, description, current) {
-    return `<button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-search-provider="${escapeAttr(value)}"><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small></button>`;
-  }
-
-  function renderSearchPolicyCard(title, value, description) {
-    return `<section class="search-policy-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small></section>`;
-  }
-
   function bindNetworkSearchSettingsActions() {
     $("searchSettingsForm")?.addEventListener("submit", (event) => saveSearchSettingsFromPanel(event).catch(showError));
     $("copySearchPrefsBtn")?.addEventListener("click", () => copyText(searchPrefsExport()));
     $("resetSearchPrefsBtn")?.addEventListener("click", resetSearchPreferences);
-    document.querySelectorAll("[data-search-provider]").forEach((node) => {
-      node.addEventListener("click", () => saveSearchPreferences({ ...currentSearchPreferences(), provider: node.dataset.searchProvider }, { notify: true }));
-    });
+    $("searchProviderSelect")?.addEventListener("change", (event) => saveSearchPreferences({ ...currentSearchPreferences(), provider: event.currentTarget.value }, { notify: true }));
     document.querySelectorAll("[data-search-toggle]").forEach((node) => {
       node.addEventListener("change", () => saveSearchPreferences({ ...currentSearchPreferences(), [node.dataset.searchToggle]: node.checked }, { notify: true }));
     });
@@ -241,8 +206,10 @@ export function createLocalPreferencesSettingsController({
 
   async function saveSearchSettingsFromPanel(event) {
     event.preventDefault();
+    const current = currentSearchPreferences();
     saveSearchPreferences({
-      ...currentSearchPreferences(),
+      ...current,
+      provider: $("searchProviderSelect")?.value || current.provider || defaultSearchPrefs.provider,
       maxResults: Number($("searchMaxResults")?.value || defaultSearchPrefs.maxResults),
       customEndpoint: $("searchCustomEndpoint")?.value || "",
       allowedDomains: $("searchAllowedDomains")?.value || "",
@@ -263,23 +230,23 @@ export function createLocalPreferencesSettingsController({
           <div class="settings-hero-title">${escapeHtml(prefs.enabled ? imGatewayChannelLabel(prefs.channel) : t("imGateway.disabledTitle"))}</div>
           <p>${escapeHtml(t("imGateway.heroDescription"))}</p>
         </div>
-        <div class="settings-action-row">
+        <div class="settings-action-row settings-toolbar">
           <button id="copyIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("imGateway.copyConfig"))}</button>
           <button id="resetIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("imGateway.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.enabled ? t("imGateway.on") : t("imGateway.off"))}</strong><span>${escapeHtml(t("imGateway.permission"))}</span></div>
-        <div><strong>${escapeHtml(imGatewayChannelLabel(prefs.channel))}</strong><span>${escapeHtml(t("imGateway.channel"))}</span></div>
-        <div><strong>${escapeHtml(formatNumber(enabledEvents))}</strong><span>${escapeHtml(t("imGateway.enabledEvents"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(prefs.enabled ? t("imGateway.on") : t("imGateway.off"))}</strong><span>${escapeHtml(t("imGateway.permission"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(imGatewayChannelLabel(prefs.channel))}</strong><span>${escapeHtml(t("imGateway.channel"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(enabledEvents))}</strong><span>${escapeHtml(t("imGateway.enabledEvents"))}</span></div>
       </div>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section highlighted settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("imGateway.securityTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("imGateway.securityMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.securityTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.securityMeta"))}</div>
           </div>
-          <span class="settings-status-pill ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? t("imGateway.needsSecureGateway") : t("imGateway.localPlanOnly"))}</span>
+          <span class="settings-status-pill settings-badge ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? t("imGateway.needsSecureGateway") : t("imGateway.localPlanOnly"))}</span>
         </div>
         <form id="imGatewaySettingsForm" class="settings-im-form">
           <div class="appearance-toggle-list">
@@ -288,32 +255,32 @@ export function createLocalPreferencesSettingsController({
             ${renderIMGatewayToggle("requireSignature", t("imGateway.requireSignature"), t("imGateway.requireSignatureDesc"), prefs.requireSignature)}
             ${renderIMGatewayToggle("redactSecrets", t("imGateway.redactSecrets"), t("imGateway.redactSecretsDesc"), prefs.redactSecrets)}
           </div>
-          <div class="settings-provider-form-grid im-form-grid">
-            <label>${escapeHtml(t("imGateway.maxPayload"))}
+          <div class="settings-provider-form-grid settings-form-grid im-form-grid">
+            <label class="settings-form-field">${escapeHtml(t("imGateway.maxPayload"))}
               <select id="imGatewayMaxPayload" class="settings-field">
                 ${[32, 64, 128, 256].map((value) => `<option value="${value}" ${prefs.maxPayloadKB === value ? "selected" : ""}>${value} KB</option>`).join("")}
               </select>
             </label>
-            <label>${escapeHtml(t("imGateway.endpoint"))}
+            <label class="settings-form-field">${escapeHtml(t("imGateway.endpoint"))}
               <input id="imGatewayEndpoint" class="settings-field" value="${escapeAttr(prefs.endpointUrl)}" placeholder="${escapeAttr(t("imGateway.endpointPlaceholder"))}" />
             </label>
-            <label class="settings-form-span-2">${escapeHtml(t("imGateway.allowedOrigins"))}
+            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("imGateway.allowedOrigins"))}
               <textarea id="imGatewayAllowedOrigins" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("imGateway.allowedOriginsPlaceholder"))}">${escapeHtml(prefs.allowedOrigins)}</textarea>
             </label>
-            <label class="settings-form-span-2">${escapeHtml(t("imGateway.blockedSenders"))}
+            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("imGateway.blockedSenders"))}
               <textarea id="imGatewayBlockedSenders" class="settings-field settings-textarea" rows="4" placeholder="${escapeAttr(t("imGateway.blockedSendersPlaceholder"))}">${escapeHtml(prefs.blockedSenders)}</textarea>
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-card-footer settings-inline-actions">
             <button class="settings-action-btn primary" type="submit">${escapeHtml(t("imGateway.saveStrategy"))}</button>
           </div>
         </form>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("imGateway.channelsTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("imGateway.channelsMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.channelsTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.channelsMeta"))}</div>
           </div>
         </div>
         <div class="im-channel-grid">
@@ -326,11 +293,11 @@ export function createLocalPreferencesSettingsController({
           ${renderIMGatewayChannelChoice("custom", t("imGateway.channelCustom"), t("imGateway.channelCustomDesc"), prefs.channel)}
         </div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("imGateway.eventsTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("imGateway.eventsMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.eventsTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.eventsMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -412,55 +379,55 @@ export function createLocalPreferencesSettingsController({
     const enabledCount = [prefs.infoToasts, prefs.successToasts, prefs.warningToasts, prefs.errorToasts].filter(Boolean).length;
     return `
     <div class="settings-live-page notification-page">
-      <section class="settings-hero-card notification-hero-card">
+      <section class="settings-hero-card notification-hero-card settings-page-section settings-card">
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("notification.heroKicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(prefs.toastEnabled ? t("notification.toastEnabledTitle") : t("notification.toastDisabledTitle"))}</div>
-          <p>${escapeHtml(t("notification.heroDescription"))}</p>
+          <div class="settings-hero-title settings-card-title">${escapeHtml(prefs.toastEnabled ? t("notification.toastEnabledTitle") : t("notification.toastDisabledTitle"))}</div>
+          <p class="settings-card-description">${escapeHtml(t("notification.heroDescription"))}</p>
         </div>
-        <div class="settings-action-row">
+        <div class="settings-action-row settings-toolbar">
           <button id="testNotificationBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("notification.test"))}</button>
           <button id="resetNotificationPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("notification.reset"))}</button>
         </div>
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(prefs.toastEnabled ? t("notification.on") : t("notification.off"))}</strong><span>${escapeHtml(t("notification.toasts"))}</span></div>
-        <div><strong>${escapeHtml(formatNumber(enabledCount))}</strong><span>${escapeHtml(t("notification.enabledTypes"))}</span></div>
-        <div><strong>${escapeHtml(notificationDurationLabel(prefs.duration))}</strong><span>${escapeHtml(t("notification.duration"))}</span></div>
+      <div class="settings-status-strip settings-stat-grid">
+        <div class="settings-stat-card"><strong>${escapeHtml(prefs.toastEnabled ? t("notification.on") : t("notification.off"))}</strong><span>${escapeHtml(t("notification.toasts"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(enabledCount))}</strong><span>${escapeHtml(t("notification.enabledTypes"))}</span></div>
+        <div class="settings-stat-card"><strong>${escapeHtml(notificationDurationLabel(prefs.duration))}</strong><span>${escapeHtml(t("notification.duration"))}</span></div>
       </div>
-      <section class="settings-provider-section highlighted">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section highlighted settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("notification.webhookTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("notification.webhookMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.webhookTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.webhookMeta"))}</div>
           </div>
-          <span class="settings-status-pill ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? t("notification.loading") : (serverSettings.enabled ? t("notification.enabledStatus") : t("notification.disabledStatus")))}</span>
+          <span class="settings-status-pill settings-badge ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? t("notification.loading") : (serverSettings.enabled ? t("notification.enabledStatus") : t("notification.disabledStatus")))}</span>
         </div>
-        ${state?.serverNotificationError ? `<div class="settings-inline-alert">${escapeHtml(state.serverNotificationError)}</div>` : ""}
-        <form id="serverNotificationSettingsForm" class="settings-im-form">
+        ${state?.serverNotificationError ? `<div class="settings-inline-alert settings-alert" role="alert">${escapeHtml(state.serverNotificationError)}</div>` : ""}
+        <form id="serverNotificationSettingsForm" class="settings-im-form settings-card-content">
           <div class="appearance-toggle-list">
             ${renderServerNotificationToggle("enabled", t("notification.enableWebhook"), t("notification.enableWebhookDesc"), serverSettings.enabled)}
             ${renderServerNotificationToggle("notifyOnApproval", t("notification.notifyOnApproval"), t("notification.notifyOnApprovalDesc"), serverSettings.notifyOnApproval !== false)}
             ${renderServerNotificationToggle("notifyOnDone", t("notification.notifyOnDone"), t("notification.notifyOnDoneDesc"), serverSettings.notifyOnDone !== false)}
             ${renderServerNotificationToggle("notifyOnError", t("notification.notifyOnError"), t("notification.notifyOnErrorDesc"), serverSettings.notifyOnError !== false)}
           </div>
-          <div class="settings-provider-form-grid im-form-grid">
-            <label class="settings-form-span-2">${escapeHtml(t("notification.webhookUrl"))}
+          <div class="settings-provider-form-grid settings-form-grid im-form-grid">
+            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("notification.webhookUrl"))}
               <input id="serverNotificationWebhookUrl" class="settings-field" value="${escapeAttr(serverSettings.webhookUrl || "")}" placeholder="${escapeAttr(t("notification.webhookUrlPlaceholder"))}" />
             </label>
           </div>
-          <div class="settings-action-row settings-form-actions">
+          <div class="settings-action-row settings-form-actions settings-card-footer settings-inline-actions">
             <button id="refreshServerNotificationSettingsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("notification.refreshServer"))}</button>
             <button id="testServerNotificationBtn" class="settings-action-btn subtle" type="button" ${state?.serverNotificationTesting ? "disabled" : ""}>${escapeHtml(state?.serverNotificationTesting ? t("notification.sending") : t("notification.sendTestWebhook"))}</button>
             <button class="settings-action-btn primary" type="submit" ${state?.serverNotificationSaving ? "disabled" : ""}>${escapeHtml(state?.serverNotificationSaving ? t("notification.saving") : t("notification.saveWebhook"))}</button>
           </div>
         </form>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("notification.toastTypesTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("notification.toastTypesMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.toastTypesTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.toastTypesMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -471,24 +438,24 @@ export function createLocalPreferencesSettingsController({
           ${renderNotificationToggle("errorToasts", t("notification.errorToasts"), t("notification.errorToastsDesc"), prefs.errorToasts)}
         </div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("notification.durationTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("notification.durationMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.durationTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.durationMeta"))}</div>
           </div>
         </div>
-        <div class="appearance-choice-grid">
+        <div class="appearance-choice-grid settings-choice-grid" role="radiogroup">
           ${renderNotificationDurationChoice("short", t("notification.durationShort"), t("notification.durationShortDesc"), prefs.duration)}
           ${renderNotificationDurationChoice("normal", t("notification.durationNormal"), t("notification.durationNormalDesc"), prefs.duration)}
           ${renderNotificationDurationChoice("long", t("notification.durationLong"), t("notification.durationLongDesc"), prefs.duration)}
         </div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
+      <section class="settings-provider-section settings-page-section settings-card">
+        <div class="settings-provider-section-head settings-card-header">
           <div>
-            <div class="settings-provider-title">${escapeHtml(t("notification.terminalTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("notification.terminalMeta"))}</div>
+            <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.terminalTitle"))}</div>
+            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.terminalMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -501,7 +468,7 @@ export function createLocalPreferencesSettingsController({
 
   function renderNotificationToggle(field, title, description, checked) {
     return `
-    <label class="appearance-toggle-row notification-toggle-row">
+    <label class="appearance-toggle-row notification-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
         <small>${escapeHtml(description)}</small>
@@ -513,7 +480,7 @@ export function createLocalPreferencesSettingsController({
 
   function renderServerNotificationToggle(field, title, description, checked) {
     return `
-    <label class="appearance-toggle-row notification-toggle-row">
+    <label class="appearance-toggle-row notification-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
         <small>${escapeHtml(description)}</small>
@@ -525,7 +492,7 @@ export function createLocalPreferencesSettingsController({
 
   function renderNotificationDurationChoice(value, title, description, current) {
     return `
-    <button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-notification-duration="${escapeAttr(value)}">
+    <button class="appearance-choice settings-choice-card ${current === value ? "active" : ""}" type="button" role="radio" aria-checked="${current === value}" data-notification-duration="${escapeAttr(value)}">
       <span>${escapeHtml(title)}</span>
       <small>${escapeHtml(description)}</small>
     </button>
@@ -574,77 +541,29 @@ export function createLocalPreferencesSettingsController({
     const regional = currentRegionalPreferences?.() || { locale: "auto", timezone: "auto" };
     const uiLocale = resolveUILocale(regional.locale);
     return `
-    <div class="settings-live-page appearance-page">
-      <section class="settings-hero-card appearance-hero-card">
-        <div>
+    <div class="settings-live-page compact-settings-page appearance-page">
+      <header class="compact-settings-header">
+        <div class="compact-settings-heading">
           <div class="settings-hero-kicker">${escapeHtml(t("appearance.heroKicker"))}</div>
-          <div class="settings-hero-title">${escapeHtml(appearanceThemeLabel(prefs.theme))} · ${escapeHtml(appearanceDensityLabel(prefs.density))}</div>
+          <h1>${escapeHtml(appearanceThemeLabel(prefs.themePreset))} · ${escapeHtml(appearanceDensityLabel(prefs.density))}</h1>
           <p>${escapeHtml(t("appearance.heroDescription"))}</p>
         </div>
-        <div class="appearance-preview-card" aria-hidden="true">
-          <div class="appearance-preview-bar"></div>
-          <div class="appearance-preview-line wide"></div>
-          <div class="appearance-preview-line"></div>
-          <div class="appearance-preview-pill"></div>
-        </div>
+      </header>
+      <section class="compact-settings-section appearance-language-section">
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.languageTitle"))}</h2><p>${escapeHtml(t("appearance.languageMeta"))}</p></div>
+        <div class="compact-settings-section-controls"><label class="settings-form-field compact-settings-field" for="appearanceLanguageSelect"><span>${escapeHtml(t("language.label"))}</span><select id="appearanceLanguageSelect" class="settings-field"><option value="zh-TW" ${uiLocale === "zh-TW" ? "selected" : ""}>${escapeHtml(t("language.traditionalChinese"))}</option><option value="zh-CN" ${uiLocale === "zh-CN" ? "selected" : ""}>${escapeHtml(t("language.simplifiedChinese"))}</option><option value="en-US" ${uiLocale === "en" ? "selected" : ""}>${escapeHtml(t("language.english"))}</option></select><small>${escapeHtml(t("language.description"))}</small></label></div>
       </section>
-      <div class="settings-status-strip">
-        <div><strong>${escapeHtml(appearanceThemeLabel(prefs.theme))}</strong><span>${escapeHtml(t("appearance.theme"))}</span></div>
-        <div><strong>${escapeHtml(appearanceDensityLabel(prefs.density))}</strong><span>${escapeHtml(t("appearance.density"))}</span></div>
-        <div><strong>${escapeHtml(prefs.terminalDefaultOpen ? t("appearance.terminalOpen") : t("appearance.terminalCollapsed"))}</strong><span>${escapeHtml(t("appearance.terminal"))}</span></div>
-      </div>
-      <section class="settings-provider-section appearance-language-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("appearance.languageTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("appearance.languageMeta"))}</div>
-          </div>
-        </div>
-        <label class="appearance-language-field" for="appearanceLanguageSelect">
-          <span>${escapeHtml(t("language.label"))}</span>
-          <select id="appearanceLanguageSelect" class="settings-field">
-            <option value="zh-TW" ${uiLocale === "zh-TW" ? "selected" : ""}>${escapeHtml(t("language.traditionalChinese"))}</option>
-            <option value="zh-CN" ${uiLocale === "zh-CN" ? "selected" : ""}>${escapeHtml(t("language.simplifiedChinese"))}</option>
-            <option value="en-US" ${uiLocale === "en" ? "selected" : ""}>${escapeHtml(t("language.english"))}</option>
-          </select>
-          <small>${escapeHtml(t("language.description"))}</small>
-        </label>
+      <section class="compact-settings-section">
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.themeSectionTitle"))}</h2><p>${escapeHtml(t("appearance.themeSectionMeta"))}</p></div>
+        <div class="compact-settings-section-controls"><div class="appearance-theme-grid compact-settings-choice-grid four-column" role="radiogroup" aria-label="${escapeAttr(t("appearance.themeSectionTitle"))}">${renderThemePresetChoice("light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.themePreset === "light")}${renderThemePresetChoice("dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.themePreset === "dark")}${renderThemePresetChoice("cyber", t("appearance.themeCyber"), t("appearance.themeCyberDesc"), prefs.themePreset === "cyber")}${renderThemePresetChoice("cream", t("appearance.themeCream"), t("appearance.themeCreamDesc"), prefs.themePreset === "cream")}</div></div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("appearance.themeSectionTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("appearance.themeSectionMeta"))}</div>
-          </div>
-        </div>
-        <div class="appearance-choice-grid">
-          ${renderAppearanceChoice("theme", "dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.theme === "dark")}
-          ${renderAppearanceChoice("theme", "light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.theme === "light")}
-        </div>
+      <section class="compact-settings-section">
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.densitySectionTitle"))}</h2><p>${escapeHtml(t("appearance.densitySectionMeta"))}</p></div>
+        <div class="compact-settings-section-controls"><div class="appearance-choice-grid compact-settings-choice-grid two-column" role="radiogroup">${renderAppearanceChoice("density", "comfortable", t("appearance.densityComfortable"), t("appearance.densityComfortableDesc"), prefs.density === "comfortable")}${renderAppearanceChoice("density", "compact", t("appearance.densityCompact"), t("appearance.densityCompactDesc"), prefs.density === "compact")}</div></div>
       </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("appearance.densitySectionTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("appearance.densitySectionMeta"))}</div>
-          </div>
-        </div>
-        <div class="appearance-choice-grid">
-          ${renderAppearanceChoice("density", "comfortable", t("appearance.densityComfortable"), t("appearance.densityComfortableDesc"), prefs.density === "comfortable")}
-          ${renderAppearanceChoice("density", "compact", t("appearance.densityCompact"), t("appearance.densityCompactDesc"), prefs.density === "compact")}
-        </div>
-      </section>
-      <section class="settings-provider-section">
-        <div class="settings-provider-section-head">
-          <div>
-            <div class="settings-provider-title">${escapeHtml(t("appearance.behaviorTitle"))}</div>
-            <div class="settings-provider-meta">${escapeHtml(t("appearance.behaviorMeta"))}</div>
-          </div>
-        </div>
-        <div class="appearance-toggle-list">
-          ${renderAppearanceToggle("terminalDefaultOpen", t("appearance.terminalDefaultOpen"), t("appearance.terminalDefaultOpenDesc"), prefs.terminalDefaultOpen)}
-          ${renderAppearanceToggle("showEventLog", t("appearance.showEventLog"), t("appearance.showEventLogDesc"), prefs.showEventLog)}
-        </div>
+      <section class="compact-settings-section">
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.behaviorTitle"))}</h2><p>${escapeHtml(t("appearance.behaviorMeta"))}</p></div>
+        <div class="compact-settings-section-controls compact-settings-switch-list">${renderAppearanceToggle("terminalDefaultOpen", t("appearance.terminalDefaultOpen"), t("appearance.terminalDefaultOpenDesc"), prefs.terminalDefaultOpen)}${renderAppearanceToggle("showEventLog", t("appearance.showEventLog"), t("appearance.showEventLogDesc"), prefs.showEventLog)}</div>
       </section>
     </div>
   `;
@@ -652,16 +571,25 @@ export function createLocalPreferencesSettingsController({
 
   function renderAppearanceChoice(field, value, title, description, active) {
     return `
-    <button class="appearance-choice ${active ? "active" : ""}" type="button" data-appearance-field="${escapeAttr(field)}" data-appearance-value="${escapeAttr(value)}">
+    <button class="appearance-choice settings-choice-card ${active ? "active" : ""}" type="button" role="radio" aria-checked="${active}" data-appearance-field="${escapeAttr(field)}" data-appearance-value="${escapeAttr(value)}">
       <span>${escapeHtml(title)}</span>
       <small>${escapeHtml(description)}</small>
     </button>
   `;
   }
 
+  function renderThemePresetChoice(value, title, description, active) {
+    return `
+    <button class="appearance-choice appearance-theme-choice settings-choice-card ${active ? "active" : ""}" type="button" role="radio" aria-checked="${active}" data-appearance-field="themePreset" data-appearance-value="${escapeAttr(value)}">
+      <span class="theme-preset-preview theme-preset-preview-${escapeAttr(value)}" aria-hidden="true"><i></i><b></b><em></em></span>
+      <span class="appearance-theme-choice-copy"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
+    </button>
+  `;
+  }
+
   function renderAppearanceToggle(field, title, description, checked) {
     return `
-    <label class="appearance-toggle-row">
+    <label class="appearance-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
         <small>${escapeHtml(description)}</small>
@@ -672,7 +600,12 @@ export function createLocalPreferencesSettingsController({
   }
 
   function appearanceThemeLabel(value) {
-    return value === "light" ? t("appearance.themeLightLabel") : t("appearance.themeDarkLabel");
+    return {
+      light: t("appearance.themeLightLabel"),
+      dark: t("appearance.themeDarkLabel"),
+      cyber: t("appearance.themeCyberLabel"),
+      cream: t("appearance.themeCreamLabel"),
+    }[value] || t("appearance.themeLightLabel");
   }
 
   function appearanceDensityLabel(value) {

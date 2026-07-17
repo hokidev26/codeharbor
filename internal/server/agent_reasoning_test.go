@@ -27,7 +27,7 @@ func TestUpdateAgentReasoningEffortRoute(t *testing.T) {
 	app := New(config.Config{}, store, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"high"}`))
+	request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"high"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -42,7 +42,7 @@ func TestUpdateAgentReasoningEffortRoute(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"maximum"}`))
+	request = newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/reasoning-effort", strings.NewReader(`{"reasoningEffort":"maximum"}`))
 	request.Header.Set("Content-Type", "application/json")
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {

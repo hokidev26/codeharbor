@@ -39,6 +39,12 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 	if !s.validateWebSocketRequest(w, r) {
 		return
 	}
+	wsCtx, releaseAuthorization, authorized := s.remoteWebSocketContext(r.Context(), r)
+	if !authorized {
+		writeError(w, http.StatusUnauthorized, "remote websocket authorization expired")
+		return
+	}
+	defer releaseAuthorization()
 
 	protocol, protocol2, err := websocketProtocol(r)
 	if err != nil {
@@ -68,13 +74,16 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	// validateWebSocketRequest already applies the trusted forwarded-origin
+	// policy. Disable the library's raw Host comparison so TLS-terminating
+	// loopback proxies with a backend Host can use the validated external origin.
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(wsCtx)
 	defer cancel()
 	subscription := s.hub.SubscribeProtocol(ctx, agentpkg.SubscribeOptions{
 		AgentID:       agentID,
