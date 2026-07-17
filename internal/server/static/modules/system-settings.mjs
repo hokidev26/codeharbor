@@ -50,7 +50,7 @@ export function createSystemSettingsController({
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.serverSystem.kicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(address)}</div>
-          <p>${escapeHtml(t("systemSettings.serverSystem.description"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("systemSettings.serverSystem.description"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar">
           <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.serverSystem.refresh"))}</button>
@@ -117,7 +117,7 @@ export function createSystemSettingsController({
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.runtimeResources.kicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(formatBytes(memory.allocBytes || 0))} · ${escapeHtml(t("systemSettings.runtimeResources.goroutinesValue", { count: formatNumber(go.goroutines || 0) }))}</div>
-          <p>${escapeHtml(t("systemSettings.runtimeResources.description"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("systemSettings.runtimeResources.description"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar">
           <button id="refreshRuntimeSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.runtimeResources.refresh"))}</button>
@@ -238,7 +238,7 @@ export function createSystemSettingsController({
           </span>
           <div>
             <h2 id="legacyAboutProductName">Autoto</h2>
-            <p>${escapeHtml(t("systemSettings.about.productTagline"))}</p>
+            <p data-settings-help-copy>${escapeHtml(t("systemSettings.about.productTagline"))}</p>
           </div>
         </div>
         </section>
@@ -258,7 +258,7 @@ export function createSystemSettingsController({
           </div>
         </div>
         <button id="checkForUpdatesBtn" class="legacy-about-update-button" type="button">${escapeHtml(t("systemSettings.about.checkUpdates"))}</button>
-        <p class="legacy-about-update-note">${escapeHtml(t("systemSettings.about.updateNote"))}</p>
+        <p class="legacy-about-update-note" data-settings-help-copy>${escapeHtml(t("systemSettings.about.updateNote"))}</p>
         ${state.updateError ? `<div class="settings-inline-alert settings-alert legacy-about-update-error" role="alert">${escapeHtml(state.updateError)}</div>` : ""}
         </section>
       </section>
@@ -270,7 +270,7 @@ export function createSystemSettingsController({
             <div class="settings-provider-section-head settings-card-header">
               <div>
                 <div class="settings-provider-title settings-card-title">${escapeHtml(t("systemSettings.license.openSourceTitle"))}</div>
-                <div class="settings-provider-meta settings-card-description">${escapeHtml(t("systemSettings.license.openSourceMeta"))}</div>
+                <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("systemSettings.license.openSourceMeta"))}</div>
               </div>
               <button id="refreshLicensesBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.license.refresh"))}</button>
             </div>
@@ -296,7 +296,7 @@ export function createSystemSettingsController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(t("systemSettings.localBackup.title"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("systemSettings.localBackup.meta"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("systemSettings.localBackup.meta"))}</div>
         </div>
         <div class="settings-action-row compact-actions">
           <button id="copyLocalPrefsBackupBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.localBackup.copy"))}</button>
@@ -449,7 +449,7 @@ export function createSystemSettingsController({
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("systemSettings.storage.kicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(t("systemSettings.storage.heroTitle"))}</div>
-          <p>${escapeHtml(t("systemSettings.storage.description"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("systemSettings.storage.description"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar">
           <button id="refreshStorageSummaryBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.storage.refresh"))}</button>

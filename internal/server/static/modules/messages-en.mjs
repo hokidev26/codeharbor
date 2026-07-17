@@ -186,6 +186,13 @@ export default Object.freeze({
     wizard: "Setup wizard",
     close: "Close settings",
     pages: "Settings pages",
+    pageHelp: {
+      open: "View help for this page",
+      close: "Close page help",
+      eyebrow: "Page help",
+      overview: "Page overview",
+      empty: "No additional details are available for this page.",
+    },
     defaultTitle: "API settings",
     defaultSubtitle: "Manage models, providers, and interface preferences.",
     section: { personal: "Personal settings", instance: "Instance management" },

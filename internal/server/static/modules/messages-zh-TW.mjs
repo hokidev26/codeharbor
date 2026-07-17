@@ -186,6 +186,13 @@ export default Object.freeze({
     wizard: "設定精靈",
     close: "關閉設定",
     pages: "設定頁面",
+    pageHelp: {
+      open: "查看本頁說明",
+      close: "關閉頁面說明",
+      eyebrow: "頁面說明",
+      overview: "頁面概覽",
+      empty: "本頁暫無更多詳細說明。",
+    },
     defaultTitle: "API 設定",
     defaultSubtitle: "管理模型、供應商與介面偏好。",
     section: { personal: "個人設定", instance: "執行個體管理" },

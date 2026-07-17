@@ -49,7 +49,7 @@ export function createWorkspaceSettingsController({
     const writable = Boolean(config.endpoint);
     const numericField = (id, label, value, placeholder) => `<label class="settings-form-field">${escapeHtml(label)}<input id="${id}" class="settings-field" type="number" min="0" step="1" value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" /></label>`;
     return `<section class="settings-provider-section settings-page-section settings-card">
-      <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(wt("continuationTitle"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(wt("continuationDescription"))}</div></div><span class="settings-status-pill settings-badge ${config.mode === "safe" ? "ok" : "muted"}">${escapeHtml(config.mode === "safe" ? wt("continuationSafe") : wt("continuationOff"))}</span></div>
+      <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(wt("continuationTitle"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(wt("continuationDescription"))}</div></div><span class="settings-status-pill settings-badge ${config.mode === "safe" ? "ok" : "muted"}">${escapeHtml(config.mode === "safe" ? wt("continuationSafe") : wt("continuationOff"))}</span></div>
       <form id="continuationSettingsForm" class="settings-card-content">
         <div class="continuation-settings-grid settings-form-grid">
           <label class="settings-form-field">${escapeHtml(wt("continuationMode"))}<select id="continuationMode" class="settings-field"><option value="off" ${config.mode === "safe" ? "" : "selected"}>${escapeHtml(wt("continuationOff"))}</option><option value="safe" ${config.mode === "safe" ? "selected" : ""}>${escapeHtml(wt("continuationSafe"))}</option></select></label>
@@ -77,7 +77,7 @@ export function createWorkspaceSettingsController({
         <div class="settings-card-header">
           <div class="settings-hero-kicker">${escapeHtml(wt("agentHeroKicker"))}</div>
           <div class="settings-hero-title settings-card-title">${escapeHtml(agent?.title || wt("noAgentSelected"))}</div>
-          <p class="settings-card-description">${escapeHtml(wt("agentHeroDescription"))}</p>
+          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(wt("agentHeroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
           <button id="refreshAgentSettingsBtn" class="settings-action-btn primary" type="button" ${agent ? "" : "disabled"}>${escapeHtml(wt("refreshAgent"))}</button>
@@ -103,14 +103,14 @@ export function createWorkspaceSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(wt("runtimePolicy"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(wt("runtimePolicyDescription"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(wt("runtimePolicyDescription"))}</div>
           </div>
         </div>
         <div class="agent-policy-grid settings-card-content">
-          ${renderAgentPolicyCard(wt("permissionBoundary"), agentConfig.defaultPermissionMode || "acceptEdits", wt("permissionBoundaryDescription"))}
-          ${renderAgentPolicyCard(wt("planMode"), agent?.planMode === true ? wt("planModePlan") : wt("planModeExecute"), wt("planModeDescription"))}
+          ${renderAgentPolicyCard(wt("permissionBoundary"), agentConfig.defaultPermissionMode || "acceptEdits", wt("permissionBoundaryDescription"), true)}
+          ${renderAgentPolicyCard(wt("planMode"), agent?.planMode === true ? wt("planModePlan") : wt("planModeExecute"), wt("planModeDescription"), true)}
           ${renderAgentPolicyCard(wt("modelRouting"), currentModel || wt("noneSelected"), provider ? `${providerLabel(provider)} · ${providerStatusText(provider)}` : wt("waitingModelList"))}
-          ${renderAgentPolicyCard(wt("workDirectory"), cwd || wt("notSet"), wt("workDirectoryDescription"))}
+          ${renderAgentPolicyCard(wt("workDirectory"), cwd || wt("notSet"), wt("workDirectoryDescription"), true)}
         </div>
       </section>
     </div>
@@ -215,12 +215,12 @@ export function createWorkspaceSettingsController({
       .join("");
   }
 
-  function renderAgentPolicyCard(title, value, description) {
+  function renderAgentPolicyCard(title, value, description, helpCopy = false) {
     return `
     <div class="agent-policy-card settings-card">
       <strong>${escapeHtml(value)}</strong>
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small${helpCopy ? " data-settings-help-copy" : ""}>${escapeHtml(description)}</small>
     </div>
   `;
   }
@@ -353,7 +353,7 @@ export function createWorkspaceSettingsController({
         <div class="settings-card-header">
           <div class="settings-hero-kicker">${escapeHtml(wt("worklinesHeroKicker"))}</div>
           <div class="settings-hero-title settings-card-title">${escapeHtml(state.project?.name || wt("noProjectSelected"))}</div>
-          <p class="settings-card-description">${escapeHtml(wt("worklinesHeroDescription"))}</p>
+          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(wt("worklinesHeroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
           <button id="refreshWorklinesBtn" class="settings-action-btn primary" type="button" ${state.project?.id ? "" : "disabled"}>${escapeHtml(wt("refreshWorklines"))}</button>
@@ -410,7 +410,7 @@ export function createWorkspaceSettingsController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(wt("worklineAgentsTitle"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(wt("worklineAgentsDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(wt("worklineAgentsDescription"))}</div>
         </div>
       </div>
       <div class="workline-agent-list settings-data-list settings-card-content">
@@ -421,7 +421,7 @@ export function createWorkspaceSettingsController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(wt("containersIsolation"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(wt("containersIsolationDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(wt("containersIsolationDescription"))}</div>
         </div>
         <span class="settings-status-pill settings-badge muted">${escapeHtml(wt("localDirectoryMode"))}</span>
       </div>
@@ -472,7 +472,7 @@ export function createWorkspaceSettingsController({
     <div class="workline-boundary-card settings-card">
       <strong>${escapeHtml(value)}</strong>
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small data-settings-help-copy>${escapeHtml(description)}</small>
     </div>
   `;
   }

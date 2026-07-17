@@ -26,7 +26,7 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
@@ -45,6 +45,7 @@ import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServe
 import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
 import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1";
 import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1";
+import { createSettingsHelpController } from "./settings-help.mjs?v=settings-help-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
@@ -1061,6 +1062,18 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions, layout: "about" }],
 ].forEach(([key, panel]) => settingsPanelRegistry.register(key, panel));
 
+const settingsHelp = createSettingsHelpController({
+  getRoot: () => $("settingsContentBody"),
+  trigger: $("settingsHelpBtn"),
+  panel: $("settingsHelpPanel"),
+  title: $("settingsHelpTitle"),
+  body: $("settingsHelpBody"),
+  closeButton: $("closeSettingsHelpBtn"),
+  backdrop: $("settingsHelpBackdrop"),
+  translate: t,
+});
+settingsHelp.bind();
+
 function updateRuntimeStatusButton() {
   const button = $("runtimeStatusBtn");
   const indicator = $("runtimeStatusIndicator");
@@ -1856,6 +1869,7 @@ function closeSettingsModal({ restoreWorkbench = true } = {}) {
   const modal = $("settingsModal");
   const wasOpen = Boolean(modal && !modal.classList.contains("hidden"));
   if (wasOpen) {
+    settingsHelp.close({ restoreFocus: false });
     remoteAccessSettings.consumeGeneratedPassword();
     sharedAPISettings.consumeOneTimeToken();
     $("settingsContentBody").textContent = "";
@@ -2048,9 +2062,9 @@ function renderSettingsNav(activeKey = "providers") {
     <section class="settings-nav-group" aria-label="${escapeAttr(category.label)}">
       <div class="settings-nav-group-label">${escapeHtml(category.label)}</div>
       ${category.items.map((item) => `
-        <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" ${item.key === activeKey ? 'aria-current="page"' : ""} data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.subtitle)}">
+        <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" ${item.key === activeKey ? 'aria-current="page"' : ""} data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.label)}">
           <span class="settings-nav-icon" aria-hidden="true">${escapeHtml(item.icon)}</span>
-          <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.subtitle)}</small></span>
+          <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong></span>
         </button>
       `).join("")}
     </section>
@@ -2087,15 +2101,17 @@ function selectSettingsPanel(key) {
   const item = settingsItemByKey(key) || settingsItems[0];
   const panel = settingsPanelRegistry.resolve(item.key);
   const categoryKey = settingsCategoryForItem(item.key, state.activeSettingsCategory || "api");
+  settingsHelp.close({ restoreFocus: false });
   if (state.activeSettingsPanel === "shared-api" && item.key !== "shared-api") sharedAPISettings.consumeOneTimeToken();
   state.activeSettingsCategory = categoryKey;
   state.activeSettingsPanel = item.key;
   renderSettingsNav(item.key);
   const isAboutPanel = item.key === "about";
-  $("settingsContentTitle")?.closest(".settings-content-head")?.classList.toggle("hidden", isAboutPanel);
+  $("settingsContentTitle")?.closest(".settings-content-head")?.classList.remove("hidden");
   $("settingsContentBody")?.closest(".settings-content")?.classList.toggle("about-panel-active", isAboutPanel);
   $("settingsContentTitle").textContent = item.label;
   $("settingsContentSubtitle").textContent = item.subtitle;
+  settingsHelp.sync({ key: item.key, label: item.label, overview: item.subtitle });
   const layout = panel?.layout || (isAboutPanel ? "about" : "");
   const content = panel ? panel.render(item) : renderGenericSettingsContent(item);
   $("settingsContentBody").innerHTML = `<div class="settings-page-frame" data-settings-page="${escapeAttr(item.key)}"${layout ? ` data-panel-layout="${escapeAttr(layout)}"` : ""}>${content}</div>`;
@@ -2115,7 +2131,7 @@ function renderGenericSettingsContent(item) {
       <div class="settings-panel-icon">${escapeHtml(item.icon)}</div>
       <div>
         <div class="settings-panel-title">${escapeHtml(item.label)}</div>
-        <p>${escapeHtml(item.subtitle)}</p>
+        <p data-settings-help-copy>${escapeHtml(item.subtitle)}</p>
       </div>
     </div>
     <div class="settings-panel-grid">
@@ -3273,7 +3289,10 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
 $("settingsIdentityBtn")?.addEventListener("click", () => selectSettingsPanel("profile"));
 $("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
-$("settingsModal").addEventListener("keydown", handleSettingsDialogKeydown);
+$("settingsModal").addEventListener("keydown", (event) => {
+  settingsHelp.handleKeydown(event);
+  handleSettingsDialogKeydown(event);
+});
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
 $("closeEmployeeOverviewBtn")?.addEventListener("click", closeEmployeeOverview);
 $("employeeOverviewModal")?.addEventListener("click", (event) => { if (event.target.id === "employeeOverviewModal") closeEmployeeOverview(); });

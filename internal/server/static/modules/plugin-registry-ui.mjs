@@ -202,14 +202,14 @@ export function createPluginRegistryUIController({
         : registry.items.length
           ? `<div class="skill-command-list settings-data-list" aria-live="polite" aria-busy="${registry.loading ? "true" : "false"}">${registry.items.map(renderPluginCard).join("")}</div>`
           : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("pluginRegistry.empty"))}</div>`;
-    return `<p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
+    return `<p class="skills-description settings-card-description" data-settings-help-copy>${escapeHtml(active.description)}</p>
       <section class="settings-provider-section settings-card settings-page-section highlighted" aria-busy="${registry.loading ? "true" : "false"}">
-        <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(t("pluginRegistry.title"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.description"))}</div></div><button id="refreshPluginsBtn" class="settings-action-btn subtle" type="button" ${registry.loading ? "disabled" : ""}>${escapeHtml(t(registry.loading ? "pluginRegistry.refreshing" : "pluginRegistry.refresh"))}</button></div>
+        <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(t("pluginRegistry.title"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("pluginRegistry.description"))}</div></div><button id="refreshPluginsBtn" class="settings-action-btn subtle" type="button" ${registry.loading ? "disabled" : ""}>${escapeHtml(t(registry.loading ? "pluginRegistry.refreshing" : "pluginRegistry.refresh"))}</button></div>
         <div class="settings-card-content">${list}</div>
       </section>
       <section class="settings-provider-section settings-card settings-page-section" aria-busy="${installing ? "true" : "false"}">
         <div class="settings-provider-title settings-card-title">${escapeHtml(t("pluginRegistry.installTitle"))}</div>
-        <div class="settings-provider-meta settings-card-description">${escapeHtml(t("pluginRegistry.installDescription"))}</div>
+        <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("pluginRegistry.installDescription"))}</div>
         <form id="pluginInstallForm" class="skill-command-form"><div class="settings-provider-form-grid settings-form-grid"><label class="settings-form-span-2 settings-form-field">${escapeHtml(t("pluginRegistry.pathLabel"))}<input id="pluginRootPath" class="settings-field" placeholder="${escapeAttr(t("pluginRegistry.pathPlaceholder"))}" /></label></div><div class="settings-action-row settings-form-actions settings-inline-actions"><button class="settings-action-btn primary" type="submit" ${installing ? "disabled" : ""}>${escapeHtml(t(installing ? "pluginRegistry.installing" : "pluginRegistry.install"))}</button></div></form>
         <div class="settings-provider-note settings-alert" role="note">${escapeHtml(t("pluginRegistry.uninstallNote"))}</div>
       </section>`;

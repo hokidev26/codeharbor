@@ -1,5 +1,5 @@
 import { resolveLocale } from "./locale-registry.mjs";
-import messagesEN from "./messages-en.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1";
+import messagesEN from "./messages-en.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1";
 import backgroundTaskMessages from "./messages-background-tasks.mjs";
 import remoteAccessMessages from "./messages-remote-access.mjs?v=remote-control-full-1";
 import preferencesMessages from "./messages-preferences.mjs";
@@ -7,8 +7,8 @@ import staticExtraMessages from "./messages-static-extra.mjs";
 import systemSettingsMessages from "./messages-system-settings.mjs";
 import usageHistoryMessages from "./messages-usage-history.mjs";
 import workspaceSettingsMessages from "./messages-workspace-settings.mjs";
-import messagesZhCN from "./messages-zh-CN.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1";
-import messagesZhTW from "./messages-zh-TW.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1";
+import messagesZhCN from "./messages-zh-CN.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1";
+import messagesZhTW from "./messages-zh-TW.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1";
 
 export const uiLocales = Object.freeze(["zh-TW", "zh-CN", "en"]);
 

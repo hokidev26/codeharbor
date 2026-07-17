@@ -1390,7 +1390,7 @@ export function createModelProviderSettingsController({
 
   function renderAgentRolePreferenceField(role, draft, options) {
     const preferred = draft.subagentModels?.[role] || "";
-    return `<label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt(`routing.roles.${role}.label`))}</span><select name="subagentModel_${escapeAttr(role)}" data-agent-role-model="${escapeAttr(role)}">${renderAgentModelSelectOptions(preferred, options, { allowInherited: true })}</select><small>${escapeHtml(mt(`routing.roles.${role}.description`))}</small></label>`;
+    return `<label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt(`routing.roles.${role}.label`))}</span><select name="subagentModel_${escapeAttr(role)}" data-agent-role-model="${escapeAttr(role)}">${renderAgentModelSelectOptions(preferred, options, { allowInherited: true })}</select><small data-settings-help-copy>${escapeHtml(mt(`routing.roles.${role}.description`))}</small></label>`;
   }
 
   function renderAgentModelPoolControl(role, draft, options) {
@@ -1400,7 +1400,7 @@ export function createModelProviderSettingsController({
       <summary class="compact-multi-select-summary"><span>${escapeHtml(mt(`routing.roles.${role}.label`))}</span><strong class="agent-model-pool-state ${unrestricted ? "muted" : "ok"}" data-agent-model-pool-summary="${escapeAttr(role)}">${escapeHtml(agentModelPoolSummary(unrestricted, pool.length))}</strong></summary>
       <fieldset class="compact-multi-select-panel agent-model-pool-fieldset">
         <legend class="sr-only">${escapeHtml(mt("routing.allowedModels"))}</legend>
-        <label class="compact-multi-select-all agent-model-pool-all"><input type="checkbox" data-agent-model-pool-all="${escapeAttr(role)}" ${unrestricted ? "checked" : ""}><span><strong>${escapeHtml(mt("routing.allowAllModels"))}</strong><small>${escapeHtml(mt("routing.allowAllModelsHelp"))}</small></span></label>
+        <label class="compact-multi-select-all agent-model-pool-all"><input type="checkbox" data-agent-model-pool-all="${escapeAttr(role)}" ${unrestricted ? "checked" : ""}><span><strong>${escapeHtml(mt("routing.allowAllModels"))}</strong><small data-settings-help-copy>${escapeHtml(mt("routing.allowAllModelsHelp"))}</small></span></label>
         <div class="compact-multi-select-options agent-model-pool-options" data-agent-model-pool-options="${escapeAttr(role)}">
           ${options.map((item) => `<label class="compact-multi-select-option agent-model-pool-option"><input type="checkbox" value="${escapeAttr(item.value)}" data-agent-model-pool-option="${escapeAttr(role)}" ${pool.includes(item.value) ? "checked" : ""} ${unrestricted ? "disabled" : ""}><span><strong>${escapeHtml(item.value)}</strong><small>${escapeHtml(item.available ? item.provider : mt("routing.currentlyUnavailable"))}</small></span></label>`).join("") || `<div class="settings-empty-card compact">${escapeHtml(mt("routing.noModelsForPool"))}</div>`}
         </div>
@@ -1419,9 +1419,9 @@ export function createModelProviderSettingsController({
     const members = modelAggregateMembers(editor.members).join("\n");
     return `<form id="modelAggregateForm" class="model-aggregate-editor compact-settings-editor" data-model-aggregate-mode="${editing ? "edit" : "create"}">
       <div class="compact-settings-grid two-column">
-        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateName"))}</span><input name="aggregateName" value="${escapeAttr(name)}" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,119}" ${editing ? "readonly" : "required"}><small>${escapeHtml(mt("routing.aggregateNameHelp"))}</small></label>
-        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateStrategy"))}</span><select name="aggregateMode" disabled><option value="priority" selected>${escapeHtml(mt("routing.aggregatePriority"))}</option></select><small>${escapeHtml(mt("routing.aggregateStrategyHelp"))}</small></label>
-        <label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("routing.aggregateMembers"))}</span><textarea name="aggregateMembers" rows="5" required placeholder="openai:gpt-5\ncodex:gpt-5.5">${escapeHtml(members)}</textarea><small>${escapeHtml(mt("routing.aggregateMembersHelp"))}</small></label>
+        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateName"))}</span><input name="aggregateName" value="${escapeAttr(name)}" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,119}" ${editing ? "readonly" : "required"}><small data-settings-help-copy>${escapeHtml(mt("routing.aggregateNameHelp"))}</small></label>
+        <label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.aggregateStrategy"))}</span><select name="aggregateMode" disabled><option value="priority" selected>${escapeHtml(mt("routing.aggregatePriority"))}</option></select><small data-settings-help-copy>${escapeHtml(mt("routing.aggregateStrategyHelp"))}</small></label>
+        <label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("routing.aggregateMembers"))}</span><textarea name="aggregateMembers" rows="5" required placeholder="openai:gpt-5\ncodex:gpt-5.5">${escapeHtml(members)}</textarea><small data-settings-help-copy>${escapeHtml(mt("routing.aggregateMembersHelp"))}</small></label>
       </div>
       <div class="compact-settings-editor-actions settings-inline-actions"><button class="settings-action-btn subtle" type="button" data-model-aggregate-cancel>${escapeHtml(mt("cancel"))}</button><button class="settings-action-btn primary" type="submit" data-model-aggregate-save>${escapeHtml(editing ? mt("routing.updateAggregate") : mt("routing.createAggregate"))}</button></div>
     </form>`;
@@ -1436,7 +1436,7 @@ export function createModelProviderSettingsController({
     else if (state.modelAggregatesError) content = `<div class="settings-alert" role="alert">${escapeHtml(state.modelAggregatesError)}</div>`;
     else if (!aggregates.length) content = `<div class="settings-empty-card compact" role="status">${escapeHtml(mt("routing.noAggregates"))}</div>`;
     else content = `<div class="model-aggregate-list">${aggregates.map((aggregate) => `<article class="model-aggregate-row" data-model-aggregate-row="${escapeAttr(aggregate.name)}"><div class="model-aggregate-main"><strong>aggregate:${escapeHtml(aggregate.name)}</strong><ol>${aggregate.members.map((member) => `<li><code>${escapeHtml(member)}</code></li>`).join("")}</ol></div><div class="model-aggregate-actions settings-inline-actions"><button class="settings-action-btn subtle" type="button" data-model-aggregate-edit="${escapeAttr(aggregate.name)}" ${busy ? "disabled" : ""}>${escapeHtml(mt("edit"))}</button><button class="settings-action-btn danger" type="button" data-model-aggregate-delete="${escapeAttr(aggregate.name)}" ${busy ? "disabled" : ""}>${escapeHtml(mt("delete"))}</button></div></article>`).join("")}</div>`;
-    return `<section class="compact-settings-section model-aggregate-section" aria-labelledby="model-aggregate-title"><div class="compact-settings-section-copy"><h2 id="model-aggregate-title">${escapeHtml(mt("routing.aggregatesTitle"))}</h2><p>${escapeHtml(mt("routing.aggregatesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-section-toolbar"><span>${escapeHtml(mt("routing.aggregateCount", { count: aggregates.length }))}</span><button class="settings-action-btn subtle" type="button" data-model-aggregate-add ${busy || editor ? "disabled" : ""}>＋ ${escapeHtml(mt("routing.addAggregate"))}</button></div>${content}${editor ? renderModelAggregateEditor(editor) : ""}</div></section>`;
+    return `<section class="compact-settings-section model-aggregate-section" aria-labelledby="model-aggregate-title"><div class="compact-settings-section-copy"><h2 id="model-aggregate-title">${escapeHtml(mt("routing.aggregatesTitle"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.aggregatesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-section-toolbar"><span>${escapeHtml(mt("routing.aggregateCount", { count: aggregates.length }))}</span><button class="settings-action-btn subtle" type="button" data-model-aggregate-add ${busy || editor ? "disabled" : ""}>＋ ${escapeHtml(mt("routing.addAggregate"))}</button></div>${content}${editor ? renderModelAggregateEditor(editor) : ""}</div></section>`;
   }
 
   function renderModelSettingsContent() {
@@ -1450,16 +1450,16 @@ export function createModelProviderSettingsController({
       ? `<div class="agent-model-settings-result settings-alert ${escapeAttr(settingsState.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(settingsState.result.message || "")}</div>`
       : "";
     return `<div class="settings-live-page compact-settings-page agent-model-settings-page" aria-labelledby="settings-model-page-title">
-      <header class="compact-settings-header"><div class="compact-settings-heading"><div class="settings-hero-kicker">${escapeHtml(mt("routing.kicker"))}</div><h1 id="settings-model-page-title">${escapeHtml(mt("routing.title"))}</h1><p>${escapeHtml(mt("routing.description"))}</p></div><div class="compact-settings-header-actions settings-inline-actions"><button id="settingsRefreshModelsBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshModels"))}</button><button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button></div></header>
+      <header class="compact-settings-header"><div class="compact-settings-heading"><div class="settings-hero-kicker">${escapeHtml(mt("routing.kicker"))}</div><h1 id="settings-model-page-title">${escapeHtml(mt("routing.title"))}</h1><p data-settings-help-copy>${escapeHtml(mt("routing.description"))}</p></div><div class="compact-settings-header-actions settings-inline-actions"><button id="settingsRefreshModelsBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshModels"))}</button><button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button></div></header>
       ${result}
       <form id="agentModelSettingsForm" class="compact-settings-form agent-model-settings-form" aria-busy="${settingsState.saving ? "true" : "false"}">
-        <section class="compact-settings-section" aria-labelledby="agent-model-defaults-title"><div class="compact-settings-section-copy"><h2 id="agent-model-defaults-title">${escapeHtml(mt("routing.globalDefaults"))}</h2><p>${escapeHtml(mt("routing.globalDefaultsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column"><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.defaultModel"))}</span><select name="defaultModel" required>${renderAgentModelSelectOptions(draft.defaultModel, options)}</select><small>${escapeHtml(mt("routing.defaultModelHelp"))}</small></label><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.summaryModel"))}</span><select name="summaryModel" required>${renderAgentModelSelectOptions(draft.summaryModel, options)}</select><small>${escapeHtml(mt("routing.summaryModelHelp"))}</small></label><label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("defaultReasoningEffort"))}</span><select name="defaultReasoningEffort" ${runtimeRevision > 0 ? "" : "disabled"}>${renderDefaultReasoningOptions(draft.defaultReasoningEffort)}</select><small>${escapeHtml(runtimeRevision > 0 ? mt("routing.defaultReasoningHelp") : mt("routing.runtimeSettingsUnavailable"))}</small></label></div></div></section>
-        <section class="compact-settings-section" aria-labelledby="agent-model-preferences-title"><div class="compact-settings-section-copy"><h2 id="agent-model-preferences-title">${escapeHtml(mt("routing.subagentPreferences"))}</h2><p>${escapeHtml(mt("routing.subagentPreferencesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentRolePreferenceField(role, draft, options)).join("")}</div></div></section>
-        <section class="compact-settings-section" aria-labelledby="agent-model-pools-title"><div class="compact-settings-section-copy"><h2 id="agent-model-pools-title">${escapeHtml(mt("routing.subagentPools"))}</h2><p>${escapeHtml(mt("routing.subagentPoolsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentModelPoolControl(role, draft, options)).join("")}</div></div></section>
-        <footer class="compact-settings-footer agent-model-settings-footer"><div><span id="agentModelSettingsDirtyBadge" class="settings-badge ${settingsState.dirty ? "warn" : "ok"}">${escapeHtml(settingsState.dirty ? mt("routing.unsaved") : mt("routing.saved"))}</span><small>${escapeHtml(mt("routing.persistenceDescription"))}</small></div><div class="settings-inline-actions"><button id="resetAgentModelSettingsBtn" class="settings-action-btn subtle" type="button" ${settingsState.saving ? "disabled" : ""}>${escapeHtml(mt("routing.reset"))}</button><button id="saveAgentModelSettingsBtn" class="settings-action-btn primary" type="submit" ${settingsState.saving ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(settingsState.saving ? mt("saving") : mt("routing.save"))}</button></div></footer>
+        <section class="compact-settings-section" aria-labelledby="agent-model-defaults-title"><div class="compact-settings-section-copy"><h2 id="agent-model-defaults-title">${escapeHtml(mt("routing.globalDefaults"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.globalDefaultsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column"><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.defaultModel"))}</span><select name="defaultModel" required>${renderAgentModelSelectOptions(draft.defaultModel, options)}</select><small data-settings-help-copy>${escapeHtml(mt("routing.defaultModelHelp"))}</small></label><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.summaryModel"))}</span><select name="summaryModel" required>${renderAgentModelSelectOptions(draft.summaryModel, options)}</select><small data-settings-help-copy>${escapeHtml(mt("routing.summaryModelHelp"))}</small></label><label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("defaultReasoningEffort"))}</span><select name="defaultReasoningEffort" ${runtimeRevision > 0 ? "" : "disabled"}>${renderDefaultReasoningOptions(draft.defaultReasoningEffort)}</select><small${runtimeRevision > 0 ? " data-settings-help-copy" : ""}>${escapeHtml(runtimeRevision > 0 ? mt("routing.defaultReasoningHelp") : mt("routing.runtimeSettingsUnavailable"))}</small></label></div></div></section>
+        <section class="compact-settings-section" aria-labelledby="agent-model-preferences-title"><div class="compact-settings-section-copy"><h2 id="agent-model-preferences-title">${escapeHtml(mt("routing.subagentPreferences"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.subagentPreferencesDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentRolePreferenceField(role, draft, options)).join("")}</div></div></section>
+        <section class="compact-settings-section" aria-labelledby="agent-model-pools-title"><div class="compact-settings-section-copy"><h2 id="agent-model-pools-title">${escapeHtml(mt("routing.subagentPools"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.subagentPoolsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentModelPoolControl(role, draft, options)).join("")}</div></div></section>
+        <footer class="compact-settings-footer agent-model-settings-footer"><div><span id="agentModelSettingsDirtyBadge" class="settings-badge ${settingsState.dirty ? "warn" : "ok"}">${escapeHtml(settingsState.dirty ? mt("routing.unsaved") : mt("routing.saved"))}</span><small data-settings-help-copy>${escapeHtml(mt("routing.persistenceDescription"))}</small></div><div class="settings-inline-actions"><button id="resetAgentModelSettingsBtn" class="settings-action-btn subtle" type="button" ${settingsState.saving ? "disabled" : ""}>${escapeHtml(mt("routing.reset"))}</button><button id="saveAgentModelSettingsBtn" class="settings-action-btn primary" type="submit" ${settingsState.saving ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(settingsState.saving ? mt("saving") : mt("routing.save"))}</button></div></footer>
       </form>
       ${renderModelAggregateSection()}
-      <details class="compact-settings-disclosure agent-model-catalog-details"><summary><span>${escapeHtml(mt("routing.modelListToggle"))}</span><small>${escapeHtml(mt("routing.catalogDescription"))}</small></summary><section class="agent-model-catalog compact-settings-disclosure-panel" aria-labelledby="agent-model-catalog-title"><header class="compact-settings-section-toolbar"><div><h2 id="agent-model-catalog-title">${escapeHtml(mt("routing.catalogTitle"))}</h2><p>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("routing.catalogDescription"))}</p></div><div class="settings-inline-actions"><button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button><button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button></div></header><div class="settings-model-list">${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card settings-card settings-alert" role="status">${escapeHtml(mt("noModelsLoaded"))}</div>`}</div></section></details>
+      <details class="compact-settings-disclosure agent-model-catalog-details"><summary><span>${escapeHtml(mt("routing.modelListToggle"))}</span><small data-settings-help-copy>${escapeHtml(mt("routing.catalogDescription"))}</small></summary><section class="agent-model-catalog compact-settings-disclosure-panel" aria-labelledby="agent-model-catalog-title"><header class="compact-settings-section-toolbar"><div><h2 id="agent-model-catalog-title">${escapeHtml(mt("routing.catalogTitle"))}</h2><p${preferred ? "" : " data-settings-help-copy"}>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("routing.catalogDescription"))}</p></div><div class="settings-inline-actions"><button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button><button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button></div></header><div class="settings-model-list">${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card settings-card settings-alert" role="status">${escapeHtml(mt("noModelsLoaded"))}</div>`}</div></section></details>
     </div>`;
   }
 
@@ -1604,7 +1604,7 @@ export function createModelProviderSettingsController({
     const browserLoginPanel = `
       <section class="codex-browser-login-panel settings-card" aria-labelledby="codex-browser-login-title" aria-busy="${browserLoginActive ? "true" : "false"}">
         <div class="codex-console-section-head settings-card-header">
-          <div><h2 id="codex-browser-login-title" class="settings-card-title">${escapeHtml(mt("browserLoginTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("browserLoginDescription"))}</p></div>
+          <div><h2 id="codex-browser-login-title" class="settings-card-title">${escapeHtml(mt("browserLoginTitle"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("browserLoginDescription"))}</p></div>
           <span class="settings-badge codex-browser-login-recommended">${escapeHtml(mt("browserLoginRecommended"))}</span>
         </div>
         <div class="codex-browser-login-body settings-card-content">
@@ -1620,11 +1620,11 @@ export function createModelProviderSettingsController({
     const importPanel = `
       <section class="codex-import-panel settings-card" id="codexCredentialImportSection" aria-labelledby="codex-import-title">
         <div class="codex-console-section-head settings-card-header">
-          <div><h2 id="codex-import-title" class="settings-card-title">${escapeHtml(mt("codexImportTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("codexImportDescription"))}</p></div>
+          <div><h2 id="codex-import-title" class="settings-card-title">${escapeHtml(mt("codexImportTitle"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("codexImportDescription"))}</p></div>
         </div>
         <div class="codex-import-body settings-card-content">
           <label class="settings-form-field"><span class="mp-visually-hidden">${escapeHtml(mt("codexImportTitle"))}</span><textarea id="codexAuthImportText" class="codex-import-textarea settings-text-input" data-codex-import-draft placeholder="${escapeAttr(mt("codexImportPlaceholder"))}">${escapeHtml(consoleState.codexImportDraft || "")}</textarea></label>
-          <div class="codex-import-footer"><p>${escapeHtml(mt("codexImportSuccess"))}</p><button id="codexImportAuthBtn" class="settings-action-btn primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
+          <div class="codex-import-footer"><p data-settings-help-copy>${escapeHtml(mt("codexImportSuccess"))}</p><button id="codexImportAuthBtn" class="settings-action-btn primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
         </div>
       </section>`;
     const accountContent = state.providerAuthLoading && !authFiles.length
@@ -1637,7 +1637,7 @@ export function createModelProviderSettingsController({
     return `<div class="codex-account-console settings-page" tabindex="-1" aria-labelledby="codex-console-title">
       <button class="codex-console-back" type="button" data-mp-close-codex-page>← ${escapeHtml(mt("backToProviders"))}</button>
       <header class="codex-console-hero settings-card">
-        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Codex OAuth</p><h1 id="codex-console-title" class="settings-card-title">${escapeHtml(mt("accountConsoleTitle"))}</h1><p class="settings-card-description">${escapeHtml(mt("accountConsoleDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Codex OAuth</p><h1 id="codex-console-title" class="settings-card-title">${escapeHtml(mt("accountConsoleTitle"))}</h1><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("accountConsoleDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
         <div class="codex-console-actions settings-inline-actions">
           <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button" data-mp-codex-refresh ${state.providerAuthLoading ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(state.providerAuthLoading ? mt("refreshing") : mt("refreshAccounts"))}</button>
           <button class="settings-action-btn" type="button" data-mp-refresh-models ${modelRefreshBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelRefreshBusy ? mt("refreshing") : mt("refreshModels"))}</button>
@@ -1651,7 +1651,7 @@ export function createModelProviderSettingsController({
       </section>
       ${result}${browserLoginPanel}${importPanel}
       <section class="codex-accounts-panel settings-card" aria-labelledby="codex-accounts-title" aria-busy="${state.providerAuthLoading ? "true" : "false"}">
-        <div class="codex-console-section-head settings-card-header"><div><h2 id="codex-accounts-title" class="settings-card-title">${escapeHtml(mt("importedCredentials"))}</h2><p class="settings-card-description">${escapeHtml(mt("importedCredentialsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: authFiles.length }))}</span></div>
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="codex-accounts-title" class="settings-card-title">${escapeHtml(mt("importedCredentials"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("importedCredentialsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: authFiles.length }))}</span></div>
         ${accountAlert}
         ${accountContent}
       </section>
@@ -1684,7 +1684,7 @@ export function createModelProviderSettingsController({
     return `<div class="anthropic-account-console codex-account-console settings-page" tabindex="-1" aria-labelledby="anthropic-console-title">
       <button class="codex-console-back" type="button" data-mp-close-anthropic-page>← ${escapeHtml(mt("backToProviders"))}</button>
       <header class="codex-console-hero anthropic-console-hero settings-card">
-        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Anthropic</p><h1 id="anthropic-console-title" class="settings-card-title">${escapeHtml(mt("anthropic.title"))}</h1><p class="settings-card-description">${escapeHtml(mt("anthropic.description"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <div class="codex-console-heading"><div><p class="mp-provider-kicker">Anthropic</p><h1 id="anthropic-console-title" class="settings-card-title">${escapeHtml(mt("anthropic.title"))}</h1><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("anthropic.description"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
         <div class="codex-console-actions settings-inline-actions"><button class="settings-action-btn primary" type="button" data-anthropic-focus-add>${escapeHtml(mt("anthropic.addAccount"))}</button><button class="settings-action-btn" type="button" data-anthropic-refresh ${state.anthropicAccountsLoading ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(state.anthropicAccountsLoading ? mt("refreshing") : mt("refreshAccounts"))}</button></div>
       </header>
       <section class="codex-console-stats settings-stat-grid" aria-label="${escapeAttr(mt("anthropic.summary"))}">
@@ -1695,7 +1695,7 @@ export function createModelProviderSettingsController({
       </section>
       ${result}
       <section class="anthropic-add-panel settings-card" id="anthropic-add-account" aria-labelledby="anthropic-add-title">
-        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-add-title" class="settings-card-title">${escapeHtml(mt("anthropic.addAccount"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.addDescription"))}</p></div></div>
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-add-title" class="settings-card-title">${escapeHtml(mt("anthropic.addAccount"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("anthropic.addDescription"))}</p></div></div>
         <div class="anthropic-add-body settings-card-content">
           <div class="anthropic-auth-tabs settings-inline-actions" role="group" aria-label="${escapeAttr(mt("anthropic.authType"))}"><button class="settings-action-btn ${mode === "profile" ? "primary" : "subtle"}" type="button" data-anthropic-add-mode="profile" aria-pressed="${mode === "profile" ? "true" : "false"}">${escapeHtml(mt("anthropic.profileAuth"))}</button><button class="settings-action-btn ${mode === "api_key" ? "primary" : "subtle"}" type="button" data-anthropic-add-mode="api_key" aria-pressed="${mode === "api_key" ? "true" : "false"}">${escapeHtml(mt("anthropic.apiKeyAuth"))}</button></div>
           <form class="anthropic-account-form" data-anthropic-account-form aria-busy="${creating ? "true" : "false"}">
@@ -1711,11 +1711,11 @@ export function createModelProviderSettingsController({
         </div>
       </section>
       <section class="codex-accounts-panel settings-card" aria-labelledby="anthropic-accounts-title" aria-busy="${state.anthropicAccountsLoading ? "true" : "false"}">
-        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-accounts-title" class="settings-card-title">${escapeHtml(mt("anthropic.accountsTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.accountsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: accounts.length }))}</span></div>
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-accounts-title" class="settings-card-title">${escapeHtml(mt("anthropic.accountsTitle"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("anthropic.accountsDescription"))}</p></div><span class="settings-badge">${escapeHtml(mt("accountCount", { count: accounts.length }))}</span></div>
         ${accountAlert}${accountContent}
       </section>
       <section class="anthropic-config-panel settings-card" aria-labelledby="anthropic-config-title">
-        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-config-title" class="settings-card-title">${escapeHtml(mt("anthropic.configTitle"))}</h2><p class="settings-card-description">${escapeHtml(mt("anthropic.configDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
+        <div class="codex-console-section-head settings-card-header"><div><h2 id="anthropic-config-title" class="settings-card-title">${escapeHtml(mt("anthropic.configTitle"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("anthropic.configDescription"))}</p></div><span class="settings-status-pill ${escapeAttr(providerTone)}">${escapeHtml(providerState)}</span></div>
         <form class="anthropic-config-form settings-card-content" data-mp-provider-form data-anthropic-provider-config>
           <input type="hidden" name="name" value="anthropic"><input type="hidden" name="type" value="anthropic"><input type="hidden" name="apiKey" value=""><input type="checkbox" name="apiKeyOptional" hidden>
           <div class="anthropic-config-grid">
@@ -1737,9 +1737,9 @@ export function createModelProviderSettingsController({
     const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), baseUrl: "" };
     const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
     const busy = Object.values(consoleState.busy || {}).some(Boolean);
-    return `<header class="mp-drawer-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title" class="settings-card-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description" class="settings-card-description">${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
+    return `<header class="mp-drawer-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title" class="settings-card-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description" class="settings-card-description" data-settings-help-copy>${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
       <div class="mp-drawer-body settings-card-content" aria-busy="${busy ? "true" : "false"}">
-        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols settings-inline-actions">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p>${escapeHtml(spec.help)}</p></section>
+        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols settings-inline-actions">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p data-settings-help-copy>${escapeHtml(spec.help)}</p></section>
         <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("drawer.connection"))}</h3>
           <label class="settings-form-field">${escapeHtml(ct("fields.providerName"))}<input id="relayProviderName" value="${escapeAttr(provider.name || spec.providerName)}" readonly></label>
           <label class="settings-form-field">${escapeHtml(ct("fields.apiKey"))}<input id="relayApiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct("fields.apiKeyBlankKeepsCurrent"))}"></label>
@@ -1756,12 +1756,12 @@ export function createModelProviderSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(mt("codexImportTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(mt("codexImportDescription"))}</div>
+          <div class="settings-provider-meta" data-settings-help-copy>${escapeHtml(mt("codexImportDescription"))}</div>
         </div>
         <button id="codexImportAuthBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("import"))}</button>
       </div>
       <textarea id="codexAuthImportText" class="settings-token-input" placeholder="${escapeAttr(mt("codexImportPlaceholder"))}"></textarea>
-      <div class="settings-inline-success">${escapeHtml(mt("codexImportSuccess"))}</div>
+      <div class="settings-inline-success" data-settings-help-copy>${escapeHtml(mt("codexImportSuccess"))}</div>
     </section>
   `;
   }
@@ -1772,7 +1772,7 @@ export function createModelProviderSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(mt("importedCredentials"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(mt("importedCredentialsDescription"))}</div>
+          <div class="settings-provider-meta" data-settings-help-copy>${escapeHtml(mt("importedCredentialsDescription"))}</div>
         </div>
         <button id="codexRefreshAuthBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshAccounts"))}</button>
       </div>
@@ -1811,12 +1811,12 @@ export function createModelProviderSettingsController({
             <label class="relay-field wide">
               <span>${escapeHtml(mt("providerName"))}</span>
               <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
-              <small>${escapeHtml(mt("relayProviderNameHelp", { provider: spec.providerName }))}</small>
+              <small data-settings-help-copy>${escapeHtml(mt("relayProviderNameHelp", { provider: spec.providerName }))}</small>
             </label>
             <label class="relay-field wide">
               <span>${escapeHtml(mt("providerPrefix"))}</span>
               <input class="settings-text-input" value="${escapeAttr((provider.name || spec.providerName) + ":")}" disabled>
-              <small>${escapeHtml(mt("relayProviderPrefixHelp", { provider: spec.providerName, model: modelValue }))}</small>
+              <small data-settings-help-copy>${escapeHtml(mt("relayProviderPrefixHelp", { provider: spec.providerName, model: modelValue }))}</small>
             </label>
             <label class="relay-field wide">
               <span>${escapeHtml(mt("apiKey"))}</span>
@@ -1836,7 +1836,7 @@ export function createModelProviderSettingsController({
                 </button>
               `).join("")}
             </div>
-            <small>${escapeHtml(spec.help)}</small>
+            <small data-settings-help-copy>${escapeHtml(spec.help)}</small>
           </div>
           <div class="relay-form-grid">
             <label class="relay-field wide">
@@ -1859,7 +1859,7 @@ export function createModelProviderSettingsController({
               <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("modelId"))}">
               <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("displayName"))}" disabled>
             </div>
-            <small>${escapeHtml(mt("customModelDescription"))}</small>
+            <small data-settings-help-copy>${escapeHtml(mt("customModelDescription"))}</small>
           </div>
         </div>
       ` : ""}
@@ -1874,7 +1874,7 @@ export function createModelProviderSettingsController({
       <div class="settings-provider-section-head">
         <div>
           <div class="settings-provider-title">${escapeHtml(mt("customProviderTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(mt("customProviderDescription"))}</div>
+          <div class="settings-provider-meta" data-settings-help-copy>${escapeHtml(mt("customProviderDescription"))}</div>
         </div>
         <div class="settings-action-row compact-actions">
           <button id="fillGroqProviderExampleBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("fillGroqExample"))}</button>

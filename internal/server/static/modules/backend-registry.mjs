@@ -268,7 +268,7 @@ export function createBackendRegistryController({
         <div class="settings-card-header">
           <div class="settings-hero-kicker">${escapeHtml(t("backend.heroKicker"))}</div>
           <div class="settings-hero-title settings-card-title">${escapeHtml(active?.name || t("backend.noAgentServer"))}</div>
-          <p class="settings-card-description">${escapeHtml(t("backend.heroDescription"))}</p>
+          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.heroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
           <button id="refreshAgentBackendsBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("backend.refreshBackends"))}</button>
@@ -284,7 +284,7 @@ export function createBackendRegistryController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.agentServerBackends"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("backend.apiKeyDescription"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.apiKeyDescription"))}</div>
           </div>
         </div>
         <div class="settings-backend-list settings-data-list settings-card-content">
@@ -295,7 +295,7 @@ export function createBackendRegistryController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.addTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("backend.addDescription"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.addDescription"))}</div>
           </div>
         </div>
         <form id="settingsBackendForm" class="settings-backend-form settings-card-content">

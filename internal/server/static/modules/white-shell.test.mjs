@@ -206,6 +206,20 @@ test("Codex browser login cache stamps reach the static entry and locale catalog
   assert.equal((i18n.match(/messages-(?:en|zh-CN|zh-TW)\.mjs\?v=[^"\n]*codex-browser-login-1/g) || []).length, 3);
 });
 
+test("settings help cache stamps reach the shell and locale catalogs", async () => {
+  const [html, app, appMain, i18n] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(i18nURL, "utf8"),
+  ]);
+  assert.equal((html.match(/settings-help-1/g) || []).length, 2);
+  assert.equal((app.match(/settings-help-1/g) || []).length, 1);
+  assert.match(appMain, /settings-help\.mjs\?v=settings-help-1/);
+  assert.match(appMain, /i18n\.mjs\?v=[^"\n]*settings-help-1/);
+  assert.equal((i18n.match(/messages-(?:en|zh-CN|zh-TW)\.mjs\?v=[^"\n]*settings-help-1/g) || []).length, 3);
+});
+
 test("folder picker uses stable SVG actions and directory icons instead of font glyphs", async () => {
   const [html, directoryBrowser, styles, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
@@ -703,6 +717,12 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
     "settingsContentTitle",
     "settingsContentSubtitle",
     "settingsContentBody",
+    "settingsHelpBtn",
+    "settingsHelpBackdrop",
+    "settingsHelpPanel",
+    "settingsHelpTitle",
+    "settingsHelpBody",
+    "closeSettingsHelpBtn",
     "settingsIdentityBtn",
     "settingsIdentityAvatar",
     "settingsIdentityName",
@@ -726,8 +746,19 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
     "settings-main-header",
     "settings-main-heading",
     "settings-page-scroll",
+    "settings-help-trigger",
+    "settings-help-backdrop",
+    "settings-help-panel",
+    "settings-help-body",
   ]) assert.match(html, new RegExp(`class="[^"]*${className}`));
   assert.match(html, /class="sidebar-footer hidden"/);
+  assert.match(html, /id="settingsContentSubtitle"[^>]*class="[^"]*hidden[^"]*"[^>]*aria-hidden="true"/);
+  assert.match(html, /id="settingsHelpBtn"[^>]*aria-controls="settingsHelpPanel"[^>]*aria-expanded="false"/);
+  assert.match(html, /id="settingsHelpPanel"[^>]*role="dialog"[^>]*aria-modal="false"[^>]*aria-hidden="true"/);
+  assert.match(appMain, /createSettingsHelpController/);
+  assert.match(appMain, /settingsHelp\.sync\(\{ key: item\.key, label: item\.label, overview: item\.subtitle \}\)/);
+  assert.match(appMain, /settingsHelp\.handleKeydown\(event\)/);
+  assert.doesNotMatch(appMain, /settings-nav-label[^\n]*<small>\$\{escapeHtml\(item\.subtitle\)\}/);
   assert.match(appMain, /groupSettingsItemsByLegacyCategory/);
   assert.match(appMain, /class="settings-nav-group"/);
   assert.match(appMain, /aria-current="page"/);
@@ -758,12 +789,16 @@ test("settings shadcn shell stays centered and keeps complete mobile navigation"
   assert.match(settingsStyles, /#settingsModal \.settings-dialog-shell\s*\{[\s\S]*?width:\s*min\(1520px, calc\(100vw - 24px\)\);[\s\S]*?grid-template-columns:\s*240px minmax\(0, 1fr\);/);
   assert.doesNotMatch(settingsStyles, /\.settings-dialog-shell:has\(\.codex-account-console\)/);
   assert.match(settingsStyles, /\.settings-main\.legacy-settings-content\s*\{[\s\S]*?overflow:\s*hidden !important;/);
+  assert.match(settingsStyles, /#settingsContentBody \[data-settings-help-copy\]\s*\{\s*display:\s*none !important;/);
+  assert.match(settingsStyles, /#settingsModal \.settings-help-panel\s*\{[\s\S]*?width:\s*min\(440px, 88%\);/);
+  assert.match(settingsStyles, /#settingsModal \.settings-help-body\s*\{[\s\S]*?overflow:\s*auto;/);
   assert.match(settingsStyles, /\.automation-hero p/);
   const mobile = settingsStyles.slice(settingsStyles.indexOf("@media (max-width: 767px)"));
   assert.match(mobile, /\.settings-sidebar\s*\{[\s\S]*?display:\s*grid;/);
   assert.doesNotMatch(mobile, /\.settings-sidebar\s*\{[^}]*display:\s*none;/);
   assert.match(mobile, /\.settings-mobile-category-nav,[\s\S]*?\.settings-nav-groups\s*\{[\s\S]*?display:\s*flex;/);
   assert.match(mobile, /\.settings-nav-group\s*\{[\s\S]*?display:\s*contents;/);
+  assert.match(mobile, /\.settings-help-panel\s*\{\s*width:\s*100%;\s*border-left:\s*0;/);
 });
 
 test("about settings use the legacy version layout and real update status", () => {

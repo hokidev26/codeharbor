@@ -62,7 +62,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("profile.displaySectionTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("profile.displaySectionMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("profile.displaySectionMeta"))}</div>
           </div>
         </div>
         <form id="profileSettingsForm" class="settings-profile-form settings-card-content">
@@ -105,7 +105,7 @@ export function createLocalPreferencesSettingsController({
     return `
     <section class="profile-info-card settings-card settings-card-content">
       <strong class="settings-card-title">${escapeHtml(title)}</strong>
-      <span class="settings-card-description">${escapeHtml(description)}</span>
+      <span class="settings-card-description" data-settings-help-copy>${escapeHtml(description)}</span>
     </section>
   `;
   }
@@ -138,7 +138,7 @@ export function createLocalPreferencesSettingsController({
         <div class="compact-settings-heading">
           <div class="settings-hero-kicker">${escapeHtml(t("networkSearch.heroKicker"))}</div>
           <h1>${escapeHtml(prefs.enabled ? t("networkSearch.strategyTitle") : t("networkSearch.disabledTitle"))}</h1>
-          <p>${escapeHtml(t("networkSearch.heroDescription"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("networkSearch.heroDescription"))}</p>
         </div>
         <div class="compact-settings-header-actions">
           <button id="copySearchPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("networkSearch.copyConfig"))}</button>
@@ -148,7 +148,7 @@ export function createLocalPreferencesSettingsController({
       <section class="compact-settings-section">
         <div class="compact-settings-section-copy">
           <h3>${escapeHtml(t("networkSearch.strategyTitle"))}</h3>
-          <p>${escapeHtml(t("networkSearch.strategyMeta"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("networkSearch.strategyMeta"))}</p>
         </div>
         <form id="searchSettingsForm" class="compact-settings-section-controls">
           <div class="compact-settings-switch-list">
@@ -188,7 +188,7 @@ export function createLocalPreferencesSettingsController({
   function renderSearchToggle(field, title, description, checked) {
     return `
     <label class="compact-settings-switch-row settings-switch-row">
-      <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
+      <span><strong>${escapeHtml(title)}</strong><small data-settings-help-copy>${escapeHtml(description)}</small></span>
       <input type="checkbox" data-search-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>
   `;
@@ -228,7 +228,7 @@ export function createLocalPreferencesSettingsController({
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("imGateway.heroKicker"))}</div>
           <div class="settings-hero-title">${escapeHtml(prefs.enabled ? imGatewayChannelLabel(prefs.channel) : t("imGateway.disabledTitle"))}</div>
-          <p>${escapeHtml(t("imGateway.heroDescription"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("imGateway.heroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar">
           <button id="copyIMGatewayPrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("imGateway.copyConfig"))}</button>
@@ -244,7 +244,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.securityTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.securityMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("imGateway.securityMeta"))}</div>
           </div>
           <span class="settings-status-pill settings-badge ${prefs.enabled ? "warn" : "muted"}">${escapeHtml(prefs.enabled ? t("imGateway.needsSecureGateway") : t("imGateway.localPlanOnly"))}</span>
         </div>
@@ -280,7 +280,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.channelsTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.channelsMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("imGateway.channelsMeta"))}</div>
           </div>
         </div>
         <div class="im-channel-grid">
@@ -297,7 +297,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("imGateway.eventsTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("imGateway.eventsMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("imGateway.eventsMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -321,7 +321,7 @@ export function createLocalPreferencesSettingsController({
     <label class="appearance-toggle-row im-toggle-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(description)}</small>
+        <small data-settings-help-copy>${escapeHtml(description)}</small>
       </span>
       <input type="checkbox" data-im-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>
@@ -332,7 +332,7 @@ export function createLocalPreferencesSettingsController({
     return `
     <button class="appearance-choice ${current === value ? "active" : ""}" type="button" data-im-channel="${escapeAttr(value)}">
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small data-settings-help-copy>${escapeHtml(description)}</small>
     </button>
   `;
   }
@@ -342,7 +342,7 @@ export function createLocalPreferencesSettingsController({
     <section class="im-policy-card">
       <strong>${escapeHtml(value)}</strong>
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small data-settings-help-copy>${escapeHtml(description)}</small>
     </section>
   `;
   }
@@ -383,7 +383,7 @@ export function createLocalPreferencesSettingsController({
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("notification.heroKicker"))}</div>
           <div class="settings-hero-title settings-card-title">${escapeHtml(prefs.toastEnabled ? t("notification.toastEnabledTitle") : t("notification.toastDisabledTitle"))}</div>
-          <p class="settings-card-description">${escapeHtml(t("notification.heroDescription"))}</p>
+          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(t("notification.heroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar">
           <button id="testNotificationBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("notification.test"))}</button>
@@ -399,7 +399,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.webhookTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.webhookMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("notification.webhookMeta"))}</div>
           </div>
           <span class="settings-status-pill settings-badge ${serverSettings.enabled ? "ok" : "muted"}">${escapeHtml(state?.serverNotificationLoading ? t("notification.loading") : (serverSettings.enabled ? t("notification.enabledStatus") : t("notification.disabledStatus")))}</span>
         </div>
@@ -427,7 +427,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.toastTypesTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.toastTypesMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("notification.toastTypesMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -442,7 +442,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.durationTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.durationMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("notification.durationMeta"))}</div>
           </div>
         </div>
         <div class="appearance-choice-grid settings-choice-grid" role="radiogroup">
@@ -455,7 +455,7 @@ export function createLocalPreferencesSettingsController({
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("notification.terminalTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("notification.terminalMeta"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("notification.terminalMeta"))}</div>
           </div>
         </div>
         <div class="appearance-toggle-list">
@@ -471,7 +471,7 @@ export function createLocalPreferencesSettingsController({
     <label class="appearance-toggle-row notification-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(description)}</small>
+        <small data-settings-help-copy>${escapeHtml(description)}</small>
       </span>
       <input type="checkbox" data-notification-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>
@@ -483,7 +483,7 @@ export function createLocalPreferencesSettingsController({
     <label class="appearance-toggle-row notification-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(description)}</small>
+        <small data-settings-help-copy>${escapeHtml(description)}</small>
       </span>
       <input type="checkbox" data-server-notification-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>
@@ -494,7 +494,7 @@ export function createLocalPreferencesSettingsController({
     return `
     <button class="appearance-choice settings-choice-card ${current === value ? "active" : ""}" type="button" role="radio" aria-checked="${current === value}" data-notification-duration="${escapeAttr(value)}">
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small data-settings-help-copy>${escapeHtml(description)}</small>
     </button>
   `;
   }
@@ -546,23 +546,23 @@ export function createLocalPreferencesSettingsController({
         <div class="compact-settings-heading">
           <div class="settings-hero-kicker">${escapeHtml(t("appearance.heroKicker"))}</div>
           <h1>${escapeHtml(appearanceThemeLabel(prefs.themePreset))} · ${escapeHtml(appearanceDensityLabel(prefs.density))}</h1>
-          <p>${escapeHtml(t("appearance.heroDescription"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("appearance.heroDescription"))}</p>
         </div>
       </header>
       <section class="compact-settings-section appearance-language-section">
-        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.languageTitle"))}</h2><p>${escapeHtml(t("appearance.languageMeta"))}</p></div>
-        <div class="compact-settings-section-controls"><label class="settings-form-field compact-settings-field" for="appearanceLanguageSelect"><span>${escapeHtml(t("language.label"))}</span><select id="appearanceLanguageSelect" class="settings-field"><option value="zh-TW" ${uiLocale === "zh-TW" ? "selected" : ""}>${escapeHtml(t("language.traditionalChinese"))}</option><option value="zh-CN" ${uiLocale === "zh-CN" ? "selected" : ""}>${escapeHtml(t("language.simplifiedChinese"))}</option><option value="en-US" ${uiLocale === "en" ? "selected" : ""}>${escapeHtml(t("language.english"))}</option></select><small>${escapeHtml(t("language.description"))}</small></label></div>
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.languageTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.languageMeta"))}</p></div>
+        <div class="compact-settings-section-controls"><label class="settings-form-field compact-settings-field" for="appearanceLanguageSelect"><span>${escapeHtml(t("language.label"))}</span><select id="appearanceLanguageSelect" class="settings-field"><option value="zh-TW" ${uiLocale === "zh-TW" ? "selected" : ""}>${escapeHtml(t("language.traditionalChinese"))}</option><option value="zh-CN" ${uiLocale === "zh-CN" ? "selected" : ""}>${escapeHtml(t("language.simplifiedChinese"))}</option><option value="en-US" ${uiLocale === "en" ? "selected" : ""}>${escapeHtml(t("language.english"))}</option></select><small data-settings-help-copy>${escapeHtml(t("language.description"))}</small></label></div>
       </section>
       <section class="compact-settings-section">
-        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.themeSectionTitle"))}</h2><p>${escapeHtml(t("appearance.themeSectionMeta"))}</p></div>
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.themeSectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.themeSectionMeta"))}</p></div>
         <div class="compact-settings-section-controls"><div class="appearance-theme-grid compact-settings-choice-grid four-column" role="radiogroup" aria-label="${escapeAttr(t("appearance.themeSectionTitle"))}">${renderThemePresetChoice("light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.themePreset === "light")}${renderThemePresetChoice("dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.themePreset === "dark")}${renderThemePresetChoice("cyber", t("appearance.themeCyber"), t("appearance.themeCyberDesc"), prefs.themePreset === "cyber")}${renderThemePresetChoice("cream", t("appearance.themeCream"), t("appearance.themeCreamDesc"), prefs.themePreset === "cream")}${renderThemePresetChoice("apple", t("appearance.themeApple"), t("appearance.themeAppleDesc"), prefs.themePreset === "apple")}</div></div>
       </section>
       <section class="compact-settings-section">
-        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.densitySectionTitle"))}</h2><p>${escapeHtml(t("appearance.densitySectionMeta"))}</p></div>
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.densitySectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.densitySectionMeta"))}</p></div>
         <div class="compact-settings-section-controls"><div class="appearance-choice-grid compact-settings-choice-grid two-column" role="radiogroup">${renderAppearanceChoice("density", "comfortable", t("appearance.densityComfortable"), t("appearance.densityComfortableDesc"), prefs.density === "comfortable")}${renderAppearanceChoice("density", "compact", t("appearance.densityCompact"), t("appearance.densityCompactDesc"), prefs.density === "compact")}</div></div>
       </section>
       <section class="compact-settings-section">
-        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.behaviorTitle"))}</h2><p>${escapeHtml(t("appearance.behaviorMeta"))}</p></div>
+        <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.behaviorTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.behaviorMeta"))}</p></div>
         <div class="compact-settings-section-controls compact-settings-switch-list">${renderAppearanceToggle("terminalDefaultOpen", t("appearance.terminalDefaultOpen"), t("appearance.terminalDefaultOpenDesc"), prefs.terminalDefaultOpen)}${renderAppearanceToggle("showEventLog", t("appearance.showEventLog"), t("appearance.showEventLogDesc"), prefs.showEventLog)}</div>
       </section>
     </div>
@@ -573,7 +573,7 @@ export function createLocalPreferencesSettingsController({
     return `
     <button class="appearance-choice settings-choice-card ${active ? "active" : ""}" type="button" role="radio" aria-checked="${active}" data-appearance-field="${escapeAttr(field)}" data-appearance-value="${escapeAttr(value)}">
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(description)}</small>
+      <small data-settings-help-copy>${escapeHtml(description)}</small>
     </button>
   `;
   }
@@ -582,7 +582,7 @@ export function createLocalPreferencesSettingsController({
     return `
     <button class="appearance-choice appearance-theme-choice settings-choice-card ${active ? "active" : ""}" type="button" role="radio" aria-checked="${active}" data-appearance-field="themePreset" data-appearance-value="${escapeAttr(value)}">
       <span class="theme-preset-preview theme-preset-preview-${escapeAttr(value)}" aria-hidden="true"><i></i><b></b><em></em></span>
-      <span class="appearance-theme-choice-copy"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
+      <span class="appearance-theme-choice-copy"><strong>${escapeHtml(title)}</strong><small data-settings-help-copy>${escapeHtml(description)}</small></span>
     </button>
   `;
   }
@@ -592,7 +592,7 @@ export function createLocalPreferencesSettingsController({
     <label class="appearance-toggle-row settings-switch-row">
       <span>
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(description)}</small>
+        <small data-settings-help-copy>${escapeHtml(description)}</small>
       </span>
       <input type="checkbox" data-appearance-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
     </label>

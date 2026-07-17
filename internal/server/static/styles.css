@@ -12623,10 +12623,12 @@ body.white-shell.theme-light.theme-dark #settingsModal {
 }
 
 #settingsModal .settings-main {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
   background: var(--settings-background);
 }
 
@@ -12652,6 +12654,144 @@ body.white-shell.theme-light.theme-dark #settingsModal {
   font-weight: 700;
   letter-spacing: -.015em;
 }
+
+#settingsModal .settings-help-trigger,
+#settingsModal .settings-help-close {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--settings-border);
+  border-radius: 999px;
+  outline: 0;
+  background: var(--settings-surface);
+  color: var(--settings-muted-foreground);
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--settings-shadow);
+}
+
+#settingsModal .settings-help-trigger:hover,
+#settingsModal .settings-help-trigger[aria-expanded="true"],
+#settingsModal .settings-help-close:hover {
+  border-color: color-mix(in srgb, var(--settings-primary) 38%, var(--settings-border));
+  background: var(--settings-primary-soft);
+  color: var(--settings-primary);
+}
+
+#settingsModal :is(.settings-help-trigger, .settings-help-close):focus-visible {
+  border-color: var(--settings-primary);
+  box-shadow: 0 0 0 3px var(--settings-ring);
+}
+
+#settingsModal .settings-help-backdrop {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  background: color-mix(in srgb, #0f172a 24%, transparent);
+  backdrop-filter: blur(1px);
+}
+
+#settingsModal .settings-help-panel {
+  position: absolute;
+  z-index: 21;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 88%);
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  outline: 0;
+  border-left: 1px solid var(--settings-border);
+  background: var(--settings-surface);
+  color: var(--settings-foreground);
+  box-shadow: -18px 0 44px color-mix(in srgb, #0f172a 16%, transparent);
+}
+
+#settingsModal .settings-help-panel:focus-visible { box-shadow: -18px 0 44px color-mix(in srgb, #0f172a 16%, transparent), inset 0 0 0 2px var(--settings-ring); }
+
+#settingsModal .settings-help-panel-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--settings-space-3);
+  border-bottom: 1px solid var(--settings-border);
+  padding: 18px 20px;
+}
+
+#settingsModal .settings-help-panel-header > div { min-width: 0; display: grid; gap: 4px; }
+#settingsModal .settings-help-eyebrow {
+  color: var(--settings-primary);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#settingsModal .settings-help-panel h2 {
+  overflow: hidden;
+  margin: 0;
+  color: var(--settings-foreground);
+  font-size: 18px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#settingsModal .settings-help-body {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--settings-space-4);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 20px;
+}
+
+#settingsModal :is(.settings-help-overview, .settings-help-entry) {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  border-bottom: 1px solid var(--settings-border);
+  padding: 0 0 16px;
+}
+#settingsModal .settings-help-overview {
+  border: 1px solid color-mix(in srgb, var(--settings-primary) 22%, var(--settings-border));
+  border-radius: var(--settings-radius);
+  background: var(--settings-primary-soft);
+  padding: 14px;
+}
+#settingsModal .settings-help-list { min-width: 0; display: grid; gap: 16px; }
+#settingsModal :is(.settings-help-overview, .settings-help-entry) h3 {
+  margin: 0;
+  color: var(--settings-foreground);
+  font-size: 13px;
+  font-weight: 700;
+}
+#settingsModal :is(.settings-help-overview, .settings-help-entry) p {
+  margin: 0;
+  color: var(--settings-muted-foreground);
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+#settingsModal .settings-help-empty {
+  border: 1px dashed var(--settings-border);
+  border-radius: var(--settings-radius);
+  color: var(--settings-muted-foreground);
+  padding: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+#settingsContentBody [data-settings-help-copy] { display: none !important; }
 
 #settingsModal .settings-main.legacy-settings-content {
   overflow: hidden !important;
@@ -13638,6 +13778,12 @@ body.white-shell.theme-light.theme-dark #settingsModal {
     min-height: 56px;
     padding: 10px 14px;
   }
+
+  #settingsModal .settings-help-trigger,
+  #settingsModal .settings-help-close { width: 40px; height: 40px; min-width: 40px; }
+  #settingsModal .settings-help-panel { width: 100%; border-left: 0; }
+  #settingsModal .settings-help-panel-header { min-height: 56px; padding: 10px 14px; }
+  #settingsModal .settings-help-body { padding: 16px 14px 24px; }
 
   #settingsModal .settings-page-frame { padding: 14px 12px 28px; }
   #settingsModal .legacy-settings-content-body { padding: 0; }

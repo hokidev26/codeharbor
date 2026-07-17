@@ -125,7 +125,7 @@ export function createSkillsWorkbenchController({
     const serverSkills = Array.isArray(state.serverSkills) ? state.serverSkills : [];
     const loading = state.serverSkillsStatus === "loading";
     return `
-    <p class="skills-description settings-card-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.commands.compatibilityDescription"))}${skillsPhaseB ? ` ${escapeHtml(t("skillsWorkbench.commands.phaseBDescription"))}` : ""}</p>
+    <p class="skills-description settings-card-description" data-settings-help-copy>${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.commands.compatibilityDescription"))}${skillsPhaseB ? ` ${escapeHtml(t("skillsWorkbench.commands.phaseBDescription"))}` : ""}</p>
     <div class="skill-workbench-actions skills-primary-actions">
       <button id="refreshServerSkillsBtn" class="settings-action-btn subtle" type="button" ${loading ? "disabled" : ""}>${loading ? t("skillsWorkbench.commands.statusLoading") : t("skillsWorkbench.commands.refreshServer")}</button>
       <button id="migrateLocalSkillsBtn" class="settings-action-btn subtle" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${t("skillsWorkbench.commands.migrateLocal", { count: localCommands.length })}</button>
@@ -137,7 +137,7 @@ export function createSkillsWorkbenchController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.serverTitle"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.serverDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.commands.serverDescription"))}</div>
         </div>
         <span class="settings-status-pill settings-badge ${loading || state.serverSkillsStatus === "stale" ? "warn" : state.serverSkillsStatus === "error" ? "muted" : "ok"}">${loading ? t("skillsWorkbench.commands.statusLoading") : state.serverSkillsStatus === "stale" ? t("skillsWorkbench.commands.statusStale") : state.serverSkillsStatus === "error" ? t("skillsWorkbench.commands.statusError") : state.serverSkillsStatus === "ready" ? t("skillsWorkbench.commands.statusReady") : t("skillsWorkbench.commands.statusIdle")}</span>
       </div>
@@ -147,7 +147,7 @@ export function createSkillsWorkbenchController({
     </section>
     <section class="settings-provider-section settings-card settings-page-section">
       <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.importTitle"))}</div>
-      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.importDescription"))}</div>
+      <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.commands.importDescription"))}</div>
       <div class="settings-action-row settings-form-actions settings-inline-actions">
         <input id="skillImportFile" class="hidden" type="file" accept=".md,text/markdown,text/plain" />
         <button id="chooseSkillImportFileBtn" class="settings-action-btn subtle" type="button" ${state.serverSkillsSaving ? "disabled" : ""}>${escapeHtml(t("skillsWorkbench.commands.chooseFile"))}</button>
@@ -156,7 +156,7 @@ export function createSkillsWorkbenchController({
     </section>
     <section class="settings-provider-section settings-card settings-page-section">
       <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.createTitle"))}</div>
-      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.createDescription"))}</div>
+      <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.commands.createDescription"))}</div>
       <form id="skillCommandForm" class="skill-command-form">
         <div class="settings-provider-form-grid settings-form-grid">
           <label>${escapeHtml(t("skillsWorkbench.commands.nameLabel"))}<input id="skillCommandName" class="settings-field" placeholder="${escapeAttr(t("skillsWorkbench.commands.namePlaceholder"))}" /></label>
@@ -168,7 +168,7 @@ export function createSkillsWorkbenchController({
     </section>
     <section class="settings-provider-section settings-card settings-page-section">
       <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.commands.localFallbackTitle"))}</div>
-      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.commands.localFallbackDescription"))}</div>
+      <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.commands.localFallbackDescription"))}</div>
     </section>
   `;
   }
@@ -277,12 +277,12 @@ export function createSkillsWorkbenchController({
     const editingRegistryArgs = Array.isArray(editingRegistryServer?.args) ? editingRegistryServer.args.join(" ") : "";
     const registrySubmitting = editingRegistryId ? isMCPRegistryActionBusy(editingRegistryId, "update") : isMCPRegistryActionBusy("new", "create");
     return `
-    <p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
+    <p class="skills-description settings-card-description" data-settings-help-copy>${escapeHtml(active.description)}</p>
     <section class="settings-provider-section settings-card settings-page-section">
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.mcp.registryTitle"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.mcp.registryDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.mcp.registryDescription"))}</div>
         </div>
         <button id="refreshMCPRegistryBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t(state.mcpRegistryLoading ? "skillsWorkbench.mcp.refreshingRegistry" : "skillsWorkbench.mcp.refreshRegistry"))}</button>
       </div>
@@ -310,7 +310,7 @@ export function createSkillsWorkbenchController({
     </section>
     <section class="settings-provider-section settings-card settings-page-section">
       <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.mcp.localDraftTitle"))}</div>
-      <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.mcp.localDraftDescription"))}</div>
+      <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.mcp.localDraftDescription"))}</div>
       <div class="skill-command-list settings-data-list">
         ${prefs.mcpServers.length ? prefs.mcpServers.map(renderMCPServerCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("skillsWorkbench.mcp.localDraftEmpty"))}</div>`}
       </div>
@@ -353,7 +353,7 @@ export function createSkillsWorkbenchController({
     const rules = Array.isArray(state.toolPermissionRules) ? state.toolPermissionRules : [];
     const loading = state.workflowLoading || state.toolPermissionRulesLoading;
     return `
-    <p class="skills-description settings-card-description">${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.permissions.description"))}</p>
+    <p class="skills-description settings-card-description" data-settings-help-copy>${escapeHtml(active.description)} ${escapeHtml(t("skillsWorkbench.permissions.description"))}</p>
     <div class="skill-workbench-actions">
       <button id="refreshWorkflowPolicyBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t(loading ? "skillsWorkbench.commands.statusLoading" : "skillsWorkbench.permissions.refreshServer"))}</button>
     </div>
@@ -362,7 +362,7 @@ export function createSkillsWorkbenchController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.permissions.preferencesTitle"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.permissions.preferencesDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.permissions.preferencesDescription"))}</div>
         </div>
         <span class="settings-status-pill settings-badge ${loading ? "warn" : "ok"}">${escapeHtml(t(loading ? "skillsWorkbench.commands.statusLoading" : "skillsWorkbench.permissions.connected"))}</span>
       </div>
@@ -376,7 +376,7 @@ export function createSkillsWorkbenchController({
       <div class="settings-provider-section-head settings-card-header">
         <div>
           <div class="settings-provider-title settings-card-title">${escapeHtml(t("skillsWorkbench.permissions.rulesTitle"))}</div>
-          <div class="settings-provider-meta settings-card-description">${escapeHtml(t("skillsWorkbench.permissions.rulesDescription"))}</div>
+          <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("skillsWorkbench.permissions.rulesDescription"))}</div>
         </div>
       </div>
       <div class="skill-command-list workflow-rule-list">
@@ -401,7 +401,7 @@ export function createSkillsWorkbenchController({
   function renderWorkflowPolicyToggle(field, title, description, checked) {
     return `
     <label class="appearance-toggle-row skill-policy-row settings-switch-row">
-      <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
+      <span><strong>${escapeHtml(title)}</strong><small data-settings-help-copy>${escapeHtml(description)}</small></span>
       <input type="checkbox" data-workflow-policy="${escapeAttr(field)}" ${checked ? "checked" : ""} ${state.workflowSaving ? "disabled" : ""} />
     </label>
   `;
@@ -429,7 +429,7 @@ export function createSkillsWorkbenchController({
 
   function renderSkillRoadmapPanel(active) {
     return `
-    <p class="skills-description settings-card-description">${escapeHtml(active.description)}</p>
+    <p class="skills-description settings-card-description" data-settings-help-copy>${escapeHtml(active.description)}</p>
     <div class="skill-roadmap-grid">
       ${renderSkillRoadmapCard(active.label, active.empty)}
       ${renderSkillRoadmapCard(t("skillsWorkbench.roadmap.serverTitle"), t("skillsWorkbench.roadmap.serverDescription"))}
@@ -439,7 +439,7 @@ export function createSkillsWorkbenchController({
   }
 
   function renderSkillRoadmapCard(title, description) {
-    return `<section class="skill-roadmap-card settings-card settings-empty-state"><strong class="settings-card-title">${escapeHtml(title)}</strong><span class="settings-card-description">${escapeHtml(description)}</span></section>`;
+    return `<section class="skill-roadmap-card settings-card settings-empty-state"><strong class="settings-card-title">${escapeHtml(title)}</strong><span class="settings-card-description" data-settings-help-copy>${escapeHtml(description)}</span></section>`;
   }
 
   function renderSkillPanelIntoBody(body, activeKey) {

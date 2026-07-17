@@ -238,7 +238,7 @@ export function createRemoteAccessSettingsController({
             <div>
               <div class="settings-hero-kicker">${escapeHtml(rt("session"))}</div>
               <div class="settings-hero-title settings-card-title">${escapeHtml(value.session.remote ? rt("remote") : rt("local"))}</div>
-              <p class="settings-card-description">${escapeHtml(rt("description"))}</p>
+              <p class="settings-card-description" data-settings-help-copy>${escapeHtml(rt("description"))}</p>
             </div>
             <span class="settings-status-pill settings-badge ${value.session.authenticated ? "ok" : "warn"}">${escapeHtml(value.session.authenticated ? rt("authenticated") : rt("unauthenticated"))}</span>
           </div>
@@ -254,11 +254,11 @@ export function createRemoteAccessSettingsController({
           <div class="settings-stat-card"><strong>${escapeHtml(value.session.expiresAt || rt("never"))}</strong><span>${escapeHtml(rt("expiresAt"))}</span></div>
         </div>
         <section class="settings-provider-section settings-page-section settings-card">
-          <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("policy"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(rt("allowFullAccessHint"))}</div></div></div>
+          <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("policy"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("allowFullAccessHint"))}</div></div></div>
           <form id="remoteAccessPolicyForm" class="settings-card-content remote-access-policy-form">
             <div class="settings-provider-form-grid settings-form-grid">
-              <label class="settings-form-field">${escapeHtml(rt("defaultMode"))}<select id="remoteAccessDefaultMode" class="settings-field" ${securityAdminAllowed ? "" : "disabled"}><option value="restricted" ${value.policy.defaultMode === "restricted" ? "selected" : ""}>${escapeHtml(rt("restricted"))}</option><option value="full" ${value.policy.defaultMode === "full" ? "selected" : ""} ${fullAllowed && securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("full"))}</option></select><small>${escapeHtml(fullAllowed ? rt("allowFullAccessHint") : rt("fullModeUnavailable"))}</small></label>
-              <label class="settings-check-row"><input id="remoteAccessNativePicker" type="checkbox" ${value.policy.allowRemoteNativePicker ? "checked" : ""} ${securityAdminAllowed ? "" : "disabled"} /><span><strong>${escapeHtml(rt("nativePicker"))}</strong><small>${escapeHtml(rt("nativePickerHint"))}</small></span></label>
+              <label class="settings-form-field">${escapeHtml(rt("defaultMode"))}<select id="remoteAccessDefaultMode" class="settings-field" ${securityAdminAllowed ? "" : "disabled"}><option value="restricted" ${value.policy.defaultMode === "restricted" ? "selected" : ""}>${escapeHtml(rt("restricted"))}</option><option value="full" ${value.policy.defaultMode === "full" ? "selected" : ""} ${fullAllowed && securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("full"))}</option></select><small${fullAllowed ? " data-settings-help-copy" : ""}>${escapeHtml(fullAllowed ? rt("allowFullAccessHint") : rt("fullModeUnavailable"))}</small></label>
+              <label class="settings-check-row"><input id="remoteAccessNativePicker" type="checkbox" ${value.policy.allowRemoteNativePicker ? "checked" : ""} ${securityAdminAllowed ? "" : "disabled"} /><span><strong>${escapeHtml(rt("nativePicker"))}</strong><small data-settings-help-copy>${escapeHtml(rt("nativePickerHint"))}</small></span></label>
               ${currentPasswordField("remoteAccessPolicyCurrentPassword")}
             </div>
             <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(`${rt("revision")}: ${value.policy.revision || "—"}`)}</span><button class="settings-action-btn primary" type="submit" data-remote-policy-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("savePolicy"))}</button></div>

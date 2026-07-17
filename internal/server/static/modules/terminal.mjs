@@ -158,7 +158,7 @@ export function createTerminalController({
           <div class="settings-card-header">
             <div class="settings-hero-kicker">${escapeHtml(t("workspace.terminal.management"))}</div>
             <div class="settings-hero-title settings-card-title">${escapeHtml(wsLabel)} · ${escapeHtml(collapsed ? t("workspace.terminal.collapsed") : t("workspace.terminal.expanded"))}</div>
-            <p class="settings-card-description">${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.description"))}</p>
+            <p class="settings-card-description" data-settings-help-copy>${escapeHtml(locked ? remoteTerminalLockedMessage() : sx("terminal.description"))}</p>
           </div>
           <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
             <button id="terminalReconnectSettingsBtn" class="settings-action-btn primary" type="button" ${locked ? "disabled" : ""}>${escapeHtml(t("workspace.terminal.reconnect"))}</button>
@@ -199,7 +199,7 @@ export function createTerminalController({
           <div class="settings-provider-section-head settings-card-header">
             <div>
               <div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.localPreferences"))}</div>
-              <div class="settings-provider-meta settings-card-description">${escapeHtml(sx("terminal.localPrefsDescription"))}</div>
+              <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(sx("terminal.localPrefsDescription"))}</div>
             </div>
           </div>
           <div class="appearance-toggle-list settings-card-content">
@@ -217,7 +217,7 @@ export function createTerminalController({
           <div class="settings-provider-section-head settings-card-header">
             <div>
               <div class="settings-provider-title settings-card-title">${escapeHtml(t("workspace.terminal.keyboardShortcuts"))}</div>
-              <div class="settings-provider-meta settings-card-description">${escapeHtml(sx("terminal.shortcutsDescription"))}</div>
+              <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(sx("terminal.shortcutsDescription"))}</div>
             </div>
           </div>
           <div class="terminal-shortcut-grid settings-data-list settings-card-content">
@@ -252,7 +252,7 @@ export function createTerminalController({
       <label class="appearance-toggle-row terminal-toggle-row settings-switch-row">
         <span>
           <strong>${escapeHtml(title)}</strong>
-          <small>${escapeHtml(description)}</small>
+          <small data-settings-help-copy>${escapeHtml(description)}</small>
         </span>
         <input type="checkbox" data-terminal-toggle="${escapeAttr(field)}" ${checked ? "checked" : ""} />
       </label>
@@ -263,7 +263,7 @@ export function createTerminalController({
     return `
       <button class="appearance-choice settings-data-row ${current === value ? "active" : ""}" type="button" data-terminal-max-lines="${escapeAttr(value)}">
         <span>${escapeHtml(formatNumber(value))}</span>
-        <small>${escapeHtml(sx("terminal.maxOutputLines", { count: formatNumber(value) }))}</small>
+        <small data-settings-help-copy>${escapeHtml(sx("terminal.maxOutputLines", { count: formatNumber(value) }))}</small>
       </button>
     `;
   }

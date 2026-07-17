@@ -186,6 +186,13 @@ export default Object.freeze({
     wizard: "设置向导",
     close: "关闭设置",
     pages: "设置页面",
+    pageHelp: {
+      open: "查看本页帮助",
+      close: "关闭页面帮助",
+      eyebrow: "页面帮助",
+      overview: "页面概览",
+      empty: "本页暂无更多详细说明。",
+    },
     defaultTitle: "API 设置",
     defaultSubtitle: "管理模型、提供商与界面偏好。",
     section: { personal: "个人设置", instance: "实例管理" },

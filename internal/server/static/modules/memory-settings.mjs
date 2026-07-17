@@ -109,7 +109,7 @@ export function renderMemorySettingsContent(value = {}) {
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("memory.heroKicker"))}</div>
           <div class="settings-hero-title settings-card-title">${escapeHtml(t("memory.heroTitle"))}</div>
-          <p class="settings-card-description">${escapeHtml(t("memory.heroDescription"))}</p>
+          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(t("memory.heroDescription"))}</p>
         </div>
         <div class="settings-action-row settings-toolbar settings-inline-actions">
           <button id="refreshMemoriesBtn" class="settings-action-btn subtle" type="button"${disabled}>${escapeHtml(t("common.refresh"))}</button>
@@ -125,7 +125,7 @@ export function renderMemorySettingsContent(value = {}) {
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("memory.searchTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("memory.searchDescription"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("memory.searchDescription"))}</div>
           </div>
         </div>
         <form id="memorySearchForm" class="settings-provider-config-form">
@@ -148,7 +148,7 @@ export function renderMemorySettingsContent(value = {}) {
         <div class="settings-provider-section-head settings-card-header">
           <div>
             <div class="settings-provider-title settings-card-title">${escapeHtml(t("memory.createTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description">${escapeHtml(t("memory.createDescription"))}</div>
+            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("memory.createDescription"))}</div>
           </div>
         </div>
         <form id="createMemoryForm" class="settings-provider-config-form">

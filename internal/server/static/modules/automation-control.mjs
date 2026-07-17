@@ -609,7 +609,7 @@ export function renderAutomationControl(value = {}) {
         <div>
           <div class="settings-hero-kicker">${escapeHtml(t("automation.hero.kicker"))}</div>
           <h2>${escapeHtml(t("automation.hero.title"))}</h2>
-          <p>${escapeHtml(t("automation.hero.description"))}</p>
+          <p data-settings-help-copy>${escapeHtml(t("automation.hero.description"))}</p>
         </div>
         <div class="automation-actions settings-inline-actions">
           <button id="refreshAutomationControlBtn" class="automation-btn primary" type="button"${loading ? " disabled" : ""}>${escapeHtml(t(loading ? "automation.buttons.refreshing" : "automation.buttons.refreshAll"))}</button>
@@ -630,7 +630,7 @@ export function renderAutomationControl(value = {}) {
 
       <div class="automation-section-grid">
         <section class="automation-section settings-card settings-page-section span-2">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.schedule.kicker"))}</span><h3>${escapeHtml(t("automation.schedule.title"))}</h3><p>${escapeHtml(t("automation.schedule.description"))}</p></div>${errors.monitoring ? `<small class="error">${escapeHtml(redactSensitiveText(errors.monitoring))}</small>` : ""}</div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.schedule.kicker"))}</span><h3>${escapeHtml(t("automation.schedule.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.schedule.description"))}</p></div>${errors.monitoring ? `<small class="error">${escapeHtml(redactSensitiveText(errors.monitoring))}</small>` : ""}</div>
           ${scheduleViewMode === "history" ? renderScheduleHistoryMode(selectedScheduleHistoryId, selectedSchedule, scheduleRunHistory[selectedScheduleHistoryId]) : `
           <form id="createScheduleForm" class="automation-form settings-form-grid">
             <label>${escapeHtml(t("automation.schedule.name"))}<input id="scheduleNameInput" maxlength="120" placeholder="${escapeAttr(t("automation.schedule.namePlaceholder"))}" required /></label>
@@ -648,12 +648,12 @@ export function renderAutomationControl(value = {}) {
         </section>
 
         <section class="automation-section settings-card settings-page-section">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.deliveries.kicker"))}</span><h3>${escapeHtml(t("automation.deliveries.title"))}</h3><p>${escapeHtml(t("automation.deliveries.description"))}</p></div></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.deliveries.kicker"))}</span><h3>${escapeHtml(t("automation.deliveries.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.deliveries.description"))}</p></div></div>
           <div class="automation-list settings-data-list settings-table">${deliveryState || deliveries.map((item) => renderDeliveryRow(item, busy)).join("")}</div>
         </section>
 
         <section class="automation-section settings-card settings-page-section">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.connections.kicker"))}</span><h3>${escapeHtml(t("automation.connections.title"))}</h3><p>${escapeHtml(t("automation.connections.description"))}</p></div></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.connections.kicker"))}</span><h3>${escapeHtml(t("automation.connections.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.connections.description"))}</p></div></div>
           <form id="createTelegramConnectionForm" class="automation-form settings-form-grid compact">
             <label>${escapeHtml(t("automation.connections.name"))}<input id="telegramNameInput" maxlength="160" placeholder="${escapeAttr(t("automation.connections.namePlaceholder"))}" /></label>
             <label>${escapeHtml(t("automation.connections.credential"))}<input id="telegramCredentialInput" maxlength="160" placeholder="env:AUTOTO_TELEGRAM_BOT_TOKEN" autocomplete="off" required /></label>
@@ -663,7 +663,7 @@ export function renderAutomationControl(value = {}) {
         </section>
 
         <section class="automation-section settings-card settings-page-section">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.pairing.kicker"))}</span><h3>${escapeHtml(t("automation.pairing.title"))}</h3><p>${escapeHtml(t("automation.pairing.description"))}</p></div></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.pairing.kicker"))}</span><h3>${escapeHtml(t("automation.pairing.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.pairing.description"))}</p></div></div>
           <form id="createPairingCodeForm" class="automation-form settings-form-grid compact">
             <label>${escapeHtml(t("automation.pairing.connection"))}<select id="pairingConnectionInput" required><option value="">${escapeHtml(t("automation.pairing.selectConnection"))}</option>${connectionOptions(connections, "telegram")}</select></label>
             <label>${escapeHtml(t("automation.pairing.agentId"))}<input id="pairingAgentInput" maxlength="160" placeholder="agent-id" required /></label>
@@ -674,7 +674,7 @@ export function renderAutomationControl(value = {}) {
         </section>
 
         <section class="automation-section settings-card settings-page-section span-2">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.homeAssistant.kicker"))}</span><h3>${escapeHtml(t("automation.homeAssistant.title"))}</h3><p>${escapeHtml(t("automation.homeAssistant.description"))}</p></div></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.homeAssistant.kicker"))}</span><h3>${escapeHtml(t("automation.homeAssistant.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.homeAssistant.description"))}</p></div></div>
           <form id="createHomeAssistantConnectionForm" class="automation-form settings-form-grid">
             <label>${escapeHtml(t("automation.homeAssistant.name"))}<input id="homeAssistantNameInput" maxlength="160" placeholder="Home Assistant" /></label>
             <label>${escapeHtml(t("automation.homeAssistant.url"))}<input id="homeAssistantUrlInput" maxlength="400" placeholder="http://homeassistant.local:8123" required /></label>
@@ -687,7 +687,7 @@ export function renderAutomationControl(value = {}) {
         </section>
 
         <section class="automation-section span-2 danger-section">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.deviceActions.kicker"))}</span><h3>${escapeHtml(t("automation.deviceActions.title"))}</h3><p>${escapeHtml(t("automation.deviceActions.description"))}</p></div><span class="automation-danger-badge settings-badge destructive">${escapeHtml(t("automation.deviceActions.riskBoundary"))}</span></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.deviceActions.kicker"))}</span><h3>${escapeHtml(t("automation.deviceActions.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.deviceActions.description"))}</p></div><span class="automation-danger-badge settings-badge destructive">${escapeHtml(t("automation.deviceActions.riskBoundary"))}</span></div>
           <form id="createDeviceActionForm" class="automation-form settings-form-grid">
             <label>${escapeHtml(t("automation.deviceActions.connection"))}<select id="deviceActionConnectionInput" required><option value="">${escapeHtml(t("automation.deviceActions.selectConnection"))}</option>${connectionOptions(connections, "home-assistant", selectedConnectionId)}</select></label>
             <label>${escapeHtml(t("automation.deviceActions.entityId"))}<input id="deviceActionEntityInput" maxlength="255" placeholder="light.living_room" required /></label>
@@ -699,7 +699,7 @@ export function renderAutomationControl(value = {}) {
         </section>
 
         <section class="automation-section settings-card settings-page-section span-2">
-          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.audit.kicker"))}</span><h3>${escapeHtml(t("automation.audit.title"))}</h3><p>${escapeHtml(t("automation.audit.description"))}</p></div></div>
+          <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.audit.kicker"))}</span><h3>${escapeHtml(t("automation.audit.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.audit.description"))}</p></div></div>
           <div class="automation-audit-list settings-data-list settings-table">${auditState || auditEvents.map(renderAuditRow).join("")}</div>
           ${activity.length ? `<details class="automation-activity"><summary>${escapeHtml(t("automation.audit.activity", { count: activity.length }))}</summary><ol>${activity.map(renderActivityRow).join("")}</ol></details>` : ""}
         </section>
