@@ -32,6 +32,14 @@ func newCodexRefreshTestProvider(upstreamURL, storeDir string) *CodexProvider {
 	})
 }
 
+func TestCodexProviderRejectsGatewayScenario(t *testing.T) {
+	provider := NewCodexProvider(config.ProviderConfig{Name: "codex", Type: config.ProviderTypeCodex, BaseURL: codexauth.DefaultBaseURL})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Scenario: CallScenarioGateway})
+	if events != nil || !errors.Is(err, ErrGatewayOAuthUnsupported) {
+		t.Fatalf("expected gateway OAuth rejection, events=%v err=%v", events, err)
+	}
+}
+
 func TestCodexFallbackFastCapabilitiesUseExplicitOfficialCatalogEntries(t *testing.T) {
 	provider := NewCodexProvider(config.ProviderConfig{
 		Name:    "codex",
@@ -166,7 +174,11 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 	var toolCall *ToolCall
 	var usage *Usage
 	var done bool
+	var dispatch *DispatchInfo
 	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
 		switch event.Type {
 		case "text":
 			text += event.Text
@@ -182,6 +194,9 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 	}
 	if responseRequests != 1 || text != "hello" || toolCall == nil || toolCall.ID != "call-1" || toolCall.Name != "lookup" || usage == nil || usage.InputTokens != 10 || usage.CachedInputTokens != 3 || usage.OutputTokens != 4 || usage.ReasoningTokens != 2 || !done {
 		t.Fatalf("unexpected streamed result: requests=%d text=%q tool=%+v usage=%+v done=%v", responseRequests, text, toolCall, usage, done)
+	}
+	if dispatch == nil || dispatch.Provider != "codex" || dispatch.Model != "gpt-a" || dispatch.CredentialID == "" {
+		t.Fatalf("unexpected dispatch attribution: %+v", dispatch)
 	}
 }
 

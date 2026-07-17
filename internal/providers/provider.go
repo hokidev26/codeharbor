@@ -57,13 +57,43 @@ type Usage struct {
 	ReasoningTokens   int64 `json:"reasoningTokens,omitempty"`
 }
 
+type CallScenario string
+
+const (
+	CallScenarioInternal CallScenario = "internal"
+	CallScenarioGateway  CallScenario = "gateway"
+)
+
+var ErrGatewayOAuthUnsupported = errors.New("gateway calls do not support OAuth providers")
+
 type GenerateRequest struct {
 	Model           string
 	SystemPrompt    string
 	Messages        []Message
 	Tools           []ToolSpec
 	ReasoningEffort string
+	MaxOutputTokens int64
 	FastMode        bool
+	// Scenario identifies the caller boundary. The zero value is treated as an
+	// internal call for backwards compatibility.
+	Scenario CallScenario
+}
+
+func (r GenerateRequest) EffectiveScenario() CallScenario {
+	if r.Scenario == "" {
+		return CallScenarioInternal
+	}
+	return r.Scenario
+}
+
+// configuredCredentialID attributes requests to a config-held credential slot
+// without storing the API key or a reversible key-derived identifier.
+const configuredCredentialID = "configured"
+
+type DispatchInfo struct {
+	Provider     string
+	Model        string
+	CredentialID string
 }
 
 type Event struct {
@@ -73,6 +103,17 @@ type Event struct {
 	Usage      *Usage
 	StopReason string
 	Done       bool
+	// Dispatch reports the concrete target selected by an adapter. Nil preserves
+	// the historical event contract for providers that do not report attribution.
+	Dispatch *DispatchInfo
+}
+
+func newDispatchEvent(provider, model, credentialID string) Event {
+	return Event{Type: "dispatch", Dispatch: &DispatchInfo{
+		Provider:     strings.TrimSpace(provider),
+		Model:        strings.TrimSpace(model),
+		CredentialID: strings.TrimSpace(credentialID),
+	}}
 }
 
 type Provider interface {
@@ -114,11 +155,25 @@ type ConfigurationProvider interface {
 	Configured() bool
 }
 
+// ScenarioConfigurationProvider can apply stricter credential eligibility at a
+// caller boundary. Gateway implementations use this to exclude OAuth/profile
+// credentials even when the same provider remains configured for internal use.
+type ScenarioConfigurationProvider interface {
+	ConfiguredForScenario(CallScenario) bool
+}
+
 func ConfiguredFor(provider Provider, fallback bool) bool {
 	if provider, ok := provider.(ConfigurationProvider); ok {
 		return provider.Configured()
 	}
 	return fallback
+}
+
+func ConfiguredForScenario(provider Provider, fallback bool, scenario CallScenario) bool {
+	if provider, ok := provider.(ScenarioConfigurationProvider); ok {
+		return provider.ConfiguredForScenario(scenario)
+	}
+	return ConfiguredFor(provider, fallback)
 }
 
 func CapabilitiesFor(provider Provider) Capabilities {
@@ -138,7 +193,7 @@ func ModelCapabilitiesFor(provider Provider, model string) ModelCapabilities {
 // NewProvider constructs a provider adapter from a normalized provider config.
 func NewProvider(cfg config.ProviderConfig) (Provider, error) {
 	providerType := strings.TrimSpace(cfg.Type)
-	if providerType == "openai" || providerType == "openai-compatible" || providerType == "anthropic" {
+	if providerType == "openai" || providerType == "openai-compatible" || providerType == "anthropic" || providerType == "gemini-interactions" {
 		if err := validateProviderRuntimeConfig(cfg); err != nil {
 			return nil, err
 		}

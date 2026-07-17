@@ -311,6 +311,20 @@ func TestAggregateSourceDefinitionsAreValidated(t *testing.T) {
 	}
 }
 
+func TestAggregateProviderPreservesGatewayScenarioAndConcreteDispatch(t *testing.T) {
+	candidate := &aggregateTestProvider{name: "member", caps: Capabilities{Streaming: true}, generate: func(req GenerateRequest) ([]Event, error) {
+		if req.EffectiveScenario() != CallScenarioGateway {
+			t.Fatalf("aggregate changed scenario: %+v", req)
+		}
+		return []Event{newDispatchEvent("member", req.Model, "credential-1"), {Type: "done", Done: true}}, nil
+	}}
+	provider := resolvedAggregateForTest(t, []Provider{candidate}, []string{"member:model-a"})
+	events := collectAggregateEvents(t, provider, GenerateRequest{Scenario: CallScenarioGateway})
+	if len(events) != 2 || events[0].Dispatch == nil || *events[0].Dispatch != (DispatchInfo{Provider: "member", Model: "model-a", CredentialID: "credential-1"}) {
+		t.Fatalf("aggregate did not propagate concrete dispatch: %+v", events)
+	}
+}
+
 func resolvedAggregateForTest(t *testing.T, candidates []Provider, members []string) Provider {
 	t.Helper()
 	registry := NewRegistry()

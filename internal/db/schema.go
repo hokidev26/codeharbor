@@ -333,6 +333,7 @@ CREATE TABLE IF NOT EXISTS api_requests (
   kind TEXT NOT NULL DEFAULT 'model',
   provider TEXT,
   credential_id TEXT,
+  gateway_key_id TEXT REFERENCES gateway_keys(id) ON DELETE SET NULL,
   model TEXT,
   input_tokens INTEGER,
   output_tokens INTEGER,
@@ -356,6 +357,7 @@ CREATE TABLE IF NOT EXISTS api_requests (
 CREATE INDEX IF NOT EXISTS idx_api_requests_run ON api_requests(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_api_requests_created ON api_requests(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_api_requests_provider_model_created ON api_requests(provider, model, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_api_requests_gateway_key_created ON api_requests(gateway_key_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS agent_backends (
   id TEXT PRIMARY KEY,
@@ -517,7 +519,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL + gatewaySchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -765,6 +767,53 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   CHECK (length(CAST(comment AS BLOB)) <= 16384)
 );
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_plan_created ON plan_approvals(plan_id, plan_revision, created_at ASC, id ASC);
+`
+
+const gatewaySchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS gateway_keys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  key_prefix TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  allowed_models_json TEXT NOT NULL DEFAULT '[]',
+  requests_per_minute INTEGER NOT NULL DEFAULT 0,
+  monthly_token_limit INTEGER NOT NULL DEFAULT 0,
+  max_concurrency INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 120),
+  CHECK (length(CAST(key_prefix AS BLOB)) BETWEEN 1 AND 32),
+  CHECK (key_prefix GLOB '[A-Za-z0-9]*'),
+  CHECK (key_prefix NOT GLOB '*[^A-Za-z0-9._-]*'),
+  CHECK (length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK (enabled IN (0, 1)),
+  CHECK (length(CAST(allowed_models_json AS BLOB)) <= 32768),
+  CHECK (json_valid(allowed_models_json) AND json_type(allowed_models_json) = 'array'),
+  CHECK (requests_per_minute >= 0),
+  CHECK (monthly_token_limit >= 0),
+  CHECK (max_concurrency >= 0),
+  CHECK (revoked_at IS NULL OR enabled = 0)
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_keys_enabled ON gateway_keys(enabled, revoked_at, expires_at, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_gateway_keys_prefix ON gateway_keys(key_prefix, id);
+
+CREATE TABLE IF NOT EXISTS gateway_models (
+  alias TEXT PRIMARY KEY,
+  target_model TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(CAST(alias AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (length(CAST(target_model AS BLOB)) BETWEEN 1 AND 256),
+  CHECK (enabled IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_models_enabled_alias ON gateway_models(enabled, alias);
 `
 
 const memorySchemaSQL = `

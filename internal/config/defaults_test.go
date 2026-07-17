@@ -21,6 +21,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Server.Port != 7788 {
 		t.Fatalf("expected default port 7788, got %d", cfg.Server.Port)
 	}
+	if cfg.Gateway.Enabled || cfg.Gateway.Host != "127.0.0.1" || cfg.Gateway.Port != 8788 || cfg.Gateway.MaxGlobalConcurrency != 16 || cfg.Gateway.MaxRequestBytes != 8<<20 {
+		t.Fatalf("unexpected gateway defaults: %+v", cfg.Gateway)
+	}
 	if filepath.Base(cfg.Paths.HomeDir) != ".autoto" || filepath.Base(cfg.Paths.DatabasePath) != "autoto.db" {
 		t.Fatalf("expected Autoto default paths, got %+v", cfg.Paths)
 	}
@@ -229,6 +232,17 @@ func TestLoadExplicitPathDoesNotMigrateLegacyConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(explicitPath); err != nil {
 		t.Fatalf("expected explicit config to be created: %v", err)
+	}
+}
+
+func TestNormalizeGatewayConfigBounds(t *testing.T) {
+	defaults := normalizeGatewayConfig(GatewayConfig{})
+	if defaults.Host != "127.0.0.1" || defaults.Port != 8788 || defaults.MaxGlobalConcurrency != 16 || defaults.MaxRequestBytes != 8<<20 {
+		t.Fatalf("unexpected gateway fallback: %+v", defaults)
+	}
+	bounded := normalizeGatewayConfig(GatewayConfig{Host: " 0.0.0.0 ", Port: 70000, MaxGlobalConcurrency: 5000, MaxRequestBytes: 1})
+	if bounded.Host != "0.0.0.0" || bounded.Port != 8788 || bounded.MaxGlobalConcurrency != 1024 || bounded.MaxRequestBytes != 1<<10 {
+		t.Fatalf("unexpected gateway bounds: %+v", bounded)
 	}
 }
 
@@ -442,6 +456,17 @@ func TestNormalizeProvidersPreservesExplicitProfile(t *testing.T) {
 	}}})
 	if len(providers.Instances) != 1 || providers.Instances[0].Profile != ProviderProfileCLIProxyAPI {
 		t.Fatalf("expected explicit profile to remain intact, got %+v", providers.Instances)
+	}
+}
+
+func TestNormalizeProvidersClearsOAuthGatewayEligibility(t *testing.T) {
+	providers := normalizeProviders(ProvidersConfig{Instances: []ProviderConfig{
+		{Name: "codex", Type: "CoDeX", GatewayEnabled: true},
+		{Name: "proxy", Type: "openai-compatible", Profile: ProviderProfileCLIProxyAPI, GatewayEnabled: true},
+		{Name: "relay", Type: "openai-compatible", GatewayEnabled: true},
+	}})
+	if providers.Instances[0].GatewayEnabled || providers.Instances[1].GatewayEnabled || !providers.Instances[2].GatewayEnabled {
+		t.Fatalf("unexpected normalized Gateway eligibility: %+v", providers.Instances)
 	}
 }
 

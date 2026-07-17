@@ -275,7 +275,7 @@ test("conversation and task modes expose separate creation boundaries", async ()
   assert.match(styles, /\.navigation-boundary-empty\s*\{/);
 });
 
-test("composer toolbar precedes the input row while preserving all event IDs", async () => {
+test("composer toolbar exposes only model, effort, and Fast while preserving hidden compatibility controls", async () => {
   const html = await readFile(indexURL, "utf8");
   const formStart = html.indexOf('<form id="messageForm"');
   const formEnd = html.indexOf("</form>", formStart);
@@ -285,8 +285,17 @@ test("composer toolbar precedes the input row while preserving all event IDs", a
   const inputIndex = composer.indexOf('id="composerInputShell"');
   assert.ok(toolbarIndex >= 0 && toolbarIndex < inputIndex);
   assert.ok(composer.indexOf('id="headerTaskSummaryBtn"') > toolbarIndex && composer.indexOf('id="headerTaskSummaryBtn"') < inputIndex);
-  assert.ok(composer.indexOf('id="modelSelect"') < inputIndex);
+  assert.ok(composer.indexOf('id="modelSelect"') < composer.indexOf('id="reasoningEffort"'));
+  assert.ok(composer.indexOf('id="reasoningEffort"') < composer.indexOf('id="openProviderLoginBtn"'));
+  assert.ok(composer.indexOf('id="openProviderLoginBtn"') < composer.indexOf('id="messageModeToggle"'));
   assert.ok(composer.indexOf('id="permissionMode"') < inputIndex);
+  assert.match(composer, /class="composer-field composer-model-field"/);
+  assert.match(composer, /class="composer-field composer-effort-field"/);
+  assert.match(composer, /class="composer-field composer-message-mode-field hidden" aria-hidden="true"/);
+  assert.match(composer, /class="composer-field composer-permission-field hidden" aria-hidden="true"/);
+  assert.match(composer, /class="permission-safety-indicator hidden"[^>]*aria-hidden="true"/);
+  assert.match(composer, /id="permissionRiskBadge" class="permission-risk-badge hidden" aria-hidden="true"/);
+  assert.match(composer, /class="composer-actions hidden" aria-hidden="true"/);
   assert.doesNotMatch(html, /id="currentMeta"/);
   assert.doesNotMatch(html, /id="wsBadge"/);
   assert.ok(composer.indexOf('id="messageText"') > toolbarIndex);
@@ -389,7 +398,8 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(styles, /body\.white-shell\.theme-light \.composer-wrap\s*\{[\s\S]*?padding:\s*6px 12px 8px/);
   assert.match(styles, /body\.white-shell\.theme-light \.message-input\s*\{[\s\S]*?min-height:\s*40px/);
   assert.match(styles, /body\.white-shell\.theme-light \.composer-send-btn\s*\{[\s\S]*?width:\s*34px/);
-  assert.match(styles, /body\.white-shell\.theme-light \.project-card\.navigation-project-row\s*\{[\s\S]*?min-height:\s*44px[\s\S]*?padding:\s*5px 8px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.navigation-project-row \.navigation-project-title\s*\{[\s\S]*?display:\s*flex[\s\S]*?gap:\s*6px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.navigation-project-row \.project-kind-badge\s*\{[\s\S]*?background:\s*var\(--ws-primary-soft\)[\s\S]*?font-size:\s*8px/);
   assert.match(styles, /body\.white-shell\.theme-light \.navigation-conversation-row\s*\{[\s\S]*?min-height:\s*42px[\s\S]*?grid-template-columns:\s*14px minmax\(0, 1fr\)/);
   assert.match(styles, /body\.white-shell\.theme-light \.navigation-project-group \+ \.navigation-project-group\s*\{[\s\S]*?margin-top:\s*2px/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\)\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)[\s\S]*?grid-auto-rows:\s*max-content[\s\S]*?justify-content:\s*start[\s\S]*?row-gap:\s*14px[\s\S]*?padding:\s*14px 16px 14px/);

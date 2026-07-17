@@ -41,7 +41,7 @@ func (p *AnthropicProvider) SetAccountQuotaTelemetry(telemetry AccountQuotaTelem
 	}
 }
 
-func (p *AnthropicProvider) accountCandidates() ([]anthropicAccountCandidate, error) {
+func (p *AnthropicProvider) accountCandidates(scenario CallScenario) ([]anthropicAccountCandidate, error) {
 	if p == nil {
 		return nil, providerUnavailableError(anthropicauth.DefaultProviderName, "provider is not configured")
 	}
@@ -54,6 +54,9 @@ func (p *AnthropicProvider) accountCandidates() ([]anthropicAccountCandidate, er
 	for index := range items {
 		item := items[index]
 		if item.Credential.Disabled {
+			continue
+		}
+		if scenario == CallScenarioGateway && item.Credential.AuthType != anthropicauth.AuthTypeAPIKey {
 			continue
 		}
 		client, err := p.clientForCredential(item.Credential)
@@ -74,7 +77,7 @@ func (p *AnthropicProvider) accountCandidates() ([]anthropicAccountCandidate, er
 	})
 	if strings.TrimSpace(p.cfg.APIKey) != "" && !managedAnthropicAPIKeyExists(items, p.cfg.APIKey) {
 		candidates = append(candidates, anthropicAccountCandidate{
-			id:       "configured",
+			id:       configuredCredentialID,
 			priority: int(^uint(0) >> 1),
 			client:   p.newAnthropicClient(option.WithAPIKey(p.cfg.APIKey)),
 		})

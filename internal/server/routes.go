@@ -37,6 +37,7 @@ type settingsProviderResponse struct {
 	MaxTokens      int64                       `json:"maxTokens,omitempty"`
 	Configured     bool                        `json:"configured"`
 	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled bool                        `json:"gatewayEnabled"`
 	Enabled        bool                        `json:"enabled"`
 	Origin         string                      `json:"origin"`
 	Capabilities   providers.Capabilities      `json:"capabilities"`
@@ -52,7 +53,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		providerResponses = append(providerResponses, settingsProviderResponse{
 			Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
 			MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyOptional: summary.APIKeyOptional,
-			Enabled: summary.Enabled, Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
+			GatewayEnabled: summary.GatewayEnabled, Enabled: summary.Enabled, Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
 		})
 	}
 	runtimeSettings, err := s.runtimeSettingsForResponse(r.Context())
@@ -62,6 +63,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server":                       cfg.Server,
+		"gateway":                      cfg.Gateway,
 		"paths":                        cfg.Paths,
 		"agent":                        cfg.Agent,
 		"agentModelSettingsEndpoint":   "/api/runtime/agent-model-settings",

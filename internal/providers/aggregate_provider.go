@@ -39,12 +39,28 @@ func (f AggregateSourceFunc) ResolveAggregate(ctx context.Context, name string) 
 // AggregateProvider dynamically resolves an ordered set of complete
 // provider:model references for every Generate call.
 type AggregateProvider struct {
-	registry *Registry
-	name     string
+	registry        *Registry
+	name            string
+	fixedDefinition *AggregateDefinition
 }
 
 func newAggregateProvider(registry *Registry, name string) *AggregateProvider {
 	return &AggregateProvider{registry: registry, name: strings.TrimSpace(name)}
+}
+
+// ResolveAggregateSnapshot creates an aggregate provider pinned to one validated
+// definition. It is used at security boundaries that must dispatch exactly the
+// members they already authorized rather than reloading a mutable source later.
+func (r *Registry) ResolveAggregateSnapshot(definition AggregateDefinition) (Provider, error) {
+	if r == nil {
+		return nil, errors.New("aggregate provider registry is unavailable")
+	}
+	validated, err := validateAggregateDefinition(definition.Name, definition)
+	if err != nil {
+		return nil, err
+	}
+	validated.Members = append([]string(nil), validated.Members...)
+	return &AggregateProvider{registry: r, name: validated.Name, fixedDefinition: &validated}, nil
 }
 
 func (p *AggregateProvider) Name() string {
@@ -160,6 +176,11 @@ func (p *AggregateProvider) Generate(ctx context.Context, req GenerateRequest) (
 func (p *AggregateProvider) loadDefinition(ctx context.Context) (AggregateDefinition, error) {
 	if p == nil || p.registry == nil {
 		return AggregateDefinition{}, errors.New("aggregate provider registry is unavailable")
+	}
+	if p.fixedDefinition != nil {
+		definition := *p.fixedDefinition
+		definition.Members = append([]string(nil), p.fixedDefinition.Members...)
+		return definition, nil
 	}
 	source := p.registry.aggregateSourceSnapshot()
 	if source == nil {

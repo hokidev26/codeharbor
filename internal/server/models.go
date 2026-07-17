@@ -37,6 +37,7 @@ type modelProviderResponse struct {
 	Discovered        bool                                   `json:"discovered"`
 	Configured        bool                                   `json:"configured"`
 	APIKeyOptional    bool                                   `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled    bool                                   `json:"gatewayEnabled"`
 	Enabled           bool                                   `json:"enabled"`
 	Origin            string                                 `json:"origin"`
 	Capabilities      providers.Capabilities                 `json:"capabilities"`
@@ -76,6 +77,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		ModelsSource:   "configured-default",
 		Configured:     s.providerConfigured(provider),
 		APIKeyOptional: provider.APIKeyOptional,
+		GatewayEnabled: provider.GatewayEnabled,
 		Enabled:        provider.Enabled,
 		Origin:         provider.Origin,
 		Capabilities:   metadata.Capabilities,

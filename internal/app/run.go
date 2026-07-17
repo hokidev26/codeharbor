@@ -21,6 +21,7 @@ import (
 	"autoto/internal/compat"
 	"autoto/internal/config"
 	"autoto/internal/db"
+	"autoto/internal/gateway"
 	"autoto/internal/integrations"
 	"autoto/internal/plugins"
 	"autoto/internal/preview"
@@ -188,21 +189,36 @@ func Run(options Options) int {
 		Handler:           application.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	gatewayHTTPServer, err := newGatewayHTTPServer(cfg, store, providerRegistry, application.GatewayProviderAllowed)
+	if err != nil {
+		logger.Error("create gateway service", "error", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	supervisor := runtime.NewSupervisor()
-	httpService := runtime.NewHTTPService(httpServer, func(err error) {
+	services := []runtime.Service{previewManager, channelManager, automationManager, backgroundManager}
+	if gatewayHTTPServer != nil {
+		services = append(services, runtime.NewHTTPService(gatewayHTTPServer, func(err error) {
+			logger.Error("serve gateway", "error", err)
+			stop()
+		}))
+	}
+	services = append(services, runtime.NewHTTPService(httpServer, func(err error) {
 		logger.Error("serve", "error", err)
 		stop()
-	})
-	if err := registerRuntimeServices(supervisor, previewManager, channelManager, automationManager, backgroundManager, httpService); err != nil {
+	}))
+	if err := registerRuntimeServices(supervisor, services...); err != nil {
 		logger.Error("register service", "error", err)
 		return 1
 	}
 
 	logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
+	if gatewayHTTPServer != nil {
+		logger.Info("private API gateway listening", "addr", fmt.Sprintf("http://%s", cfg.GatewayAddr()))
+	}
 	if err := supervisor.Start(ctx); err != nil {
 		logger.Error("start services", "error", err)
 		return 1
@@ -222,6 +238,28 @@ func Run(options Options) int {
 		return 1
 	}
 	return 0
+}
+
+func newGatewayHTTPServer(cfg config.Config, store *db.Store, registry *providers.Registry, providerAllowed gateway.ProviderPolicy) (*http.Server, error) {
+	if !cfg.Gateway.Enabled {
+		return nil, nil
+	}
+	service, err := gateway.New(store, registry, gateway.Options{
+		MaxGlobalConcurrency: cfg.Gateway.MaxGlobalConcurrency,
+		MaxRequestBytes:      cfg.Gateway.MaxRequestBytes,
+		ProviderAllowed:      providerAllowed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Server{
+		Addr:              cfg.GatewayAddr(),
+		Handler:           service.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}, nil
 }
 
 func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime.Service) error {

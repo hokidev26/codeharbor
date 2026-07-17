@@ -1631,7 +1631,7 @@ func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string,
 		return "", err
 	}
 	prompt := "请把下面较早的对话历史压缩成一段供后续 Agent 继续工作的中文摘要。保留用户目标、关键决策、文件路径、工具执行结果状态和未完成事项；省略大段工具输出。不要编造。\n\n" + renderMessagesForSummary(existingSummary, candidates)
-	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 Autoto 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 Autoto 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}, Scenario: providers.CallScenarioInternal}
 	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	events, err := provider.Generate(summaryCtx, request)
@@ -1769,6 +1769,7 @@ type modelTurnResult struct {
 	Text                 string
 	ToolCalls            []providers.ToolCall
 	Usage                providers.Usage
+	Dispatch             providers.DispatchInfo
 	TurnUsage            *db.MessageTurnUsage
 	StopReason           string
 	StartedAt            time.Time
@@ -1818,7 +1819,7 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 		modelCapabilities := modelProvider.ModelCapabilities(model)
 		fastModeAllowed = !modelCapabilities.FastModeKnown || modelCapabilities.FastMode
 	}
-	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort, FastMode: fastModeAllowed}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort, FastMode: fastModeAllowed, Scenario: providers.CallScenarioInternal}
 	if !capabilities.Tools {
 		request.Tools = nil
 	}
@@ -1834,7 +1835,7 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 	}, runID)})
 	events, err := provider.Generate(attemptCtx, request)
 	if err != nil {
-		r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), 0, providers.Usage{}, err.Error())
+		r.recordAPIRequest(agentID, runID, "", provider.Name(), model, "", time.Since(started), 0, providers.Usage{}, err.Error())
 		return modelTurnResult{}, err, isTransientProviderError(err)
 	}
 
@@ -1891,16 +1892,20 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
+			r.recordAttributedAPIRequest(agentID, runID, "", provider.Name(), model, result.Dispatch, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
+
 			return modelTurnResult{}, err, false
 		case <-firstEventTimer:
 			err := &ProviderError{Message: fmt.Sprintf("provider first token timeout after %dms", r.cfg.FirstTokenTimeoutMs)}
 			cancel()
-			r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), 0, result.Usage, err.Error())
+			r.recordAttributedAPIRequest(agentID, runID, "", provider.Name(), model, result.Dispatch, time.Since(started), 0, result.Usage, err.Error())
 			return modelTurnResult{}, err, true
 		case event, ok := <-events:
 			if !ok {
 				return finalize(true), nil, false
+			}
+			if event.Dispatch != nil {
+				result.Dispatch = *event.Dispatch
 			}
 			switch event.Type {
 			case "text":
@@ -1916,7 +1921,8 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 			case "tool_call":
 				if !capabilities.Tools {
 					err := &ProviderError{Message: "provider emitted a tool call without declaring tool capability"}
-					r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
+					r.recordAttributedAPIRequest(agentID, runID, "", provider.Name(), model, result.Dispatch, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, err.Error())
+
 					return modelTurnResult{}, err, false
 				}
 				if event.ToolCall != nil {
@@ -1933,7 +1939,7 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 				}
 			case "error":
 				err := &ProviderError{Message: event.Text}
-				r.recordAPIRequest(agentID, runID, "", provider.Name(), model, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, event.Text)
+				r.recordAttributedAPIRequest(agentID, runID, "", provider.Name(), model, result.Dispatch, time.Since(started), modelTurnTTFTMS(started, firstOutputAt), result.Usage, event.Text)
 				if modelOutputStarted {
 					return finalize(false), err, false
 				}
@@ -2080,10 +2086,25 @@ func (r *Runner) recordCompletedModelTurn(agentID, runID, messageID, providerNam
 	if result.TurnUsage != nil {
 		ttftMS = result.TurnUsage.TTFTMS
 	}
-	r.recordAPIRequest(agentID, runID, messageID, providerName, model, result.Duration, ttftMS, result.Usage, "")
+	r.recordAttributedAPIRequest(agentID, runID, messageID, providerName, model, result.Dispatch, result.Duration, ttftMS, result.Usage, "")
 }
 
-func (r *Runner) recordAPIRequest(agentID, runID, messageID, providerName, model string, duration time.Duration, ttftMS int64, usage providers.Usage, errorMessage string) {
+func (r *Runner) recordAttributedAPIRequest(agentID, runID, messageID, providerName, model string, dispatch providers.DispatchInfo, duration time.Duration, ttftMS int64, usage providers.Usage, errorMessage string) {
+	actualProvider, actualModel, credentialID := dispatchAttribution(providerName, model, dispatch)
+	r.recordAPIRequest(agentID, runID, messageID, actualProvider, actualModel, credentialID, duration, ttftMS, usage, errorMessage)
+}
+
+func dispatchAttribution(providerName, model string, dispatch providers.DispatchInfo) (string, string, string) {
+	if actual := strings.TrimSpace(dispatch.Provider); actual != "" {
+		providerName = actual
+	}
+	if actual := strings.TrimSpace(dispatch.Model); actual != "" {
+		model = actual
+	}
+	return providerName, model, strings.TrimSpace(dispatch.CredentialID)
+}
+
+func (r *Runner) recordAPIRequest(agentID, runID, messageID, providerName, model, credentialID string, duration time.Duration, ttftMS int64, usage providers.Usage, errorMessage string) {
 	if r.store == nil {
 		return
 	}
@@ -2100,12 +2121,13 @@ func (r *Runner) recordAPIRequest(agentID, runID, messageID, providerName, model
 	if ttftMS > durationMS {
 		ttftMS = durationMS
 	}
-	_, err := r.store.AddAPIRequest(context.Background(), db.APIRequest{
+	request := db.APIRequest{
 		AgentID:           agentID,
 		RunID:             runID,
 		MessageID:         messageID,
 		Kind:              "model",
 		Provider:          providerName,
+		CredentialID:      strings.TrimSpace(credentialID),
 		Model:             model,
 		InputTokens:       usage.InputTokens,
 		OutputTokens:      usage.OutputTokens,
@@ -2115,7 +2137,8 @@ func (r *Runner) recordAPIRequest(agentID, runID, messageID, providerName, model
 		DurationMS:        durationMS,
 		CostUSD:           estimateUsageCostUSD(providerName, model, usage),
 		ErrorMessage:      errorMessage,
-	})
+	}
+	_, err := r.store.AddAPIRequest(context.Background(), request)
 	if err != nil {
 		slog.Warn("record api request failed", "agentId", agentID, "error", err)
 	}

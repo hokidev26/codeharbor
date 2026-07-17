@@ -20,8 +20,9 @@ import (
 const defaultGeminiInteractionsURL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
 type GeminiInteractions struct {
-	cfg    config.ProviderConfig
-	client *http.Client
+	cfg       config.ProviderConfig
+	client    *http.Client
+	configErr error
 }
 
 func NewGeminiInteractions(cfg config.ProviderConfig) *GeminiInteractions {
@@ -34,10 +35,14 @@ func NewGeminiInteractions(cfg config.ProviderConfig) *GeminiInteractions {
 	if cfg.Model == "" {
 		cfg.Model = "gemini-2.5-pro"
 	}
-	return &GeminiInteractions{cfg: cfg, client: &http.Client{Timeout: 90 * time.Second}}
+	return &GeminiInteractions{cfg: cfg, client: providerHTTPClient(90 * time.Second), configErr: validateProviderRuntimeConfig(cfg)}
 }
 
 func (p *GeminiInteractions) Name() string { return p.cfg.Name }
+
+func (p *GeminiInteractions) Configured() bool {
+	return p != nil && p.configErr == nil && strings.TrimSpace(p.cfg.APIKey) != ""
+}
 
 func (p *GeminiInteractions) Capabilities() Capabilities {
 	return Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: true, ReasoningEffort: true, ReasoningEfforts: []string{"low", "medium", "high"}}
@@ -46,6 +51,9 @@ func (p *GeminiInteractions) Capabilities() Capabilities {
 // The Interactions endpoint does not expose a portable model-list resource for
 // API-key clients, so configured models remain the reliable fallback.
 func (p *GeminiInteractions) ListModels(context.Context) ([]string, error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
 	return fallbackModels(p.cfg.Model), nil
 }
 
@@ -57,15 +65,13 @@ func fallbackModels(model string) []string {
 }
 
 func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
-	out := make(chan Event, 16)
-	if strings.TrimSpace(p.cfg.APIKey) == "" {
-		go func() {
-			defer close(out)
-			out <- Event{Type: "text", Text: "Gemini Interactions provider is not configured. Set GEMINI_API_KEY to enable Interactions API calls."}
-			out <- Event{Type: "done", Done: true, StopReason: "not_configured"}
-		}()
-		return out, nil
+	if p.configErr != nil {
+		return nil, p.configErr
 	}
+	if strings.TrimSpace(p.cfg.APIKey) == "" {
+		return nil, providerUnavailableError(p.cfg.Name, "API key is not configured")
+	}
+	out := make(chan Event, 16)
 
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
@@ -83,8 +89,15 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 	if tools := geminiInteractionTools(req.Tools); len(tools) > 0 {
 		payload["tools"] = tools
 	}
+	generationConfig := map[string]any{}
 	if effort := normalizeGeminiReasoningEffort(req.ReasoningEffort); effort != "" {
-		payload["generation_config"] = map[string]string{"thinking_level": effort}
+		generationConfig["thinking_level"] = effort
+	}
+	if req.MaxOutputTokens > 0 {
+		generationConfig["max_output_tokens"] = req.MaxOutputTokens
+	}
+	if len(generationConfig) > 0 {
+		payload["generation_config"] = generationConfig
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -93,7 +106,7 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 
 	endpoint, err := url.Parse(strings.TrimRight(p.cfg.BaseURL, "/"))
 	if err != nil {
-		return nil, err
+		return nil, providerUnavailableError(p.cfg.Name, "request URL is invalid")
 	}
 	query := endpoint.Query()
 	if query.Get("alt") == "" {
@@ -102,7 +115,7 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 	endpoint.RawQuery = query.Encode()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(encoded))
 	if err != nil {
-		return nil, err
+		return nil, providerUnavailableError(p.cfg.Name, "request could not be constructed")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
@@ -111,14 +124,15 @@ func (p *GeminiInteractions) Generate(ctx context.Context, req GenerateRequest) 
 
 	go func() {
 		defer close(out)
+		out <- newDispatchEvent(p.cfg.Name, model, configuredCredentialID)
 		res, err := p.client.Do(httpReq)
 		if err != nil {
-			out <- Event{Type: "error", Text: fmt.Sprintf("%s provider request failed: %v", p.cfg.Name, err)}
+			out <- Event{Type: "error", Text: providerRequestFailedText(p.cfg.Name)}
 			return
 		}
 		defer res.Body.Close()
 		if res.StatusCode >= http.StatusMultipleChoices {
-			out <- Event{Type: "error", Text: p.geminiHTTPError(res)}
+			out <- Event{Type: "error", Text: providerHTTPFailedText(p.cfg.Name, res.StatusCode)}
 			return
 		}
 		if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "text/event-stream") {
@@ -137,24 +151,6 @@ func normalizeGeminiReasoningEffort(effort string) string {
 	default:
 		return ""
 	}
-}
-
-func (p *GeminiInteractions) geminiHTTPError(res *http.Response) string {
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 64*1024))
-	if key := strings.TrimSpace(p.cfg.APIKey); key != "" {
-		body = bytes.ReplaceAll(body, []byte(key), []byte("[REDACTED]"))
-	}
-	var parsed map[string]any
-	if json.Unmarshal(body, &parsed) == nil {
-		if message := geminiErrorMessage(parsed); message != "" {
-			return fmt.Sprintf("%s model request failed: %s", res.Status, message)
-		}
-	}
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return "Gemini model request failed: " + res.Status
-	}
-	return fmt.Sprintf("Gemini model request failed: %s: %s", res.Status, text)
 }
 
 func geminiErrorMessage(value map[string]any) string {

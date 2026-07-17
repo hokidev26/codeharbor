@@ -27,6 +27,7 @@ type providerConfigUpdateRequest struct {
 	Model          string `json:"model"`
 	MaxTokens      int64  `json:"maxTokens"`
 	APIKeyOptional bool   `json:"apiKeyOptional"`
+	GatewayEnabled *bool  `json:"gatewayEnabled"`
 }
 
 type providerConfigUpdateResponse struct {
@@ -37,8 +38,9 @@ type providerConfigUpdateResponse struct {
 }
 
 type providerConfigPatchRequest struct {
-	Enabled *bool   `json:"enabled"`
-	Model   *string `json:"model"`
+	Enabled        *bool   `json:"enabled"`
+	Model          *string `json:"model"`
+	GatewayEnabled *bool   `json:"gatewayEnabled"`
 }
 
 type providerDeleteResponse struct {
@@ -64,6 +66,11 @@ const (
 	maxProviderModelBytes        = 512
 	maxProviderProfileBytes      = 64
 )
+
+func providerGatewaySharingForbidden(providerType, profile string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), config.ProviderTypeCodex) ||
+		strings.EqualFold(strings.TrimSpace(profile), config.ProviderProfileCLIProxyAPI)
+}
 
 func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	providerName := strings.TrimSpace(chi.URLParam(r, "name"))
@@ -145,8 +152,8 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Enabled == nil && req.Model == nil {
-		writeError(w, http.StatusBadRequest, "enabled or model is required")
+	if req.Enabled == nil && req.Model == nil && req.GatewayEnabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled, model, or gatewayEnabled is required")
 		return
 	}
 	s.configMutationMu.Lock()
@@ -162,6 +169,13 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 	updated := existing
 	if req.Enabled != nil {
 		updated.Disabled = !*req.Enabled
+	}
+	if req.GatewayEnabled != nil {
+		if *req.GatewayEnabled && providerGatewaySharingForbidden(updated.Type, updated.Profile) {
+			writeError(w, http.StatusBadRequest, "OAuth-backed providers cannot be enabled for the shared API gateway")
+			return
+		}
+		updated.GatewayEnabled = *req.GatewayEnabled
 	}
 	if req.Model != nil {
 		updated.Model = strings.TrimSpace(*req.Model)
@@ -494,6 +508,13 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 	if profile == config.ProviderProfileCLIProxyAPI {
 		apiKeyOptional = true
 	}
+	gatewayEnabled := existing.GatewayEnabled
+	if req.GatewayEnabled != nil {
+		gatewayEnabled = *req.GatewayEnabled
+	}
+	if gatewayEnabled && providerGatewaySharingForbidden(providerType, profile) {
+		return config.ProviderConfig{}, errors.New("OAuth-backed providers cannot be enabled for the shared API gateway")
+	}
 	return config.ProviderConfig{
 		Name:           name,
 		Type:           providerType,
@@ -503,6 +524,7 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		Model:          model,
 		MaxTokens:      maxTokens,
 		APIKeyOptional: apiKeyOptional,
+		GatewayEnabled: gatewayEnabled,
 		Disabled:       existing.Disabled,
 	}, nil
 }

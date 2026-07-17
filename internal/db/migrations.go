@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 40
+const CurrentDBVersion = 41
 
 type migration struct {
 	version int
@@ -58,6 +58,7 @@ var migrations = []migration{
 	{version: 38, name: "durable plans and execution snapshots", up: migrateV38Plans},
 	{version: 39, name: "durable background tasks and output", up: migrateV39BackgroundTasks},
 	{version: 40, name: "run continuation metadata", up: migrateV40RunContinuations},
+	{version: 41, name: "private api gateway", up: migrateV41PrivateAPIGateway},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1294,6 +1295,21 @@ BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
 	return err
 }
 
+func migrateV41PrivateAPIGateway(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, gatewaySchemaSQL); err != nil {
+		return err
+	}
+	apiRequestsExist, err := tableExists(ctx, tx, "api_requests")
+	if err != nil || !apiRequestsExist {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "api_requests", "gateway_key_id", "TEXT REFERENCES gateway_keys(id) ON DELETE SET NULL"); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_api_requests_gateway_key_created ON api_requests(gateway_key_id, created_at DESC, id DESC)`)
+	return err
+}
+
 func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1329,7 +1345,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 func legacyNamingSchemaSQL() string {
 	// P2-P3 tables were introduced after the agent/workline naming migration and
 	// must be created by their own migrations with modern column names.
-	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL)
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL+gatewaySchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",

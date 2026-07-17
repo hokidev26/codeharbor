@@ -20,6 +20,7 @@ const CurrentConfigVersion = 1
 type Config struct {
 	SchemaVersion int             `json:"version"`
 	Server        ServerConfig    `json:"server"`
+	Gateway       GatewayConfig   `json:"gateway"`
 	Paths         PathsConfig     `json:"paths"`
 	Agent         AgentConfig     `json:"agent"`
 	Auth          AuthConfig      `json:"auth"`
@@ -31,6 +32,14 @@ type Config struct {
 type ServerConfig struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
+}
+
+type GatewayConfig struct {
+	Enabled              bool   `json:"enabled"`
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	MaxGlobalConcurrency int    `json:"maxGlobalConcurrency"`
+	MaxRequestBytes      int64  `json:"maxRequestBytes"`
 }
 
 type PathsConfig struct {
@@ -101,6 +110,7 @@ type ProviderConfig struct {
 	Model          string `json:"model"`
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
 	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled bool   `json:"gatewayEnabled,omitempty"`
 	// Disabled is persisted instead of Enabled so configs written before this
 	// field existed remain enabled after an upgrade.
 	Disabled bool `json:"disabled,omitempty"`
@@ -137,6 +147,7 @@ type ProviderSummary struct {
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
 	Configured     bool   `json:"configured"`
 	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled bool   `json:"gatewayEnabled"`
 	Enabled        bool   `json:"enabled"`
 	Origin         string `json:"origin"`
 }
@@ -169,6 +180,13 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 	return Config{
 		SchemaVersion: CurrentConfigVersion,
 		Server:        ServerConfig{Host: "localhost", Port: 7788},
+		Gateway: GatewayConfig{
+			Enabled:              false,
+			Host:                 "127.0.0.1",
+			Port:                 8788,
+			MaxGlobalConcurrency: 16,
+			MaxRequestBytes:      8 << 20,
+		},
 		Paths: PathsConfig{
 			HomeDir:           appHome,
 			DatabasePath:      filepath.Join(appHome, "autoto.db"),
@@ -448,6 +466,7 @@ func normalizeConfig(cfg Config) Config {
 
 func normalizeConfigWithReport(cfg Config, report *compat.Report) Config {
 	cfg = migrateConfig(cfg)
+	cfg.Gateway = normalizeGatewayConfig(cfg.Gateway)
 	cfg.Agent = normalizeAgentConfig(cfg.Agent)
 	cfg.Security = normalizeSecurityConfig(cfg.Security)
 	applySecurityEnvOverrides(&cfg.Security, report)
@@ -462,6 +481,29 @@ func migrateConfig(cfg Config) Config {
 		cfg.SchemaVersion = CurrentConfigVersion
 	}
 	return cfg
+}
+
+func normalizeGatewayConfig(gateway GatewayConfig) GatewayConfig {
+	gateway.Host = strings.TrimSpace(gateway.Host)
+	if gateway.Host == "" {
+		gateway.Host = "127.0.0.1"
+	}
+	if gateway.Port <= 0 || gateway.Port > 65535 {
+		gateway.Port = 8788
+	}
+	if gateway.MaxGlobalConcurrency <= 0 {
+		gateway.MaxGlobalConcurrency = 16
+	} else if gateway.MaxGlobalConcurrency > 1024 {
+		gateway.MaxGlobalConcurrency = 1024
+	}
+	if gateway.MaxRequestBytes <= 0 {
+		gateway.MaxRequestBytes = 8 << 20
+	} else if gateway.MaxRequestBytes < 1<<10 {
+		gateway.MaxRequestBytes = 1 << 10
+	} else if gateway.MaxRequestBytes > 64<<20 {
+		gateway.MaxRequestBytes = 64 << 20
+	}
+	return gateway
 }
 
 func normalizeAgentConfig(agent AgentConfig) AgentConfig {
@@ -594,6 +636,10 @@ func (c Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
+func (c Config) GatewayAddr() string {
+	return fmt.Sprintf("%s:%d", c.Gateway.Host, c.Gateway.Port)
+}
+
 func (p ProviderConfig) IsConfigured() bool {
 	if p.Type == ProviderTypeCodex {
 		return false
@@ -611,6 +657,7 @@ func (p ProviderConfig) Summary() ProviderSummary {
 		MaxTokens:      p.MaxTokens,
 		Configured:     p.IsConfigured(),
 		APIKeyOptional: p.APIKeyOptional,
+		GatewayEnabled: p.GatewayEnabled,
 		Enabled:        !p.Disabled,
 		Origin:         ProviderOriginForName(p.Name),
 	}
@@ -668,6 +715,9 @@ func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 			provider.Profile = legacyProviderProfile(provider.Name)
 		}
 		applyProviderEnvDefaults(provider)
+		if strings.EqualFold(provider.Type, ProviderTypeCodex) || strings.EqualFold(provider.Profile, ProviderProfileCLIProxyAPI) {
+			provider.GatewayEnabled = false
+		}
 	}
 	return p
 }

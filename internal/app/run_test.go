@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"autoto/internal/config"
 	"autoto/internal/db"
@@ -29,12 +32,12 @@ func (s orderedService) Close(context.Context) error {
 	return nil
 }
 
-func TestRuntimeRegistrationClosesHTTPBeforeWorkers(t *testing.T) {
+func TestRuntimeRegistrationClosesHTTPAndGatewayBeforeWorkers(t *testing.T) {
 	var mu sync.Mutex
 	closed := []string{}
 	service := func(name string) orderedService { return orderedService{name: name, mu: &mu, closed: &closed} }
 	supervisor := runtime.NewSupervisor()
-	if err := registerRuntimeServices(supervisor, service("preview"), service("channels"), service("automation"), service("background"), service("http")); err != nil {
+	if err := registerRuntimeServices(supervisor, service("preview"), service("channels"), service("automation"), service("background"), service("gateway"), service("http")); err != nil {
 		t.Fatal(err)
 	}
 	if err := supervisor.Start(context.Background()); err != nil {
@@ -43,9 +46,53 @@ func TestRuntimeRegistrationClosesHTTPBeforeWorkers(t *testing.T) {
 	if err := supervisor.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"http", "background", "automation", "channels", "preview"}
+	want := []string{"http", "gateway", "background", "automation", "channels", "preview"}
 	if !reflect.DeepEqual(closed, want) {
 		t.Fatalf("unexpected close order: got %v want %v", closed, want)
+	}
+}
+
+func TestNewGatewayHTTPServerHonorsDisabledConfig(t *testing.T) {
+	server, err := newGatewayHTTPServer(config.Config{}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server != nil {
+		t.Fatal("disabled gateway unexpectedly created an HTTP server")
+	}
+}
+
+func TestNewGatewayHTTPServerUsesIndependentGatewayRouter(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.Config{Gateway: config.GatewayConfig{
+		Enabled:              true,
+		Host:                 "127.0.0.1",
+		Port:                 8788,
+		MaxGlobalConcurrency: 4,
+		MaxRequestBytes:      1 << 20,
+	}}
+	server, err := newGatewayHTTPServer(cfg, store, providers.NewRegistry(), func(context.Context, string) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server == nil || server.Addr != "127.0.0.1:8788" || server.MaxHeaderBytes != 32<<10 || server.ReadHeaderTimeout != 10*time.Second || server.ReadTimeout != 30*time.Second || server.IdleTimeout != 60*time.Second || server.WriteTimeout != 0 {
+		t.Fatalf("unexpected gateway HTTP server: %+v", server)
+	}
+
+	gatewayResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(gatewayResponse, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if gatewayResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("gateway route returned %d: %s", gatewayResponse.Code, gatewayResponse.Body.String())
+	}
+	adminResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(adminResponse, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if adminResponse.Code != http.StatusNotFound {
+		t.Fatalf("gateway router exposed an admin route: %d %s", adminResponse.Code, adminResponse.Body.String())
 	}
 }
 

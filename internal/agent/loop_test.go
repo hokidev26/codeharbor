@@ -286,6 +286,24 @@ func TestToolEventInputJSONBoundsLargeStructuredValues(t *testing.T) {
 	}
 }
 
+func TestRunModelTurnCapturesConcreteDispatch(t *testing.T) {
+	provider := &scriptedProvider{turns: [][]providers.Event{{
+		{Type: "dispatch", Dispatch: &providers.DispatchInfo{Provider: "actual", Model: "actual-model", CredentialID: "credential-1"}},
+		{Type: "done", Done: true},
+	}}}
+	result, err, _ := (&Runner{}).runModelTurnAttempt(context.Background(), "agent", "run", provider, "aggregate-model", "", nil, nil, "auto", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Dispatch != (providers.DispatchInfo{Provider: "actual", Model: "actual-model", CredentialID: "credential-1"}) {
+		t.Fatalf("dispatch was not captured: %+v", result.Dispatch)
+	}
+	actualProvider, actualModel, credentialID := dispatchAttribution("aggregate:test", "aggregate-model", result.Dispatch)
+	if actualProvider != "actual" || actualModel != "actual-model" || credentialID != "credential-1" {
+		t.Fatalf("dispatch was not preferred: %q %q %q", actualProvider, actualModel, credentialID)
+	}
+}
+
 func TestToolCallCountsAsFirstOutputAndEstimatedRunes(t *testing.T) {
 	provider := &scriptedProvider{turns: [][]providers.Event{{
 		{Type: "tool_call", ToolCall: &providers.ToolCall{ID: "tool-1", Name: "Read", Input: json.RawMessage(`{"path":"文档.txt"}`)}},
@@ -1036,16 +1054,17 @@ func TestEstimateUsageCostUSD(t *testing.T) {
 	}
 }
 
-func TestRunnerRecordsEstimatedCost(t *testing.T) {
+func TestRunnerRecordsEstimatedCostAndCredentialAttribution(t *testing.T) {
 	ctx := context.Background()
 	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
 	defer store.Close()
 	provider := &scriptedProvider{}
 	runner := newAgentTestRunner(store, provider, config.AgentConfig{})
-	runner.recordAPIRequest(agent.ID, "", "", "openai", "gpt-4.1-mini", time.Millisecond, 1, providers.Usage{InputTokens: 1_000_000, OutputTokens: 100_000}, "")
+	runner.recordAPIRequest(agent.ID, "", "", "openai", "gpt-4.1-mini", "credential-1", time.Millisecond, 1, providers.Usage{InputTokens: 1_000_000, OutputTokens: 100_000}, "")
 	var cost float64
 	var ttftMS int64
-	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0), COALESCE(MAX(ttft_ms),0) FROM api_requests WHERE agent_id = ?`, agent.ID).Scan(&cost, &ttftMS); err != nil {
+	var credentialID string
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0), COALESCE(MAX(ttft_ms),0), COALESCE(MAX(credential_id),'') FROM api_requests WHERE agent_id = ?`, agent.ID).Scan(&cost, &ttftMS, &credentialID); err != nil {
 		t.Fatal(err)
 	}
 	if cost < 0.5599 || cost > 0.5601 {
@@ -1053,6 +1072,9 @@ func TestRunnerRecordsEstimatedCost(t *testing.T) {
 	}
 	if ttftMS != 1 {
 		t.Fatalf("expected ttft to be stored, got %dms", ttftMS)
+	}
+	if credentialID != "credential-1" {
+		t.Fatalf("expected credential attribution to be stored, got %q", credentialID)
 	}
 }
 

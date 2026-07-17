@@ -16,8 +16,8 @@ func TestBackgroundTaskFreshSchemaAndV38Upgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version := readUserVersion(t, ctx, fresh.DB()); version != 40 {
-		t.Fatalf("fresh version = %d, want 40", version)
+	if version := readUserVersion(t, ctx, fresh.DB()); version != CurrentDBVersion {
+		t.Fatalf("fresh version = %d, want %d", version, CurrentDBVersion)
 	}
 	for _, table := range []string{"background_tasks", "background_task_output"} {
 		if !testTableExists(t, ctx, fresh.DB(), table) {
@@ -54,8 +54,8 @@ func TestBackgroundTaskFreshSchemaAndV38Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if version := readUserVersion(t, ctx, upgraded.DB()); version != 40 {
-		t.Fatalf("upgraded version = %d, want 40", version)
+	if version := readUserVersion(t, ctx, upgraded.DB()); version != CurrentDBVersion {
+		t.Fatalf("upgraded version = %d, want %d", version, CurrentDBVersion)
 	}
 	for _, table := range []string{"background_tasks", "background_task_output"} {
 		if !testTableExists(t, ctx, upgraded.DB(), table) {

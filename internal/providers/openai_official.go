@@ -106,7 +106,11 @@ func (p *OpenAIOfficial) Generate(ctx context.Context, req GenerateRequest) (<-c
 		if model == "" {
 			model = p.cfg.Model
 		}
+		out <- newDispatchEvent(p.cfg.Name, model, configuredCredentialID)
 		params := responses.ResponseNewParams{Model: model}
+		if req.MaxOutputTokens > 0 {
+			params.MaxOutputTokens = param.NewOpt(req.MaxOutputTokens)
+		}
 		if reasoningEffort != "" {
 			params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(reasoningEffort)}
 		}

@@ -1,4 +1,4 @@
-import { t } from "./i18n.mjs";
+import { t } from "./i18n.mjs?v=shared-api-1";
 
 function settingItem(key, icon, messageKey) {
   return {
@@ -27,6 +27,7 @@ export const settingsSections = [
     title: t("settings.section.instance"),
     items: [
       settingItem("providers", "☁", "providers"),
+      settingItem("shared-api", "⇄", "sharedAPI"),
       settingItem("network-search", "⌕", "networkSearch"),
       settingItem("agent-admin", "⬡", "agentAdmin"),
       settingItem("worklines-containers", "◇", "worklines"),

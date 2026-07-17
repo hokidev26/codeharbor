@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +54,7 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	events, err := provider.Generate(ctx, GenerateRequest{
 		SystemPrompt:    "Be concise.",
 		ReasoningEffort: "high",
+		MaxOutputTokens: 64,
 		Messages:        []Message{{Role: "user", Blocks: []ContentBlock{{Type: "text", Text: "read the image"}, {Type: "image", MIMEType: "image/png", Data: []byte{1, 2, 3}}}}},
 		Tools: []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{
 			"type":                 "object",
@@ -69,7 +71,11 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	var text string
 	var calls []ToolCall
 	var usage Usage
+	var dispatch *DispatchInfo
 	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
 		switch event.Type {
 		case "error":
 			t.Fatalf("unexpected event error: %s", event.Text)
@@ -93,6 +99,9 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	if usage != (Usage{InputTokens: 12, OutputTokens: 4, CachedInputTokens: 2, ReasoningTokens: 3}) {
 		t.Fatalf("unexpected usage: %+v", usage)
 	}
+	if dispatch == nil || dispatch.Provider != "gemini" || dispatch.Model != "gemini-test" || dispatch.CredentialID != configuredCredentialID {
+		t.Fatalf("unexpected dispatch attribution: %+v", dispatch)
+	}
 	if payload["model"] != "gemini-test" || payload["stream"] != true || payload["store"] != false {
 		t.Fatalf("unexpected payload: %+v", payload)
 	}
@@ -100,8 +109,8 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 		t.Fatalf("missing system instruction: %+v", payload)
 	}
 	generationConfig, _ := payload["generation_config"].(map[string]any)
-	if generationConfig["thinking_level"] != "high" {
-		t.Fatalf("missing thinking level: %+v", payload)
+	if generationConfig["thinking_level"] != "high" || generationConfig["max_output_tokens"] != float64(64) {
+		t.Fatalf("missing thinking level or max output tokens: %+v", payload)
 	}
 	tools, _ := payload["tools"].([]any)
 	if len(tools) != 1 {
@@ -111,6 +120,125 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	schema := tool["parameters"].(map[string]any)
 	if _, exists := schema["additionalProperties"]; exists || len(schema["required"].([]any)) != 1 {
 		t.Fatalf("schema was not sanitized: %+v", schema)
+	}
+}
+
+func TestGeminiInteractionsAttributesConfiguredCredentialOnHTTPFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-goog-api-key"); got != "gemini-secret" {
+			t.Fatalf("unexpected API key header: %q", got)
+		}
+		http.Error(w, "quota exceeded", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	provider := NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: server.URL, APIKey: "gemini-secret", Model: "gemini-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatch *DispatchInfo
+	var errorText string
+	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
+		if event.Type == "error" {
+			errorText = event.Text
+		}
+	}
+	if dispatch == nil || dispatch.Provider != "gemini" || dispatch.Model != "gemini-test" || dispatch.CredentialID != configuredCredentialID {
+		t.Fatalf("failed request lost credential attribution: %+v", dispatch)
+	}
+	if errorText == "" {
+		t.Fatal("expected an attributed error event")
+	}
+}
+
+func TestGeminiInteractionsRequiresConfiguredAPIKey(t *testing.T) {
+	provider := NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: "http://127.0.0.1:65510", Model: "gemini-test"})
+	if provider.client.Timeout != 90*time.Second {
+		t.Fatalf("provider HTTP timeout = %s", provider.client.Timeout)
+	}
+	if provider.Configured() {
+		t.Fatal("provider without an API key must not be configured")
+	}
+	if events, err := provider.Generate(context.Background(), GenerateRequest{}); events != nil || !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected unavailable error for missing API key, events=%v err=%v", events, err)
+	}
+
+	configured := NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: "http://127.0.0.1:65510", APIKey: "gemini-secret", Model: "gemini-test"})
+	if !configured.Configured() {
+		t.Fatal("provider with a valid endpoint and API key must be configured")
+	}
+}
+
+func TestGeminiInteractionsRejectsUnsafeRuntimeURL(t *testing.T) {
+	const secret = "gemini-secret"
+	_, err := NewProvider(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: "http://169.254.169.254/v1beta/interactions", APIKey: secret, Model: "gemini-test"})
+	if err == nil {
+		t.Fatal("metadata endpoint must be rejected")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "169.254") {
+		t.Fatalf("unsafe URL validation leaked input: %v", err)
+	}
+}
+
+func TestGeminiInteractionsHTTPErrorDoesNotLeakCredentialsOrURLs(t *testing.T) {
+	const apiKey = "AIza-gemini-secret"
+	const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "x-goog-api-key="+apiKey+" Authorization: Bearer "+jwt+" https://private.example.test/path", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	provider := NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: server.URL, APIKey: apiKey, Model: "gemini-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errorText string
+	for event := range events {
+		if event.Type == "error" {
+			errorText = event.Text
+		}
+	}
+	if !strings.Contains(errorText, "502") {
+		t.Fatalf("expected safe HTTP status error, got %q", errorText)
+	}
+	for _, secret := range []string{apiKey, "Bearer", jwt, server.URL, "private.example.test"} {
+		if strings.Contains(errorText, secret) {
+			t.Fatalf("HTTP error leaked %q in %q", secret, errorText)
+		}
+	}
+}
+
+func TestGeminiInteractionsRedirectErrorDoesNotLeakRequestURL(t *testing.T) {
+	const apiKey = "AIza-gemini-secret"
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, server.URL+"/redirect?x-goog-api-key="+apiKey, http.StatusFound)
+	}))
+	defer server.Close()
+
+	provider := NewGeminiInteractions(config.ProviderConfig{Name: "gemini", Type: "gemini-interactions", BaseURL: server.URL, APIKey: apiKey, Model: "gemini-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errorText string
+	for event := range events {
+		if event.Type == "error" {
+			errorText = event.Text
+		}
+	}
+	if errorText != "gemini provider request failed" {
+		t.Fatalf("unexpected redirect error: %q", errorText)
+	}
+	for _, secret := range []string{apiKey, server.URL, "redirect"} {
+		if strings.Contains(errorText, secret) {
+			t.Fatalf("redirect error leaked %q in %q", secret, errorText)
+		}
 	}
 }
 

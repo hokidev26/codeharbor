@@ -225,6 +225,21 @@ func TestProviderConfigUpdatePreservesProfileWithoutNameBasedAPIKeyOverride(t *t
 	}
 }
 
+func TestProviderConfigUpdateRejectsOAuthProxyGatewayEligibility(t *testing.T) {
+	enabled := true
+	_, err := providerConfigFromUpdateRequest("cliproxyapi", config.ProviderConfig{}, providerConfigUpdateRequest{
+		Name:           "cliproxyapi",
+		Type:           "openai-compatible",
+		Profile:        config.ProviderProfileCLIProxyAPI,
+		BaseURL:        "http://127.0.0.1:8317/v1",
+		Model:          "gpt-5.5",
+		GatewayEnabled: &enabled,
+	})
+	if err == nil || !strings.Contains(err.Error(), "OAuth") {
+		t.Fatalf("expected OAuth proxy Gateway rejection, got %v", err)
+	}
+}
+
 func TestUpdateProviderConfigRejectsUnsafeCodexBaseURL(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil, providers.NewRegistry())
 	for _, baseURL := range []string{"http://chatgpt.com/backend-api/codex", "https://evil.example/backend-api/codex", "https://chatgpt.com/other"} {
@@ -331,6 +346,54 @@ func TestPatchProviderConfigDisablesAndReenablesRuntimeProvider(t *testing.T) {
 	defaultProvider, err = registry.Default()
 	if err != nil || defaultProvider.Name() != "relay" {
 		t.Fatalf("expected preferred default to be restored, provider=%v err=%v", defaultProvider, err)
+	}
+}
+
+func TestPatchProviderGatewayEligibility(t *testing.T) {
+	relay := config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8081/v1", APIKeyOptional: true, Model: "relay-model"}
+	registry := providers.NewRegistry()
+	registry.Register(providers.NewOpenAICompatible(relay))
+	if !registry.SetDefaultFromConfig("relay:relay-model", []config.ProviderConfig{relay}) {
+		t.Fatal("expected relay default")
+	}
+	app := New(config.Config{Agent: config.AgentConfig{DefaultModel: "relay:relay-model"}, Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{relay}}}, nil, nil, nil, registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPatch, "/api/providers/relay", strings.NewReader(`{"gatewayEnabled":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enable gateway provider: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response providerConfigUpdateResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Provider.GatewayEnabled {
+		t.Fatalf("gateway eligibility was not persisted: %+v", response.Provider)
+	}
+
+	codex := config.ProviderConfig{Name: "codex", Type: config.ProviderTypeCodex, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-test"}
+	codexApp := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{codex}}}, nil, nil, nil)
+	denied := httptest.NewRecorder()
+	deniedRequest := newTestRequest(http.MethodPatch, "/api/providers/codex", strings.NewReader(`{"gatewayEnabled":true}`))
+	deniedRequest.Header.Set("Content-Type", "application/json")
+	deniedRequest.Header.Set(localTokenHeader, codexApp.localToken)
+	codexApp.Routes().ServeHTTP(denied, deniedRequest)
+	if denied.Code != http.StatusBadRequest {
+		t.Fatalf("Codex gateway eligibility must be rejected: %d %s", denied.Code, denied.Body.String())
+	}
+
+	proxy := config.ProviderConfig{Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI, BaseURL: "http://127.0.0.1:8317/v1", Model: "gpt-test", APIKeyOptional: true}
+	proxyApp := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{proxy}}}, nil, nil, nil)
+	proxyDenied := httptest.NewRecorder()
+	proxyRequest := newTestRequest(http.MethodPatch, "/api/providers/cliproxyapi", strings.NewReader(`{"gatewayEnabled":true}`))
+	proxyRequest.Header.Set("Content-Type", "application/json")
+	proxyRequest.Header.Set(localTokenHeader, proxyApp.localToken)
+	proxyApp.Routes().ServeHTTP(proxyDenied, proxyRequest)
+	if proxyDenied.Code != http.StatusBadRequest {
+		t.Fatalf("OAuth proxy gateway eligibility must be rejected: %d %s", proxyDenied.Code, proxyDenied.Body.String())
 	}
 }
 

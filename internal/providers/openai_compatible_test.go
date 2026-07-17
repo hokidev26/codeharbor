@@ -153,7 +153,11 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 	}
 	var text string
 	var usage Usage
+	var dispatch *DispatchInfo
 	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
 		if event.Type == "error" {
 			t.Fatalf("unexpected error event: %s", event.Text)
 		}
@@ -169,6 +173,46 @@ func TestOpenAICompatibleAllowsOptionalAPIKey(t *testing.T) {
 	}
 	if usage.InputTokens != 12 || usage.OutputTokens != 4 || usage.CachedInputTokens != 3 || usage.ReasoningTokens != 1 {
 		t.Fatalf("unexpected usage: %+v", usage)
+	}
+	if dispatch == nil || dispatch.Provider != "cliproxyapi" || dispatch.Model != "gpt-5.5" || dispatch.CredentialID != configuredCredentialID {
+		t.Fatalf("unexpected dispatch attribution: %+v", dispatch)
+	}
+}
+
+func TestOpenAICompatibleAttributesConfiguredCredentialOnHTTPFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer configured-key" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		http.Error(w, "upstream unavailable: configured-key Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature https://private.example.test/path", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatible(config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: server.URL, APIKey: "configured-key", Model: "gpt-test"})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatch *DispatchInfo
+	var errorText string
+	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
+		if event.Type == "error" {
+			errorText = event.Text
+		}
+	}
+	if dispatch == nil || dispatch.Provider != "relay" || dispatch.Model != "gpt-test" || dispatch.CredentialID != configuredCredentialID {
+		t.Fatalf("failed request lost credential attribution: %+v", dispatch)
+	}
+	if !strings.Contains(errorText, "502") {
+		t.Fatalf("unexpected error event: %q", errorText)
+	}
+	for _, secret := range []string{"configured-key", "Bearer", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature", "private.example.test", server.URL} {
+		if strings.Contains(errorText, secret) {
+			t.Fatalf("HTTP error leaked %q in %q", secret, errorText)
+		}
 	}
 }
 
@@ -188,6 +232,8 @@ func TestOpenAICompatibleStreamsTextAndToolCalls(t *testing.T) {
 			``,
 			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".md\"}"}}]}}]}`,
 			``,
+			`data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":1}}}`,
+			``,
 			`data: [DONE]`,
 			``,
 		}, "\n") + "\n\n"))
@@ -198,14 +244,16 @@ func TestOpenAICompatibleStreamsTextAndToolCalls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	events, err := provider.Generate(ctx, GenerateRequest{
-		Messages: []Message{{Role: "user", Content: "read README"}},
-		Tools:    []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}},
+		Messages:        []Message{{Role: "user", Content: "read README"}},
+		Tools:           []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}},
+		MaxOutputTokens: 64,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var text string
 	var calls []ToolCall
+	var usage Usage
 	for event := range events {
 		switch event.Type {
 		case "error":
@@ -216,6 +264,10 @@ func TestOpenAICompatibleStreamsTextAndToolCalls(t *testing.T) {
 			if event.ToolCall != nil {
 				calls = append(calls, *event.ToolCall)
 			}
+		case "usage":
+			if event.Usage != nil {
+				usage = *event.Usage
+			}
 		}
 	}
 	if text != "hello" {
@@ -224,8 +276,15 @@ func TestOpenAICompatibleStreamsTextAndToolCalls(t *testing.T) {
 	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "Read" || string(calls[0].Input) != `{"path":"README.md"}` {
 		t.Fatalf("unexpected tool calls: %+v", calls)
 	}
-	if requestBody["stream"] != true {
-		t.Fatalf("expected stream=true, got %+v", requestBody)
+	if usage != (Usage{InputTokens: 12, OutputTokens: 4, CachedInputTokens: 3, ReasoningTokens: 1}) {
+		t.Fatalf("usage-only final chunk was not parsed: %+v", usage)
+	}
+	if requestBody["stream"] != true || requestBody["max_tokens"] != float64(64) {
+		t.Fatalf("expected stream and max output tokens, got %+v", requestBody)
+	}
+	streamOptions, ok := requestBody["stream_options"].(map[string]any)
+	if !ok || streamOptions["include_usage"] != true {
+		t.Fatalf("expected stream_options.include_usage=true, got %+v", requestBody["stream_options"])
 	}
 	tools, ok := requestBody["tools"].([]any)
 	if !ok || len(tools) != 1 {
@@ -347,6 +406,26 @@ func TestOpenAICompatibleCLIProxySendsReasoningAndAutotoIdentity(t *testing.T) {
 	}
 	if requestBody["reasoning_effort"] != "medium" {
 		t.Fatalf("unexpected compatible reasoning payload: %+v", requestBody)
+	}
+}
+
+func TestOpenAICompatibleCLIProxyRejectsGatewayScenario(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	provider := NewOpenAICompatible(config.ProviderConfig{
+		Name: "cliproxyapi", Type: "openai-compatible", Profile: config.ProviderProfileCLIProxyAPI,
+		BaseURL: server.URL, Model: "gpt-5", APIKeyOptional: true,
+	})
+	events, err := provider.Generate(context.Background(), GenerateRequest{Scenario: CallScenarioGateway})
+	if events != nil || !errors.Is(err, ErrGatewayOAuthUnsupported) {
+		t.Fatalf("expected OAuth proxy Gateway rejection, events=%v err=%v", events, err)
+	}
+	if requests != 0 {
+		t.Fatalf("Gateway request reached OAuth proxy upstream %d times", requests)
 	}
 }
 

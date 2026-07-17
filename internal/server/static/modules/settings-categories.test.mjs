@@ -29,8 +29,10 @@ test("every existing settings page remains reachable from a legacy category", ()
   assert.deepEqual([...new Set(settingsItems.map((item) => item.key).filter((key) => !mapped.has(key)))], []);
   assert.equal(settingsCategoryForItem("runtime"), "diagnostics");
   assert.equal(settingsCategoryForItem("providers"), "api");
+  assert.equal(settingsCategoryForItem("shared-api"), "api");
   assert.equal(firstSettingsItemForCategory("market"), "skills");
   assert.equal(settingsItemByKey("providers")?.key, "providers");
+  assert.equal(settingsItemByKey("shared-api")?.key, "shared-api");
   assert.equal(settingsItemByKey("users"), null);
   assert.equal(legacySettingsCategories.some((category) => category.items.includes("users")), false);
   assert.equal(settingsItemByKey("missing"), null);
@@ -39,7 +41,7 @@ test("every existing settings page remains reachable from a legacy category", ()
 test("legacy category grouping preserves page order and filters empty groups", () => {
   const groups = groupSettingsItemsByLegacyCategory(settingsItems);
   assert.deepEqual(groups.map((group) => group.key), legacySettingsCategories.map((group) => group.key));
-  assert.deepEqual(groups.find((group) => group.key === "api").items.map((item) => item.key), ["providers", "models", "profile", "appearance"]);
+  assert.deepEqual(groups.find((group) => group.key === "api").items.map((item) => item.key), ["providers", "shared-api", "models", "profile", "appearance"]);
 
   const modelsOnly = groupSettingsItemsByLegacyCategory(settingsItems, (item) => item.key === "models");
   assert.deepEqual(modelsOnly.map((group) => ({ key: group.key, items: group.items.map((item) => item.key) })), [

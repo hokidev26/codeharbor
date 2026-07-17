@@ -19,6 +19,48 @@ import (
 	"autoto/internal/config"
 )
 
+func TestAnthropicGatewayCandidatesExcludeProfiles(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	profile, err := store.Create(anthropicauth.CreateRequest{AuthType: anthropicauth.AuthTypeProfile, Profile: "work", Priority: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiKey := createAnthropicAPIKeyAccount(t, store, "sk-ant-api-key", 2, false)
+	provider := NewAnthropicProvider(config.ProviderConfig{CredentialStorePath: storeDir})
+	candidates, err := provider.accountCandidates(CallScenarioGateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].id != apiKey.Credential.ID || candidates[0].id == profile.Credential.ID {
+		t.Fatalf("gateway candidates must contain only API keys: %+v", candidates)
+	}
+	internal, err := provider.accountCandidates(CallScenarioInternal)
+	if err != nil || len(internal) != 2 {
+		t.Fatalf("internal candidates changed: candidates=%+v err=%v", internal, err)
+	}
+}
+
+func TestAnthropicScenarioConfigurationRequiresGatewayAPIKey(t *testing.T) {
+	storeDir := t.TempDir()
+	store := anthropicauth.NewStore(storeDir)
+	if _, err := store.Create(anthropicauth.CreateRequest{AuthType: anthropicauth.AuthTypeProfile, Profile: "work", Priority: 1}); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewAnthropicProvider(config.ProviderConfig{CredentialStorePath: storeDir})
+	if !provider.Configured() || !ConfiguredForScenario(provider, false, CallScenarioInternal) {
+		t.Fatal("profile credential should remain configured for internal calls")
+	}
+	if provider.ConfiguredForScenario(CallScenarioGateway) || ConfiguredForScenario(provider, true, CallScenarioGateway) {
+		t.Fatal("profile-only Anthropic provider must not be configured for Gateway calls")
+	}
+
+	createAnthropicAPIKeyAccount(t, store, "sk-ant-gateway", 2, false)
+	if !provider.ConfiguredForScenario(CallScenarioGateway) || !ConfiguredForScenario(provider, false, CallScenarioGateway) {
+		t.Fatal("enabled Anthropic API key should configure Gateway calls")
+	}
+}
+
 func TestAnthropicMessagesPreserveToolBlocks(t *testing.T) {
 	messages, _ := anthropicMessages([]Message{
 		{Role: "assistant", Blocks: []ContentBlock{{Type: "text", Text: "checking"}, {Type: "tool_use", ToolUseID: "tool-1", ToolName: "Read", Input: json.RawMessage(`{"file_path":"README.md"}`)}}},
@@ -104,7 +146,7 @@ func TestAnthropicProviderStreamsTextUsageAndToolCalls(t *testing.T) {
 	provider := NewAnthropicProvider(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "claude-sonnet-4-5", MaxTokens: 128})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}, Tools: []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object"}}}})
+	events, err := provider.Generate(ctx, GenerateRequest{Messages: []Message{{Role: "user", Content: "hello"}}, Tools: []ToolSpec{{Name: "Read", Description: "Read a file", Schema: map[string]any{"type": "object"}}}, MaxOutputTokens: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +172,8 @@ func TestAnthropicProviderStreamsTextUsageAndToolCalls(t *testing.T) {
 			stopReason = event.StopReason
 		}
 	}
-	if requestBody["stream"] != true {
-		t.Fatalf("expected stream=true request, got %+v", requestBody)
+	if requestBody["stream"] != true || requestBody["max_tokens"] != float64(64) {
+		t.Fatalf("expected stream and max output tokens, got %+v", requestBody)
 	}
 	if text != "hello" {
 		t.Fatalf("expected streamed text hello, got %q", text)
@@ -604,7 +646,7 @@ func TestAnthropicProviderErrorsAreRedactedAndNonRetryableErrorsStop(t *testing.
 	storeDir := t.TempDir()
 	store := anthropicauth.NewStore(storeDir)
 	secret := "sk-ant-secret-never-leak"
-	_ = createAnthropicAPIKeyAccount(t, store, secret, 10, false)
+	selected := createAnthropicAPIKeyAccount(t, store, secret, 10, false)
 	_ = createAnthropicAPIKeyAccount(t, store, "unused-second-key", 20, false)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -623,10 +665,10 @@ func TestAnthropicProviderErrorsAreRedactedAndNonRetryableErrorsStop(t *testing.
 	if requests.Load() != 1 {
 		t.Fatalf("non-retryable error rotated accounts: requests=%d", requests.Load())
 	}
-	if len(collected) != 1 || collected[0].Type != "error" || !strings.Contains(collected[0].Text, "HTTP 400") {
-		t.Fatalf("unexpected error events: %+v", collected)
+	if len(collected) != 2 || collected[0].Dispatch == nil || collected[0].Dispatch.Provider != provider.Name() || collected[0].Dispatch.Model != "claude-test" || collected[0].Dispatch.CredentialID != selected.Credential.ID || collected[1].Type != "error" || !strings.Contains(collected[1].Text, "HTTP 400") {
+		t.Fatalf("unexpected attributed error events: %+v", collected)
 	}
-	if strings.Contains(collected[0].Text, secret) || strings.Contains(collected[0].Text, "bad key") {
-		t.Fatalf("error leaked upstream secret/body: %q", collected[0].Text)
+	if strings.Contains(collected[1].Text, secret) || strings.Contains(collected[1].Text, "bad key") {
+		t.Fatalf("error leaked upstream secret/body: %q", collected[1].Text)
 	}
 }

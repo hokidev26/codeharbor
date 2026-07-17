@@ -359,6 +359,8 @@ type APIRequest struct {
 	MessageID         string          `json:"messageId,omitempty"`
 	Kind              string          `json:"kind"`
 	Provider          string          `json:"provider,omitempty"`
+	CredentialID      string          `json:"credentialId,omitempty"`
+	GatewayKeyID      string          `json:"gatewayKeyId,omitempty"`
 	Model             string          `json:"model,omitempty"`
 	InputTokens       int64           `json:"inputTokens,omitempty"`
 	OutputTokens      int64           `json:"outputTokens,omitempty"`
@@ -3159,7 +3161,7 @@ func (s *Store) AddAPIRequest(ctx context.Context, request APIRequest) (APIReque
 	if request.TurnIndex < 0 || request.ContinuationIndex < 0 {
 		return APIRequest{}, errors.New("api request turn indexes must not be negative")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, agent_id, run_id, message_id, kind, provider, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, stop_reason, turn_index, continuation_index, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, request.ID, request.AgentID, request.RunID, request.MessageID, request.Kind, request.Provider, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.StopReason, request.TurnIndex, request.ContinuationIndex, request.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_requests (id, agent_id, run_id, message_id, kind, provider, credential_id, gateway_key_id, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, duration_ms, cost_usd, error_message, raw_dump_json, stop_reason, turn_index, continuation_index, created_at) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)`, request.ID, request.AgentID, request.RunID, request.MessageID, request.Kind, request.Provider, request.CredentialID, request.GatewayKeyID, request.Model, request.InputTokens, request.OutputTokens, request.CachedInputTokens, request.ReasoningTokens, request.TTFTMS, request.DurationMS, request.CostUSD, request.ErrorMessage, string(request.RawDumpJSON), request.StopReason, request.TurnIndex, request.ContinuationIndex, request.CreatedAt)
 	if err != nil {
 		return APIRequest{}, err
 	}

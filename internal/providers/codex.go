@@ -175,6 +175,9 @@ func (p *CodexProvider) ListModels(ctx context.Context) ([]string, error) {
 }
 
 func (p *CodexProvider) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if req.EffectiveScenario() == CallScenarioGateway {
+		return nil, fmt.Errorf("%w: Codex provider %q", ErrGatewayOAuthUnsupported, p.cfg.Name)
+	}
 	reasoningEffort, err := normalizeReasoningEffortForCapabilities(req.ReasoningEffort, p.Capabilities(), p.cfg.Name)
 	if err != nil {
 		return nil, err
@@ -246,7 +249,14 @@ func (p *CodexProvider) Generate(ctx context.Context, req GenerateRequest) (<-ch
 				if shouldTryNextCodexCredential(status) {
 					continue
 				}
+				if !emitProviderEvent(ctx, out, newDispatchEvent(p.cfg.Name, model, used.Credential.ID)) {
+					return
+				}
 				emitProviderEvent(ctx, out, Event{Type: "error", Text: lastErr.Error()})
+				return
+			}
+			if !emitProviderEvent(ctx, out, newDispatchEvent(p.cfg.Name, model, used.Credential.ID)) {
+				response.Body.Close()
 				return
 			}
 			outcome := handleCodexResponsesStream(ctx, out, response.Body, used.Credential)
@@ -585,6 +595,9 @@ func buildCodexResponsesPayload(req GenerateRequest, model, reasoningEffort, ins
 	}
 	if reasoningEffort != "" {
 		payload["reasoning"] = map[string]any{"effort": reasoningEffort}
+	}
+	if req.MaxOutputTokens > 0 {
+		payload["max_output_tokens"] = req.MaxOutputTokens
 	}
 	if req.FastMode {
 		payload["service_tier"] = "priority"

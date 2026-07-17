@@ -15,7 +15,7 @@ import {
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1";
 import {
   basename,
   canonicalLocalPath,
@@ -26,7 +26,7 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-apple-theme-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
@@ -40,10 +40,11 @@ import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-
 import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=apple-theme-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-1";
+import { createSharedAPISettingsController } from "./shared-api-settings.mjs?v=shared-api-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
-import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1";
-import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1";
+import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1";
+import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
@@ -121,6 +122,12 @@ const state = {
   remoteAccess: null,
   remoteAccessError: "",
   remoteAccessLoading: false,
+  gatewayKeys: [],
+  gatewayModels: [],
+  gatewayUsage: { items: [], summary: {} },
+  gatewayDataLoaded: false,
+  gatewayDataLoading: false,
+  gatewayAPIError: "",
   runtimeError: "",
   runtimeSeq: 0,
   authUser: undefined,
@@ -1010,6 +1017,18 @@ const remoteAccessSettings = createRemoteAccessSettingsController({
   showToast,
 });
 
+const sharedAPISettings = createSharedAPISettingsController({
+  state,
+  request: api,
+  reloadSettings: loadSettings,
+  copyText: copyToClipboard,
+  onChange: () => {
+    if (state.activeSettingsPanel === "shared-api") refreshActiveSettingsPanel();
+  },
+  showError,
+  showToast,
+});
+
 const usageHistory = createUsageHistoryController({
   state,
   request: api,
@@ -1026,6 +1045,7 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["models", { render: renderModelSettingsContent, bind: bindModelSettingsActions }],
   ["agents", { render: renderAgentSettingsContent, bind: bindAgentSettingsActions }],
   ["providers", { render: renderProviderSettingsContent, bind: bindProviderSettingsActions }],
+  ["shared-api", { render: sharedAPISettings.render, bind: sharedAPISettings.bind }],
   ["network-search", { render: renderNetworkSearchSettingsContent, bind: bindNetworkSearchSettingsActions }],
   ["im-gateway", { render: automationControl.render, bind: automationControl.bind }],
   ["notifications", { render: renderNotificationSettingsContent, bind: bindNotificationSettingsActions }],
@@ -1835,7 +1855,11 @@ function openSettingsModal(key = "providers", { trigger = document.activeElement
 function closeSettingsModal({ restoreWorkbench = true } = {}) {
   const modal = $("settingsModal");
   const wasOpen = Boolean(modal && !modal.classList.contains("hidden"));
-  if (wasOpen) remoteAccessSettings.consumeGeneratedPassword();
+  if (wasOpen) {
+    remoteAccessSettings.consumeGeneratedPassword();
+    sharedAPISettings.consumeOneTimeToken();
+    $("settingsContentBody").textContent = "";
+  }
   modal?.classList.add("hidden");
   if (wasOpen) restoreSettingsDialogFocus();
   if (restoreWorkbench) setGlobalRailActive(primaryWorkbenchRailTarget());
@@ -2063,6 +2087,7 @@ function selectSettingsPanel(key) {
   const item = settingsItemByKey(key) || settingsItems[0];
   const panel = settingsPanelRegistry.resolve(item.key);
   const categoryKey = settingsCategoryForItem(item.key, state.activeSettingsCategory || "api");
+  if (state.activeSettingsPanel === "shared-api" && item.key !== "shared-api") sharedAPISettings.consumeOneTimeToken();
   state.activeSettingsCategory = categoryKey;
   state.activeSettingsPanel = item.key;
   renderSettingsNav(item.key);

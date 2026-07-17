@@ -46,14 +46,18 @@ func TestOpenAIOfficialStreamsTextAndUsage(t *testing.T) {
 	provider := NewOpenAIOfficial(config.ProviderConfig{BaseURL: server.URL, APIKey: "test-key", Model: "gpt-4.1-mini"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	events, err := provider.Generate(ctx, GenerateRequest{SystemPrompt: "Be concise.", Messages: []Message{{Role: "user", Content: "hello"}}})
+	events, err := provider.Generate(ctx, GenerateRequest{SystemPrompt: "Be concise.", Messages: []Message{{Role: "user", Content: "hello"}}, MaxOutputTokens: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var text string
 	var usage Usage
 	var done bool
+	var dispatch *DispatchInfo
 	for event := range events {
+		if event.Dispatch != nil {
+			dispatch = event.Dispatch
+		}
 		switch event.Type {
 		case "error":
 			t.Fatalf("unexpected error event: %s", event.Text)
@@ -67,8 +71,8 @@ func TestOpenAIOfficialStreamsTextAndUsage(t *testing.T) {
 			done = true
 		}
 	}
-	if requestBody["stream"] != true {
-		t.Fatalf("expected stream=true request, got %+v", requestBody)
+	if requestBody["stream"] != true || requestBody["max_output_tokens"] != float64(64) {
+		t.Fatalf("expected stream and max output tokens, got %+v", requestBody)
 	}
 	input, _ := requestBody["input"].(string)
 	if !strings.Contains(input, "User: hello") || requestBody["instructions"] != "Be concise." {
@@ -82,6 +86,9 @@ func TestOpenAIOfficialStreamsTextAndUsage(t *testing.T) {
 	}
 	if !done {
 		t.Fatal("expected done event")
+	}
+	if dispatch == nil || dispatch.Provider != "openai" || dispatch.Model != "gpt-4.1-mini" || dispatch.CredentialID != configuredCredentialID {
+		t.Fatalf("unexpected dispatch attribution: %+v", dispatch)
 	}
 }
 

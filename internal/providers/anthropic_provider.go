@@ -49,6 +49,17 @@ func (p *AnthropicProvider) Configured() bool {
 	return p != nil && p.configErr == nil && ((p.store != nil && p.store.Configured()) || strings.TrimSpace(p.cfg.APIKey) != "")
 }
 
+func (p *AnthropicProvider) ConfiguredForScenario(scenario CallScenario) bool {
+	if scenario != CallScenarioGateway {
+		return p.Configured()
+	}
+	if p == nil || p.configErr != nil {
+		return false
+	}
+	candidates, err := p.accountCandidates(CallScenarioGateway)
+	return err == nil && len(candidates) > 0
+}
+
 func (p *AnthropicProvider) Capabilities() Capabilities {
 	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
 }
@@ -60,7 +71,7 @@ func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	if p.configErr != nil {
 		return nil, p.configErr
 	}
-	candidates, err := p.accountCandidates()
+	candidates, err := p.accountCandidates(CallScenarioInternal)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +119,7 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 	if _, err := normalizeReasoningEffort(req.ReasoningEffort, false, p.cfg.Name); err != nil {
 		return nil, err
 	}
-	candidates, err := p.accountCandidates()
+	candidates, err := p.accountCandidates(req.EffectiveScenario())
 	if err != nil {
 		return nil, err
 	}
@@ -120,9 +131,13 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 	if len(messages) == 0 {
 		messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock("Continue.")))
 	}
+	maxTokens := p.cfg.MaxTokens
+	if req.MaxOutputTokens > 0 && (maxTokens <= 0 || req.MaxOutputTokens < maxTokens) {
+		maxTokens = req.MaxOutputTokens
+	}
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
-		MaxTokens: p.cfg.MaxTokens,
+		MaxTokens: maxTokens,
 		Messages:  messages,
 		System:    system,
 		Tools:     anthropicTools(req.Tools),
@@ -138,6 +153,14 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 				return
 			}
 			lastErr = nil
+			dispatchEmitted := false
+			emitDispatch := func() bool {
+				if dispatchEmitted {
+					return true
+				}
+				dispatchEmitted = emitProviderEvent(ctx, out, newDispatchEvent(p.cfg.Name, model, candidate.id))
+				return dispatchEmitted
+			}
 			var response *http.Response
 			stream := candidate.client.Messages.NewStreaming(ctx, params, option.WithResponseInto(&response))
 			var acc anthropic.Message
@@ -155,7 +178,7 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 					usage = anthropicUsageFromUsage(typed.Message.Usage)
 				case anthropic.ContentBlockDeltaEvent:
 					if delta, ok := typed.Delta.AsAny().(anthropic.TextDelta); ok && delta.Text != "" {
-						if !emitProviderEvent(ctx, out, Event{Type: "text", Text: delta.Text}) {
+						if !emitDispatch() || !emitProviderEvent(ctx, out, Event{Type: "text", Text: delta.Text}) {
 							_ = stream.Close()
 							return
 						}
@@ -163,7 +186,7 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 					}
 				case anthropic.ContentBlockStopEvent:
 					if toolEvent, ok := anthropicToolCallEvent(acc, typed.Index); ok {
-						if !emitProviderEvent(ctx, out, toolEvent) {
+						if !emitDispatch() || !emitProviderEvent(ctx, out, toolEvent) {
 							_ = stream.Close()
 							return
 						}
@@ -195,10 +218,16 @@ func (p *AnthropicProvider) Generate(ctx context.Context, req GenerateRequest) (
 				if !emittedContent && shouldTryNextAnthropicAccount(ctx, lastErr) {
 					continue
 				}
+				if !emitDispatch() {
+					return
+				}
 				_ = emitProviderEvent(ctx, out, Event{Type: "error", Text: sanitizeAnthropicError(ctx, p.cfg.Name, lastErr).Error()})
 				return
 			}
 			p.recordAccountAttempt(ctx, candidate.id, true, anthropicResponseStatus(response), nil)
+			if !emitDispatch() {
+				return
+			}
 			if usage != (Usage{}) && !emitProviderEvent(ctx, out, Event{Type: "usage", Usage: &usage}) {
 				return
 			}

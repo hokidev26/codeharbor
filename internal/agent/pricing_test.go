@@ -1,17 +1,19 @@
 package agent
 
-import "testing"
+import (
+	"math"
+	"testing"
 
-func TestModelTokenPriceDoesNotDependOnProviderName(t *testing.T) {
-	openAI, ok := modelTokenPrice("custom-relay", "gpt-4.1-mini")
-	if !ok || openAI.InputPerMTok != 0.40 {
-		t.Fatalf("expected model catalog OpenAI price, got %+v ok=%v", openAI, ok)
-	}
-	anthropic, ok := modelTokenPrice("custom-relay", "claude-sonnet-4-5")
-	if !ok || anthropic.InputPerMTok != 3.00 {
-		t.Fatalf("expected model catalog Anthropic price, got %+v ok=%v", anthropic, ok)
-	}
-	if _, ok := modelTokenPrice("openai", "custom-model"); ok {
-		t.Fatal("unknown model must not inherit provider pricing")
+	"autoto/internal/providers"
+)
+
+func TestEstimateUsageCostUSDUsesSharedPricing(t *testing.T) {
+	cost := estimateUsageCostUSD("custom-relay", "gpt-4.1-mini", providers.Usage{
+		InputTokens:       1_000_000,
+		CachedInputTokens: 250_000,
+		OutputTokens:      100_000,
+	})
+	if math.Abs(cost-0.485) > 0.000001 {
+		t.Fatalf("unexpected shared estimate: %.6f", cost)
 	}
 }

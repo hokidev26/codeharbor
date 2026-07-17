@@ -69,7 +69,7 @@ func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.cfg.BaseURL, "/")+"/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, providerUnavailableError(p.cfg.Name, "models request could not be constructed")
 	}
 	if p.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
@@ -77,11 +77,11 @@ func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 	p.applyRequestHeaders(req)
 	res, err := p.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, providerUnavailableError(p.cfg.Name, "models request failed")
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
-		return nil, fmt.Errorf("models request failed: %s", res.Status)
+		return nil, providerUnavailableError(p.cfg.Name, fmt.Sprintf("models request failed (HTTP %d)", res.StatusCode))
 	}
 	var body struct {
 		Data []struct {
@@ -89,7 +89,7 @@ func (p *OpenAICompatible) ListModels(ctx context.Context) ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		return nil, err
+		return nil, providerUnavailableError(p.cfg.Name, "models response was invalid")
 	}
 	models := make([]string, 0, len(body.Data))
 	for _, item := range body.Data {
@@ -235,6 +235,9 @@ func contentBlocksText(blocks []ContentBlock) string {
 }
 
 func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<-chan Event, error) {
+	if req.EffectiveScenario() == CallScenarioGateway && p.cfg.Profile == config.ProviderProfileCLIProxyAPI {
+		return nil, fmt.Errorf("%w: provider profile %q", ErrGatewayOAuthUnsupported, p.cfg.Profile)
+	}
 	if p.configErr != nil {
 		return nil, p.configErr
 	}
@@ -253,7 +256,15 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 			model = p.cfg.Model
 		}
 		messages := openAICompatibleMessages(req)
-		payload := map[string]any{"model": model, "messages": messages, "stream": true}
+		payload := map[string]any{
+			"model":          model,
+			"messages":       messages,
+			"stream":         true,
+			"stream_options": map[string]bool{"include_usage": true},
+		}
+		if req.MaxOutputTokens > 0 {
+			payload["max_tokens"] = req.MaxOutputTokens
+		}
 		if reasoningEffort != "" {
 			payload["reasoning_effort"] = reasoningEffort
 		}
@@ -262,12 +273,12 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
-			out <- Event{Type: "error", Text: err.Error()}
+			out <- Event{Type: "error", Text: providerRequestFailedText(p.cfg.Name)}
 			return
 		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(p.cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(data))
 		if err != nil {
-			out <- Event{Type: "error", Text: err.Error()}
+			out <- Event{Type: "error", Text: providerRequestFailedText(p.cfg.Name)}
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -275,14 +286,15 @@ func (p *OpenAICompatible) Generate(ctx context.Context, req GenerateRequest) (<
 			httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 		}
 		p.applyRequestHeaders(httpReq)
+		out <- newDispatchEvent(p.cfg.Name, model, configuredCredentialID)
 		res, err := p.client.Do(httpReq)
 		if err != nil {
-			out <- Event{Type: "error", Text: fmt.Sprintf("%s provider request failed: %v", p.cfg.Name, err)}
+			out <- Event{Type: "error", Text: providerRequestFailedText(p.cfg.Name)}
 			return
 		}
 		defer res.Body.Close()
 		if res.StatusCode >= 300 {
-			out <- Event{Type: "error", Text: fmt.Sprintf("%s model request failed: %s", p.cfg.Name, res.Status)}
+			out <- Event{Type: "error", Text: providerHTTPFailedText(p.cfg.Name, res.StatusCode)}
 			return
 		}
 		if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "text/event-stream") {
