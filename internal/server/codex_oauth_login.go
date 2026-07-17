@@ -23,6 +23,7 @@ const (
 	codexOAuthCallbackHost      = "localhost"
 	codexOAuthCallbackCSP       = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 	codexOAuthCallbackMaxWait   = 5 * time.Second
+	codexOAuthEphemeralAttempts = 8
 	codexOAuthLoginIDPrefix     = "codex_login_"
 	codexOAuthLoginErrorMessage = "Codex OAuth 登录失败，请重新开始登录"
 )
@@ -49,7 +50,8 @@ type codexOAuthLoginSession struct {
 	errorMessage string
 	account      *codexauth.AccountSummary
 	oauthConfig  codexauth.OAuthConfig
-	listener     net.Listener
+	listeners    []net.Listener
+	callbackPort int
 	server       *http.Server
 	cancel       context.CancelFunc
 	ctx          context.Context
@@ -98,7 +100,7 @@ func (s *Server) startCodexOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Codex OAuth 登录配置无效")
 		return
 	}
-	listener, err := listenCodexOAuthCallback(runtimeConfig.listenAddresses)
+	listeners, port, err := listenCodexOAuthCallback(runtimeConfig.listenAddresses)
 	if err != nil {
 		writeError(w, http.StatusConflict, "无法监听 Codex OAuth 本地回调端口")
 		return
@@ -106,32 +108,26 @@ func (s *Server) startCodexOAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 	loginRandom, err := codexauth.NewOAuthState()
 	if err != nil {
-		listener.Close()
+		closeCodexOAuthCallbackListeners(listeners)
 		writeError(w, http.StatusInternalServerError, "无法安全启动 Codex OAuth 登录")
 		return
 	}
 	state, err := codexauth.NewOAuthState()
 	if err != nil {
-		listener.Close()
+		closeCodexOAuthCallbackListeners(listeners)
 		writeError(w, http.StatusInternalServerError, "无法安全启动 Codex OAuth 登录")
 		return
 	}
 	pkce, err := codexauth.NewPKCE()
 	if err != nil {
-		listener.Close()
+		closeCodexOAuthCallbackListeners(listeners)
 		writeError(w, http.StatusInternalServerError, "无法安全启动 Codex OAuth 登录")
-		return
-	}
-	port, err := listenerPort(listener)
-	if err != nil {
-		listener.Close()
-		writeError(w, http.StatusInternalServerError, "Codex OAuth 本地回调地址无效")
 		return
 	}
 	redirectURI := fmt.Sprintf("http://%s:%d%s", codexOAuthCallbackHost, port, codexOAuthCallbackPath)
 	authURL, err := codexauth.BuildAuthorizeURL(runtimeConfig.oauth, redirectURI, state, pkce.Challenge)
 	if err != nil {
-		listener.Close()
+		closeCodexOAuthCallbackListeners(listeners)
 		writeError(w, http.StatusInternalServerError, "无法构造 Codex OAuth 授权地址")
 		return
 	}
@@ -139,17 +135,18 @@ func (s *Server) startCodexOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	now := s.now().UTC()
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &codexOAuthLoginSession{
-		loginID:     codexOAuthLoginIDPrefix + loginRandom,
-		state:       state,
-		verifier:    pkce.Verifier,
-		authURL:     authURL,
-		redirectURI: redirectURI,
-		status:      codexOAuthLoginPending,
-		expiresAt:   now.Add(runtimeConfig.ttl),
-		oauthConfig: runtimeConfig.oauth,
-		listener:    listener,
-		cancel:      cancel,
-		ctx:         ctx,
+		loginID:      codexOAuthLoginIDPrefix + loginRandom,
+		state:        state,
+		verifier:     pkce.Verifier,
+		authURL:      authURL,
+		redirectURI:  redirectURI,
+		status:       codexOAuthLoginPending,
+		expiresAt:    now.Add(runtimeConfig.ttl),
+		oauthConfig:  runtimeConfig.oauth,
+		listeners:    listeners,
+		callbackPort: port,
+		cancel:       cancel,
+		ctx:          ctx,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(codexOAuthCallbackPath, func(callbackWriter http.ResponseWriter, callbackRequest *http.Request) {
@@ -161,7 +158,9 @@ func (s *Server) startCodexOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		IdleTimeout:       15 * time.Second,
 	}
 	s.codexOAuthLogin = session
-	go s.serveCodexOAuthCallback(session)
+	for _, listener := range session.listeners {
+		go s.serveCodexOAuthCallback(session, listener)
+	}
 	go s.expireCodexOAuthLoginAfter(session, runtimeConfig.ttl)
 
 	setNoStore(w)
@@ -219,7 +218,7 @@ func (s *Server) handleCodexOAuthCallback(session *codexOAuthLoginSession, w htt
 		writeCodexOAuthCallbackHTML(w, http.StatusMethodNotAllowed, "请求方法无效", "Codex OAuth 回调只接受 GET 请求。")
 		return
 	}
-	if !validCodexOAuthCallbackHost(r.Host, session.listener.Addr()) {
+	if !validCodexOAuthCallbackHost(r.Host, session.callbackPort) {
 		writeCodexOAuthCallbackHTML(w, http.StatusBadRequest, "回调地址无效", "本地 OAuth 回调 Host 校验失败。")
 		return
 	}
@@ -422,19 +421,107 @@ func validateCodexOAuthListenAddress(address string) error {
 	return nil
 }
 
-func listenCodexOAuthCallback(addresses []string) (net.Listener, error) {
+// The registered redirect URI uses localhost, which may resolve to either
+// 127.0.0.1 or ::1. Bind both families to the same port so another local
+// process cannot capture the callback through the address family we omitted.
+func listenCodexOAuthCallback(addresses []string) ([]net.Listener, int, error) {
+	ipv6Available := codexOAuthIPv6LoopbackAvailable()
 	var lastErr error
 	for _, address := range addresses {
-		listener, err := net.Listen("tcp4", address)
+		listeners, port, err := listenCodexOAuthCallbackAddress(strings.TrimSpace(address), ipv6Available)
 		if err == nil {
-			return listener, nil
+			return listeners, port, nil
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("没有可用的 Codex OAuth 回调地址")
 	}
-	return nil, lastErr
+	return nil, 0, lastErr
+}
+
+func listenCodexOAuthCallbackAddress(address string, ipv6Available bool) ([]net.Listener, int, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, 0, err
+	}
+	if port == "0" {
+		return listenCodexOAuthEphemeralCallback(host, ipv6Available)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber <= 0 || portNumber > 65535 {
+		return nil, 0, errors.New("Codex OAuth callback listener port 无效")
+	}
+
+	var ipv6Listener net.Listener
+	if ipv6Available {
+		ipv6Listener, err = net.Listen("tcp6", net.JoinHostPort("::1", port))
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	ipv4Listener, err := net.Listen("tcp4", net.JoinHostPort(host, port))
+	if err != nil {
+		closeCodexOAuthCallbackListeners([]net.Listener{ipv6Listener})
+		return nil, 0, err
+	}
+	listeners := []net.Listener{ipv4Listener}
+	if ipv6Listener != nil {
+		listeners = append(listeners, ipv6Listener)
+	}
+	return listeners, portNumber, nil
+}
+
+func listenCodexOAuthEphemeralCallback(host string, ipv6Available bool) ([]net.Listener, int, error) {
+	if !ipv6Available {
+		listener, err := net.Listen("tcp4", net.JoinHostPort(host, "0"))
+		if err != nil {
+			return nil, 0, err
+		}
+		port, err := listenerPort(listener)
+		if err != nil {
+			_ = listener.Close()
+			return nil, 0, err
+		}
+		return []net.Listener{listener}, port, nil
+	}
+
+	var lastErr error
+	for range codexOAuthEphemeralAttempts {
+		ipv6Listener, err := net.Listen("tcp6", net.JoinHostPort("::1", "0"))
+		if err != nil {
+			return nil, 0, err
+		}
+		port, err := listenerPort(ipv6Listener)
+		if err != nil {
+			_ = ipv6Listener.Close()
+			return nil, 0, err
+		}
+		ipv4Listener, err := net.Listen("tcp4", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err == nil {
+			return []net.Listener{ipv4Listener, ipv6Listener}, port, nil
+		}
+		lastErr = err
+		_ = ipv6Listener.Close()
+	}
+	return nil, 0, lastErr
+}
+
+func codexOAuthIPv6LoopbackAvailable() bool {
+	listener, err := net.Listen("tcp6", net.JoinHostPort("::1", "0"))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
+}
+
+func closeCodexOAuthCallbackListeners(listeners []net.Listener) {
+	for _, listener := range listeners {
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}
 }
 
 func listenerPort(listener net.Listener) (int, error) {
@@ -445,9 +532,8 @@ func listenerPort(listener net.Listener) (int, error) {
 	return address.Port, nil
 }
 
-func validCodexOAuthCallbackHost(value string, listenerAddress net.Addr) bool {
-	expectedPort, err := listenerPortFromAddress(listenerAddress)
-	if err != nil {
+func validCodexOAuthCallbackHost(value string, expectedPort int) bool {
+	if expectedPort <= 0 || expectedPort > 65535 {
 		return false
 	}
 	host := strings.TrimSpace(value)
@@ -464,19 +550,8 @@ func validCodexOAuthCallbackHost(value string, listenerAddress net.Addr) bool {
 	return port != "" && port == strconv.Itoa(expectedPort)
 }
 
-func listenerPortFromAddress(address net.Addr) (int, error) {
-	if tcp, ok := address.(*net.TCPAddr); ok && tcp.Port > 0 {
-		return tcp.Port, nil
-	}
-	_, port, err := net.SplitHostPort(address.String())
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(port)
-}
-
-func (s *Server) serveCodexOAuthCallback(session *codexOAuthLoginSession) {
-	err := session.server.Serve(session.listener)
+func (s *Server) serveCodexOAuthCallback(session *codexOAuthLoginSession, listener net.Listener) {
+	err := session.server.Serve(listener)
 	if err == nil || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return
 	}
@@ -525,17 +600,20 @@ func (s *Server) finishCodexOAuthLoginLocked(session *codexOAuthLoginSession, st
 	if session.cancel != nil {
 		session.cancel()
 	}
+	listeners := session.listeners
+	session.listeners = nil
 	if session.server != nil {
-		go shutdownCodexOAuthCallback(session.server)
-	} else if session.listener != nil {
-		_ = session.listener.Close()
+		go shutdownCodexOAuthCallback(session.server, listeners)
+	} else {
+		closeCodexOAuthCallbackListeners(listeners)
 	}
 }
 
-func shutdownCodexOAuthCallback(server *http.Server) {
+func shutdownCodexOAuthCallback(server *http.Server, listeners []net.Listener) {
 	ctx, cancel := context.WithTimeout(context.Background(), codexOAuthCallbackMaxWait)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+	closeCodexOAuthCallbackListeners(listeners)
 }
 
 func codexOAuthLoginPublicResponse(session *codexOAuthLoginSession, includeAuthURL bool) codexOAuthLoginResponse {

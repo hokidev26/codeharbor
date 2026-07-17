@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -380,6 +381,90 @@ func TestCodexOAuthLoginCancellationAndTimeout(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	assertCodexOAuthSessionSecretsCleared(t, app, expiring.LoginID)
+}
+
+func TestListenCodexOAuthCallbackSkipsIPv6PortCollision(t *testing.T) {
+	occupiedIPv6, err := net.Listen("tcp6", net.JoinHostPort("::1", "0"))
+	if err != nil {
+		t.Skipf("IPv6 loopback is unavailable: %v", err)
+	}
+	defer occupiedIPv6.Close()
+	occupiedPort, err := listenerPort(occupiedIPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	occupiedAddress := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", occupiedPort))
+	ipv4Probe, err := net.Listen("tcp4", occupiedAddress)
+	if err != nil {
+		t.Skipf("IPv6 fixture also reserved the IPv4 port: %v", err)
+	}
+	_ = ipv4Probe.Close()
+
+	listeners, selectedPort, err := listenCodexOAuthCallback([]string{occupiedAddress, net.JoinHostPort("127.0.0.1", "0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCodexOAuthCallbackListeners(listeners)
+	if selectedPort == occupiedPort {
+		t.Fatalf("callback reused port %d despite an IPv6 listener owning localhost", occupiedPort)
+	}
+	if len(listeners) != 2 {
+		t.Fatalf("expected IPv4 and IPv6 callback listeners, got %d", len(listeners))
+	}
+	families := map[string]bool{}
+	for _, listener := range listeners {
+		address, ok := listener.Addr().(*net.TCPAddr)
+		if !ok || address.Port != selectedPort {
+			t.Fatalf("callback listener did not share selected port %d: %v", selectedPort, listener.Addr())
+		}
+		if address.IP.To4() != nil {
+			families["ipv4"] = true
+		} else {
+			families["ipv6"] = true
+		}
+	}
+	if !families["ipv4"] || !families["ipv6"] {
+		t.Fatalf("callback listeners did not cover both loopback families: %v", families)
+	}
+}
+
+func TestCodexOAuthCallbackAcceptsIPv6LocalhostConnection(t *testing.T) {
+	if !codexOAuthIPv6LoopbackAvailable() {
+		t.Skip("IPv6 loopback is unavailable")
+	}
+	issuer := httptest.NewServer(http.NotFoundHandler())
+	defer issuer.Close()
+	app := newCodexOAuthLoginTestServer(t, issuer, time.Minute)
+	started := startCodexOAuthLoginForTest(t, app)
+	authURL, err := url.Parse(started.AuthURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback, err := url.Parse(authURL.Query().Get("redirect_uri"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback.Host = net.JoinHostPort("::1", callback.Port())
+	callback.RawQuery = url.Values{"code": {"unused-code"}, "state": {"wrong-state"}}.Encode()
+	request, err := http.NewRequest(http.MethodGet, callback.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = net.JoinHostPort("localhost", callback.Port())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "OAuth state") {
+		t.Fatalf("IPv6 callback did not reach the Autoto handler: %d %s", response.StatusCode, body)
+	}
+	assertCodexOAuthHTMLSecurity(t, response)
+	if status := getCodexOAuthLoginForTest(t, app, started.LoginID); status.Status != codexOAuthLoginPending {
+		t.Fatalf("invalid IPv6 callback consumed the login session: %+v", status)
+	}
+	cancelCodexOAuthLoginForTest(t, app, started.LoginID)
 }
 
 func TestCodexOAuthLoginRoutesRejectRemoteAccess(t *testing.T) {
