@@ -138,7 +138,8 @@ test("project groups contain every conversation once and preserve recent orderin
   assert.equal((html.match(/data-navigation-target="p1::w1::a1"/g) || []).length, 1);
   assert.equal((html.match(/data-navigation-target="p1::w2::a2"/g) || []).length, 1);
   assert.match(html, /navigation-conversation-row nested active/);
-  assert.match(html, /project-card-top"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span><span class="project-agent-count"[^>]*>AGENT 2<\/span>/);
+  assert.match(html, /navigation-project-title"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span><\/span>/);
+  assert.doesNotMatch(html, /project-agent-count|AGENT 2/);
   assert.match(html, /navigation-conversation-row nested[^\"]*status-idle/);
   assert.match(html, /data-agent-status="idle"/);
   assert.match(html, /navigation-conversation-meta" title="feat\/login · claude-sonnet · idle ·/);
@@ -156,7 +157,12 @@ test("buildNavigationView supports all, projects, and conversations modes", () =
   assert.deepEqual(projects.projects.map((item) => item.id), ["p1", "p2", "invalid"]);
   assert.equal(projects.groups.length, 3);
   assert.deepEqual(projects.groups[0].conversations.map((item) => item.agentId), ["a1", "a2"]);
-  assert.match(renderNavigationHTML(projects), /data-navigation-project-group="p1" data-conversation-count="2"/);
+  const projectsHTML = renderNavigationHTML(projects, { activeProjectId: "p1" });
+  assert.equal((projectsHTML.match(/class="navigation-conversation-row navigation-project-row/g) || []).length, 3);
+  assert.match(projectsHTML, /navigation-project-row active/);
+  assert.match(projectsHTML, /navigation-project-title"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span>/);
+  assert.match(projectsHTML, /navigation-conversation-meta project-path" title="\/work\/alpha">\/work\/alpha<\/span>/);
+  assert.doesNotMatch(projectsHTML, /data-navigation-project-group|data-project-conversations|data-navigation-target|project-agent-count/);
 
   const conversations = buildNavigationView(payload, { mode: "conversations" });
   assert.deepEqual(conversations.conversations.map((item) => item.agentId), ["a1", "a3", "a2"]);

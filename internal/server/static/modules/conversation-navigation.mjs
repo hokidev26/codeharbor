@@ -351,18 +351,17 @@ export function navigationAgentStatusClass(value) {
   return text(value).toLocaleLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "idle";
 }
 
-function renderProject(project, activeProjectId, agentCount = 0) {
+function renderProject(project, activeProjectId) {
   const active = project.id === activeProjectId;
   const path = project.gitPath || project.id;
   const displayPath = compactDisplayPath(path);
-  const count = Math.max(0, Math.trunc(Number(agentCount) || 0));
-  const countLabel = `${count} Agent${count === 1 ? "" : "s"}`;
+  const icon = `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <button class="project-card navigation-project-row ${active ? "active" : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}">
-      <span class="project-active-dot" aria-hidden="true"></span>
-      <span class="project-card-main">
-        <span class="project-card-top"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span><span class="project-agent-count" title="${escapeNavigationHtml(countLabel)}">AGENT ${escapeNavigationHtml(String(count))}</span></span>
-        <span class="project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
+    <button class="navigation-conversation-row navigation-project-row ${active ? "active " : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}">
+      <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
+      <span class="navigation-conversation-main">
+        <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span></span>
+        <span class="navigation-conversation-meta project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
       </span>
     </button>`;
 }
@@ -398,14 +397,16 @@ export function renderNavigationHTML(view = {}, options = {}) {
   const activeAgentId = text(options.activeAgentId);
   const taskContext = options.taskContext === true;
   let html = "";
-  if (mode === "all" || mode === "projects") {
+  if (mode === "all" || taskContext) {
     html = (view.groups || []).map((group) => `
       <section class="navigation-project-group ${taskContext ? "task-context" : ""}" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
-        ${renderProject(group.project, activeProjectId, group.conversations.length)}
+        ${renderProject(group.project, activeProjectId)}
         <div class="navigation-project-conversations" data-project-conversations="${escapeNavigationHtml(group.project.id)}">
           ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true, { taskContext })).join("")}
         </div>
       </section>`).join("");
+  } else if (mode === "projects") {
+    html = (view.projects || []).map((project) => renderProject(project, activeProjectId)).join("");
   } else {
     html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId, false, { taskContext })).join("");
   }
