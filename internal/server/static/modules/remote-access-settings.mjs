@@ -19,6 +19,7 @@ export function normalizeRemoteAccess(value = {}) {
   const policy = objectValue(source.policy);
   const session = objectValue(source.session);
   const capabilities = objectValue(source.capabilities);
+  const tunnel = objectValue(source.tunnel);
   const sessionMode = textValue(session.mode, "local");
   const revision = Number(policy.revision);
   return {
@@ -44,6 +45,13 @@ export function normalizeRemoteAccess(value = {}) {
       filesystemScope: ["host", "full"].includes(textValue(capabilities.filesystemScope).toLowerCase()) ? "full" : "restricted",
       nativePickerAllowed: Boolean(capabilities.nativePickerAllowed),
       securityAdminAllowed: Boolean(capabilities.securityAdminAllowed),
+    },
+    tunnel: {
+      available: Boolean(tunnel.available),
+      status: ["idle", "starting", "running", "stopping", "unavailable", "error"].includes(textValue(tunnel.status)) ? textValue(tunnel.status) : "unavailable",
+      publicUrl: textValue(tunnel.publicUrl),
+      error: textValue(tunnel.error),
+      startedAt: textValue(tunnel.startedAt),
     },
   };
 }
@@ -208,6 +216,22 @@ export function createRemoteAccessSettingsController({
     return { access: state.remoteAccess, generatedPassword };
   }
 
+  async function updateTunnel(method) {
+    const result = await request(`${endpoint}/tunnel`, { method });
+    const current = access();
+    state.remoteAccess = normalizeRemoteAccess({ ...current, tunnel: result });
+    onChange?.(state.remoteAccess);
+    return state.remoteAccess.tunnel;
+  }
+
+  async function startTunnel() {
+    return updateTunnel("POST");
+  }
+
+  async function stopTunnel() {
+    return updateTunnel("DELETE");
+  }
+
   function currentPasswordField(id) {
     if (!requiresCurrentPassword() || !access().capabilities.securityAdminAllowed) return "";
     return `<label class="settings-form-field remote-access-current-password">${escapeHtml(rt("currentPassword"))}<input id="${escapeAttr(id)}" class="settings-field" type="password" autocomplete="current-password" required placeholder="${escapeAttr(rt("currentPasswordPlaceholder"))}" /><small>${escapeHtml(rt("currentPasswordHint"))}</small></label>`;
@@ -221,6 +245,34 @@ export function createRemoteAccessSettingsController({
     if (mode === "full") return rt("full");
     if (mode === "restricted") return rt("restricted");
     return rt("local");
+  }
+
+  function tunnelStatusLabel(status) {
+    const labels = {
+      idle: "tunnelIdle",
+      starting: "tunnelStarting",
+      running: "tunnelRunning",
+      stopping: "tunnelStopping",
+      unavailable: "tunnelUnavailable",
+      error: "tunnelError",
+    };
+    return rt(labels[status] || labels.unavailable);
+  }
+
+  function renderTunnelSection(value, securityAdminAllowed) {
+    const tunnel = value.tunnel;
+    const active = tunnel.status === "running";
+    const busy = tunnel.status === "starting" || tunnel.status === "stopping";
+    const canManage = securityAdminAllowed && value.credential.configured && tunnel.available;
+    const actionLabel = active ? rt("stopTunnel") : rt("startTunnel");
+    const actionMethod = active ? "stop" : "start";
+    return `
+        <section class="settings-provider-section settings-page-section settings-card remote-access-tunnel-card">
+          <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("temporaryTunnel"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("temporaryTunnelHint"))}</div></div><span class="settings-status-pill settings-badge ${active ? "ok" : tunnel.status === "error" ? "warn" : ""}">${escapeHtml(tunnelStatusLabel(tunnel.status))}</span></div>
+          ${tunnel.error ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(tunnel.error)}</div>` : ""}
+          ${tunnel.publicUrl ? `<div class="remote-access-tunnel-url"><a href="${escapeAttr(tunnel.publicUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(tunnel.publicUrl)}</a><button id="copyRemoteTunnelUrlBtn" class="settings-action-btn subtle" type="button">${escapeHtml(rt("copyTunnelUrl"))}</button></div>` : `<p class="settings-card-description">${escapeHtml(tunnel.available ? rt("tunnelStopped") : rt("tunnelUnavailableHint"))}</p>`}
+          <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(tunnel.available ? rt("tunnelAccessHint") : rt("tunnelInstallHint"))}</span><button id="${actionMethod}RemoteTunnelBtn" class="settings-action-btn ${active ? "subtle" : "primary"}" type="button" data-remote-tunnel-action="${actionMethod}" ${canManage && !busy ? "" : "disabled"}>${escapeHtml(busy ? tunnelStatusLabel(tunnel.status) : actionLabel)}</button></div>
+        </section>`;
   }
 
   function render() {
@@ -247,6 +299,7 @@ export function createRemoteAccessSettingsController({
         ${remoteSessionRevoked ? `<div class="settings-inline-alert settings-alert" role="status"><span>${escapeHtml(rt("sessionRevoked"))}</span> <a class="settings-action-btn subtle" href="/auth/remote-access">${escapeHtml(rt("signInAgain"))}</a></div>` : ""}
         ${state?.remoteAccessError ? `<div class="settings-inline-alert settings-alert" role="alert">${escapeHtml(state.remoteAccessError)}</div>` : ""}
         ${!securityAdminAllowed ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(rt("localOnlyNotice"))}</div>` : ""}
+        ${renderTunnelSection(value, securityAdminAllowed)}
         <div class="remote-access-summary-grid settings-stat-grid">
           <div class="settings-stat-card"><strong>${escapeHtml(sessionModeLabel(value.session.mode))}</strong><span>${escapeHtml(rt("mode"))}</span></div>
           <div class="settings-stat-card"><strong>${escapeHtml(value.credential.configured ? rt("configured") : rt("notConfigured"))}</strong><span>${escapeHtml(rt("credential"))}</span></div>
@@ -266,11 +319,11 @@ export function createRemoteAccessSettingsController({
         </section>
         <section class="settings-provider-section settings-page-section settings-card">
           <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("credential"))}</div><div class="settings-provider-meta settings-card-description">${escapeHtml(`${rt("source")}: ${value.credential.source}`)}</div></div></div>
-          ${environmentCredential ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(rt("environmentReadonly"))}</div>` : `
-            <div class="remote-access-password-grid settings-card-content">
-              <form id="remoteAccessGeneratePasswordForm" class="remote-access-password-form"><strong>${escapeHtml(rt("generatePassword"))}</strong>${currentPasswordField("remoteAccessGenerateCurrentPassword")}<button class="settings-action-btn subtle" type="submit" data-remote-generate-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("generatePassword"))}</button></form>
-              <form id="remoteAccessCustomPasswordForm" class="remote-access-password-form"><label class="settings-form-field">${escapeHtml(rt("customPassword"))}<input id="remoteAccessCustomPassword" class="settings-field" type="password" autocomplete="new-password" required ${securityAdminAllowed ? "" : "disabled"} placeholder="${escapeAttr(rt("customPasswordPlaceholder"))}" /></label>${currentPasswordField("remoteAccessCustomCurrentPassword")}<button class="settings-action-btn primary" type="submit" data-remote-custom-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("updatePassword"))}</button></form>
-            </div>`}
+          ${environmentCredential ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(rt(securityAdminAllowed ? "environmentOverrideHint" : "environmentReadonly"))}</div>` : ""}
+          <div class="remote-access-password-grid settings-card-content">
+            <form id="remoteAccessGeneratePasswordForm" class="remote-access-password-form"><strong>${escapeHtml(rt("generatePassword"))}</strong>${currentPasswordField("remoteAccessGenerateCurrentPassword")}<button class="settings-action-btn subtle" type="submit" data-remote-generate-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("generatePassword"))}</button></form>
+            <form id="remoteAccessCustomPasswordForm" class="remote-access-password-form"><label class="settings-form-field">${escapeHtml(rt("customPassword"))}<input id="remoteAccessCustomPassword" class="settings-field" type="password" autocomplete="new-password" required ${securityAdminAllowed ? "" : "disabled"} placeholder="${escapeAttr(rt("customPasswordPlaceholder"))}" /></label>${currentPasswordField("remoteAccessCustomCurrentPassword")}<button class="settings-action-btn primary" type="submit" data-remote-custom-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("updatePassword"))}</button></form>
+          </div>
           ${generatedPassword ? `<div class="remote-access-generated settings-inline-alert" role="status"><strong>${escapeHtml(rt("generatedPassword"))}</strong><code>${escapeHtml(generatedPassword)}</code><span>${escapeHtml(rt("generatedPasswordHint"))}</span><button id="copyGeneratedRemotePasswordBtn" class="settings-action-btn subtle" type="button">${escapeHtml(rt("copyPassword"))}</button></div>` : ""}
         </section>
         <section class="settings-provider-section settings-page-section settings-card">
@@ -304,6 +357,30 @@ export function createRemoteAccessSettingsController({
         showError?.(err);
       } finally {
         setButtonBusy(event.currentTarget, false);
+      }
+    });
+    const tunnelButton = $("startRemoteTunnelBtn") || $("stopRemoteTunnelBtn");
+    tunnelButton?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = button.dataset.remoteTunnelAction === "stop" ? stopTunnel : startTunnel;
+      setButtonBusy(button, true);
+      try {
+        await action();
+        showToast?.(rt(button.dataset.remoteTunnelAction === "stop" ? "tunnelStoppedToast" : "tunnelStartedToast"));
+      } catch (err) {
+        showError?.(err);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+    $("copyRemoteTunnelUrlBtn")?.addEventListener("click", async () => {
+      const publicUrl = access().tunnel.publicUrl;
+      if (!publicUrl) return;
+      try {
+        await copyText?.(publicUrl);
+        showToast?.(rt("tunnelUrlCopied"));
+      } catch (err) {
+        showError?.(err);
       }
     });
     $("remoteAccessPolicyForm")?.addEventListener("submit", async (event) => {
@@ -374,6 +451,8 @@ export function createRemoteAccessSettingsController({
     render,
     requiresCurrentPassword,
     savePolicy,
+    startTunnel,
+    stopTunnel,
     updatePassword,
   };
 }

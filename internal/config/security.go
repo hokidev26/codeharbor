@@ -42,9 +42,9 @@ func VerifyAccessPassword(encoded, password string) bool {
 }
 
 // migrateLegacySecurityPassword migrates only a password explicitly present in
-// the config file. Environment values are applied after migration and therefore
-// retain their priority without accidentally becoming persisted hashes. The
-// returned bool reports that the legacy field must be removed from disk.
+// the config file. Environment values may seed a missing credential, while a
+// persisted hash remains authoritative after a host-local password rotation.
+// The returned bool reports that the legacy field must be removed from disk.
 func migrateLegacySecurityPassword(cfg *Config, data []byte) (bool, error) {
 	if cfg == nil {
 		return false, nil

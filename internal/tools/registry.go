@@ -64,6 +64,7 @@ func RegisterCore(registry *Registry) {
 	registry.Register(BashTool{})
 	registry.Register(AgentTool{})
 	registry.Register(TaskTool{})
+	registry.Register(ContextAskTool{})
 	registry.Register(StartPipelineTool{})
 	registry.Register(EndPipelineTool{})
 	registry.Register(GlobTool{})

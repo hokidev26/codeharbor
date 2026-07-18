@@ -24,7 +24,12 @@ export const primaryModePrefsKey = "autoto.ui.primaryMode";
 export const defaultPrimaryModePreference = "conversation";
 export const localPreferenceBackupKind = "autoto.local-preferences";
 export const legacyLocalPreferenceBackupKind = "codeharbor.local-preferences";
-export const localPreferenceBackupVersion = 1;
+export const localPreferenceBackupVersion = 2;
+export const accountPreferenceStorageKeys = Object.freeze([
+  profilePrefsKey,
+  preferredModelKey,
+  modelVisibilityPrefsKey,
+]);
 
 export const localPreferenceKeys = [
   recentDirectoriesKey,
@@ -89,6 +94,7 @@ export const localPreferenceBackupKeys = [
   { key: recentDirectoriesKey, labelKey: "recentDirectories", type: "json" },
   { key: recentConversationsKey, labelKey: "recentConversations", type: "json" },
   { key: preferredModelKey, labelKey: "preferredModel", type: "string" },
+  { key: modelVisibilityPrefsKey, labelKey: "modelVisibility", type: "json" },
   { key: relayProtocolPrefsKey, labelKey: "relayProtocol", type: "string" },
   { key: primaryModePrefsKey, labelKey: "primaryMode", type: "string" },
 ].map((entry) => ({ ...entry, label: localPreferenceBackupLabel(entry) }));
@@ -174,7 +180,7 @@ export const defaultNotificationPrefs = {
   duration: "normal",
 };
 
-export const appearanceStyleVersion = 3;
+export const appearanceStyleVersion = 4;
 export const appearanceThemePresets = Object.freeze(["light", "dark", "cyber", "cream", "apple"]);
 export const appearanceThemePresetTheme = Object.freeze({
   light: "light",
@@ -193,8 +199,32 @@ export function appearanceThemeForPreset(preset) {
   return appearanceThemePresetTheme[normalizeAppearanceThemePreset(preset)] || "light";
 }
 
+export function normalizeAppearanceThemeRef(value, fallbackPreset = "light") {
+  const fallback = normalizeAppearanceThemePreset(fallbackPreset) || "light";
+  const kind = String(value?.kind || "").trim().toLowerCase();
+  const id = String(value?.id || "").trim().toLowerCase();
+  if (kind === "preset") {
+    const preset = normalizeAppearanceThemePreset(id);
+    return { kind: "preset", id: preset || fallback };
+  }
+  if (kind === "package" && /^[a-z0-9](?:[a-z0-9_-]{0,62})$/.test(id)) {
+    const revision = String(value?.revision || "").trim().slice(0, 128);
+    const colorScheme = value?.colorScheme === "dark" ? "dark" : "light";
+    return { kind: "package", id, revision, colorScheme };
+  }
+  return { kind: "preset", id: fallback };
+}
+
+export function appearanceThemeForRef(themeRef, fallbackPreset = "light") {
+  const normalized = normalizeAppearanceThemeRef(themeRef, fallbackPreset);
+  return normalized.kind === "package"
+    ? normalized.colorScheme
+    : appearanceThemeForPreset(normalized.id);
+}
+
 export const defaultAppearancePrefs = {
   styleVersion: appearanceStyleVersion,
+  themeRef: { kind: "preset", id: "light" },
   themePreset: "light",
   theme: "light",
   density: "comfortable",

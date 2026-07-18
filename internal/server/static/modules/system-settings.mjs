@@ -410,7 +410,7 @@ export function createSystemSettingsController({
     setButtonBusy(button, true, t("systemSettings.localBackup.importing"));
     if (textarea) textarea.disabled = true;
     try {
-      const imported = restoreLocalPreferencesBackup(text);
+      const imported = await restoreLocalPreferencesBackup(text);
       if (textarea) textarea.value = "";
       refreshActiveSettingsPanel();
       const message = t("systemSettings.localBackup.imported", { count: imported });

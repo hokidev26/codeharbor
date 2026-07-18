@@ -69,8 +69,9 @@ type AgentConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret        string `json:"jwtSecret"`
-	RegistrationOpen bool   `json:"registrationOpen"`
+	JWTSecret        string         `json:"jwtSecret"`
+	RegistrationOpen bool           `json:"registrationOpen"`
+	OAuthApp         OAuthAppConfig `json:"oauthApp"`
 }
 
 type SecurityConfig struct {
@@ -215,7 +216,15 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 			MaxRunDurationMs:         3600000,
 			MaxRunTokens:             500000,
 		},
-		Auth: AuthConfig{RegistrationOpen: true},
+		Auth: AuthConfig{
+			RegistrationOpen: true,
+			OAuthApp: OAuthAppConfig{
+				ClientSecretEnv: "AUTOTO_OIDC_CLIENT_SECRET",
+				RedirectURL:     "http://localhost:7788/app/auth/callback",
+				AutoProvision:   true,
+				SessionTTLHours: 8,
+			},
+		},
 		Security: SecurityConfig{
 			Exposed:                 getenvBoolFallbackReported(report, []string{"AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"}, false),
 			AccessPassword:          firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"),
@@ -290,7 +299,7 @@ func LoadWithReport(path string) (Config, compat.Report, error) {
 		return Config{}, report, err
 	}
 	explicitLegacyPath := filepath.Clean(path) == filepath.Clean(legacyPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := ensureConfigParent(path); err != nil {
 		return Config{}, report, err
 	}
 	data, err := os.ReadFile(path)
@@ -344,6 +353,35 @@ decode:
 		report.Add(legacyConfigUsage("loaded"))
 	}
 	return cfg, report, nil
+}
+
+func ensureConfigParent(path string) error {
+	dir := filepath.Dir(path)
+	mode := os.FileMode(0o755)
+	privateDefaultHome := false
+	if home, err := os.UserHomeDir(); err == nil {
+		privateDefaultHome = filepath.Clean(dir) == filepath.Clean(filepath.Join(home, ".autoto"))
+		if privateDefaultHome {
+			mode = 0o700
+		}
+	}
+	if err := os.MkdirAll(dir, mode); err != nil {
+		return err
+	}
+	if !privateDefaultHome {
+		return nil
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("default Autoto home %s must be a real directory", dir)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	return nil
 }
 
 func isCanonicalConfigPath(path string, cfg Config) bool {
@@ -474,9 +512,11 @@ func normalizeConfigWithReport(cfg Config, report *compat.Report) Config {
 	cfg = migrateConfig(cfg)
 	cfg.Gateway = normalizeGatewayConfig(cfg.Gateway)
 	cfg.Agent = normalizeAgentConfig(cfg.Agent)
+	cfg.Auth.OAuthApp = cfg.Auth.OAuthApp.Normalized()
 	cfg.Security = normalizeSecurityConfig(cfg.Security)
 	applySecurityEnvOverrides(&cfg.Security, report)
 	cfg.Security = normalizeSecurityConfig(cfg.Security)
+
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)
 	return cfg
@@ -619,9 +659,14 @@ func applySecurityEnvOverrides(security *SecurityConfig, report *compat.Report) 
 	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_EXPOSED", "CODEHARBOR_EXPOSED"); ok {
 		security.Exposed = value
 	}
-	if value := firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
-		// Environment credentials deliberately override a persisted hash but are
-		// never saved by sanitizeConfigForDisk.
+	if strings.TrimSpace(security.AccessPasswordHash) != "" {
+		// A host-local password rotation persists a hash. Once present, it is the
+		// durable authority and must not be shadowed by a stale startup env value.
+		security.AccessPassword = ""
+	} else if value := firstEnvFallback(report, "AUTOTO_ACCESS_PASSWORD", "CODEHARBOR_ACCESS_PASSWORD"); value != "" {
+		// Environment credentials seed the initial password but are never saved
+		// by sanitizeConfigForDisk. A localhost rotation can replace them with a
+		// durable hash for subsequent restarts.
 		security.AccessPassword = value
 	}
 	if value, ok := lookupBoolEnvFallbackReported(report, "AUTOTO_ALLOW_REMOTE_FULL_ACCESS", "CODEHARBOR_ALLOW_REMOTE_FULL_ACCESS"); ok {
@@ -861,7 +906,7 @@ func Save(path string, cfg Config) error {
 	if cfg.SchemaVersion > CurrentConfigVersion {
 		return fmt.Errorf("config schema version %d is newer than supported version %d", cfg.SchemaVersion, CurrentConfigVersion)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := ensureConfigParent(path); err != nil {
 		return err
 	}
 	cfg, err = preserveSecurityEnvOverrides(path, cfg)
@@ -965,6 +1010,7 @@ func writeConfigAtomically(path string, data []byte) error {
 func sanitizeConfigForDisk(cfg Config) Config {
 	cfg = migrateConfig(cfg)
 	cfg.Agent = normalizeAgentConfig(cfg.Agent)
+	cfg.Auth.OAuthApp = cfg.Auth.OAuthApp.Normalized()
 	cfg.Security = normalizeSecurityConfig(cfg.Security)
 	cfg.Providers = normalizeProviders(cfg.Providers)
 	cfg.Backends = normalizeBackends(cfg.Backends)

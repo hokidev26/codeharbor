@@ -9,6 +9,9 @@ if [[ -n "$unformatted" ]]; then
   exit 1
 fi
 
+printf '==> Checking Go module tidiness\n'
+go mod tidy -diff
+
 printf '==> Running Go tests\n'
 go test ./...
 
@@ -17,6 +20,8 @@ go vet ./...
 
 printf '==> Building Go packages\n'
 go build ./...
+
+./scripts/deadcode.sh
 
 printf '==> Checking embedded JavaScript syntax\n'
 node --version

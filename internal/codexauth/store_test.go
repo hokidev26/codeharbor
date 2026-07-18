@@ -58,6 +58,53 @@ func TestStoreImportPersistsAndListsWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestStoreLifecycleSurvivesFreshStoreInstances(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "credentials", "codex")
+	created, err := NewStore(dir).Import([]ImportDocument{{
+		Filename: "restart.json",
+		Content:  []byte(`{"type":"codex","access_token":"initial-access","refresh_token":"initial-refresh","account_id":"restart-account"}`),
+	}})
+	if err != nil || created.Imported != 1 || len(created.Files) != 1 {
+		t.Fatalf("create failed: result=%+v err=%v", created, err)
+	}
+
+	afterCreate := NewStore(dir)
+	items, err := afterCreate.Load()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("fresh store did not recover create: items=%+v err=%v", items, err)
+	}
+	stableID := items[0].Credential.ID
+	if stableID == "" || items[0].Credential.AccessToken != "initial-access" || items[0].Credential.RefreshToken != "initial-refresh" {
+		t.Fatalf("fresh store recovered unexpected credential: %+v", items[0])
+	}
+
+	rotated := items[0]
+	rotated.Credential.AccessToken = "rotated-access"
+	rotated.Credential.RefreshToken = "rotated-refresh"
+	if err := afterCreate.Update(rotated); err != nil {
+		t.Fatal(err)
+	}
+	afterUpdate, err := NewStore(dir).GetByID(stableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterUpdate.Credential.AccessToken != "rotated-access" || afterUpdate.Credential.RefreshToken != "rotated-refresh" || afterUpdate.Credential.ID != stableID {
+		t.Fatalf("fresh store did not recover update: %+v", afterUpdate)
+	}
+
+	if err := NewStore(dir).Delete(stableID); err != nil {
+		t.Fatal(err)
+	}
+	deletedStore := NewStore(dir)
+	if _, err := deletedStore.GetByID(stableID); !os.IsNotExist(err) {
+		t.Fatalf("fresh store recovered deleted credential: %v", err)
+	}
+	remaining, err := deletedStore.Load()
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("fresh store retained deleted credential: items=%+v err=%v", remaining, err)
+	}
+}
+
 func TestStoreExportByIDRoundTripsCompleteCredential(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "source"))
 	result, err := store.Import([]ImportDocument{{

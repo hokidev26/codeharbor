@@ -156,6 +156,152 @@ INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permissi
 	}
 }
 
+func TestNavigationStatePinsOrdersAndArchivesWithoutDeletingRecords(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "navigation-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	project, workline, first, err := store.CreateProject(ctx, "Navigation", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateAgent(ctx, Agent{WorklineID: workline.ID, Type: "primary", Title: "Second", Model: "fake:test", PermissionMode: "acceptEdits", Status: "idle", CWD: project.GitPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pinned := true
+	updatedAgent, err := store.UpdateAgentNavigationState(ctx, first.ID, &pinned, nil)
+	if err != nil || !updatedAgent.Pinned {
+		t.Fatalf("pin agent: agent=%+v err=%v", updatedAgent, err)
+	}
+	conversations, err := store.ListNavigationConversations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 2 || conversations[0].AgentID != first.ID || !conversations[0].AgentPinned {
+		t.Fatalf("expected pinned conversation first, got %+v", conversations)
+	}
+
+	archived := true
+	updatedAgent, err = store.UpdateAgentNavigationState(ctx, first.ID, nil, &archived)
+	if err != nil || updatedAgent.ArchivedAt == "" {
+		t.Fatalf("archive agent: agent=%+v err=%v", updatedAgent, err)
+	}
+	conversations, err = store.ListNavigationConversations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 1 || conversations[0].AgentID != second.ID {
+		t.Fatalf("archived conversation should be hidden by default, got %+v", conversations)
+	}
+	allConversations, err := store.ListNavigationConversationsWithOptions(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allConversations) != 2 || allConversations[1].AgentID != first.ID || allConversations[1].AgentArchivedAt == "" {
+		t.Fatalf("includeArchived should retain the archived conversation, got %+v", allConversations)
+	}
+
+	updatedProject, err := store.UpdateProjectNavigationState(ctx, project.ID, &pinned, &archived)
+	if err != nil || !updatedProject.Pinned || updatedProject.ArchivedAt == "" {
+		t.Fatalf("archive project: project=%+v err=%v", updatedProject, err)
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("archived project should be hidden by default, got %+v", projects)
+	}
+	allProjects, err := store.ListProjectsWithOptions(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allProjects) != 1 || allProjects[0].ID != project.ID || !allProjects[0].Pinned || allProjects[0].ArchivedAt == "" {
+		t.Fatalf("includeArchived should retain the project state, got %+v", allProjects)
+	}
+	allConversations, err = store.ListNavigationConversationsWithOptions(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allConversations) != 2 || allConversations[0].ProjectArchivedAt == "" || allConversations[1].ProjectArchivedAt == "" {
+		t.Fatalf("project archive state should flow into conversations, got %+v", allConversations)
+	}
+
+	restored := false
+	if _, err := store.UpdateProjectNavigationState(ctx, project.ID, nil, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateAgentNavigationState(ctx, first.ID, nil, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if records, err := store.ListNavigationConversations(ctx); err != nil || len(records) != 2 {
+		t.Fatalf("restored records should return without data loss: records=%+v err=%v", records, err)
+	}
+	if _, err := store.UpdateProjectNavigationState(ctx, "missing", &pinned, nil); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing project should return not found, got %v", err)
+	}
+	if _, err := store.UpdateAgentNavigationState(ctx, first.ID, nil, nil); err == nil {
+		t.Fatal("empty navigation patch should fail")
+	}
+}
+
+func TestNavigationStateMigrationAddsColumnsAndIndexes(t *testing.T) {
+	ctx := context.Background()
+	raw := openRawDB(t, filepath.Join(t.TempDir(), "navigation-state-v42.db"))
+	defer raw.Close()
+	if _, err := raw.ExecContext(ctx, `
+CREATE TABLE projects (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
+CREATE TABLE agents (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
+INSERT INTO projects (id, updated_at) VALUES ('project', '2026-01-01T00:00:00Z');
+INSERT INTO agents (id, updated_at) VALUES ('agent', '2026-01-01T00:00:00Z');
+PRAGMA user_version = 42;
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	if version := readUserVersion(t, ctx, raw); version != CurrentDBVersion {
+		t.Fatalf("expected migrated version %d, got %d", CurrentDBVersion, version)
+	}
+	for _, column := range []struct{ table, name string }{
+		{"projects", "pinned"}, {"projects", "archived_at"}, {"agents", "pinned"}, {"agents", "archived_at"},
+	} {
+		exists, err := columnExists(ctx, raw, column.table, column.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Fatalf("expected %s.%s after migration", column.table, column.name)
+		}
+	}
+	for _, index := range []string{"idx_projects_navigation_state", "idx_agents_navigation_state"} {
+		var count int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("expected navigation index %s", index)
+		}
+	}
+	var projectPinned, agentPinned int
+	var projectArchived, agentArchived sql.NullString
+	if err := raw.QueryRowContext(ctx, `SELECT pinned, archived_at FROM projects WHERE id = 'project'`).Scan(&projectPinned, &projectArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT pinned, archived_at FROM agents WHERE id = 'agent'`).Scan(&agentPinned, &agentArchived); err != nil {
+		t.Fatal(err)
+	}
+	if projectPinned != 0 || agentPinned != 0 || projectArchived.Valid || agentArchived.Valid {
+		t.Fatalf("migration should preserve active unpinned defaults: project=(%d,%v) agent=(%d,%v)", projectPinned, projectArchived, agentPinned, agentArchived)
+	}
+}
+
 func TestAddAPIRequestPersistsUsage(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

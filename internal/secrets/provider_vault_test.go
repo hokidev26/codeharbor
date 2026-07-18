@@ -206,3 +206,57 @@ func TestProviderVaultReconcilesMatchingPendingUpdate(t *testing.T) {
 		t.Fatalf("reconciled secret unavailable: metadata=%+v err=%v", metadata, err)
 	}
 }
+
+func TestSecretLastFiveDoesNotExposeShortSecrets(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		want   string
+	}{
+		{name: "empty", secret: "", want: ""},
+		{name: "one ASCII", secret: "a", want: ""},
+		{name: "five ASCII", secret: "abcde", want: ""},
+		{name: "six ASCII", secret: "abcdef", want: "bcdef"},
+		{name: "five Unicode", secret: "密钥值甲乙", want: ""},
+		{name: "six Unicode", secret: "密钥值甲乙丙", want: "钥值甲乙丙"},
+		{name: "mixed Unicode", secret: "ab密钥值甲", want: "b密钥值甲"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := SecretLastFive(test.secret); got != test.want {
+				t.Fatalf("SecretLastFive(%q) = %q, want %q", test.secret, got, test.want)
+			}
+		})
+	}
+}
+
+func TestProviderVaultShortSecretMetadataDoesNotExposeSecret(t *testing.T) {
+	store := newFakeProviderSecretStore()
+	vault := NewProviderVault(store, t.TempDir())
+	binding := ProviderBinding{Name: "relay", Type: "openai-compatible", BaseURL: "https://relay.example/v1", SecretRevision: 1}
+	ctx := context.Background()
+	metadata, err := vault.PrepareSet(ctx, binding, "短密钥")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.LastFive != "" {
+		t.Fatalf("prepare metadata exposed complete short secret: %+v", metadata)
+	}
+	record, err := store.GetProviderSecret(ctx, binding.Name, ProviderAPIKeyKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.PendingLastFive != "" {
+		t.Fatalf("stored metadata exposed complete short secret: %+v", record)
+	}
+	if err := vault.CommitPending(ctx, binding.Name); err != nil {
+		t.Fatal(err)
+	}
+	secret, metadata, err := vault.Resolve(ctx, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secret != "短密钥" || metadata.LastFive != "" {
+		t.Fatalf("unexpected resolved short secret metadata: secret=%q metadata=%+v", secret, metadata)
+	}
+}

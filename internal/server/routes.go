@@ -117,6 +117,15 @@ type createProjectRequest struct {
 	Model       string `json:"model"`
 }
 
+type navigationStatePatchRequest struct {
+	Pinned   *bool `json:"pinned"`
+	Archived *bool `json:"archived"`
+}
+
+func validNavigationStatePatch(req navigationStatePatchRequest) bool {
+	return req.Pinned != nil || req.Archived != nil
+}
+
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	var req createProjectRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -172,6 +181,50 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "workline": workline, "agent": agent})
+}
+
+func (s *Server) patchProjectNavigationState(w http.ResponseWriter, r *http.Request) {
+	var req navigationStatePatchRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !validNavigationStatePatch(req) {
+		writeError(w, http.StatusBadRequest, "navigation state patch must include pinned or archived")
+		return
+	}
+	project, err := s.store.UpdateProjectNavigationState(r.Context(), chi.URLParam(r, "id"), req.Pinned, req.Archived)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+func (s *Server) patchAgentNavigationState(w http.ResponseWriter, r *http.Request) {
+	var req navigationStatePatchRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !validNavigationStatePatch(req) {
+		writeError(w, http.StatusBadRequest, "navigation state patch must include pinned or archived")
+		return
+	}
+	agent, err := s.store.UpdateAgentNavigationState(r.Context(), chi.URLParam(r, "id"), req.Pinned, req.Archived)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {

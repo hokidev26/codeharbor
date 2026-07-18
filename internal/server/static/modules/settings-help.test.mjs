@@ -171,7 +171,6 @@ test("registered settings renderers expose help-copy markers without hiding crit
   const rendererFiles = [
     "app-main.mjs",
     "automation-control.mjs",
-    "backend-registry.mjs",
     "local-preferences-settings.mjs",
     "memory-settings.mjs",
     "model-provider-components.mjs",

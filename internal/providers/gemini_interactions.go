@@ -425,6 +425,10 @@ func handleGeminiInteractionsJSON(out chan<- Event, reader io.Reader) {
 	}
 	acc := geminiEventAccumulator{emittedCalls: make(map[string]bool), pendingCalls: make(map[string]*geminiPendingCall)}
 	acc.emit(out, "", payload)
+	if !acc.done {
+		out <- Event{Type: "error", Text: "Gemini response ended before a terminal event"}
+		return
+	}
 	out <- Event{Type: "done", Done: true, StopReason: acc.stopReason}
 }
 
@@ -475,7 +479,9 @@ func handleGeminiInteractionsSSE(out chan<- Event, reader io.Reader) {
 		out <- Event{Type: "error", Text: err.Error()}
 		return
 	}
-	if !flush() && acc.done {
+	_ = flush()
+	if !acc.done {
+		out <- Event{Type: "error", Text: "Gemini stream closed before a terminal event"}
 		return
 	}
 	out <- Event{Type: "done", Done: true, StopReason: acc.stopReason}
@@ -769,24 +775,35 @@ func geminiUsage(root any) (Usage, bool) {
 }
 
 func geminiStopReason(root any, eventType string) string {
-	typ := strings.ToLower(eventType)
-	if strings.Contains(typ, "completed") || strings.Contains(typ, "finished") || strings.Contains(typ, ".done") {
-		return strings.TrimSpace(eventType)
+	rootMap, _ := root.(map[string]any)
+	terminal := geminiOverallCompletionEvent(eventType)
+	if !terminal && rootMap != nil {
+		terminal = geminiOverallCompletionEvent(geminiString(rootMap, "type", "event", "event_type"))
 	}
-	var reason string
-	visitGeminiMaps(root, func(value map[string]any) {
-		if reason != "" {
-			return
-		}
-		typ := strings.ToLower(geminiString(value, "type", "event"))
-		if strings.Contains(typ, "completed") || strings.Contains(typ, "finished") || strings.HasSuffix(typ, ".done") {
-			reason = geminiString(value, "stop_reason", "stopReason", "finish_reason", "finishReason")
-			if reason == "" {
-				reason = typ
-			}
-		}
-	})
-	return reason
+	if !terminal {
+		return ""
+	}
+	reason := ""
+	if rootMap != nil {
+		reason = strings.ToLower(strings.TrimSpace(geminiString(rootMap, "stop_reason", "stopReason", "finish_reason", "finishReason")))
+	}
+	switch reason {
+	case "", "stop", "completed", "complete":
+		return "completed"
+	case "max_tokens", "max_output_tokens", "length":
+		return "max_output_tokens"
+	default:
+		return reason
+	}
+}
+
+func geminiOverallCompletionEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "completed", "interaction.completed", "interaction.finished", "response.completed", "response.finished":
+		return true
+	default:
+		return false
+	}
 }
 
 func geminiEventError(root any) string {

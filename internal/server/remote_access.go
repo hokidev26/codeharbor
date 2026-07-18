@@ -537,6 +537,7 @@ func (s *Server) getRemoteAccessSettings(w http.ResponseWriter, r *http.Request)
 		"policy":       map[string]any{"allowFullAccess": cfg.Security.AllowRemoteFullAccess, "defaultMode": cfg.Security.DefaultRemoteAccessMode, "allowRemoteNativePicker": cfg.Security.AllowRemoteNativePicker, "revision": normalizedCredentialRevision(cfg)},
 		"session":      session,
 		"capabilities": s.capabilitiesForRequest(r),
+		"tunnel":       s.temporaryTunnelSnapshot(),
 	})
 }
 
@@ -644,10 +645,6 @@ func (s *Server) updateRemoteAccessPassword(w http.ResponseWriter, r *http.Reque
 	defer s.configMutationMu.Unlock()
 	if ok, message := s.remoteSecurityMutationAllowed(r, req.CurrentPassword); !ok {
 		writeError(w, http.StatusForbidden, message)
-		return
-	}
-	if _, source := s.credentialConfigured(); source == "environment" {
-		writeError(w, http.StatusConflict, "the active remote credential is controlled by AUTOTO_ACCESS_PASSWORD")
 		return
 	}
 	strategy := strings.ToLower(strings.TrimSpace(req.Strategy))

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,6 +53,91 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if provider.Type != ProviderTypeCodex || provider.BaseURL != "https://chatgpt.com/backend-api/codex" || provider.Model != "gpt-5.5" || provider.APIKeyOptional {
 		t.Fatalf("unexpected native Codex provider preset: %+v", *provider)
+	}
+}
+
+func TestDefaultConfigHomeUsesPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+	for _, test := range []struct {
+		name      string
+		precreate bool
+	}{
+		{name: "fresh"},
+		{name: "existing permissive directory", precreate: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			appHome := filepath.Join(home, ".autoto")
+			if test.precreate {
+				if err := os.Mkdir(appHome, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(appHome, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := Load(""); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(appHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Fatalf("default app home permissions = %04o, want 0700", got)
+			}
+			configInfo, err := os.Stat(filepath.Join(appHome, "config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := configInfo.Mode().Perm(); got != 0o600 {
+				t.Fatalf("default config permissions = %04o, want 0600", got)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigHomeRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation may require elevated privileges")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, "redirected")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, ".autoto")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(""); err == nil {
+		t.Fatal("default app home symlink was accepted")
+	}
+}
+
+func TestSaveDoesNotChangeExistingCustomParentPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+	parent := filepath.Join(t.TempDir(), "custom")
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(filepath.Join(parent, "config.json"), Config{SchemaVersion: CurrentConfigVersion}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("custom config parent permissions = %04o, want 0750", got)
 	}
 }
 
@@ -137,6 +223,29 @@ func TestSecurityConfigFromEnv(t *testing.T) {
 	}
 	if !cfg.Security.AllowRemoteTerminal {
 		t.Fatalf("expected remote terminal env override, got %+v", cfg.Security)
+	}
+}
+
+func TestPersistedAccessPasswordHashTakesPrecedenceOverEnvironment(t *testing.T) {
+	t.Setenv("AUTOTO_ACCESS_PASSWORD", "environment-secret")
+	t.Setenv("CODEHARBOR_ACCESS_PASSWORD", "legacy-environment-secret")
+	hash, err := HashAccessPassword("stored-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{Security: SecurityConfig{AccessPasswordHash: hash}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.AccessPassword != "" || !VerifyAccessPassword(cfg.Security.AccessPasswordHash, "stored-secret") {
+		t.Fatalf("expected persisted hash to remain authoritative, got %+v", cfg.Security)
+	}
+	if VerifyAccessPassword(cfg.Security.AccessPasswordHash, "environment-secret") {
+		t.Fatal("environment password must not replace the persisted local password")
 	}
 }
 

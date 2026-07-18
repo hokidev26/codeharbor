@@ -5,26 +5,43 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"autoto/internal/agentrole"
+)
+
+const (
+	maxAcceptanceCriteriaItems      = 16
+	maxAcceptanceCriterionBytes     = 1000
+	maxAcceptanceCriteriaTotalBytes = maxAcceptanceCriteriaItems * maxAcceptanceCriterionBytes
 )
 
 type AgentTool struct{}
 
 type agentTaskInput struct {
-	Prompt          string `json:"prompt"`
-	Description     string `json:"description,omitempty"`
-	SubagentType    string `json:"subagent_type,omitempty"`
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	RunInBackground *bool  `json:"run_in_background,omitempty"`
-	ResumeParent    bool   `json:"resume_parent,omitempty"`
+	Prompt             string   `json:"prompt"`
+	Description        string   `json:"description,omitempty"`
+	SubagentType       string   `json:"subagent_type,omitempty"`
+	Model              string   `json:"model,omitempty"`
+	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
+	RunInBackground    *bool    `json:"run_in_background,omitempty"`
+	ResumeParent       bool     `json:"resume_parent,omitempty"`
 }
 
 type agentTaskPayload struct {
-	Prompt          string `json:"prompt"`
-	Description     string `json:"description,omitempty"`
-	SubagentType    string `json:"subagentType,omitempty"`
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	Prompt             string   `json:"prompt"`
+	Description        string   `json:"description,omitempty"`
+	SubagentType       string   `json:"subagentType,omitempty"`
+	Model              string   `json:"model,omitempty"`
+	ReasoningEffort    string   `json:"reasoningEffort,omitempty"`
+	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty"`
+}
+
+type agentTaskPublicSummary struct {
+	Description     string `json:"description"`
+	SubagentType    string `json:"subagentType"`
+	Model           string `json:"model"`
+	AcceptanceCount int    `json:"acceptanceCount,omitempty"`
 }
 
 func (AgentTool) Name() string { return "Agent" }
@@ -41,7 +58,7 @@ func (AgentTool) Execute(ctx context.Context, call Call, env Env) (Result, error
 	}
 	input.Prompt = strings.TrimSpace(input.Prompt)
 	input.Description = strings.TrimSpace(input.Description)
-	input.SubagentType = strings.ToLower(strings.TrimSpace(input.SubagentType))
+	input.SubagentType = strings.TrimSpace(input.SubagentType)
 	input.Model = strings.TrimSpace(input.Model)
 	input.ReasoningEffort = strings.TrimSpace(input.ReasoningEffort)
 	if input.Prompt == "" {
@@ -53,8 +70,29 @@ func (AgentTool) Execute(ctx context.Context, call Call, env Env) (Result, error
 	if len([]byte(input.Description)) > 200 || len([]byte(input.Model)) > 256 || len([]byte(input.SubagentType)) > 64 {
 		return Result{Output: "agent task metadata exceeds size limit", IsError: true}, nil
 	}
-	if input.SubagentType != "" && !validSubagentType(input.SubagentType) {
+	role, err := agentrole.Normalize(input.SubagentType)
+	if err != nil {
 		return Result{Output: "invalid subagent_type", IsError: true}, nil
+	}
+	input.SubagentType = string(role)
+	if len(input.AcceptanceCriteria) > maxAcceptanceCriteriaItems {
+		return Result{Output: "acceptance_criteria exceeds item limit", IsError: true}, nil
+	}
+	acceptanceCriteriaBytes := 0
+	for index, criterion := range input.AcceptanceCriteria {
+		criterion = strings.TrimSpace(criterion)
+		if criterion == "" {
+			return Result{Output: "acceptance_criteria items must not be blank", IsError: true}, nil
+		}
+		criterionBytes := len([]byte(criterion))
+		if criterionBytes > maxAcceptanceCriterionBytes {
+			return Result{Output: "acceptance_criteria item exceeds size limit", IsError: true}, nil
+		}
+		acceptanceCriteriaBytes += criterionBytes
+		if acceptanceCriteriaBytes > maxAcceptanceCriteriaTotalBytes {
+			return Result{Output: "acceptance_criteria exceeds total size limit", IsError: true}, nil
+		}
+		input.AcceptanceCriteria[index] = criterion
 	}
 	if input.RunInBackground != nil && !*input.RunInBackground {
 		return Result{Output: "foreground child agents are not supported; set run_in_background to true", IsError: true}, nil
@@ -71,15 +109,13 @@ func (AgentTool) Execute(ctx context.Context, call Call, env Env) (Result, error
 		return Result{Output: "resume_parent requires a durable parent run", IsError: true}, nil
 	}
 	payload, err := json.Marshal(agentTaskPayload{
-		Prompt: input.Prompt, Description: input.Description, SubagentType: input.SubagentType, Model: input.Model, ReasoningEffort: input.ReasoningEffort,
+		Prompt: input.Prompt, Description: input.Description, SubagentType: input.SubagentType, Model: input.Model, ReasoningEffort: input.ReasoningEffort, AcceptanceCriteria: input.AcceptanceCriteria,
 	})
 	if err != nil {
 		return Result{}, err
 	}
-	publicSummary, _ := json.Marshal(map[string]any{
-		"description":  input.Description,
-		"subagentType": input.SubagentType,
-		"model":        input.Model,
+	publicSummary, _ := json.Marshal(agentTaskPublicSummary{
+		Description: input.Description, SubagentType: input.SubagentType, Model: input.Model, AcceptanceCount: len(input.AcceptanceCriteria),
 	})
 	task, err := env.Background.Submit(ctx, BackgroundTaskRequest{
 		Kind:                         BackgroundTaskKindAgent,
@@ -105,17 +141,4 @@ func (AgentTool) Execute(ctx context.Context, call Call, env Env) (Result, error
 	}
 	encoded, _ := json.Marshal(task)
 	return Result{Output: string(encoded), Meta: map[string]any{"backgroundTaskId": task.ID, "background": true}}, nil
-}
-
-func validSubagentType(value string) bool {
-	if value == "" {
-		return false
-	}
-	for index, char := range value {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' || char == '_' || (char == '.' && index > 0) {
-			continue
-		}
-		return false
-	}
-	return true
 }

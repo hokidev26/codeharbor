@@ -393,5 +393,3 @@ export function createExecutionNotifications({
     state: () => ({ seen: [...seenOrder], checkpoints: checkpoints.map((entry) => ({ ...entry })) }),
   };
 }
-
-export const createExecutionNotificationController = createExecutionNotifications;

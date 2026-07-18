@@ -32,7 +32,7 @@ func TestPlanPolicyOnlyExposesCoreReadAllowlist(t *testing.T) {
 		names = append(names, spec.Name)
 	}
 	sort.Strings(names)
-	want := []string{"EndPipeline", "Glob", "Grep", "Read", "StartPipeline", "WebFetch", "WebSearch"}
+	want := []string{"ContextAsk", "EndPipeline", "Glob", "Grep", "Read", "StartPipeline", "WebFetch", "WebSearch"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("unexpected plan tool surface: got=%v want=%v", names, want)
 	}
@@ -97,7 +97,7 @@ func TestPlanPolicyFinalGatewayRejectsWriteExecDangerMCPAndPlugin(t *testing.T) 
 			}
 		})
 	}
-	for _, name := range []string{"Read", "Glob", "Grep", "WebFetch", "WebSearch", "StartPipeline", "EndPipeline"} {
+	for _, name := range []string{"Read", "Glob", "Grep", "WebFetch", "WebSearch", "ContextAsk", "StartPipeline", "EndPipeline"} {
 		if result, denied := planToolDeniedResult(policy, tools.Call{Name: name}, tools.RiskRead); denied || result.IsError {
 			t.Fatalf("plan gateway rejected allowed tool %s: %+v denied=%v", name, result, denied)
 		}
@@ -215,7 +215,7 @@ func TestPlanRunUsesDurableModeAndReadToolSurface(t *testing.T) {
 		names = append(names, spec.Name)
 	}
 	sort.Strings(names)
-	if want := []string{"EndPipeline", "Glob", "Grep", "Read", "StartPipeline", "WebFetch", "WebSearch"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"ContextAsk", "EndPipeline", "Glob", "Grep", "Read", "StartPipeline", "WebFetch", "WebSearch"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("unexpected plan tool specs: got=%v want=%v", names, want)
 	}
 	runs, err := store.ListRuns(ctx, agent.ID, 1)

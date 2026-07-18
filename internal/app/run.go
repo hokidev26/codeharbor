@@ -181,6 +181,7 @@ func Run(options Options) int {
 	runner.SetBackgroundTaskService(backgroundService)
 
 	previewManager := preview.NewManager()
+	temporaryTunnelManager := server.NewTemporaryTunnelManager(cfg.Addr())
 	reviewService := server.NewReviewService(providerRegistry, cfg.Agent.ReviewModel)
 	runner.SetReviewService(reviewService)
 	application := server.New(cfg, store, runner, hub, providerRegistry)
@@ -193,6 +194,7 @@ func Run(options Options) int {
 	application.SetReviewService(reviewService)
 	application.SetAuditRecorder(auditRecorder)
 	application.SetPreviewManager(previewManager)
+	application.SetTemporaryTunnelManager(temporaryTunnelManager)
 	application.SetConfigPath(resolvedConfigPath)
 
 	httpServer := &http.Server{
@@ -210,7 +212,7 @@ func Run(options Options) int {
 	defer stop()
 
 	supervisor := runtime.NewSupervisor()
-	services := []runtime.Service{previewManager, channelManager, automationManager, backgroundManager}
+	services := []runtime.Service{previewManager, temporaryTunnelManager, channelManager, automationManager, backgroundManager}
 	if gatewayHTTPServer != nil {
 		services = append(services, runtime.NewHTTPService(gatewayHTTPServer, func(err error) {
 			logger.Error("serve gateway", "error", err)

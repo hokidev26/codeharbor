@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'" />
+    <title>NarraFork OAuth App</title>
+    <link rel="icon" href="/ui/autoto-logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/ui/oauth-app.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#oauthMain">跳到主要内容</a>
+    <header class="app-header">
+      <div class="brand-block">
+        <img src="/ui/autoto-logo.svg" width="42" height="42" alt="" />
+        <div>
+          <p class="eyebrow">NarraFork</p>
+          <h1>OAuth App</h1>
+        </div>
+      </div>
+      <div class="account-block" aria-label="账户">
+        <div id="currentUser" class="current-user" aria-live="polite">正在检查登录状态…</div>
+        <a id="loginLink" class="button primary" href="/app/auth/login">登录</a>
+        <button id="logoutButton" class="button" type="button" hidden>退出登录</button>
+      </div>
+    </header>
+
+    <main id="oauthMain" class="app-main" tabindex="-1">
+      <section id="statusPanel" class="status-panel" aria-live="polite" aria-atomic="true">
+        <h2 id="statusTitle">正在连接</h2>
+        <p id="statusMessage">正在从同源 BFF 获取会话信息。</p>
+        <button id="retryButton" class="button" type="button" hidden>重试</button>
+      </section>
+
+      <div id="browserWorkspace" class="browser-workspace" hidden>
+        <nav class="collection-panel" aria-labelledby="projectsHeading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">工作区</p>
+              <h2 id="projectsHeading">项目</h2>
+            </div>
+            <button id="refreshProjectsButton" class="icon-button" type="button" aria-label="刷新项目" title="刷新项目">↻</button>
+          </div>
+          <div id="projectsList" class="selection-list" aria-label="项目列表" aria-busy="false"></div>
+          <p id="projectsEmpty" class="empty-state" hidden>当前账户没有可访问的项目。</p>
+        </nav>
+
+        <nav class="collection-panel" aria-labelledby="agentsHeading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">项目成员</p>
+              <h2 id="agentsHeading">Agents</h2>
+            </div>
+          </div>
+          <p id="agentsHint" class="empty-state">请先选择项目。</p>
+          <div id="agentsList" class="selection-list" aria-label="Agent 列表" aria-busy="false"></div>
+        </nav>
+
+        <section class="messages-panel" aria-labelledby="messagesHeading">
+          <div class="panel-heading messages-heading">
+            <div>
+              <p class="eyebrow">只读消息视图</p>
+              <h2 id="messagesHeading">Agent Messages</h2>
+            </div>
+            <button id="refreshMessagesButton" class="icon-button" type="button" aria-label="刷新消息" title="刷新消息" disabled>↻</button>
+          </div>
+          <p id="messagesHint" class="empty-state">请选择 Agent 查看消息。</p>
+          <div id="messagesList" class="messages-list" role="log" aria-live="polite" aria-busy="false"></div>
+
+          <form id="taskForm" class="task-form" hidden>
+            <div class="task-form-heading">
+              <div>
+                <p class="eyebrow">可选任务提交</p>
+                <h3>提交消息</h3>
+              </div>
+              <span class="permission-badge">只读权限</span>
+            </div>
+            <p class="task-form-note">此入口仅在服务端明确启用时显示。任务固定以服务端授予的只读权限运行，不能由页面提升权限。</p>
+            <label for="taskContent">任务内容</label>
+            <textarea id="taskContent" name="content" rows="4" maxlength="12000" required aria-describedby="taskFormHelp"></textarea>
+            <div class="task-form-actions">
+              <span id="taskFormHelp" class="form-help" aria-live="polite">不会在浏览器存储身份凭据或任务草稿。</span>
+              <button id="submitTaskButton" class="button primary" type="submit">以只读权限提交</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </main>
+
+    <footer class="app-footer">
+      <p>此页面仅使用同源 BFF 会话 Cookie；不会读取或保存 access token、Gateway Key 或本地管理 token。</p>
+    </footer>
+
+    <script type="module" src="/ui/modules/oauth-app.mjs"></script>
+  </body>
+</html>

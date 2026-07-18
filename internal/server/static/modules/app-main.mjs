@@ -1,10 +1,12 @@
+import { createAccountPreferencesController } from "./account-preferences.mjs";
 import { createAgentStreamController } from "./agent-stream.mjs";
 import { createAutomationControlController } from "./automation-control.mjs";
+import { createArchiveSettingsController } from "./archive-settings.mjs?v=archive-settings-1";
 import { createBackgroundTasksController } from "./background-tasks.mjs";
 import { createExecutionNotifications } from "./execution-notifications.mjs";
-import { createBackendRegistryController } from "./backend-registry.mjs";
+import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1";
-import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1";
+import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1";
 import {
   addRecentConversation,
   buildNavigationView,
@@ -15,7 +17,7 @@ import {
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1";
 import {
   basename,
   canonicalLocalPath,
@@ -23,32 +25,34 @@ import {
   normalizePath,
   normalizeRecentDirectories,
   shortPath,
-} from "./directory-browser.mjs?v=folder-picker-remote-2";
+} from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
-import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1";
+import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1-autoto-themes-1";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-1-codex-browser-login-1-provider-secrets-1-model-picker-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1";
 import { createPageLifecycleController } from "./page-lifecycle.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
 import { createTaskWorkspaceController } from "./task-workspace.mjs?v=task-workspace-1";
-import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=apple-theme-1";
+import { createThemeManager, setThemePageContext } from "./theme-manager.mjs?v=autoto-themes-1";
+import { createThemeSettingsController } from "./theme-settings.mjs?v=autoto-themes-1";
+import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=autoto-themes-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
-import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-1";
+import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-2";
 import { createSharedAPISettingsController } from "./shared-api-settings.mjs?v=shared-api-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
-import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1";
-import { settingsItemByKey, settingsItems } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1";
+import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1";
+import { settingsIconSVG, settingsItemByKey, settingsItems, settingsSections } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1-settings-icons-1";
 import { createSettingsHelpController } from "./settings-help.mjs?v=settings-help-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
-import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1";
+import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
@@ -58,13 +62,10 @@ import { createUIShellController, elementVisible, isComposingInput } from "./ui-
 import { createUsageHistoryController } from "./usage-history.mjs";
 import { createWorkspaceSettingsController } from "./workspace-settings.mjs?v=plan-mode-1";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
+import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
 
 let backendRegistry = null;
 let settingsPreferences = null;
-
-function activeBackend() {
-  return backendRegistry.activeBackend();
-}
 
 function closeBackendsModal() {
   backendRegistry.closeBackendsModal();
@@ -83,16 +84,22 @@ function updateSidebarAccountSummary() {
 }
 
 let skillsPhaseB = null;
+let messageViewportBusyTimer = null;
+let settingsShellSession = null;
+const messageViewportBusyDelayMs = 140;
 
 const state = {
   projects: [],
   navigationConversations: [],
   navigationLoadSeq: 0,
   navigationMode: "all",
+  navigationMenuTarget: null,
+  navigationTransitionTitle: "",
   recentConversations: [],
   project: null,
   workline: null,
   agent: null,
+  workState: null,
   healthSeq: 0,
   healthOK: null,
   healthLabel: "checking",
@@ -232,6 +239,9 @@ const state = {
   initializing: false,
   initSeq: 0,
   settingsWarmupStarted: false,
+  settingsShellOpen: false,
+  settingsMobileViewport: false,
+  mobileSettingsView: "detail",
   activeSettingsPanel: "providers",
   activeSettingsCategory: "api",
   settingsSearchQuery: "",
@@ -508,17 +518,14 @@ const {
 
 backendRegistry = createBackendRegistryController({
   state,
-  refreshActiveSettingsPanel,
   showError,
   showToast,
   updateSidebarAccountSummary,
 });
 
 const {
-  bindAgentAdminSettingsActions,
   loadBackends,
   openBackendsModal,
-  renderAgentAdminSettingsContent,
   renderBackendPanel,
   resetBackendForm,
   saveBackend,
@@ -529,10 +536,11 @@ const uiShell = createUIShellController({
   clearSettingsSearchQuery,
   closeBackendsModal,
   closeDirectoryModal,
-  closeSettingsModal,
+  closeSettingsModal: requestCloseSettingsModal,
   focusSettingsSearchInput,
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
+  openModelSettings: () => openSettingsModal("models"),
   renderProjects,
   resizeTerminal,
   showError,
@@ -553,6 +561,7 @@ const {
   handleSettingsSearchShortcut,
   handleSidebarSettingsMenuDocumentClick,
   openMobileSidebar,
+  restoreSettingsDialogFocus,
   toggleMobileTerminal,
   toggleProjectSearch,
   toggleSidebarSettingsMenu,
@@ -560,15 +569,38 @@ const {
 
 bindSidebarResizer();
 bindComposerSelectMenus();
+closeMobileSidebar({ restoreFocus: false });
+
+const accountPreferences = createAccountPreferencesController({
+  request: api,
+  onChange: ({ snapshot }) => {
+    state.profile = snapshot.profile;
+    settingsPreferences?.applyProfilePreferences?.();
+    renderModelOptions?.();
+  },
+});
+
+const themeManager = createThemeManager({
+  api,
+  showToast,
+  translate: t,
+});
+themeManager.subscribe(() => {
+  if (state.activeSettingsPanel === "appearance") refreshActiveSettingsPanel();
+});
 
 const modelProviderSettings = createModelProviderSettingsController({
   state,
   copyText,
+  getModelVisibilityPreference: accountPreferences.getModelVisibility,
+  getPreferredModelPreference: accountPreferences.getPreferredModel,
   loadModelCatalog,
   loadSettings,
   notifyTerminal,
   openSettingsModal,
   refreshActiveSettingsPanel,
+  setModelVisibilityPreference: accountPreferences.setModelVisibility,
+  setPreferredModelPreference: accountPreferences.setPreferredModel,
   showError,
   updateWorkspaceMetaPills,
 });
@@ -670,9 +702,10 @@ const {
 
 settingsPreferences = createSettingsPreferencesController({
   state,
-  activeBackend,
+  accountPreferences,
   appendTerminal,
   applyPrimaryMode: applyPrimaryWorkbench,
+  applyThemePreference: (prefs) => themeManager.applyPreference(prefs),
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -749,6 +782,7 @@ const {
   resetSearchPreferences,
   resetSkillsPreferences,
   restoreLocalPreferencesBackup,
+  saveAppearancePreferences,
   saveNotificationPreferences,
   saveProfilePreferences,
   saveRegionalPreferences,
@@ -762,6 +796,21 @@ const {
   shouldLogAgentEvents,
   skillsPrefsExport,
 } = settingsPreferences;
+
+themeManager.setPreferenceAdapter({
+  currentAppearancePreferences,
+  saveAppearancePreferences,
+});
+
+const themeSettings = createThemeSettingsController({
+  themeManager,
+  currentAppearancePreferences,
+  setAppearancePreference,
+  refreshActiveSettingsPanel,
+  showError,
+  showToast,
+});
+const { bindThemeLibraryActions, renderThemeLibrarySection } = themeSettings;
 
 const localPreferencesSettings = createLocalPreferencesSettingsController({
   state,
@@ -785,6 +834,8 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   saveSearchPreferences,
   searchPrefsExport,
   searchProviderLabel,
+  renderThemeLibrarySection,
+  bindThemeLibraryActions,
   setAppearancePreference,
   setNotificationPreference,
   showError,
@@ -983,6 +1034,15 @@ const memorySettings = createMemorySettingsController({
   showToast,
 });
 
+const archiveSettings = createArchiveSettingsController({
+  request: api,
+  refresh: () => {
+    if (state.activeSettingsPanel === "archive") refreshActiveSettingsPanel();
+  },
+  showError,
+  showToast,
+});
+
 const automationControl = createAutomationControlController({
   request: api,
   onChange: () => {
@@ -1042,6 +1102,7 @@ const usageHistory = createUsageHistoryController({
 const settingsPanelRegistry = createSettingsPanelRegistry();
 [
   ["profile", { render: renderProfileSettingsContent, bind: bindProfileSettingsActions }],
+  ["archive", { render: archiveSettings.render, bind: archiveSettings.bind }],
   ["memory", { render: memorySettings.render, bind: memorySettings.bind }],
   ["skills", { render: () => renderSkillSettingsContent(state.activeSkillTab || "commands"), bind: () => bindSkillTabs(state.activeSkillTab || "commands") }],
   ["models", { render: renderModelSettingsContent, bind: bindModelSettingsActions }],
@@ -1052,7 +1113,6 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["im-gateway", { render: automationControl.render, bind: automationControl.bind }],
   ["notifications", { render: renderNotificationSettingsContent, bind: bindNotificationSettingsActions }],
   ["appearance", { render: renderAppearanceSettingsContent, bind: bindAppearanceSettingsActions }],
-  ["agent-admin", { render: renderAgentAdminSettingsContent, bind: bindAgentAdminSettingsActions }],
   ["worklines-containers", { render: renderWorklinesSettingsContent, bind: bindWorklinesSettingsActions }],
   ["storage", { render: renderStorageSettingsContent, bind: bindStorageSettingsActions }],
   ["usage", { render: usageHistory.render, bind: usageHistory.bind }],
@@ -1145,9 +1205,18 @@ function renderConversationDetails() {
     [sx("app.currentModel"), state.agent?.model || currentWorkspaceModel()],
     [sx("app.permissionMode"), state.agent?.permissionMode || "—"],
   ];
+  const workStateHTML = renderWorkStateHTML(state.workState, {
+    title: t("workspace.workState.title"), goal: t("workspace.workState.goal"), role: t("workspace.workState.role"),
+    taskCounts: t("workspace.workState.taskCounts"), activeTask: t("workspace.workState.activeTask"),
+    verification: t("workspace.workState.verification"), reviewer: t("workspace.workState.reviewer"), declaredTest: t("workspace.workState.declaredTest"),
+    taskStatuses: { todo: t("workspace.workState.todo"), doing: t("workspace.workState.doing"), done: t("workspace.workState.done"), blocked: t("workspace.workState.blocked") },
+    verificationStatuses: { not_configured: t("workspace.workState.notConfigured"), declared: t("workspace.workState.declared"), reviewed: t("workspace.workState.reviewed"), stale: t("workspace.workState.stale"), pending: t("workspace.workState.pending"), running: t("workspace.workState.running"), passed: t("workspace.workState.passed"), pass: t("workspace.workState.passed"), failed: t("workspace.workState.failed"), blocked: t("workspace.workState.blocked"), skipped: t("workspace.workState.skipped") },
+    reviewerStatuses: { pass: t("workspace.workState.reviewPass"), needs_human: t("workspace.workState.reviewNeedsHuman"), block_recommended: t("workspace.workState.reviewBlockRecommended"), unavailable: t("workspace.workState.reviewUnavailable") },
+  });
   body.innerHTML = `
     <section class="conversation-detail-hero"><div><h2>${escapeHtml(state.project?.name || state.agent?.title || sx("app.noConversationSelected"))}</h2><p>${escapeHtml(state.agent?.title || sx("app.selectConversationHint"))}</p></div><span class="conversation-detail-status">${escapeHtml(state.agent?.status || t("chat.idle"))}</span></section>
     ${backgroundTasks.renderContinuationStatusHTML()}
+    ${workStateHTML}
     <section class="conversation-metric-grid">
       ${[["Messages", metrics.messages], ["Cost", `$${metrics.cost.toFixed(4)}`], [sx("app.inputTokens"), metrics.inputTokens], [sx("app.outputTokens"), metrics.outputTokens], [sx("app.cacheTokens"), metrics.cacheTokens], [sx("app.tools"), metrics.tools], [t("terminal.title"), metrics.terminal], [sx("app.browser"), metrics.browser], [sx("app.pendingApprovals"), metrics.approvals]].map(([label, value]) => `<div class="conversation-metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(typeof value === "number" ? formatNumber(value) : value)}</strong></div>`).join("")}
     </section>
@@ -1754,7 +1823,6 @@ function renderPrimaryModeSidebar() {
     setTranslatedAttribute(refreshButton, "title", refreshKey);
     setTranslatedAttribute(refreshButton, "aria-label", refreshKey);
   }
-
   newProjectButton?.classList.toggle("hidden", taskMode);
   newTaskButton?.classList.toggle("hidden", !taskMode);
   if (newTaskButton) {
@@ -1856,6 +1924,7 @@ function applyPrimaryWorkbench(value) {
   }
   renderWorkbenchShell();
   renderProjects();
+  syncThemePageContext();
   if (workbench && taskWorkspace.getState().scope === "agent" && state.agent?.id) specBoard.load().catch(showError);
   return mode;
 }
@@ -1863,7 +1932,7 @@ function applyPrimaryWorkbench(value) {
 function switchPrimaryWorkbench(value) {
   backgroundTasks.closeTray("workbench-switch");
   closeConversationDetails();
-  closeSettingsModal({ restoreWorkbench: false });
+  closeSettingsModal({ restoreWorkbench: false, restoreFocus: false });
   closeEmployeeOverview({ restoreWorkbench: false });
   return setPrimaryModePreference(normalizedPrimaryWorkbench(value));
 }
@@ -1908,7 +1977,317 @@ function setGlobalRailActive(target = "conversation") {
   });
 }
 
-function openSettingsModal(key = "providers", { trigger = document.activeElement } = {}) {
+function captureInlineProperties(element, properties) {
+  if (!element) return null;
+  return {
+    element,
+    properties: Object.fromEntries(properties.map((property) => [property, {
+      value: element.style.getPropertyValue(property),
+      priority: element.style.getPropertyPriority(property),
+    }])),
+  };
+}
+
+function restoreInlineProperties(snapshot) {
+  if (!snapshot?.element) return;
+  Object.entries(snapshot.properties).forEach(([property, entry]) => {
+    if (entry.value) snapshot.element.style.setProperty(property, entry.value, entry.priority);
+    else snapshot.element.style.removeProperty(property);
+  });
+}
+
+function setSettingsShellNodeHidden(element, hidden) {
+  if (!element) return null;
+  const snapshot = {
+    element,
+    display: element.style.getPropertyValue("display"),
+    displayPriority: element.style.getPropertyPriority("display"),
+    ariaHidden: element.getAttribute("aria-hidden"),
+  };
+  if (hidden) {
+    element.style.setProperty("display", "none", "important");
+    element.setAttribute("aria-hidden", "true");
+  }
+  return snapshot;
+}
+
+function restoreSettingsShellNode(snapshot) {
+  if (!snapshot?.element) return;
+  if (snapshot.display) snapshot.element.style.setProperty("display", snapshot.display, snapshot.displayPriority);
+  else snapshot.element.style.removeProperty("display");
+  if (snapshot.ariaHidden == null) snapshot.element.removeAttribute("aria-hidden");
+  else snapshot.element.setAttribute("aria-hidden", snapshot.ariaHidden);
+}
+
+const MOBILE_SETTINGS_MEDIA_QUERY = "(max-width: 767px)";
+const mobileSettingsSectionSpecs = Object.freeze([
+  {
+    key: "personal-interface",
+    labelKey: "settings.mobile.section.personalInterface",
+    items: ["profile", "appearance", "notifications", "archive"],
+  },
+  {
+    key: "ai-capabilities",
+    labelKey: "settings.mobile.section.aiCapabilities",
+    items: ["models", "providers", "agents", "skills", "memory", "network-search", "im-gateway", "shared-api", "worklines-containers"],
+  },
+  {
+    key: "system-security",
+    labelKey: "settings.mobile.section.systemSecurity",
+    items: ["servers-system", "terminals", "storage", "runtime", "remote-access", "usage", "about"],
+  },
+]);
+
+function isMobileSettingsViewport() {
+  const mediaMatch = globalThis.matchMedia?.(MOBILE_SETTINGS_MEDIA_QUERY)?.matches;
+  if (typeof mediaMatch === "boolean") return mediaMatch;
+  return Number(globalThis.innerWidth || 0) <= 767;
+}
+
+function settingsModalOpen() {
+  const modal = $("settingsModal");
+  return Boolean(modal && !modal.classList.contains("hidden"));
+}
+
+function resolvedMobileSettingsSections() {
+  const itemByKey = new Map(settingsItems.map((item) => [item.key, item]));
+  const canonicalItems = [];
+  const seen = new Set();
+  [...settingsSections.flatMap((section) => section.items || []), ...settingsItems].forEach((item) => {
+    if (!item?.key || seen.has(item.key)) return;
+    seen.add(item.key);
+    canonicalItems.push(itemByKey.get(item.key) || item);
+  });
+  const assigned = new Set(mobileSettingsSectionSpecs.flatMap((section) => section.items));
+  const sections = mobileSettingsSectionSpecs.map((section) => ({
+    ...section,
+    label: t(section.labelKey),
+    items: section.items.map((key) => itemByKey.get(key)).filter(Boolean),
+  }));
+  const unassigned = canonicalItems.filter((item) => !assigned.has(item.key));
+  if (unassigned.length) sections[sections.length - 1].items.push(...unassigned);
+  return sections.filter((section) => section.items.length);
+}
+
+function syncSettingsCloseControl() {
+  const button = $("closeSettingsModalBtn");
+  if (!button) return;
+  const mobile = state.settingsMobileViewport && isMobileSettingsViewport();
+  const detail = mobile && state.mobileSettingsView === "detail";
+  const messageKey = detail
+    ? "settings.mobile.backToIndex"
+    : mobile
+      ? "settings.mobile.close"
+      : "settings.backToChat";
+  const label = t(messageKey);
+  button.textContent = detail ? "←" : "×";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("data-i18n-title", messageKey);
+  button.setAttribute("data-i18n-aria-label", messageKey);
+}
+
+function applyMobileSettingsViewClasses() {
+  const modal = $("settingsModal");
+  if (!modal) return;
+  const mobile = state.settingsMobileViewport && isMobileSettingsViewport();
+  const index = mobile && state.mobileSettingsView === "index";
+  modal.classList.toggle("mobile-settings-index", index);
+  modal.classList.toggle("mobile-settings-detail", mobile && !index);
+  if (mobile) modal.dataset.mobileSettingsView = index ? "index" : "detail";
+  else delete modal.dataset.mobileSettingsView;
+  syncSettingsCloseControl();
+}
+
+function renderMobileSettingsIndex() {
+  const nav = $("settingsNav");
+  if (!nav) return;
+  nav.setAttribute("aria-label", t("settings.mobile.indexTitle"));
+  nav.innerHTML = resolvedMobileSettingsSections().map((section) => `
+    <section class="settings-mobile-index-group" data-mobile-settings-section="${escapeAttr(section.key)}" aria-labelledby="mobile-settings-section-${escapeAttr(section.key)}">
+      <div id="mobile-settings-section-${escapeAttr(section.key)}" class="settings-mobile-index-heading">${escapeHtml(section.label)}</div>
+      <div class="settings-mobile-index-list">
+        ${section.items.map((item) => `
+          <button class="settings-nav-item settings-mobile-index-row" type="button" data-settings-key="${escapeAttr(item.key)}" aria-label="${escapeAttr(item.label)}">
+            <span class="settings-nav-icon" aria-hidden="true">${settingsIconSVG(item.icon)}</span>
+            <span class="settings-nav-label settings-mobile-index-copy"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.subtitle)}</small></span>
+            <span class="settings-mobile-index-chevron" aria-hidden="true">›</span>
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `).join("");
+  nav.querySelectorAll("[data-settings-key]").forEach((node) => {
+    node.addEventListener("click", () => selectSettingsPanel(node.dataset.settingsKey));
+  });
+  bindSettingsArrowNavigation(nav, "[data-settings-key]", { ArrowUp: -1, ArrowDown: 1, Home: "first", End: "last" });
+}
+
+function showMobileSettingsIndex({ focus = false } = {}) {
+  if (!isMobileSettingsViewport() || !settingsModalOpen()) return false;
+  settingsHelp.close({ restoreFocus: false });
+  state.settingsMobileViewport = true;
+  state.mobileSettingsView = "index";
+  if ($("settingsModalTitle")) $("settingsModalTitle").textContent = t("settings.mobile.indexTitle");
+  state.settingsSearchQuery = "";
+  syncSettingsSearchInput();
+  applyMobileSettingsViewClasses();
+  renderMobileSettingsIndex();
+  if (focus) globalThis.queueMicrotask?.(() => $("settingsIdentityBtn")?.focus?.());
+  return true;
+}
+
+function requestCloseSettingsModal(options) {
+  if (state.settingsMobileViewport && state.mobileSettingsView === "detail" && showMobileSettingsIndex({ focus: true })) return;
+  closeSettingsModal(options);
+}
+
+function syncSettingsViewportState() {
+  const mobile = isMobileSettingsViewport();
+  const wasMobile = state.settingsMobileViewport;
+  const wasIndex = state.mobileSettingsView === "index";
+  state.settingsMobileViewport = mobile;
+  if ($("settingsModalTitle")) $("settingsModalTitle").textContent = mobile && state.mobileSettingsView === "detail"
+    ? (settingsItemByKey(state.activeSettingsPanel)?.label || t("settings.dialogTitle"))
+    : (mobile ? t("settings.mobile.indexTitle") : t("settings.dialogTitle"));
+  if (!settingsModalOpen()) {
+    state.mobileSettingsView = "detail";
+    applyMobileSettingsViewClasses();
+    return;
+  }
+  if (mobile) {
+    if (state.settingsShellOpen) exitSettingsShell();
+    applyMobileSettingsViewClasses();
+    if (state.mobileSettingsView === "index") renderMobileSettingsIndex();
+    else renderSettingsNav(state.activeSettingsPanel || "providers");
+    return;
+  }
+  state.mobileSettingsView = "detail";
+  applyMobileSettingsViewClasses();
+  enterSettingsShell();
+  if (wasMobile && wasIndex) selectSettingsPanel(state.activeSettingsPanel || "providers");
+  else renderSettingsNav(state.activeSettingsPanel || "providers");
+}
+
+function layoutSettingsShell() {
+  if (!state.settingsShellOpen || !settingsShellSession) return;
+  const { appShell, modal, card } = settingsShellSession;
+  const desktop = globalThis.matchMedia?.("(min-width: 768px)")?.matches !== false;
+  if (desktop) {
+    const railWidth = globalThis.matchMedia?.("(min-width: 1280px)")?.matches ? "76px" : "68px";
+    appShell.style.setProperty("grid-template-columns", `${railWidth} var(--session-sidebar-width, 296px) minmax(0, 1fr)`);
+    modal.style.setProperty("grid-column", "2 / -1");
+    modal.style.setProperty("grid-row", "1");
+    card.style.setProperty("grid-template-columns", "var(--session-sidebar-width, 296px) minmax(0, 1fr)");
+    card.style.setProperty("grid-template-rows", "minmax(0, 1fr)");
+  } else {
+    appShell.style.removeProperty("grid-template-columns");
+    modal.style.setProperty("grid-column", "1 / -1");
+    modal.style.setProperty("grid-row", "2");
+    card.style.setProperty("grid-template-columns", "minmax(0, 1fr)");
+    card.style.setProperty("grid-template-rows", "minmax(220px, 40vh) minmax(0, 1fr)");
+  }
+}
+
+function enterSettingsShell() {
+  if (state.settingsShellOpen) {
+    layoutSettingsShell();
+    return;
+  }
+  const appShell = $("appShell");
+  const modal = $("settingsModal");
+  const card = modal?.querySelector(".settings-dialog-shell");
+  if (!appShell || !modal || !card) return;
+
+  saveCurrentChatDraft();
+  hideSlashCommandPalette();
+  closeMobileSidebar();
+  const originalParent = modal.parentNode;
+  const originalNextSibling = modal.nextSibling;
+  const hiddenNodes = [
+    "sessionSidebar",
+    "sidebarResizeHandle",
+    "conversationPanel",
+    "workbenchPanel",
+    "terminalPanel",
+    "conversationDetailsPanel",
+    "backgroundTaskTray",
+    "expandTerminalBtn",
+  ].map((id) => setSettingsShellNodeHidden($(id), true)).filter(Boolean);
+  const appShellStyle = captureInlineProperties(appShell, ["grid-template-columns"]);
+  const modalStyle = captureInlineProperties(modal, [
+    "position", "inset", "width", "height", "min-width", "min-height", "display", "grid-column", "grid-row",
+    "align-items", "justify-content", "overflow", "padding", "background", "backdrop-filter", "z-index",
+  ]);
+  const cardStyle = captureInlineProperties(card, [
+    "width", "height", "max-width", "max-height", "display", "grid-template-columns", "grid-template-rows",
+    "overflow", "border", "border-radius", "box-shadow",
+  ]);
+  settingsShellSession = {
+    appShell,
+    modal,
+    card,
+    originalParent,
+    originalNextSibling,
+    originalRole: modal.getAttribute("role"),
+    originalAriaModal: modal.getAttribute("aria-modal"),
+    hiddenNodes,
+    appShellStyle,
+    modalStyle,
+    cardStyle,
+  };
+  state.settingsShellOpen = true;
+  appShell.appendChild(modal);
+  modal.setAttribute("role", "region");
+  modal.removeAttribute("aria-modal");
+  modal.style.setProperty("position", "relative");
+  modal.style.setProperty("inset", "auto");
+  modal.style.setProperty("width", "auto");
+  modal.style.setProperty("height", "100%");
+  modal.style.setProperty("min-width", "0");
+  modal.style.setProperty("min-height", "0");
+  modal.style.setProperty("display", "flex");
+  modal.style.setProperty("align-items", "stretch");
+  modal.style.setProperty("justify-content", "stretch");
+  modal.style.setProperty("overflow", "hidden");
+  modal.style.setProperty("padding", "0");
+  modal.style.setProperty("background", "transparent");
+  modal.style.setProperty("backdrop-filter", "none");
+  modal.style.setProperty("z-index", "10");
+  card.style.setProperty("width", "100%");
+  card.style.setProperty("height", "100%");
+  card.style.setProperty("max-width", "none");
+  card.style.setProperty("max-height", "none");
+  card.style.setProperty("display", "grid");
+  card.style.setProperty("overflow", "hidden");
+  card.style.setProperty("border", "0");
+  card.style.setProperty("border-radius", "0");
+  card.style.setProperty("box-shadow", "none");
+  layoutSettingsShell();
+}
+
+function exitSettingsShell() {
+  const session = settingsShellSession;
+  state.settingsShellOpen = false;
+  settingsShellSession = null;
+  if (!session) return;
+  const { modal, originalParent, originalNextSibling } = session;
+  restoreInlineProperties(session.appShellStyle);
+  restoreInlineProperties(session.modalStyle);
+  restoreInlineProperties(session.cardStyle);
+  session.hiddenNodes.forEach(restoreSettingsShellNode);
+  if (session.originalRole == null) modal.removeAttribute("role");
+  else modal.setAttribute("role", session.originalRole);
+  if (session.originalAriaModal == null) modal.removeAttribute("aria-modal");
+  else modal.setAttribute("aria-modal", session.originalAriaModal);
+  if (originalParent) {
+    if (originalNextSibling?.parentNode === originalParent) originalParent.insertBefore(modal, originalNextSibling);
+    else originalParent.appendChild(modal);
+  }
+  applyPrimaryWorkbench(state.activeWorkbench);
+}
+
+function openSettingsModal(key = "providers", { trigger = document.activeElement, showMobileIndex = false } = {}) {
   backgroundTasks.closeTray("settings-open");
   closeEmployeeOverview({ restoreWorkbench: false });
   closeConversationDetails();
@@ -1918,16 +2297,23 @@ function openSettingsModal(key = "providers", { trigger = document.activeElement
   const wasOpen = !modal?.classList.contains("hidden");
   state.settingsSearchQuery = "";
   state.activeSettingsCategory = settingsCategoryForItem(itemKey, "api");
+  state.settingsMobileViewport = isMobileSettingsViewport();
+  state.mobileSettingsView = "detail";
   modal?.classList.remove("hidden");
+  setThemePageContext("");
+  if (state.settingsMobileViewport) exitSettingsShell();
+  else enterSettingsShell();
   if (!wasOpen) beginSettingsDialogFocus(trigger);
   setGlobalRailActive("profile");
   syncSettingsSearchInput();
   warmSettingsData();
-  renderSettingsNav(itemKey);
+  applyMobileSettingsViewClasses();
   selectSettingsPanel(itemKey);
+  if (itemKey === "appearance") themeManager.loadCatalog({ force: true }).catch(() => {});
+  if (state.settingsMobileViewport && showMobileIndex) showMobileSettingsIndex();
 }
 
-function closeSettingsModal({ restoreWorkbench = true } = {}) {
+function closeSettingsModal({ restoreWorkbench = true, restoreFocus = true } = {}) {
   const modal = $("settingsModal");
   const wasOpen = Boolean(modal && !modal.classList.contains("hidden"));
   if (wasOpen) {
@@ -1937,7 +2323,11 @@ function closeSettingsModal({ restoreWorkbench = true } = {}) {
     $("settingsContentBody").textContent = "";
   }
   modal?.classList.add("hidden");
-  if (wasOpen) restoreSettingsDialogFocus();
+  state.mobileSettingsView = "detail";
+  applyMobileSettingsViewClasses();
+  exitSettingsShell();
+  syncThemePageContext();
+  if (wasOpen && restoreFocus) restoreSettingsDialogFocus();
   if (restoreWorkbench) setGlobalRailActive(primaryWorkbenchRailTarget());
 }
 
@@ -2011,9 +2401,10 @@ function renderEmployeeOverview() {
 async function openEmployeeOverview() {
   backgroundTasks.closeTray("employee-overview-open");
   closeConversationDetails();
-  closeSettingsModal({ restoreWorkbench: false });
+  closeSettingsModal({ restoreWorkbench: false, restoreFocus: false });
   setGlobalRailActive("profile");
   $("employeeOverviewModal")?.classList.remove("hidden");
+  setThemePageContext("");
   renderEmployeeOverview();
   await automationControl.load();
   renderEmployeeOverview();
@@ -2021,6 +2412,7 @@ async function openEmployeeOverview() {
 
 function closeEmployeeOverview({ restoreWorkbench = true } = {}) {
   $("employeeOverviewModal")?.classList.add("hidden");
+  syncThemePageContext();
   if (restoreWorkbench && (!$("settingsModal") || $("settingsModal").classList.contains("hidden"))) {
     setGlobalRailActive(primaryWorkbenchRailTarget());
   }
@@ -2111,6 +2503,11 @@ function selectSettingsCategory(categoryKey) {
 function renderSettingsNav(activeKey = "providers") {
   const nav = $("settingsNav");
   if (!nav) return;
+  if (state.settingsMobileViewport && state.mobileSettingsView === "index" && isMobileSettingsViewport()) {
+    renderMobileSettingsIndex();
+    return;
+  }
+  nav.setAttribute("aria-label", t("settings.directory"));
   syncSettingsSearchInput();
   const categoryKey = settingsCategoryForItem(activeKey, state.activeSettingsCategory || "api");
   state.activeSettingsCategory = categoryKey;
@@ -2125,7 +2522,7 @@ function renderSettingsNav(activeKey = "providers") {
       <div class="settings-nav-group-label">${escapeHtml(category.label)}</div>
       ${category.items.map((item) => `
         <button class="settings-nav-item ${item.key === activeKey ? "active" : ""}" type="button" ${item.key === activeKey ? 'aria-current="page"' : ""} data-settings-key="${escapeAttr(item.key)}" title="${escapeAttr(item.label)}">
-          <span class="settings-nav-icon" aria-hidden="true">${escapeHtml(item.icon)}</span>
+          <span class="settings-nav-icon" aria-hidden="true">${settingsIconSVG(item.icon)}</span>
           <span class="settings-nav-label"><strong>${escapeHtml(item.label)}</strong></span>
         </button>
       `).join("")}
@@ -2153,6 +2550,7 @@ function clearSettingsSearchQuery({ focus = false } = {}) {
 }
 
 function focusSettingsSearchInput({ select = false } = {}) {
+  if (state.settingsMobileViewport && state.mobileSettingsView === "index") return;
   const input = $("settingsSearchInput");
   if (!input) return;
   input.focus();
@@ -2161,6 +2559,12 @@ function focusSettingsSearchInput({ select = false } = {}) {
 
 function selectSettingsPanel(key) {
   const item = settingsItemByKey(key) || settingsItems[0];
+  if ($("settingsModalTitle")) $("settingsModalTitle").textContent = isMobileSettingsViewport() ? item.label : t("settings.dialogTitle");
+  if (isMobileSettingsViewport() && settingsModalOpen()) {
+    state.settingsMobileViewport = true;
+    state.mobileSettingsView = "detail";
+    applyMobileSettingsViewClasses();
+  }
   const panel = settingsPanelRegistry.resolve(item.key);
   const categoryKey = settingsCategoryForItem(item.key, state.activeSettingsCategory || "api");
   settingsHelp.close({ restoreFocus: false });
@@ -2183,6 +2587,10 @@ function selectSettingsPanel(key) {
 function refreshActiveSettingsPanel() {
   const modal = $("settingsModal");
   if (!modal || modal.classList.contains("hidden")) return;
+  if (state.settingsMobileViewport && state.mobileSettingsView === "index" && isMobileSettingsViewport()) {
+    renderMobileSettingsIndex();
+    return;
+  }
   selectSettingsPanel(state.activeSettingsPanel || "profile");
 }
 
@@ -2190,7 +2598,7 @@ function renderGenericSettingsContent(item) {
   const details = settingsPanelDetails(item.key);
   return `
     <div class="settings-panel-card">
-      <div class="settings-panel-icon">${escapeHtml(item.icon)}</div>
+      <div class="settings-panel-icon">${settingsIconSVG(item.icon)}</div>
       <div>
         <div class="settings-panel-title">${escapeHtml(item.label)}</div>
         <p data-settings-help-copy>${escapeHtml(item.subtitle)}</p>
@@ -2262,10 +2670,6 @@ function settingsPanelDetails(key) {
       { title: "Codex OAuth", text: codexProviderSummary() },
       { title: "Secret", text: am("secretDescription") },
     ],
-    "agent-admin": [
-      { title: am("backendCount"), text: am("agentServerBackends", { count: state.backends.length }) },
-      { title: am("currentBackend"), text: activeBackend()?.name || am("backendNotConfigured") },
-    ],
     "servers-system": [
       { title: am("serverPort"), text: `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "7788"}` },
       { title: am("version"), text: state.settings?.version || "0.1.0-dev" },
@@ -2293,10 +2697,19 @@ function renderEmptyWorkspaceCard({ title = t("chat.emptyTitle"), text = t("chat
   `;
 }
 
+function syncThemePageContext() {
+  const settingsOpen = elementVisible("settingsModal") || elementVisible("employeeOverviewModal");
+  const homeEmpty = !settingsOpen
+    && state.activeWorkbench === "conversation"
+    && !state.agent;
+  setThemePageContext(homeEmpty ? "home-empty" : "");
+}
+
 function showEmptyWorkspaceState(options = {}) {
   const el = $("messages");
   if (!el) return;
   const busy = options.busy === true;
+  syncThemePageContext();
   el.classList.add("empty");
   el.innerHTML = renderEmptyWorkspaceCard(options);
   if (busy) {
@@ -2308,18 +2721,40 @@ function showEmptyWorkspaceState(options = {}) {
   }
 }
 
-function markMessageViewportBusy() {
+function clearMessageViewportBusyTimer() {
+  if (messageViewportBusyTimer === null) return;
+  window.clearTimeout(messageViewportBusyTimer);
+  messageViewportBusyTimer = null;
+}
+
+function markMessageViewportBusy(options = {}) {
   const el = $("messages");
   if (!el) return;
+  clearMessageViewportBusyTimer();
   el.setAttribute("aria-busy", "true");
   el.dataset.initialChatState = "loading";
+  delete el.dataset.contextSwitching;
+  delete el.dataset.switchingLabel;
+  if (!options.contextSwitch) return;
+
+  const label = String(options.label || am("projectLoadingTitle"));
+  messageViewportBusyTimer = window.setTimeout(() => {
+    messageViewportBusyTimer = null;
+    const current = $("messages");
+    if (!current || current.getAttribute("aria-busy") !== "true") return;
+    current.dataset.contextSwitching = "true";
+    current.dataset.switchingLabel = label;
+  }, messageViewportBusyDelayMs);
 }
 
 function clearMessageViewportBusy() {
+  clearMessageViewportBusyTimer();
   const el = $("messages");
   if (!el) return;
   el.removeAttribute("aria-busy");
   delete el.dataset.initialChatState;
+  delete el.dataset.contextSwitching;
+  delete el.dataset.switchingLabel;
 }
 
 function permissionLabel(value) {
@@ -2468,7 +2903,7 @@ function currentWorkspaceModel() {
 }
 
 function conversationHeaderTitle() {
-  return state.agent?.title || state.project?.name || t("chat.noAgent");
+  return state.agent?.title || state.navigationTransitionTitle || state.project?.name || t("chat.noAgent");
 }
 
 function titleEditorElements(surface) {
@@ -2485,7 +2920,7 @@ function titleEditorElements(surface) {
 }
 
 function titleForSurface(surface) {
-  if (surface === "workbench") return state.agent?.title || state.project?.name || t("workbench.title");
+  if (surface === "workbench") return state.agent?.title || state.navigationTransitionTitle || state.project?.name || t("workbench.title");
   return conversationHeaderTitle();
 }
 
@@ -2533,11 +2968,23 @@ function renderAgentTitleEditor(surface) {
   }
 }
 
+function syncMobilePageTitle() {
+  const node = $("mobilePageTitle");
+  if (!node) return;
+  if (state.activeWorkbench === "workbench") {
+    node.textContent = titleForSurface("workbench") || t("workbench.title");
+    return;
+  }
+  node.textContent = (!state.project && !state.agent) ? t("shell.home") : titleForSurface("conversation");
+}
+
 function renderConversationHeaderIdentity() {
   renderAgentTitleEditor("conversation");
+  syncMobilePageTitle();
 }
 
 function renderWorkbenchHeaderIdentity() {
+  syncMobilePageTitle();
   const workspaceState = taskWorkspace.getState();
   if (workspaceState.scope === "agent") {
     renderAgentTitleEditor("workbench");
@@ -2705,6 +3152,109 @@ function renderRecentSidebarConversations() {
   });
 }
 
+function closeNavigationContextMenu({ restoreFocus = false } = {}) {
+  const menu = $("navigationContextMenu");
+  const target = state.navigationMenuTarget;
+  const trigger = target?.trigger?.isConnected
+    ? target.trigger
+    : [...document.querySelectorAll("[data-navigation-kind][data-navigation-id]:not([data-navigation-menu-trigger])")]
+      .find((node) => node.dataset.navigationKind === target?.kind && node.dataset.navigationId === target?.id);
+  state.navigationMenuTarget = null;
+  menu?.classList.add("hidden");
+  menu?.setAttribute("aria-hidden", "true");
+  if (restoreFocus) trigger?.focus?.();
+}
+
+function navigationMenuRecord(kind, id) {
+  if (kind === "project") {
+    const project = state.projects.find((item) => item.id === id);
+    return project ? { kind, id, pinned: Boolean(project.pinned), archived: Boolean(project.archivedAt) } : null;
+  }
+  const conversation = state.navigationConversations.find((item) => item.agentId === id);
+  return conversation
+    ? { kind, id, pinned: Boolean(conversation.agentPinned), archived: Boolean(conversation.agentArchivedAt) }
+    : null;
+}
+
+function positionNavigationContextMenu(menu, x, y) {
+  const margin = 8;
+  const width = menu.offsetWidth || 180;
+  const height = menu.offsetHeight || 88;
+  const maxX = Math.max(margin, (window.innerWidth || document.documentElement.clientWidth) - width - margin);
+  const maxY = Math.max(margin, (window.innerHeight || document.documentElement.clientHeight) - height - margin);
+  menu.style.left = `${Math.min(Math.max(margin, Number(x) || margin), maxX)}px`;
+  menu.style.top = `${Math.min(Math.max(margin, Number(y) || margin), maxY)}px`;
+}
+
+function openNavigationContextMenu(kind, id, event, trigger = null) {
+  const record = navigationMenuRecord(kind, id);
+  const menu = $("navigationContextMenu");
+  if (!record || !menu) return false;
+  const pinItem = menu.querySelector('[data-navigation-menu-action="pin"]');
+  const archiveItem = menu.querySelector('[data-navigation-menu-action="archive"]');
+  state.navigationMenuTarget = { ...record, trigger };
+  setTranslatedText(pinItem, record.pinned ? "shell.unpin" : "shell.pin");
+  setTranslatedText(archiveItem, record.archived ? "shell.restore" : "shell.archive");
+  menu.dataset.navigationMenuKind = kind;
+  menu.dataset.navigationMenuId = id;
+  menu.classList.remove("hidden");
+  menu.setAttribute("aria-hidden", "false");
+  const rect = trigger?.getBoundingClientRect?.();
+  const x = event?.clientX || (rect ? rect.right : 0);
+  const y = event?.clientY || (rect ? rect.bottom : 0);
+  positionNavigationContextMenu(menu, x, y);
+  (pinItem || archiveItem)?.focus?.();
+  return true;
+}
+
+function handleNavigationContextMenu(event) {
+  const row = event.target.closest?.("[data-navigation-kind][data-navigation-id]");
+  if (!row || !$("projects")?.contains(row)) return;
+  const kind = String(row.dataset.navigationKind || "").trim();
+  const id = String(row.dataset.navigationId || "").trim();
+  if (!kind || !id) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openNavigationContextMenu(kind, id, event, row);
+}
+
+function bindNavigationMenuTriggers() {
+  $("projects")?.querySelectorAll("[data-navigation-menu-trigger]").forEach((trigger) => {
+    const open = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openNavigationContextMenu(trigger.dataset.navigationKind, trigger.dataset.navigationId, event, trigger);
+    };
+    trigger.addEventListener("click", open);
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      open(event);
+    });
+  });
+}
+
+async function applyNavigationMenuAction(action) {
+  const target = state.navigationMenuTarget;
+  if (!target || !["pin", "archive"].includes(action)) return;
+  const patch = action === "pin"
+    ? { pinned: !target.pinned }
+    : { archived: !target.archived };
+  closeNavigationContextMenu({ restoreFocus: true });
+  const path = target.kind === "project"
+    ? `/api/projects/${encodeURIComponent(target.id)}/navigation-state`
+    : `/api/agents/${encodeURIComponent(target.id)}/navigation-state`;
+  try {
+    await api(path, { method: "PATCH", body: JSON.stringify(patch) });
+    await loadProjects();
+    const messageKey = action === "pin"
+      ? (patch.pinned ? "shell.pinSuccess" : "shell.unpinSuccess")
+      : (patch.archived ? "shell.archiveSuccess" : "shell.restoreSuccess");
+    showToast(t(messageKey), "success", { force: true });
+  } catch (error) {
+    showToast(error?.message || t("shell.navigationStateFailed"), "error", { force: true });
+  }
+}
+
 async function loadProjects() {
   const seq = ++state.navigationLoadSeq;
   try {
@@ -2749,6 +3299,15 @@ function syncNavigationConversationFromAgent(agent, options = {}) {
   return true;
 }
 
+function bindNavigationActivation(node, activate) {
+  node.addEventListener("click", activate);
+  node.addEventListener("keydown", (event) => {
+    if (event.target !== node || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    activate();
+  });
+}
+
 function renderProjects() {
   const el = $("projects");
   if (!el) return;
@@ -2776,15 +3335,16 @@ function renderProjects() {
     node.setAttribute("aria-pressed", active ? "true" : "false");
   });
   el.querySelectorAll("[data-project-id]").forEach((node) => {
-    node.addEventListener("click", () => selectProject(node.dataset.projectId).then(() => {
+    bindNavigationActivation(node, () => selectProject(node.dataset.projectId).then(() => {
       if (state.activeWorkbench === "workbench") {
         taskWorkspace.setContext({ projectId: node.dataset.projectId, agentId: state.agent?.id || "", scope: "project" });
       }
     }).catch(showError));
   });
   el.querySelectorAll("[data-navigation-target]").forEach((node) => {
-    node.addEventListener("click", () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
+    bindNavigationActivation(node, () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
   });
+  bindNavigationMenuTriggers();
   el.querySelectorAll("[data-primary-workbench-target]").forEach((node) => {
     node.addEventListener("click", () => switchPrimaryWorkbench(node.dataset.primaryWorkbenchTarget));
   });
@@ -2850,22 +3410,25 @@ async function createProjectFromDirectory(path, options = {}) {
   }
 }
 
-function beginNavigationSelection(project) {
+function beginNavigationSelection(project, options = {}) {
   saveCurrentChatDraft();
   hideSlashCommandPalette();
   closeMobileSidebar();
   state.projectCreateSeq++;
   const seq = ++state.projectSelectSeq;
+  const previousTitle = conversationHeaderTitle();
+  state.navigationTransitionTitle = options.preserveConversationView ? previousTitle : "";
   disconnectAgentTransports();
   state.project = project || null;
   state.workline = null;
   state.agent = null;
+  state.workState = null;
   state.titleEditing = false;
   state.titleSaving = false;
   state.titleDraft = "";
-  renderConversationHeaderIdentity();
+  if (!options.preserveConversationView) renderConversationHeaderIdentity();
   state.chatHydrating = true;
-  clearLiveAssistantText();
+  clearLiveAssistantText({ preserveView: true });
   setWorkspaceExplorerAgent(null);
   projectKanban.setAgent(null);
   taskWorkspace.setContext({ projectId: project?.id || "", agentId: "" });
@@ -2888,24 +3451,34 @@ function beginNavigationSelection(project) {
 }
 
 async function selectProject(id, options = {}) {
-  const seq = beginNavigationSelection(state.projects.find((project) => project.id === id) || null);
+  const project = state.projects.find((item) => item.id === id) || null;
+  const preserveConversationView = Boolean(
+    state.project?.id
+      && state.project.id !== id
+      && state.agent?.id,
+  );
+  const seq = beginNavigationSelection(project, { preserveConversationView });
   if (!state.project) {
     state.chatHydrating = false;
     updateWorkspaceMetaPills();
     showEmptyWorkspaceState();
     return;
   }
-  $("currentTitle").textContent = state.project.name;
-  updateWorkspaceMetaPills();
-  if (!options.preserveMessageState) {
-    showEmptyWorkspaceState({
-      title: am("projectLoadingTitle"),
-      text: am("projectLoadingDescription"),
-      action: am("chooseAnotherFolder"),
-      hint: state.project.gitPath || "",
-      icon: "…",
-      busy: true,
-    });
+  if (!preserveConversationView) {
+    $("currentTitle").textContent = state.project.name;
+    updateWorkspaceMetaPills();
+    if (!options.preserveMessageState) {
+      showEmptyWorkspaceState({
+        title: am("projectLoadingTitle"),
+        text: am("projectLoadingDescription"),
+        action: am("chooseAnotherFolder"),
+        hint: state.project.gitPath || "",
+        icon: "…",
+        busy: true,
+      });
+    }
+  } else {
+    markMessageViewportBusy({ contextSwitch: true, label: am("projectLoadingTitle") });
   }
   try {
     const worklines = await api(`/api/projects/${id}/worklines`);
@@ -2914,8 +3487,10 @@ async function selectProject(id, options = {}) {
     state.workline = state.projectWorklines[0] || null;
     if (!state.workline) {
       state.chatHydrating = false;
+      state.navigationTransitionTitle = "";
       $("currentTitle").textContent = state.project.name;
       updateWorkspaceMetaPills();
+      clearMessageViewportBusy();
       showEmptyWorkspaceState({ title: am("noWorklines"), text: am("noWorklinesDescription"), action: am("chooseAnotherFolder"), icon: "◇" });
       return;
     }
@@ -2926,16 +3501,20 @@ async function selectProject(id, options = {}) {
     state.agent = state.worklineAgents.find((agent) => agent.type === "primary") || state.worklineAgents[0] || null;
     if (!state.agent) {
       state.chatHydrating = false;
+      state.navigationTransitionTitle = "";
       $("currentTitle").textContent = state.project.name;
       updateWorkspaceMetaPills();
+      clearMessageViewportBusy();
       showEmptyWorkspaceState({ title: am("noAgents"), text: am("noAgentsDescription"), action: am("chooseAnotherFolder"), icon: "♧" });
       return;
     }
     await enterAgent();
     if (seq !== state.projectSelectSeq) return;
+    clearMessageViewportBusy();
   } catch (err) {
     if (seq === state.projectSelectSeq && state.project?.id === id) {
       state.chatHydrating = false;
+      clearMessageViewportBusy();
       throw err;
     }
   }
@@ -2951,17 +3530,20 @@ async function selectNavigationConversation(target, options = {}) {
     gitPath: navigationConversation.projectPath,
     updatedAt: navigationConversation.projectUpdatedAt,
   } : null);
-  const seq = beginNavigationSelection(project);
+  const preserveConversationView = Boolean(state.agent?.id);
+  const seq = beginNavigationSelection(project, { preserveConversationView });
   if (!state.project) {
     state.chatHydrating = false;
     showEmptyWorkspaceState();
     throw new Error(am("projectNoLongerExists"));
   }
 
-  $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
+  if (!preserveConversationView) {
+    $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
+  }
   updateWorkspaceMetaPills();
-  // Keep the previous conversation in place while the next one hydrates. Replacing
-  // it with a full-screen loading card causes a distracting flash on every switch.
+  // Keep the previous title and conversation in place while the next one hydrates.
+  // Replacing either with an intermediate project/loading state causes a distracting flash.
   markMessageViewportBusy();
 
   try {
@@ -3018,8 +3600,10 @@ async function openTaskWorkspaceAgent(agent, project) {
 
 async function enterAgent() {
   if (!state.agent) return;
+  syncThemePageContext();
   closeConversationDetails();
   const agentId = state.agent.id;
+  state.navigationTransitionTitle = "";
   backgroundTasks.setAgent(agentId);
   setWorkspaceExplorerAgent(state.agent);
   projectKanban.setAgent(state.agent);
@@ -3037,7 +3621,7 @@ async function enterAgent() {
   await restoreCurrentChatDraft();
   syncMessageComposerBusy();
   state.chatHydrating = true;
-  clearRunSummary();
+  clearRunSummary({ preserveView: true });
   clearPlanState(agentId);
   connectTerminal();
   loadGitStatus({ silent: true }).then(renderWorkbenchShell).catch(() => {});
@@ -3124,6 +3708,10 @@ function updateAgentStreamStatus(detail = {}) {
   const badge = $("wsBadge");
   const streamStatus = detail.status || "idle";
   state.agentStreamStatus = streamStatus;
+  if (streamStatus === "resyncing") {
+    state.workState = null;
+    if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
+  }
   const labels = {
     idle: ["ws idle", t("workspace.main.idle"), false],
     syncing: ["ws syncing", t("workspace.main.syncing"), false],
@@ -3146,10 +3734,13 @@ function updateAgentStreamStatus(detail = {}) {
 async function applyAgentLiveSnapshot(snapshot, detail = {}) {
   const agentId = snapshot?.agent?.id || "";
   if (!agentId || state.agent?.id !== agentId) return;
+  const nextAgent = snapshot.agent;
+  const nextWorkState = normalizeWorkStateSnapshot(snapshot);
+  state.agent = nextAgent;
+  state.workState = nextWorkState;
   backgroundTasks.applySnapshot(snapshot, { agentId });
   if (detail.source === "initial") await executionNotifications.initial(snapshot, { agentId });
   else await executionNotifications.snapshot(snapshot, { agentId });
-  state.agent = snapshot.agent;
   renderConversationHeaderIdentity();
   syncNavigationConversationFromAgent(state.agent, { reason: "agent-snapshot" });
   navigationRefresh.request("agent-snapshot");
@@ -3397,10 +3988,10 @@ $("settingsSearchInput")?.addEventListener("keydown", (event) => {
 });
 $("clearSettingsSearchBtn")?.addEventListener("click", () => clearSettingsSearchQuery({ focus: true }));
 $("settingsIdentityBtn")?.addEventListener("click", () => selectSettingsPanel("profile"));
-$("closeSettingsModalBtn").addEventListener("click", closeSettingsModal);
+$("closeSettingsModalBtn").addEventListener("click", () => requestCloseSettingsModal());
 $("settingsModal").addEventListener("keydown", (event) => {
   settingsHelp.handleKeydown(event);
-  handleSettingsDialogKeydown(event);
+  if (!state.settingsShellOpen) handleSettingsDialogKeydown(event);
 });
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
 $("closeEmployeeOverviewBtn")?.addEventListener("click", closeEmployeeOverview);
@@ -3427,7 +4018,7 @@ $("mobileDrawerSearchBtn")?.addEventListener("click", focusMobileSearch);
 $("mobileSidebarSettingsBtn")?.addEventListener("click", () => {
   closeMobileSidebar();
   closeSidebarSettingsMenu();
-  openSettingsModal("providers");
+  openSettingsModal("providers", { showMobileIndex: true });
 });
 $("mobileSidebarLogoutBtn")?.addEventListener("click", () => {
   closeMobileSidebar();
@@ -3439,6 +4030,26 @@ $("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node
     state.navigationMode = node.dataset.navigationMode || "all";
     renderProjects();
   });
+});
+$("navigationContextMenu")?.addEventListener("click", (event) => {
+  const action = event.target.closest?.("[data-navigation-menu-action]")?.dataset.navigationMenuAction;
+  if (!action) return;
+  event.preventDefault();
+  event.stopPropagation();
+  applyNavigationMenuAction(action).catch(showError);
+});
+document.addEventListener("contextmenu", handleNavigationContextMenu);
+document.addEventListener("click", (event) => {
+  const menu = $("navigationContextMenu");
+  if (!menu || menu.classList.contains("hidden")) return;
+  if (menu.contains(event.target) || event.target.closest?.("[data-navigation-menu-trigger]")) return;
+  closeNavigationContextMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!(state.navigationMenuTarget && !$("navigationContextMenu")?.classList.contains("hidden"))) return;
+  closeNavigationContextMenu({ restoreFocus: true });
+  event.preventDefault();
 });
 $("projectSearchToggleBtn")?.addEventListener("click", (event) => {
   event.preventDefault();
@@ -3541,6 +4152,9 @@ $("terminalOutput").addEventListener("paste", (event) => {
 });
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", () => {
+  closeMobileSidebar({ restoreFocus: false });
+  syncSettingsViewportState();
+  layoutSettingsShell();
   resizeTerminal();
   autoResizeMessageInput();
 });
@@ -3554,6 +4168,7 @@ window.addEventListener("autoto:auth-changed", () => {
   state.project = null;
   state.workline = null;
   state.agent = null;
+  state.workState = null;
   state.projectWorklines = [];
   state.worklineAgents = [];
   state.chatHydrating = false;
@@ -3642,8 +4257,12 @@ async function init() {
     state.promptHistory = loadPromptHistory();
     state.recentConversations = loadRecentConversations();
     applyAppearancePreferences({ applyTerminalDefault: true });
+    themeManager.loadCatalog()
+      .then(() => themeManager.applyPreference(currentAppearancePreferences(), { notifyMissing: false }))
+      .catch(() => {});
     applyPrimaryWorkbench(currentPrimaryModePreference());
     updateGlobalThemeToggle();
+    const accountPreferencesHydration = accountPreferences.hydrate();
     if (!state.agent) {
       $("currentTitle").textContent = t("chat.noAgent");
       $("composerStatusText").textContent = t("chat.idle");
@@ -3656,8 +4275,11 @@ async function init() {
     renderRecentSidebarConversations();
     renderRecentSidebarDirectories();
     await loadHealth();
-    await Promise.all([loadSettings(), loadRuntimeSummary(), remoteAccessSettings.load().catch(() => {}), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);
+    await Promise.all([accountPreferencesHydration, loadSettings(), loadRuntimeSummary(), remoteAccessSettings.load().catch(() => {}), loadModelCatalog(), loadProjects(), loadBackends(), loadServerSkills()]);
     if (seq !== state.initSeq) return;
+    state.profile = loadProfilePreferences();
+    applyProfilePreferences();
+    renderModelOptions();
     navigationRefresh.start();
     if (!state.agent) {
       const initialTarget = resolveInitialNavigationTarget(state.recentConversations, state.navigationConversations);

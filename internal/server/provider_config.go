@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -60,13 +61,54 @@ type providerTestResponse struct {
 	Message    string   `json:"message"`
 }
 
+type providerMessageTestRequest struct {
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	Profile        string `json:"profile"`
+	BaseURL        string `json:"baseUrl"`
+	APIKey         string `json:"apiKey"`
+	ClearAPIKey    bool   `json:"clearApiKey"`
+	Model          string `json:"model"`
+	MaxTokens      int64  `json:"maxTokens"`
+	APIKeyOptional bool   `json:"apiKeyOptional"`
+	Prompt         string `json:"prompt"`
+}
+
+type providerMessageTestResponse struct {
+	Success   bool             `json:"success"`
+	Model     string           `json:"model,omitempty"`
+	Output    string           `json:"output,omitempty"`
+	Usage     *providers.Usage `json:"usage,omitempty"`
+	Truncated bool             `json:"truncated,omitempty"`
+	ErrorCode string           `json:"errorCode,omitempty"`
+	Message   string           `json:"message"`
+}
+
+func (r providerMessageTestRequest) configUpdateRequest() providerConfigUpdateRequest {
+	return providerConfigUpdateRequest{
+		Name:           r.Name,
+		Type:           r.Type,
+		Profile:        r.Profile,
+		BaseURL:        r.BaseURL,
+		APIKey:         r.APIKey,
+		ClearAPIKey:    r.ClearAPIKey,
+		Model:          r.Model,
+		MaxTokens:      r.MaxTokens,
+		APIKeyOptional: r.APIKeyOptional,
+	}
+}
+
 const (
-	providerTestTimeout          = 3 * time.Second
-	maxProviderConfigRequestSize = 32 << 10
-	maxProviderBaseURLBytes      = 2048
-	maxProviderAPIKeyBytes       = 16 << 10
-	maxProviderModelBytes        = 512
-	maxProviderProfileBytes      = 64
+	providerTestTimeout               = 3 * time.Second
+	providerMessageTestTimeout        = 30 * time.Second
+	providerMessageTestMaxOutputBytes = 64 << 10
+	providerMessageTestMaxPromptBytes = 8 << 10
+	providerMessageTestMaxTokens      = 512
+	maxProviderConfigRequestSize      = 32 << 10
+	maxProviderBaseURLBytes           = 2048
+	maxProviderAPIKeyBytes            = 16 << 10
+	maxProviderModelBytes             = 512
+	maxProviderProfileBytes           = 64
 )
 
 func providerGatewaySharingForbidden(providerType, profile string) bool {
@@ -102,8 +144,37 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	renamed := existed && existing.Name != updated.Name
+	if renamed {
+		if config.IsBuiltinProviderName(existing.Name) {
+			writeError(w, http.StatusBadRequest, "内置 Provider 不支持重命名")
+			return
+		}
+		if config.IsBuiltinProviderName(updated.Name) {
+			writeError(w, http.StatusBadRequest, "新的 Provider 名称不能使用内置名称")
+			return
+		}
+		if _, occupied := s.providerConfig(updated.Name); occupied {
+			writeError(w, http.StatusConflict, "Provider 名称已存在")
+			return
+		}
+	}
 
 	incomingAPIKey := strings.TrimSpace(req.APIKey)
+	storedSecretRenamed := renamed && storedProviderSecretSource(existing.APIKeySource)
+	storedSecretCanMigrate := storedSecretRenamed && existing.Type == updated.Type && existing.Profile == updated.Profile && existing.BaseURL == updated.BaseURL
+	if storedSecretCanMigrate && incomingAPIKey == "" && !req.ClearAPIKey {
+		if s.providerVault == nil {
+			writeError(w, http.StatusBadRequest, "重命名已保存凭据的 Provider 前请重新输入 API Key")
+			return
+		}
+		resolved, _, resolveErr := s.providerVault.Resolve(r.Context(), serverProviderSecretBinding(existing))
+		if resolveErr != nil || strings.TrimSpace(resolved) == "" {
+			writeError(w, http.StatusBadRequest, "无法读取原 Provider 凭据；请重新输入 API Key 后再重命名")
+			return
+		}
+		incomingAPIKey = strings.TrimSpace(resolved)
+	}
 	secretMutation := ""
 	switch {
 	case incomingAPIKey != "":
@@ -138,10 +209,15 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.cfgMu.RLock()
 	cfg := s.cfg
-	cfg.Providers.Instances = upsertServerProvider(cfg.Providers.Instances, updated)
+	if renamed {
+		cfg.Providers.Instances = renameServerProvider(cfg.Providers.Instances, existing.Name, updated)
+		renameProviderModelReferences(&cfg, existing.Name, updated.Name, existing.Model, updated.Model)
+	} else {
+		cfg.Providers.Instances = upsertServerProvider(cfg.Providers.Instances, updated)
+	}
 	configPath := s.configPath
 	s.cfgMu.RUnlock()
-	if err := s.ensureProviderDefaultAfterMutation(cfg, providerName); err != nil {
+	if err := s.ensureProviderDefaultAfterMutation(cfg, updated.Name); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -165,23 +241,30 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	persisted, err := s.persistProviderConfig(configPath, cfg)
 	if err != nil {
 		if secretPrepared {
-			_ = s.providerVault.RollbackPending(r.Context(), providerName)
+			_ = s.providerVault.RollbackPending(r.Context(), updated.Name)
 		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存配置失败：%v", err))
 		return
 	}
 	if secretPrepared && !persisted {
-		_ = s.providerVault.RollbackPending(r.Context(), providerName)
+		_ = s.providerVault.RollbackPending(r.Context(), updated.Name)
 		writeError(w, http.StatusInternalServerError, "配置路径不可用，Provider 凭据未保存。")
 		return
 	}
 	if secretPrepared {
-		if err := s.providerVault.CommitPending(r.Context(), providerName); err != nil {
+		if err := s.providerVault.CommitPending(r.Context(), updated.Name); err != nil {
 			// config.json already contains the target revision. Keep the pending
 			// record so startup recovery can finish without crossing bindings.
 			writeError(w, http.StatusInternalServerError, "Provider 凭据提交未完成；重启后将自动恢复。")
 			return
 		}
+	}
+	oldSecretCleanupFailed := false
+	if storedSecretRenamed && s.providerVault != nil {
+		oldSecretCleanupFailed = s.providerVault.Delete(r.Context(), existing.Name) != nil
+	}
+	if renamed {
+		s.unregisterProvider(existing.Name)
 	}
 	if updated.Disabled {
 		s.unregisterProvider(updated.Name)
@@ -195,8 +278,14 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 
 	status := s.providerAPIKeyStatus(r.Context(), updated)
 	message := "Provider 配置已持久化并在当前运行时生效。"
+	if renamed {
+		message = "Provider 配置已保存，名称已更新并在当前运行时生效。"
+	}
 	if incomingAPIKey != "" && s.providerVault == nil {
 		message = "Provider 配置已生效；当前测试实例未启用持久凭据仓库。"
+	}
+	if oldSecretCleanupFailed {
+		message += "旧凭据记录未能立即清理，将在后续恢复流程中处理。"
 	}
 	writeJSON(w, http.StatusOK, providerConfigUpdateResponse{
 		Provider:        s.settingsProviderResponse(r.Context(), updated),
@@ -425,6 +514,107 @@ func (s *Server) testProviderConfigDraft(w http.ResponseWriter, r *http.Request)
 	s.testProviderAdapter(w, r, provider)
 }
 
+// testProviderMessageDraft sends one tool-free prompt through a temporary
+// provider adapter. It never persists the draft or changes the runtime registry.
+func (s *Server) testProviderMessageDraft(w http.ResponseWriter, r *http.Request) {
+	var req providerMessageTestRequest
+	if err := decodeProviderJSONRequest(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateProviderConfigRequest(req.configUpdateRequest()); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ClearAPIKey {
+		writeError(w, http.StatusBadRequest, "provider message test does not support clearing API keys")
+		return
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if err := validateAPIText("prompt", prompt, providerMessageTestMaxPromptBytes, true, true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	providerName := strings.TrimSpace(req.Name)
+	if err := validateProviderName(providerName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+
+	s.providerMutationMu.Lock()
+	existing, _ := s.providerConfig(providerName)
+	provider, err := providerConfigFromUpdateRequest(providerName, existing, req.configUpdateRequest())
+	s.providerMutationMu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	adapter, err := s.newRuntimeProvider(provider)
+	if err != nil {
+		writeJSON(w, http.StatusOK, providerMessageTestResponse{ErrorCode: "invalid_configuration", Message: "Provider 配置无效。"})
+		return
+	}
+	configured := providers.ConfiguredForScenario(adapter, provider.IsConfigured(), providers.CallScenarioInternal)
+	if !configured {
+		writeJSON(w, http.StatusOK, providerMessageTestResponse{Model: provider.Model, ErrorCode: "not_configured", Message: "需要 API Key，尚未发送测试。"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), providerMessageTestTimeout)
+	defer cancel()
+	events, err := adapter.Generate(ctx, providers.GenerateRequest{
+		Model:           provider.Model,
+		Messages:        []providers.Message{{Role: "user", Content: prompt}},
+		MaxOutputTokens: providerMessageTestMaxTokens,
+		Scenario:        providers.CallScenarioInternal,
+	})
+	if err != nil {
+		errorCode, message := classifyProviderMessageTestError(err)
+		writeJSON(w, http.StatusOK, providerMessageTestResponse{Model: provider.Model, ErrorCode: errorCode, Message: message})
+		return
+	}
+
+	var output strings.Builder
+	var usage *providers.Usage
+	truncated := false
+	for {
+		select {
+		case <-ctx.Done():
+			errorCode, message := classifyProviderMessageTestError(ctx.Err())
+			writeJSON(w, http.StatusOK, providerMessageTestResponse{Model: provider.Model, ErrorCode: errorCode, Message: message})
+			return
+		case event, ok := <-events:
+			if !ok {
+				text := strings.TrimSpace(output.String())
+				if text == "" {
+					writeJSON(w, http.StatusOK, providerMessageTestResponse{Model: provider.Model, Usage: usage, ErrorCode: "empty_response", Message: "模型没有返回文本。"})
+					return
+				}
+				writeJSON(w, http.StatusOK, providerMessageTestResponse{Success: true, Model: provider.Model, Output: text, Usage: usage, Truncated: truncated, Message: "测试消息发送成功。"})
+				return
+			}
+			if event.Usage != nil {
+				copy := *event.Usage
+				usage = &copy
+			}
+			switch event.Type {
+			case "error":
+				errorCode, message := classifyProviderMessageTestError(errors.New(event.Text))
+				writeJSON(w, http.StatusOK, providerMessageTestResponse{Model: provider.Model, Usage: usage, ErrorCode: errorCode, Message: message})
+				return
+			case "text":
+				if appendProviderMessageTestOutput(&output, event.Text, providerMessageTestMaxOutputBytes) {
+					truncated = true
+				}
+			}
+		}
+	}
+}
+
 func (s *Server) testProviderAdapter(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig) {
 	adapter, err := s.newRuntimeProvider(provider)
 	if err != nil {
@@ -487,7 +677,7 @@ func (s *Server) providerConfig(name string) (config.ProviderConfig, bool) {
 	return config.ProviderConfig{}, false
 }
 
-func decodeProviderConfigUpdateRequest(r *http.Request, dst *providerConfigUpdateRequest) error {
+func decodeProviderJSONRequest(r *http.Request, dst any) error {
 	defer r.Body.Close()
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxProviderConfigRequestSize+1))
 	decoder.DisallowUnknownFields()
@@ -501,10 +691,14 @@ func decodeProviderConfigUpdateRequest(r *http.Request, dst *providerConfigUpdat
 		}
 		return err
 	}
-	if err := validateProviderConfigRequest(*dst); err != nil {
+	return nil
+}
+
+func decodeProviderConfigUpdateRequest(r *http.Request, dst *providerConfigUpdateRequest) error {
+	if err := decodeProviderJSONRequest(r, dst); err != nil {
 		return err
 	}
-	return nil
+	return validateProviderConfigRequest(*dst)
 }
 
 func validateProviderConfigRequest(req providerConfigUpdateRequest) error {
@@ -550,11 +744,8 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 	if err := validateProviderName(name); err != nil {
 		return config.ProviderConfig{}, err
 	}
-	if name != providerName {
-		return config.ProviderConfig{}, errors.New("暂不支持在此处重命名 provider，请保持供应商名称不变")
-	}
 	providerType := strings.TrimSpace(req.Type)
-	if providerType == "" && existing.Name == name {
+	if providerType == "" && existing.Name != "" {
 		providerType = existing.Type
 	}
 	if providerType == "" {
@@ -573,7 +764,7 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		baseURL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 	}
 	model := strings.TrimSpace(req.Model)
-	if model == "" && existing.Name == name {
+	if model == "" && existing.Name != "" {
 		model = existing.Model
 	}
 	if model == "" {
@@ -589,18 +780,18 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		}
 	}
 	maxTokens := req.MaxTokens
-	if maxTokens <= 0 && existing.Name == name {
+	if maxTokens <= 0 && existing.Name != "" {
 		maxTokens = existing.MaxTokens
 	}
 	if providerType == "anthropic" && maxTokens <= 0 {
 		maxTokens = 4096
 	}
 	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" && existing.Name == name {
+	if apiKey == "" && existing.Name != "" {
 		apiKey = existing.APIKey
 	}
 	profile := strings.TrimSpace(req.Profile)
-	if profile == "" && existing.Name == name {
+	if profile == "" && existing.Name != "" {
 		profile = existing.Profile
 	}
 	if err := validateProviderProfile(profile); err != nil {
@@ -809,6 +1000,42 @@ func classifyProviderTestError(err error) (errorCode, message string, reachable 
 	}
 }
 
+func classifyProviderMessageTestError(err error) (errorCode, message string) {
+	errorCode, _, _ = classifyProviderTestError(err)
+	switch errorCode {
+	case "timeout":
+		return errorCode, "模型响应超时。"
+	case "authentication_failed":
+		return errorCode, "Provider 拒绝了凭据，测试消息未发送。"
+	case "not_configured":
+		return errorCode, "Provider 凭据尚未配置，测试消息未发送。"
+	case "unreachable":
+		return errorCode, "无法连接 Provider，测试消息未发送。"
+	default:
+		return "request_failed", "模型测试失败。"
+	}
+}
+
+func appendProviderMessageTestOutput(output *strings.Builder, text string, maxBytes int) bool {
+	if output == nil || text == "" {
+		return false
+	}
+	remaining := maxBytes - output.Len()
+	if remaining <= 0 {
+		return true
+	}
+	if len(text) <= remaining {
+		output.WriteString(text)
+		return false
+	}
+	text = text[:remaining]
+	for text != "" && !utf8.ValidString(text) {
+		text = text[:len(text)-1]
+	}
+	output.WriteString(text)
+	return true
+}
+
 func upsertServerProvider(items []config.ProviderConfig, provider config.ProviderConfig) []config.ProviderConfig {
 	out := append([]config.ProviderConfig(nil), items...)
 	for i, existing := range out {
@@ -818,6 +1045,63 @@ func upsertServerProvider(items []config.ProviderConfig, provider config.Provide
 		}
 	}
 	return append(out, provider)
+}
+
+func renameServerProvider(items []config.ProviderConfig, oldName string, provider config.ProviderConfig) []config.ProviderConfig {
+	out := make([]config.ProviderConfig, 0, len(items))
+	replaced := false
+	for _, existing := range items {
+		if existing.Name == oldName {
+			if !replaced {
+				out = append(out, provider)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, existing)
+	}
+	if !replaced {
+		out = append(out, provider)
+	}
+	return out
+}
+
+func renameProviderModelReferences(cfg *config.Config, oldName, newName, oldModel, newModel string) {
+	if cfg == nil || strings.TrimSpace(oldName) == "" || strings.TrimSpace(newName) == "" || oldName == newName {
+		return
+	}
+	cfg.Agent.DefaultModel = renameProviderModelReference(cfg.Agent.DefaultModel, oldName, newName, oldModel, newModel)
+	cfg.Agent.SummaryModel = renameProviderModelReference(cfg.Agent.SummaryModel, oldName, newName, oldModel, newModel)
+	cfg.Agent.ReviewModel = renameProviderModelReference(cfg.Agent.ReviewModel, oldName, newName, oldModel, newModel)
+	if cfg.Agent.SubagentModels != nil {
+		models := make(map[string]string, len(cfg.Agent.SubagentModels))
+		for role, model := range cfg.Agent.SubagentModels {
+			models[role] = renameProviderModelReference(model, oldName, newName, oldModel, newModel)
+		}
+		cfg.Agent.SubagentModels = models
+	}
+	if cfg.Agent.SubagentModelPools != nil {
+		pools := make(map[string][]string, len(cfg.Agent.SubagentModelPools))
+		for role, models := range cfg.Agent.SubagentModelPools {
+			updated := make([]string, len(models))
+			for i, model := range models {
+				updated[i] = renameProviderModelReference(model, oldName, newName, oldModel, newModel)
+			}
+			pools[role] = updated
+		}
+		cfg.Agent.SubagentModelPools = pools
+	}
+}
+
+func renameProviderModelReference(value, oldName, newName, oldModel, newModel string) string {
+	providerName, modelName := providers.SplitModel(strings.TrimSpace(value))
+	if providerName != oldName || modelName == "" {
+		return value
+	}
+	if strings.TrimSpace(oldModel) != "" && modelName == oldModel && strings.TrimSpace(newModel) != "" {
+		modelName = newModel
+	}
+	return newName + ":" + modelName
 }
 
 func removeServerProvider(items []config.ProviderConfig, name string) ([]config.ProviderConfig, bool) {

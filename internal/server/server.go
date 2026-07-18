@@ -29,6 +29,7 @@ import (
 	"autoto/internal/providers"
 	"autoto/internal/review"
 	"autoto/internal/secrets"
+	"autoto/internal/themes"
 	"autoto/internal/tools"
 )
 
@@ -41,10 +42,23 @@ func (f *redactingLogFormatter) NewLogEntry(r *http.Request) middleware.LogEntry
 		return (&middleware.DefaultLogFormatter{Logger: log.New(os.Stdout, "", log.LstdFlags), NoColor: true}).NewLogEntry(r)
 	}
 	query := r.URL.Query()
-	if _, present := query[localTokenQuery]; !present {
+	redacted := false
+	if _, present := query[localTokenQuery]; present {
+		query.Set(localTokenQuery, "[REDACTED]")
+		redacted = true
+	}
+	if r.URL.Path == oauthAppCallbackPath && r.URL.RawQuery != "" {
+		for key := range query {
+			query.Set(key, "[REDACTED]")
+		}
+		if len(query) == 0 {
+			query.Set("callback", "[REDACTED]")
+		}
+		redacted = true
+	}
+	if !redacted {
 		return f.delegate.NewLogEntry(r)
 	}
-	query.Set(localTokenQuery, "[REDACTED]")
 	clone := r.Clone(r.Context())
 	urlCopy := *r.URL
 	urlCopy.RawQuery = query.Encode()
@@ -104,14 +118,18 @@ type Server struct {
 	toolRegistryMu            sync.RWMutex
 	backgroundTasks           tools.BackgroundTaskService
 	previewManager            *preview.Manager
+	temporaryTunnel           *TemporaryTunnelManager
 	notifier                  *WebhookNotifier
 	automation                *automation.Manager
 	connections               *integrations.ConnectionService
 	plugins                   PluginService
+	themeStore                *themes.Store
 	reviewer                  *review.Service
 	audit                     audit.Recorder
 	integrationClient         *http.Client
 	deviceAdapterFactory      func(context.Context, string) (devices.Adapter, error)
+	oauthAppMu                sync.Mutex
+	oauthApp                  *oauthAppRuntime
 }
 
 func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agentpkg.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -145,6 +163,13 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		codexCredentials:     codexauth.NewStore(codexauth.DefaultStoreDir(cfg.Paths.HomeDir)),
 		anthropicCredentials: anthropicauth.NewStore(anthropicauth.DefaultStoreDir(cfg.Paths.HomeDir)),
 		toolRegistry:         newCoreToolRegistry(),
+	}
+	if cfg.Paths.HomeDir != "" {
+		if themeStore, err := themes.NewStore(cfg.Paths.HomeDir); err != nil {
+			slog.Warn("initialize theme store", "error", err)
+		} else {
+			server.themeStore = themeStore
+		}
 	}
 	server.SetReviewService(NewReviewService(providerRegistry, cfg.Agent.ReviewModel))
 	if runner != nil {
@@ -245,6 +270,10 @@ func (s *Server) SetPluginService(service PluginService) {
 	s.plugins = service
 }
 
+func (s *Server) SetThemeStore(store *themes.Store) {
+	s.themeStore = store
+}
+
 // NewReviewService constructs the isolated, tool-free reviewer used by plan
 // runs. It deliberately receives only the provider registry and review model.
 func NewReviewService(registry *providers.Registry, model string) *review.Service {
@@ -279,6 +308,10 @@ func (s *Server) SetPreviewManager(manager *preview.Manager) {
 	s.previewManager = manager
 }
 
+func (s *Server) SetTemporaryTunnelManager(manager *TemporaryTunnelManager) {
+	s.temporaryTunnel = manager
+}
+
 func (s *Server) warnLegacy(key, legacy, replacement, kind string) {
 	if s.legacyWarnings == nil {
 		return
@@ -305,6 +338,8 @@ func (s *Server) Routes() http.Handler {
 	r.Use(s.localRequestGuard)
 	r.Use(s.projectAccessGuard)
 	s.mountUI(r)
+	s.mountOAuthApp(r)
+	s.mountThemeRoutes(r)
 
 	r.Get("/api/health", s.health)
 	r.Get("/api/auth/status", s.authStatus)
@@ -313,8 +348,14 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/auth/logout", s.logout)
 	r.Get("/api/auth/me", s.me)
 	r.Get("/api/users", s.listUsers)
+	r.Get("/api/preferences", s.getAccountPreferences)
+	r.Patch("/api/preferences", s.patchAccountPreferences)
+	r.Post("/api/preferences/import-local", s.importLocalAccountPreferences)
 	r.Get("/api/settings", s.settings)
 	r.Get("/api/security/remote-access", s.getRemoteAccessSettings)
+	r.Get("/api/security/remote-access/tunnel", s.getTemporaryTunnel)
+	r.Post("/api/security/remote-access/tunnel", s.startTemporaryTunnel)
+	r.Delete("/api/security/remote-access/tunnel", s.stopTemporaryTunnel)
 	r.Patch("/api/security/remote-access/policy", s.updateRemoteAccessPolicy)
 	r.Put("/api/security/remote-access/password", s.updateRemoteAccessPassword)
 	r.Get("/api/models", s.models)
@@ -328,6 +369,7 @@ func (s *Server) Routes() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(s.sensitiveLocalTokenGuard)
 		r.Post("/api/providers/test", s.testProviderConfigDraft)
+		r.Post("/api/providers/test-message", s.testProviderMessageDraft)
 		r.Put("/api/providers/{name}/config", s.updateProviderConfig)
 		r.Patch("/api/providers/{name}", s.patchProviderConfig)
 		r.Delete("/api/providers/{name}", s.deleteProviderConfig)
@@ -468,6 +510,7 @@ func (s *Server) Routes() http.Handler {
 	r.Route("/api/projects", func(r chi.Router) {
 		r.Get("/", s.listProjects)
 		r.Post("/", s.createProject)
+		r.Patch("/{id}/navigation-state", s.patchProjectNavigationState)
 		r.Get("/{id}", s.getProject)
 		r.Get("/{id}/worklines", s.listProjectWorklines)
 		r.Get("/{id}/chapters", s.listProjectWorklines)
@@ -492,6 +535,7 @@ func (s *Server) Routes() http.Handler {
 		r.Patch("/{id}/fast-mode", s.updateAgentFastMode)
 		r.Patch("/{id}/permission-mode", s.updateAgentPermissionMode)
 		r.Patch("/{id}/plan-mode", s.updateAgentPlanMode)
+		r.Patch("/{id}/navigation-state", s.patchAgentNavigationState)
 		r.Get("/{id}/plans", s.listReviewPlans)
 		r.Post("/{id}/plans", s.createReviewPlan)
 		r.Get("/{id}/plans/{planId}", s.getReviewPlan)

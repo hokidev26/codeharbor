@@ -922,8 +922,8 @@ export function createChatRenderingController({
     `;
   }
 
-  function renderLiveAssistantCard() {
-    if (state.chatHydrating) return;
+  function renderLiveAssistantCard({ preserveView = false } = {}) {
+    if (preserveView || state.chatHydrating) return;
     const el = $("messages");
     if (!el) return;
     const existing = el.querySelector("[data-live-assistant]");
@@ -993,7 +993,7 @@ export function createChatRenderingController({
     return true;
   }
 
-  function clearLiveAssistantText() {
+  function clearLiveAssistantText({ preserveView = false } = {}) {
     state.liveAssistantActive = false;
     state.liveAssistantText = "";
     state.liveAssistantRequestId = "";
@@ -1002,7 +1002,7 @@ export function createChatRenderingController({
     state.liveAssistantModel = "";
     state.liveAssistantStartedAt = "";
     state.liveAssistantPerformance = null;
-    renderLiveAssistantCard();
+    renderLiveAssistantCard({ preserveView });
   }
 
   function renderCorrectionEditor(message) {
@@ -1066,7 +1066,7 @@ export function createChatRenderingController({
     showToast("已创建更正消息并重新运行。", "success");
   }
 
-  function clearRunSummary() {
+  function clearRunSummary({ preserveView = false } = {}) {
     state.activeRunSummary = null;
     state.activeRunSummaryRunId = "";
     state.activeRunToolCalls = [];
@@ -1077,7 +1077,7 @@ export function createChatRenderingController({
     state.runSummaryError = "";
     state.runRollbackBusy = false;
     state.runSummarySeq = Number(state.runSummarySeq || 0) + 1;
-    renderRunSummaryCard();
+    if (!preserveView) renderRunSummaryCard();
   }
 
   async function loadLatestRunSummary(agentId = state.agent?.id) {
@@ -1163,17 +1163,24 @@ export function createChatRenderingController({
     const el = $("messages");
     if (!el) return;
     const existing = el.querySelector("[data-run-summary-card]");
-    if (existing) existing.remove();
+    // Keep the current review card stable while a refresh is in flight. Rendering
+    // the transient loading status here makes context switches visibly flash.
+    if (state.runSummaryLoading) return;
     const html = renderRunSummaryCardHTML();
-    if (!html) return;
-    if (el.classList.contains("empty")) {
-      el.classList.remove("empty");
-      el.innerHTML = html;
-    } else {
-      const approvalStack = el.querySelector("[data-approval-stack]");
-      if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
-      else el.insertAdjacentHTML("beforeend", html);
+    if (existing) {
+      if (html) existing.outerHTML = html;
+      else existing.remove();
+    } else if (html) {
+      if (el.classList.contains("empty")) {
+        el.classList.remove("empty");
+        el.innerHTML = html;
+      } else {
+        const approvalStack = el.querySelector("[data-approval-stack]");
+        if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
+        else el.insertAdjacentHTML("beforeend", html);
+      }
     }
+    if (!html) return;
     bindRunSummaryButtons(el);
     el.scrollTop = el.scrollHeight;
   }
@@ -1183,7 +1190,8 @@ export function createChatRenderingController({
     const run = summary?.run;
     const runId = state.activeRunSummaryRunId || run?.id || "";
     if (!run && !runId && !state.runSummaryLoading && !state.runSummaryError) return "";
-    const status = run?.status || (state.runSummaryLoading ? "loading" : "unknown");
+    if (!run && state.runSummaryLoading && !state.runSummaryError) return "";
+    const status = run?.status || "unknown";
     const checkpoint = runCheckpointState(run);
     const toolCalls = state.activeRunToolCallsRunId === runId && Array.isArray(state.activeRunToolCalls)
       ? state.activeRunToolCalls
@@ -1195,7 +1203,7 @@ export function createChatRenderingController({
         <div class="run-summary-head">
           <div>
             <div class="run-summary-kicker">${escapeHtml(cr("run.review"))}</div>
-            <div class="run-summary-title">${escapeHtml(runStatusLabel(status))}${state.runSummaryLoading ? ` · ${escapeHtml(cr("run.refreshing"))}` : ""}</div>
+            <div class="run-summary-title">${escapeHtml(runStatusLabel(status))}</div>
             <div class="run-summary-meta">${escapeHtml(runTimeRange(run))}${runId ? ` · ${escapeHtml(shortRunId(runId))}` : ""}</div>
           </div>
           <span class="run-summary-status">${escapeHtml(status)}</span>
@@ -1640,19 +1648,23 @@ export function createChatRenderingController({
     const el = $("messages");
     if (!el) return;
     const existing = el.querySelector("[data-live-tool-output-stack]");
-    if (existing) existing.remove();
     const html = renderLiveToolOutputCardsHTML();
-    if (!html) return;
-    if (el.classList.contains("empty")) {
-      el.classList.remove("empty");
-      el.innerHTML = html;
-    } else {
-      const runSummary = el.querySelector("[data-run-summary-card]");
-      const approvalStack = el.querySelector("[data-approval-stack]");
-      if (runSummary) runSummary.insertAdjacentHTML("beforebegin", html);
-      else if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
-      else el.insertAdjacentHTML("beforeend", html);
+    if (existing) {
+      if (html) existing.outerHTML = html;
+      else existing.remove();
+    } else if (html) {
+      if (el.classList.contains("empty")) {
+        el.classList.remove("empty");
+        el.innerHTML = html;
+      } else {
+        const runSummary = el.querySelector("[data-run-summary-card]");
+        const approvalStack = el.querySelector("[data-approval-stack]");
+        if (runSummary) runSummary.insertAdjacentHTML("beforebegin", html);
+        else if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);
+        else el.insertAdjacentHTML("beforeend", html);
+      }
     }
+    if (!html) return;
     el.scrollTop = el.scrollHeight;
   }
 
@@ -1735,15 +1747,19 @@ export function createChatRenderingController({
     const el = $("messages");
     if (!el) return;
     const existing = el.querySelector("[data-approval-stack]");
-    if (existing) existing.remove();
     const html = renderApprovalCardsHTML();
-    if (!html) return;
-    if (el.classList.contains("empty")) {
-      el.classList.remove("empty");
-      el.innerHTML = html;
-    } else {
-      el.insertAdjacentHTML("beforeend", html);
+    if (existing) {
+      if (html) existing.outerHTML = html;
+      else existing.remove();
+    } else if (html) {
+      if (el.classList.contains("empty")) {
+        el.classList.remove("empty");
+        el.innerHTML = html;
+      } else {
+        el.insertAdjacentHTML("beforeend", html);
+      }
     }
+    if (!html) return;
     bindApprovalButtons(el);
     el.scrollTop = el.scrollHeight;
   }

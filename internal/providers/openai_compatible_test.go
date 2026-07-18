@@ -506,3 +506,32 @@ func TestOpenAICompatibleWithoutAPIKeyReturnsUnavailableError(t *testing.T) {
 		t.Fatal("unconfigured provider must not return a successful event stream")
 	}
 }
+
+func TestOpenAICompatibleStreamFailsClosedWithoutTerminalEvent(t *testing.T) {
+	out := make(chan Event, 4)
+	handleOpenAICompatibleStream(out, strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+	close(out)
+	var sawError, sawDone bool
+	for event := range out {
+		sawError = sawError || event.Type == "error"
+		sawDone = sawDone || event.Type == "done"
+	}
+	if !sawError || sawDone {
+		t.Fatalf("unterminated stream was not fail-closed: error=%v done=%v", sawError, sawDone)
+	}
+}
+
+func TestOpenAICompatiblePropagatesLengthFinishReason(t *testing.T) {
+	out := make(chan Event, 4)
+	handleOpenAICompatibleJSON(out, strings.NewReader(`{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}`))
+	close(out)
+	var done Event
+	for event := range out {
+		if event.Type == "done" {
+			done = event
+		}
+	}
+	if !done.Done || done.StopReason != "length" {
+		t.Fatalf("length finish reason was not propagated: %+v", done)
+	}
+}

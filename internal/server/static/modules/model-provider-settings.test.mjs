@@ -35,6 +35,7 @@ import {
   providerModelDiscovery,
   providerPreflightResult,
   restoreProviderConsoleFocus,
+  selectProviderConsoleFieldOnFocus,
   shouldOpenProviderCardFromKeyboard,
   syncProviderConsoleDraft,
   trapProviderConsoleFocus,
@@ -55,6 +56,7 @@ import {
   providerConsoleRequest,
   providerConsoleStats,
   providerTestPayload,
+  providerMessageTestPayload,
   renderProviderConsolePage,
 } from "./model-provider-components.mjs";
 import { setUILocale } from "./i18n.mjs";
@@ -78,6 +80,14 @@ const labels = {
   creditsBalance: "Balance {balance}",
   creditsUnlimited: "Unlimited",
   creditsUnavailable: "Unavailable",
+  usageTotal: "All time",
+  usageLast5Hours: "Last 5 hours",
+  usageLast7Days: "Last 7 days",
+  usageRequests: "requests",
+  usageTokens: "tokens",
+  usageNoLocalData: "No local records",
+  recordedCost: "Recorded local cost",
+  recordedCostHint: "Based on local request records; not a provider billing statement.",
   never: "Never",
   rateLimited: "Rate limited",
   disabled: "Disabled",
@@ -146,6 +156,11 @@ test("Codex account table renders complete account data and escapes HTML", () =>
     plan_type: "team<unsafe>",
     disabled: false,
     stats: { success_count: 12, failure_count: 3, last_use_at: "2025-12-31T23:00:00Z", last_error_code: `bad<script>` },
+    usage: {
+      total: { requestCount: 828, inputTokens: 90000000, outputTokens: 27000000, totalTokens: 117000000, costUsd: 145.19 },
+      last5Hours: { requestCount: 3, inputTokens: 1000, outputTokens: 200, totalTokens: 1200, costUsd: 0.12 },
+      last7Days: { requestCount: 20, inputTokens: 5000, outputTokens: 1000, totalTokens: 6000, costUsd: 1.5 },
+    },
     quota: { plan_type: "team", primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_after_seconds: 3600 } },
   }]);
   assert.match(html, /codex-account-table/);
@@ -156,6 +171,11 @@ test("Codex account table renders complete account data and escapes HTML", () =>
   assert.match(html, /workspace-1/);
   assert.match(html, />12<\/span> \/ <span[^>]*>3</);
   assert.match(html, /75% remaining/);
+  assert.match(html, /828 requests/);
+  assert.match(html, /(?:117M|1\.2億|1\.2亿) tokens/);
+  assert.match(html, /Recorded local cost \$145\.19/);
+  assert.match(html, /Last 5 hours/);
+  assert.match(html, /Last 7 days/);
   assert.match(html, /5h · Resets in 1h 0m/);
   assert.match(html, /data-codex-edit="codex_fixture"/);
   assert.match(html, /data-codex-sync="codex_fixture"/);
@@ -230,7 +250,8 @@ test("Codex quota rendering supports camelCase windows and invalid numeric value
   assert.match(html, /Rate limited/);
   assert.match(html, /0% remaining/);
   assert.match(html, /1h · Resets in 1m/);
-  assert.doesNotMatch(html, /Credits|Balance 12\.5/);
+  assert.match(html, /Credits/);
+  assert.match(html, /Balance \$12\.50/);
   assert.match(html, /codex-priority-value">100/);
   assert.doesNotMatch(html, /NaN/);
   assert.doesNotMatch(html, /<script>/);
@@ -238,10 +259,11 @@ test("Codex quota rendering supports camelCase windows and invalid numeric value
   assert.match(html, /pro&lt;&amp;&gt;/);
 });
 
-test("Codex quota without windows stays compact and shows no quota", () => {
+test("Codex quota without windows still renders upstream credit state", () => {
   const html = render([{ id: "unlimited", quota: { credits: { unlimited: true } } }]);
-  assert.doesNotMatch(html, /Credits|Unlimited/);
-  assert.match(html, /No quota/);
+  assert.match(html, /Credits/);
+  assert.match(html, /Unlimited/);
+  assert.doesNotMatch(html, /No quota/);
 });
 
 test("Codex account status distinguishes disabled, limited, expired, and available", () => {
@@ -529,7 +551,7 @@ test("model catalog passes through object-shaped Provider reasoning capabilities
   });
 });
 
-test("供应商控制台总览将 settings 与 catalog 合并，并保留已禁用供应商", () => {
+test("供应商控制台总览合并数据，并在卡片上提供启停与自建供应商删除入口", () => {
   const providers = modelProvidersForUIUnion(
     [
       { name: "openai", type: "openai", enabled: true, origin: "builtin", model: "gpt-4.1-mini", configured: true },
@@ -555,9 +577,19 @@ test("供应商控制台总览将 settings 与 catalog 合并，并保留已禁�
   assert.match(html, /可用模型/);
   assert.match(html, /需处理/);
   assert.match(html, /data-mp-provider-card="offline-gateway"/);
-  assert.match(html, /mp-provider-card settings-card is-disabled/);
+  assert.match(html, /mp-provider-card settings-card is-disabled is-custom/);
   assert.match(html, /data-disabled="true"/);
-  assert.doesNotMatch(html, /data-mp-provider-toggle|mp-provider-switch|role="switch"/);
+  assert.match(html, /data-mp-category-section="custom"[\s\S]*data-mp-provider-card="offline-gateway"/);
+  const builtinCard = html.match(/<article[^>]*data-mp-provider-card="openai"[\s\S]*?<\/article>/)?.[0] || "";
+  const customCard = html.match(/<article[^>]*data-mp-provider-card="offline-gateway"[\s\S]*?<\/article>/)?.[0] || "";
+  assert.match(builtinCard, /data-mp-provider-toggle="openai"/);
+  assert.match(builtinCard, /role="switch" aria-checked="true"/);
+  assert.doesNotMatch(builtinCard, /data-mp-delete-provider/);
+  assert.match(customCard, /data-mp-provider-toggle="offline-gateway"/);
+  assert.match(customCard, /role="switch" aria-checked="false"/);
+  assert.match(customCard, /data-mp-provider-open="offline-gateway"/);
+  assert.match(customCard, /data-mp-delete-provider="offline-gateway"/);
+  assert.match(customCard, /编辑供应商/);
   for (const className of ["settings-page-section", "settings-card", "settings-card-header", "settings-card-content", "settings-toolbar", "settings-stat-grid", "settings-stat-card", "settings-form-field", "settings-inline-actions", "settings-badge"]) {
     assert.match(html, new RegExp(className));
   }
@@ -584,12 +616,14 @@ test("已获取模型在 Provider 页面可见并进入全局模型选择器", (
     providers,
     consoleState: { drawer: "provider", mode: "edit", type: "openai-compatible", draft: providers[0] },
   });
-  assert.match(html, /mp-provider-models/);
-  assert.match(html, /mp-model-chip/);
-  assert.match(html, /terra-a/);
-  assert.match(html, /terra-b/);
+  assert.match(html, /mp-provider-create-page mp-provider-create-form/);
+  assert.match(html, /mp-provider-edit-page/);
+  assert.match(html, /list="mp-provider-create-model-options"/);
+  assert.match(html, /<option value="terra-a"><\/option>/);
+  assert.match(html, /<option value="terra-b"><\/option>/);
   assert.match(html, /data-mp-model-choice/);
   assert.match(html, /value="terra-a"/);
+  assert.doesNotMatch(html, /data-mp-provider-card="relay"|mp-provider-drawer-backdrop/);
 
   const controller = createModelProviderSettingsController({
     state: {
@@ -634,7 +668,8 @@ test("供应商控制台按分类和搜索过滤，并保留兼容 relay 入口"
     { name: "acme", type: "anthropic", enabled: false, origin: "custom", baseUrl: "https://acme.example", model: "claude" },
   ], []);
   assert.deepEqual(filterConsoleProviders(providers, { category: "official" }).map((provider) => provider.name), ["codex"]);
-  assert.deepEqual(filterConsoleProviders(providers, { category: "compatible" }).map((provider) => provider.name), ["groq"]);
+  assert.deepEqual(filterConsoleProviders(providers, { category: "custom" }).map((provider) => provider.name), ["groq", "acme"]);
+  assert.deepEqual(filterConsoleProviders(providers, { category: "compatible" }).map((provider) => provider.name), []);
   assert.deepEqual(filterConsoleProviders(providers, { search: "acme" }).map((provider) => provider.name), ["acme"]);
   assert.deepEqual(filterConsoleProviders(providers, { search: "groq.example" }).map((provider) => provider.name), ["groq"]);
 
@@ -647,35 +682,117 @@ test("供应商控制台按分类和搜索过滤，并保留兼容 relay 入口"
   assert.match(html, /data-mp-open-relay/);
 });
 
-test("供应商控制台渲染添加类型 modal 和配置 drawer", () => {
-  const providers = modelProvidersForUIUnion([{ name: "groq", type: "openai-compatible", origin: "custom", enabled: true, model: "llama", baseUrl: "https://api.groq.example/v1" }], []);
-  const modal = renderProviderConsolePage({ providers, consoleState: { modal: "types" } });
-  assert.match(modal, /mp-provider-type-modal/);
-  assert.match(modal, /mp-provider-type-grid/);
-  assert.match(modal, /data-mp-select-type="codex"/);
-  assert.match(modal, /data-mp-select-type="ollama"/);
+test("供应商控制台移除类型选择弹窗并让普通编辑使用全页配置", () => {
+  const providers = modelProvidersForUIUnion([{ name: "groq", type: "openai-compatible", origin: "custom", enabled: true, model: "llama", models: ["llama"], baseUrl: "https://api.groq.example/v1" }], []);
+  const list = renderProviderConsolePage({ providers, consoleState: { modal: "types" } });
+  assert.match(list, /data-mp-open-types/);
+  assert.doesNotMatch(list, /mp-provider-type-modal|mp-provider-type-grid|data-mp-select-type/);
 
-  const drawer = renderProviderConsolePage({
+  const editPage = renderProviderConsolePage({
     providers,
     consoleState: { drawer: "provider", mode: "edit", type: "openai-compatible", draft: providers[0] },
   });
-  for (const className of ["mp-provider-drawer-backdrop", "mp-provider-drawer", "mp-drawer-head", "mp-drawer-body", "mp-drawer-foot", "mp-config-section"]) {
-    assert.match(drawer, new RegExp(className));
-  }
-  assert.match(drawer, /data-mp-fetch-models/);
-  assert.match(drawer, /list="mp-provider-model-options"/);
-  assert.match(drawer, /<option value="llama"><\/option>/);
-  assert.match(drawer, /data-mp-test-provider/);
-  assert.match(drawer, /data-mp-save-provider/);
-  assert.match(drawer, /data-mp-delete-provider="groq"/);
-  assert.match(drawer, /aria-describedby="mp-drawer-description"/);
-  assert.match(drawer, /aria-busy="false"/);
-  assert.match(drawer, /settings-card-footer/);
-  assert.match(drawer, /settings-form-field/);
-  assert.match(modal, /aria-describedby="mp-provider-type-description"/);
-  assert.match(modal, /role="dialog" aria-modal="true"/);
-  assert.match(modal, /settings-card-footer/);
-  assert.match(drawer, /留空会保留已保存的 Key/);
+  assert.match(editPage, /mp-provider-page mp-provider-create-page mp-provider-create-form/);
+  assert.match(editPage, /mp-provider-edit-page/);
+  assert.match(editPage, /编辑供应商/);
+  assert.match(editPage, /name="name"[^>]*value="groq"[^>]*required/);
+  assert.doesNotMatch(editPage, /name="name"[^>]*readonly/);
+  assert.match(editPage, /name="baseUrl"[^>]*type="url"/);
+  assert.doesNotMatch(editPage, /name="baseUrl"[^>]*readonly/);
+  assert.match(editPage, /data-mp-fetch-models/);
+  assert.match(editPage, /list="mp-provider-create-model-options"/);
+  assert.match(editPage, /<option value="llama"><\/option>/);
+  assert.match(editPage, /data-mp-test-provider/);
+  assert.match(editPage, /发送测试/);
+  assert.match(editPage, /data-mp-save-provider/);
+  assert.match(editPage, /data-mp-delete-provider="groq"/);
+  assert.match(editPage, /aria-describedby="mp-provider-create-description"/);
+  assert.match(editPage, /aria-busy="false"/);
+  assert.match(editPage, /留空会保留已保存的 Key/);
+  assert.doesNotMatch(editPage, /mp-provider-drawer-backdrop|mp-provider-type-modal|data-mp-provider-card="groq"/);
+
+  const testPage = renderProviderConsolePage({
+    providers,
+    consoleState: {
+      drawer: "provider",
+      mode: "edit",
+      type: "openai-compatible",
+      draft: providers[0],
+      testOpen: true,
+      test: { prompt: "reply", result: { success: true, tone: "success", output: "ok", message: "测试成功" } },
+    },
+  });
+  assert.match(testPage, /mp-provider-test-dialog/);
+  assert.match(testPage, /data-mp-test-prompt/);
+  assert.match(testPage, /data-mp-send-test/);
+  assert.match(testPage, /<pre>ok<\/pre>/);
+});
+
+test("新增供应商入口默认直接建立 custom-openai 全页草稿", () => {
+  const state = { settings: { providers: [] }, modelCatalog: { providers: [] } };
+  let refreshes = 0;
+  const controller = createModelProviderSettingsController({
+    state,
+    refreshActiveSettingsPanel() { refreshes += 1; },
+  });
+  controller.openProviderConsoleType();
+  assert.equal(state.providerConsole.modal, "");
+  assert.equal(state.providerConsole.drawer, "provider");
+  assert.equal(state.providerConsole.mode, "create");
+  assert.equal(state.providerConsole.type, "openai-compatible");
+  assert.equal(state.providerConsole.providerName, "custom-openai");
+  assert.equal(state.providerConsole.draft.name, "custom-openai");
+  assert.equal(state.providerConsole.draft.baseUrl, "https://api.example.com/v1");
+  assert.equal(refreshes, 1);
+  const html = controller.renderProviderSettingsContent();
+  assert.match(html, /mp-provider-create-page/);
+  assert.match(html, /name="name" value=""[^>]*placeholder="custom-openai"/);
+  assert.match(html, /name="baseUrl"[^>]*value=""[^>]*placeholder="https:\/\/api\.example\.com\/v1"/);
+  assert.doesNotMatch(html, /mp-provider-type-modal|data-mp-select-type/);
+});
+
+test("供应商控制台重绘保持状态对象身份，异步模型发现结果不会丢失", () => {
+  const retainedTestState = { prompt: "", result: null };
+  const state = {
+    settings: { providers: [] },
+    modelCatalog: { providers: [] },
+    providerConsole: {
+      drawer: "provider",
+      mode: "create",
+      type: "openai-compatible",
+      providerName: "zzz",
+      dirty: true,
+      busy: {},
+      test: retainedTestState,
+      draft: {
+        ...createProviderDraft("openai-compatible"),
+        name: "zzz",
+        baseUrl: "https://relay.example/v1",
+        model: "your-model",
+        apiKeyOptional: true,
+      },
+    },
+  };
+  const retainedConsoleState = state.providerConsole;
+  const controller = createModelProviderSettingsController({ state });
+
+  controller.renderProviderSettingsContent();
+  assert.equal(state.providerConsole, retainedConsoleState);
+  assert.equal(state.providerConsole.test, retainedTestState);
+
+  const discoveredModels = ["codex-auto-review", "model-b", "model-c", "model-d", "model-e", "model-f", "model-g"];
+  retainedConsoleState.draft = {
+    ...retainedConsoleState.draft,
+    models: discoveredModels,
+    model: discoveredModels[0],
+  };
+  const html = controller.renderProviderSettingsContent();
+
+  assert.equal(state.providerConsole, retainedConsoleState);
+  assert.match(html, /name="model"[^>]*value="codex-auto-review"/);
+  assert.match(html, /<option value="codex-auto-review" selected>/);
+  assert.match(html, /<option value="model-g"><\/option>/);
+  assert.match(html, /value="zzz:codex-auto-review"/);
 });
 
 test("新增普通供应商使用独立全宽扁平配置页", () => {
@@ -788,6 +905,8 @@ test("供应商控制台 toggle、草稿预检、delete 与 config 请求遵守�
   assert.equal(toggle.path, "/api/providers/custom%2Fname%20space");
   assert.equal(toggle.options.method, "PATCH");
   assert.deepEqual(JSON.parse(toggle.options.body), { enabled: true, model: "model-a" });
+  const toggleWithoutModel = providerConsoleRequest("toggle", { name: "empty-provider" }, { enabled: false });
+  assert.deepEqual(JSON.parse(toggleWithoutModel.options.body), { enabled: false });
 
   const draft = {
     name: provider.name,
@@ -821,6 +940,14 @@ test("供应商控制台 toggle、草稿预检、delete 与 config 请求遵守�
   assert.equal(Object.hasOwn(JSON.parse(testConnection.options.body), "origin"), false);
   assert.equal(Object.hasOwn(JSON.parse(testConnection.options.body), "enabled"), false);
 
+  const messagePayload = providerMessageTestPayload(draft, provider, "reply with ok");
+  assert.equal(messagePayload.prompt, "reply with ok");
+  assert.equal(Object.hasOwn(messagePayload, "origin"), false);
+  const messageTest = providerConsoleRequest("message-test", provider, { ...draft, prompt: "reply with ok" });
+  assert.equal(messageTest.path, "/api/providers/test-message");
+  assert.equal(messageTest.options.method, "POST");
+  assert.deepEqual(JSON.parse(messageTest.options.body), messagePayload);
+
   const remove = providerConsoleRequest("delete", provider);
   assert.deepEqual(remove, { path: "/api/providers/custom%2Fname%20space", options: { method: "DELETE" } });
 
@@ -828,6 +955,12 @@ test("供应商控制台 toggle、草稿预检、delete 与 config 请求遵守�
   assert.equal(config.path, "/api/providers/custom%2Fname%20space/config");
   assert.equal(config.options.method, "PUT");
   assert.equal(JSON.parse(config.options.body).apiKey, "");
+
+  const renameConfig = providerConsoleRequest("config", { name: "old-name" }, { name: "new-name", pathName: "old-name", type: "openai-compatible", baseUrl: "https://example.test/v1", model: "model-a" });
+  assert.equal(renameConfig.path, "/api/providers/old-name/config");
+  assert.equal(JSON.parse(renameConfig.options.body).name, "new-name");
+  const renameToggle = providerConsoleRequest("toggle", { name: "new-name" }, { name: "new-name", enabled: true, model: "model-a" });
+  assert.equal(renameToggle.path, "/api/providers/new-name");
 });
 
 test("供应商表单草稿实时同步并在后台重绘时保持 dirty 内容", () => {
@@ -878,6 +1011,74 @@ test("供应商表单草稿实时同步并在后台重绘时保持 dirty 内容"
   assert.doesNotMatch(refreshedRender, /draft-key/);
   assert.equal(state.providerConsole.dirty, true);
   assert.equal(state.providerConsole.draft.apiKey, "draft-key");
+});
+
+test("模型选择器更新 draft 后会在重绘中保持选中模型和引用", () => {
+  const form = {
+    elements: {
+      name: { value: "relay" },
+      type: { value: "openai-compatible" },
+      baseUrl: { value: "https://relay.example/v1" },
+      apiKey: { value: "" },
+      model: { value: "model-b" },
+      maxTokens: { value: "0" },
+      apiKeyOptional: { checked: true },
+    },
+  };
+  const consoleState = { type: "openai-compatible", draft: { name: "relay", models: ["model-a", "model-b"], model: "model-a" } };
+  syncProviderConsoleDraft(consoleState, form);
+  assert.equal(consoleState.draft.model, "model-b");
+  const html = renderProviderConsolePage({
+    providers: [{ name: "relay", type: "openai-compatible", model: "model-b", models: ["model-a", "model-b"], baseUrl: "https://relay.example/v1", configured: true, enabled: true, origin: "custom" }],
+    consoleState: { drawer: "provider", mode: "edit", type: "openai-compatible", draft: consoleState.draft },
+  });
+  assert.match(html, /<option value="model-b" selected>/);
+  assert.match(html, /value="relay:model-b"/);
+});
+
+test("模型可见性偏好通过注入 getter 隐藏模型且不依赖全局 localStorage", () => {
+  const previousStorage = globalThis.localStorage;
+  delete globalThis.localStorage;
+  try {
+    const controller = createModelProviderSettingsController({
+      state: {
+        settings: { providers: [{ name: "openai", type: "openai", model: "gpt-5", configured: true, enabled: true }] },
+        modelCatalog: { providers: [{ name: "openai", type: "openai", configured: true, enabled: true, models: ["gpt-5", "gpt-4.1-mini"] }] },
+        agent: { model: "openai:gpt-5" },
+      },
+      getModelVisibilityPreference: () => ({ hiddenModels: { "openai:gpt-4.1-mini": true }, showUnconfiguredProviders: false }),
+    });
+    const html = controller.renderModelSettingsContent();
+    assert.match(html, /data-toggle-model-visibility="openai:gpt-4\.1-mini"/);
+    assert.match(html, /data-model-visibility-state="hidden"/);
+    assert.match(html, /aria-pressed="false"/);
+    assert.match(html, /显示这个模型/);
+    assert.doesNotMatch(controller.renderAgentModelOptions(""), /openai:gpt-4\.1-mini/);
+    assert.match(controller.renderAgentModelOptions(""), /openai:gpt-5/);
+  } finally {
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
+});
+
+test("首选模型通过注入 getter 和乐观 setter 且不依赖全局 localStorage", () => {
+  const previousStorage = globalThis.localStorage;
+  delete globalThis.localStorage;
+  const saved = [];
+  try {
+    const controller = createModelProviderSettingsController({
+      state: {},
+      getPreferredModelPreference: () => saved.at(-1) || "openai:gpt-server",
+      setPreferredModelPreference: (value) => saved.push(value),
+    });
+    assert.equal(controller.getPreferredModel(), "openai:gpt-server");
+    assert.equal(controller.setPreferredModel("anthropic:claude"), "anthropic:claude");
+    assert.equal(saved.at(-1), "anthropic:claude");
+    assert.equal(controller.getPreferredModel(), "anthropic:claude");
+  } finally {
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
 });
 
 test("Agent 模型设置规范化角色路由并生成后端 payload", () => {
@@ -936,7 +1137,7 @@ test("模型聚合与默认推理强度请求遵循后端契约", () => {
   assert.deepEqual(JSON.parse(reasoning.options.body), { defaultReasoningEffort: "high", revision: 7 });
 });
 
-test("模型设置页面使用一屏扁平路由表单、聚合管理与折叠模型列表", () => {
+test("模型设置页面使用一屏扁平路由表单、聚合管理与已展开模型目录", () => {
   const controller = createModelProviderSettingsController({
     state: {
       settings: {
@@ -972,12 +1173,15 @@ test("模型设置页面使用一屏扁平路由表单、聚合管理与折叠�
   assert.match(html, /data-model-aggregate-add/);
   assert.match(html, /<option value="aggregate:primary"/);
   assert.match(html, /aggregate:primary/);
-  assert.match(html, /agent-model-catalog-details/);
+  assert.match(html, /<details class="compact-settings-disclosure agent-model-catalog-details" open>/);
+  assert.match(html, /已加载 2 个模型/);
   assert.match(html, /agent-model-catalog-provider/);
   assert.match(html, /agent-model-catalog-item settings-model-row/);
   assert.match(html, /id="saveAgentModelSettingsBtn"/);
   assert.match(html, /data-apply-model="openai:gpt-5"/);
   assert.match(html, /data-toggle-model-visibility="openai:gpt-5"/);
+  assert.match(html, /aria-pressed="true"/);
+  assert.match(html, /<svg viewBox="0 0 24 24"/);
   assert.match(html, /settings-model-row settings-card active/);
 });
 
@@ -996,6 +1200,67 @@ test("供应商卡片键盘操作排除交互元素", () => {
   assert.equal(shouldOpenProviderCardFromKeyboard({ key: " ", target: input }, card), false);
   assert.equal(shouldOpenProviderCardFromKeyboard({ key: "Enter", target: plain }, card), true);
   assert.equal(shouldOpenProviderCardFromKeyboard({ key: "Escape", target: plain }, card), false);
+});
+
+test("供应商配置的通用聚焦辅助仅对显式标记字段生效", () => {
+  const field = {
+    value: "https://api.example.com/v1",
+    type: "url",
+    disabled: false,
+    readOnly: false,
+    dataset: { selectOnFocus: "true" },
+    selected: 0,
+    removeAttribute(name) {
+      if (name === "data-select-on-focus") delete this.dataset.selectOnFocus;
+    },
+    select() { this.selected += 1; },
+  };
+  assert.equal(selectProviderConsoleFieldOnFocus(field), true);
+  assert.equal(field.selected, 1);
+  assert.equal(field.dataset.selectOnFocus, undefined);
+  assert.equal(selectProviderConsoleFieldOnFocus(field), false);
+  assert.equal(field.selected, 1);
+
+  const empty = {
+    value: "",
+    type: "text",
+    disabled: false,
+    readOnly: false,
+    dataset: { selectOnFocus: "true" },
+    removeAttribute(name) {
+      if (name === "data-select-on-focus") delete this.dataset.selectOnFocus;
+    },
+    select() { throw new Error("empty fields should not be selected"); },
+  };
+  assert.equal(selectProviderConsoleFieldOnFocus(empty), false);
+  assert.equal(empty.dataset.selectOnFocus, undefined);
+
+  const password = {
+    value: "secret",
+    type: "password",
+    disabled: false,
+    readOnly: false,
+    dataset: { selectOnFocus: "true" },
+    removeAttribute(name) {
+      if (name === "data-select-on-focus") delete this.dataset.selectOnFocus;
+    },
+    select() { throw new Error("password fields should keep normal editing"); },
+  };
+  assert.equal(selectProviderConsoleFieldOnFocus(password), false);
+});
+
+test("供应商新增表单使用 placeholder 示例且名称和 Base URL 不自动全选", () => {
+  const html = renderProviderConsolePage({
+    providers: [],
+    consoleState: { drawer: "provider", mode: "create", type: "openai-compatible", draft: createProviderDraft("openai-compatible") },
+  });
+  assert.match(html, /name="name" value=""[^>]*placeholder="custom-openai"/);
+  assert.match(html, /name="baseUrl"[^>]*value=""[^>]*placeholder="https:\/\/api\.example\.com\/v1"/);
+  assert.doesNotMatch(html, /name="name"[^>]*data-select-on-focus="true"/);
+  assert.doesNotMatch(html, /name="baseUrl"[^>]*data-select-on-focus="true"/);
+  for (const field of ["model", "maxTokens"]) {
+    assert.match(html, new RegExp(`name="${field}"[^>]*data-select-on-focus="true"`));
+  }
 });
 
 test("供应商弹层焦点环与触发元素恢复", () => {
@@ -1024,13 +1289,14 @@ test("英文与繁中控制台不会回退为简中硬编码", () => {
   setUILocale("en", root);
   const english = renderProviderConsolePage({ providers, consoleState: { drawer: "provider", mode: "edit", type: "openai-compatible", draft: providers[0] } });
   const englishCreate = renderProviderConsolePage({ providers, consoleState: { drawer: "provider", mode: "create", type: "openai-compatible", draft: createProviderDraft("openai-compatible") } });
-  assert.match(english, /Current draft|Model provider|Provider/);
+  assert.match(english, /Edit provider|Back to providers|Connection and credential/);
   assert.match(englishCreate, /Back to providers|Connection and credential|Discard changes/);
   assert.doesNotMatch(`${english}${englishCreate}`, /供应商|连接|配置|当前|保存|删除/);
   setUILocale("zh-TW", root);
   const traditional = renderProviderConsolePage({ providers, consoleState: { modal: "types" } });
   const traditionalCreate = renderProviderConsolePage({ providers, consoleState: { drawer: "provider", mode: "create", type: "openai-compatible", draft: createProviderDraft("openai-compatible") } });
-  assert.match(traditional, /模型供應商|選擇連線類型/);
+  assert.match(traditional, /模型供應商|新增供應商/);
+  assert.doesNotMatch(traditional, /選擇連線類型|mp-provider-type-modal/);
   assert.match(traditionalCreate, /返回供應商清單|連線與憑據|放棄變更/);
   assert.doesNotMatch(`${traditional}${traditionalCreate}`, /供应商|连接|配置|当前|保存|删除/);
   setUILocale("zh-CN", root);

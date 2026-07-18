@@ -55,6 +55,17 @@ const directoryFolderIcon = `
     <path class="directory-folder-stroke" d="M2.75 7h18.5M2.75 5.25A2.25 2.25 0 0 1 5 3h4.2l1.8 2h8A2.25 2.25 0 0 1 21.25 7.25v7.5A2.25 2.25 0 0 1 19 17H5a2.25 2.25 0 0 1-2.25-2.25Z"></path>
   </svg>`;
 
+const directoryShortcutIcons = Object.freeze({
+  Home: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m3.5 10.5 8.5-7 8.5 7"></path><path d="M5.75 9.5v10h12.5v-10M9.25 19.5v-6h5.5v6"></path></svg>`,
+  Desktop: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3.5" y="4.5" width="17" height="12" rx="1.8"></rect><path d="M8 20h8M12 16.5V20"></path></svg>`,
+  Downloads: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3.5v11"></path><path d="m7.5 10.5 4.5 4.5 4.5-4.5"></path><path d="M4 18.5v1.25A1.75 1.75 0 0 0 5.75 21.5h12.5A1.75 1.75 0 0 0 20 19.75V18.5"></path></svg>`,
+  Documents: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3.5h8l4 4v13H6z"></path><path d="M14 3.5v4h4M9 12h6M9 16h6"></path></svg>`,
+  Projects: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.25A2.25 2.25 0 0 1 5.75 5h4l1.8 2h6.7a2.25 2.25 0 0 1 2.25 2.25v7.5A2.25 2.25 0 0 1 18.25 19H5.75a2.25 2.25 0 0 1-2.25-2.25Z"></path><path d="M3.75 9h16.5"></path></svg>`,
+  Root: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4.5v15M5 12h9M14 12l4-4M14 12l4 4"></path></svg>`,
+});
+
+const directoryFavoriteIcon = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 3.75 2.55 5.16 5.7.83-4.12 4.02.97 5.68L12 16.76l-5.1 2.68.97-5.68-4.12-4.02 5.7-.83Z"></path></svg>`;
+
 export function createDirectoryBrowserController({
   state,
   createProjectFromDirectory,
@@ -184,24 +195,36 @@ export function createDirectoryBrowserController({
   }
 
   function renderDirectoryShortcuts(shortcuts) {
-    const iconByName = {
-      Home: "⌂",
-      Desktop: "▣",
-      Downloads: "▾",
-      Documents: "□",
-      Projects: "▱",
-      Root: "⌜",
-    };
-    $("directoryShortcuts").innerHTML = shortcuts.map((shortcut) => {
+    const items = Array.isArray(shortcuts) ? shortcuts : [];
+    const root = items.find((shortcut) => shortcut.name === "Root");
+    const regular = items.filter((shortcut) => shortcut !== root);
+    const renderShortcut = (shortcut) => {
       const active = normalizePath(shortcut.path) === normalizePath(state.directoryPath);
       const label = shortcutLabel(shortcut.name);
+      const icon = directoryShortcutIcons[shortcut.name] || directoryShortcutIcons.Projects;
       return `
       <button class="folder-shortcut ${active ? "active" : ""}" type="button" data-path="${escapeAttr(shortcut.path)}">
-        <span class="folder-shortcut-icon">${escapeHtml(iconByName[shortcut.name] || "▱")}</span>
+        <span class="folder-shortcut-icon">${icon}</span>
         <span>${escapeHtml(label)}</span>
       </button>
     `;
-    }).join("");
+    };
+    const rootHTML = root ? (() => {
+      const active = normalizePath(root.path) === normalizePath(state.directoryPath);
+      const label = shortcutLabel(root.name);
+      const icon = directoryShortcutIcons[root.name] || directoryShortcutIcons.Root;
+      const path = canonicalLocalPath(root.path) || "/";
+      return `
+      <div class="folder-root-section">
+        <button class="folder-root-card ${active ? "active" : ""}" type="button" data-path="${escapeAttr(root.path)}" aria-label="${escapeAttr(label)}">
+          <span class="folder-root-card-icon">${icon}</span>
+          <span class="folder-root-card-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(path)}</small></span>
+          <span class="folder-root-card-mark" aria-hidden="true">/</span>
+        </button>
+      </div>
+    `;
+    })() : "";
+    $("directoryShortcuts").innerHTML = `${regular.map(renderShortcut).join("")}${rootHTML}`;
     $("directoryShortcuts").querySelectorAll("[data-path]").forEach((node) => {
       node.addEventListener("click", () => browseDirectories(node.dataset.path).catch(reportError));
     });
@@ -261,7 +284,7 @@ export function createDirectoryBrowserController({
       const path = canonicalLocalPath(rawPath);
       return `
       <button class="folder-shortcut" type="button" data-path="${escapeAttr(path)}" title="${escapeAttr(path)}">
-        <span class="folder-shortcut-icon">☆</span>
+        <span class="folder-shortcut-icon">${directoryFavoriteIcon}</span>
         <span>${escapeHtml(basename(path) || path)}</span>
       </button>
     `;

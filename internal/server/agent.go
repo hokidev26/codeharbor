@@ -31,6 +31,60 @@ func terminalAgentRunStatus(status string) bool {
 	}
 }
 
+type workStateGoal struct {
+	Text       string `json:"text"`
+	Source     string `json:"source"`
+	Status     string `json:"status,omitempty"`
+	QueueState string `json:"queueState,omitempty"`
+}
+
+type workStateTask struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	Status    string `json:"status"`
+	Protected bool   `json:"protected"`
+}
+
+type workStateTaskCounts struct {
+	Total   int `json:"total"`
+	Todo    int `json:"todo"`
+	Doing   int `json:"doing"`
+	Blocked int `json:"blocked"`
+	Done    int `json:"done"`
+}
+
+type workStateExecutionRole struct {
+	Kind             string `json:"kind"`
+	Role             string `json:"role"`
+	Status           string `json:"status"`
+	AgentID          string `json:"agentId,omitempty"`
+	Title            string `json:"title,omitempty"`
+	WorklineID       string `json:"worklineId,omitempty"`
+	WorklineRole     string `json:"worklineRole,omitempty"`
+	BackgroundTaskID string `json:"backgroundTaskId,omitempty"`
+	BackgroundKind   string `json:"backgroundKind,omitempty"`
+	ChildAgentID     string `json:"childAgentId,omitempty"`
+}
+
+type workStateVerification struct {
+	Status         string                  `json:"status"`
+	Summary        string                  `json:"summary,omitempty"`
+	PlanID         string                  `json:"planId,omitempty"`
+	PlanStatus     string                  `json:"planStatus,omitempty"`
+	Tests          []reviewPlanTestSummary `json:"tests"`
+	ReviewVerdict  string                  `json:"reviewVerdict,omitempty"`
+	ReviewFindings []string                `json:"reviewFindings"`
+}
+
+type workStateSnapshot struct {
+	SchemaVersion  int                      `json:"schemaVersion"`
+	Goal           *workStateGoal           `json:"goal,omitempty"`
+	Tasks          []workStateTask          `json:"tasks"`
+	TaskCounts     workStateTaskCounts      `json:"taskCounts"`
+	ExecutionRoles []workStateExecutionRole `json:"executionRoles"`
+	Verification   workStateVerification    `json:"verification"`
+}
+
 type agentLiveSnapshotResponse struct {
 	Protocol              int                      `json:"protocol"`
 	Agent                 db.Agent                 `json:"agent"`
@@ -52,7 +106,152 @@ type agentLiveSnapshotResponse struct {
 	BackgroundTasks       []tools.BackgroundTask   `json:"backgroundTasks,omitempty"`
 	RecentBackgroundTasks []tools.BackgroundTask   `json:"recentBackgroundTasks,omitempty"`
 	Continuation          map[string]any           `json:"continuation,omitempty"`
+	WorkState             *workStateSnapshot       `json:"workState,omitempty"`
 	Stream                agentpkg.StreamWatermark `json:"stream"`
+}
+
+func publicLiveSnapshotAgent(agent db.Agent) db.Agent {
+	agent.SystemPrompt = ""
+	return agent
+}
+
+func (s *Server) liveSnapshotChildrenForRequest(r *http.Request, children []db.Agent) ([]db.Agent, error) {
+	out := make([]db.Agent, 0, len(children))
+	if s == nil || s.store == nil {
+		for _, child := range children {
+			out = append(out, publicLiveSnapshotAgent(child))
+		}
+		return out, nil
+	}
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	var userID string
+	if hasUsers {
+		user, ok, userErr := s.currentUser(r)
+		if userErr != nil {
+			return nil, userErr
+		}
+		if !ok {
+			return nil, errors.New("current user is unavailable")
+		}
+		userID = user.ID
+	}
+	for _, child := range children {
+		if hasUsers {
+			allowed, accessErr := s.store.CanAccessAgent(r.Context(), userID, child.ID)
+			if accessErr != nil {
+				return nil, accessErr
+			}
+			if !allowed {
+				continue
+			}
+		}
+		if s.capabilitiesForRequest(r).FilesystemScope == "project" && !s.filesystemPathWithinProjectRoot(child.CWD) {
+			continue
+		}
+		out = append(out, publicLiveSnapshotAgent(child))
+	}
+	return out, nil
+}
+
+func (s *Server) buildWorkState(ctx context.Context, agent db.Agent, spec *db.SpecBoard, children []db.Agent, reviewState agentReviewState, backgroundTasks []tools.BackgroundTask) *workStateSnapshot {
+	state := &workStateSnapshot{
+		SchemaVersion:  1,
+		Tasks:          []workStateTask{},
+		ExecutionRoles: []workStateExecutionRole{},
+		Verification: workStateVerification{
+			Status:         "not_configured",
+			Tests:          []reviewPlanTestSummary{},
+			ReviewFindings: []string{},
+		},
+	}
+	if spec != nil {
+		tasksByID := make(map[string]db.SpecTask, len(spec.Tasks))
+		for _, task := range spec.Tasks {
+			tasksByID[task.ID] = task
+			state.Tasks = append(state.Tasks, workStateTask{ID: task.ID, Text: task.Text, Status: task.Status, Protected: task.Protected})
+			state.TaskCounts.Total++
+			switch task.Status {
+			case "todo":
+				state.TaskCounts.Todo++
+			case "doing":
+				state.TaskCounts.Doing++
+			case "blocked":
+				state.TaskCounts.Blocked++
+			case "done":
+				state.TaskCounts.Done++
+			}
+		}
+		for _, confirmation := range spec.Confirmations {
+			if confirmation.Status != "confirmed" {
+				continue
+			}
+			if task, ok := tasksByID[confirmation.TaskID]; ok {
+				state.Goal = &workStateGoal{Text: task.Text, Source: "spec", Status: confirmation.Status, QueueState: confirmation.QueueState}
+				break
+			}
+		}
+	}
+
+	plan := reviewState.ActivePlan
+	if plan == nil {
+		plan = reviewState.PendingPlanApproval
+	}
+	if plan != nil {
+		state.Verification.PlanID = plan.ID
+		state.Verification.PlanStatus = plan.Status
+		state.Verification.Tests = append(state.Verification.Tests, plan.Tests...)
+		state.Verification.ReviewVerdict = plan.ReviewVerdict
+		state.Verification.ReviewFindings = append(state.Verification.ReviewFindings, plan.ReviewFindings...)
+		switch {
+		case plan.Status == db.PlanStatusStale:
+			state.Verification.Status = "stale"
+		case len(plan.Tests) > 0:
+			state.Verification.Status = "declared"
+		case strings.TrimSpace(plan.ReviewVerdict) != "":
+			state.Verification.Status = "reviewed"
+		default:
+			state.Verification.Status = "pending"
+		}
+		if len(plan.ReviewFindings) > 0 {
+			state.Verification.Summary = plan.ReviewFindings[0]
+		} else {
+			state.Verification.Summary = plan.Summary
+		}
+		if state.Goal == nil && strings.TrimSpace(plan.Goal) != "" {
+			state.Goal = &workStateGoal{Text: plan.Goal, Source: "plan", Status: plan.Status}
+		}
+	}
+
+	appendAgentRole := func(item db.Agent) {
+		role := strings.TrimSpace(item.SubagentType)
+		if role == "" {
+			role = strings.TrimSpace(item.Type)
+		}
+		projected := workStateExecutionRole{Kind: "agent", Role: role, Status: item.Status, AgentID: item.ID, Title: item.Title, WorklineID: item.WorklineID}
+		if s != nil && s.store != nil && strings.TrimSpace(item.WorklineID) != "" {
+			if workline, err := s.store.GetWorkline(ctx, item.WorklineID); err == nil {
+				projected.WorklineRole = workline.Role
+				if strings.TrimSpace(projected.Role) == "" {
+					projected.Role = workline.Role
+				}
+			}
+		}
+		state.ExecutionRoles = append(state.ExecutionRoles, projected)
+	}
+	appendAgentRole(agent)
+	for _, child := range children {
+		appendAgentRole(child)
+	}
+	for _, task := range backgroundTasks {
+		state.ExecutionRoles = append(state.ExecutionRoles, workStateExecutionRole{
+			Kind: "backgroundTask", Role: task.Kind, Status: task.Status, BackgroundTaskID: task.ID,
+			BackgroundKind: task.Kind, ChildAgentID: task.ChildAgentID,
+		})
+	}
+	return state
 }
 
 func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -85,12 +284,18 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	spec, err := s.store.GetSpecBoard(r.Context(), agentID)
+	board, err := s.store.GetSpecBoard(r.Context(), agentID)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	children, err := s.store.ListChildAgents(r.Context(), agentID)
+	spec := &board
+	listedChildren, err := s.store.ListChildAgents(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	children, err := s.liveSnapshotChildrenForRequest(r, listedChildren)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -129,9 +334,10 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 			toolActivity = append(toolActivity, projected)
 		}
 	}
+	workState := s.buildWorkState(r.Context(), snapshot.Agent, spec, children, reviewState, backgroundTasks)
 	writeJSON(w, http.StatusOK, agentLiveSnapshotResponse{
 		Protocol:              agentpkg.ProtocolVersion,
-		Agent:                 snapshot.Agent,
+		Agent:                 publicLiveSnapshotAgent(snapshot.Agent),
 		Messages:              snapshot.Messages,
 		MessageHasMoreBefore:  snapshot.MessageHasMoreBefore,
 		MessageNextBefore:     snapshot.MessageNextBefore,
@@ -142,7 +348,7 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		ExecutionGeneration:   snapshot.Agent.ExecutionGeneration,
 		ExecutionsSince:       executions,
 		ExecutionsTruncated:   truncated,
-		Spec:                  &spec,
+		Spec:                  spec,
 		ChildAgents:           children,
 		ActivePlan:            reviewState.ActivePlan,
 		PendingPlanApproval:   reviewState.PendingPlanApproval,
@@ -150,6 +356,7 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		BackgroundTasks:       backgroundTasks,
 		RecentBackgroundTasks: recentBackgroundTasks(backgroundTasks, 8),
 		Continuation:          continuation,
+		WorkState:             workState,
 		Stream:                watermark,
 	})
 }

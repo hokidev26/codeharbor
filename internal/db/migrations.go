@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 42
+const CurrentDBVersion = 45
 
 type migration struct {
 	version int
@@ -60,6 +60,9 @@ var migrations = []migration{
 	{version: 40, name: "run continuation metadata", up: migrateV40RunContinuations},
 	{version: 41, name: "private api gateway", up: migrateV41PrivateAPIGateway},
 	{version: 42, name: "provider api key secrets", up: migrateV42ProviderSecrets},
+	{version: 43, name: "navigation archive and pin state", up: migrateV43NavigationState},
+	{version: 44, name: "account preferences", up: migrateV44AccountPreferences},
+	{version: 45, name: "OAuth app identities and sessions", up: migrateV45OAuthApp},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1301,6 +1304,70 @@ func migrateV42ProviderSecrets(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
+func migrateV43NavigationState(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{"projects", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"projects", "archived_at", "TEXT"},
+		{"agents", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"agents", "archived_at", "TEXT"},
+	} {
+		if err := ensureColumn(ctx, tx, column.table, column.column, column.definition); err != nil {
+			return err
+		}
+	}
+	projectsExist, err := tableExists(ctx, tx, "projects")
+	if err != nil {
+		return err
+	}
+	if projectsExist {
+		if _, err := tx.ExecContext(ctx, `UPDATE projects SET pinned = 0 WHERE pinned IS NULL OR pinned NOT IN (0, 1)`); err != nil {
+			return err
+		}
+		updatedAtExists, err := columnExists(ctx, tx, "projects", "updated_at")
+		if err != nil {
+			return err
+		}
+		if updatedAtExists {
+			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_projects_navigation_state ON projects(pinned DESC, archived_at, updated_at DESC, id ASC)`); err != nil {
+				return err
+			}
+		}
+	}
+	agentsExist, err := tableExists(ctx, tx, "agents")
+	if err != nil {
+		return err
+	}
+	if agentsExist {
+		if _, err := tx.ExecContext(ctx, `UPDATE agents SET pinned = 0 WHERE pinned IS NULL OR pinned NOT IN (0, 1)`); err != nil {
+			return err
+		}
+		updatedAtExists, err := columnExists(ctx, tx, "agents", "updated_at")
+		if err != nil {
+			return err
+		}
+		if updatedAtExists {
+			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_agents_navigation_state ON agents(pinned DESC, archived_at, updated_at DESC, id ASC)`); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func migrateV44AccountPreferences(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, accountPreferencesSchemaSQL)
+	return err
+}
+
+func migrateV45OAuthApp(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, oauthAppSchemaSQL)
+	return err
+}
+
 func migrateV41PrivateAPIGateway(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, gatewaySchemaSQL); err != nil {
 		return err
@@ -1351,7 +1418,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 func legacyNamingSchemaSQL() string {
 	// P2-P3 tables were introduced after the agent/workline naming migration and
 	// must be created by their own migrations with modern column names.
-	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+providerSecretsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL+gatewaySchemaSQL)
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+providerSecretsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL+gatewaySchemaSQL+accountPreferencesSchemaSQL+oauthAppSchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",
@@ -1543,6 +1610,8 @@ func ensureLegacyColumns(ctx context.Context, tx *sql.Tx) error {
 		{"projects", "copy_files", "TEXT"},
 		{"projects", "chapter_settings", "TEXT"},
 		{"projects", "proxy_domain", "TEXT"},
+		{"projects", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"projects", "archived_at", "TEXT"},
 		{"chapters", "description", "TEXT"},
 		{"chapters", "status", "TEXT NOT NULL DEFAULT 'active'"},
 		{"chapters", "role", "TEXT NOT NULL DEFAULT 'root'"},
@@ -1598,6 +1667,8 @@ func ensureLegacyColumns(ctx context.Context, tx *sql.Tx) error {
 		{"narrators", "background_status", "TEXT"},
 		{"narrators", "background_result", "TEXT"},
 		{"narrators", "background_completed_at", "TEXT"},
+		{"narrators", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"narrators", "archived_at", "TEXT"},
 		{"narrator_messages", "run_id", "TEXT"},
 		{"narrator_messages", "sdk_message_uuid", "TEXT"},
 		{"narrator_messages", "parent_tool_use_id", "TEXT"},

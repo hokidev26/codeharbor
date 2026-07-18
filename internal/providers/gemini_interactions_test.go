@@ -72,6 +72,7 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	var calls []ToolCall
 	var usage Usage
 	var dispatch *DispatchInfo
+	var stopReason string
 	for event := range events {
 		if event.Dispatch != nil {
 			dispatch = event.Dispatch
@@ -85,6 +86,8 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 			calls = append(calls, *event.ToolCall)
 		case "usage":
 			usage = *event.Usage
+		case "done":
+			stopReason = event.StopReason
 		}
 	}
 	if text != "hello world" {
@@ -98,6 +101,9 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	}
 	if usage != (Usage{InputTokens: 12, OutputTokens: 4, CachedInputTokens: 2, ReasoningTokens: 3}) {
 		t.Fatalf("unexpected usage: %+v", usage)
+	}
+	if stopReason != "completed" {
+		t.Fatalf("Gemini completion stop reason = %q", stopReason)
 	}
 	if dispatch == nil || dispatch.Provider != "gemini" || dispatch.Model != "gemini-test" || dispatch.CredentialID != configuredCredentialID {
 		t.Fatalf("unexpected dispatch attribution: %+v", dispatch)
@@ -120,6 +126,20 @@ func TestGeminiInteractionsStreamsNativeFunctionCalls(t *testing.T) {
 	schema := tool["parameters"].(map[string]any)
 	if _, exists := schema["additionalProperties"]; exists || len(schema["required"].([]any)) != 1 {
 		t.Fatalf("schema was not sanitized: %+v", schema)
+	}
+}
+
+func TestGeminiInteractionsStreamFailsClosedWithoutTerminalEvent(t *testing.T) {
+	out := make(chan Event, 4)
+	handleGeminiInteractionsSSE(out, strings.NewReader("event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\nevent: response.output_item.done\ndata: {\"type\":\"function_call\",\"id\":\"call-1\",\"name\":\"Read\",\"arguments\":{\"type\":\"response.completed\"}}\n\n"))
+	close(out)
+	var sawError, sawDone bool
+	for event := range out {
+		sawError = sawError || event.Type == "error"
+		sawDone = sawDone || event.Type == "done"
+	}
+	if !sawError || sawDone {
+		t.Fatalf("unterminated Gemini stream was not fail-closed: error=%v done=%v", sawError, sawDone)
 	}
 }
 

@@ -4,17 +4,25 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoto</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-1-rail-compact-1-message-editing-1-message-neutral-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-preview-compact-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-settings-shell-stable-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-composer-responsive-2-user-message-content-2-mobile-toolbar-right-3-icon-rail-1-terminal-actions-compact-1-about-brand-license-1-workbench-title-edit-1-provider-create-page-1-codex-browser-login-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-model-picker-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-1-rail-compact-1-message-editing-1-message-neutral-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-preview-compact-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-settings-shell-stable-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-composer-responsive-2-user-message-content-2-mobile-toolbar-right-3-icon-rail-1-terminal-actions-compact-1-about-brand-license-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-model-picker-1-navigation-state-1-storage-card-gap-1-agent-model-wrap-1-archive-3-message-switch-3-hide-run-loading-1-provider-full-page-2-settings-icons-1-lightning-icon-1-autoto-themes-1-settings-content-left-1" />
+    <link rel="stylesheet" href="/ui/theme-runtime.css?v=autoto-themes-1" />
   </head>
   <body class="theme-light white-shell ui-density-comfortable">
     <main id="appShell" class="app-shell terminal-collapsed">
-      <header class="mobile-topbar">
-        <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单" data-i18n-title="staticExtra.shell.mobileMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
-        <div class="mobile-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon">♙</span><span id="mobileVersionChip">更新: v0.1.0 → …</span></div>
-        <div class="mobile-brand">Autoto</div>
-        <button id="mobileWorkbenchBtn" class="mobile-icon-btn" type="button" title="切换任务工作台" aria-label="切换任务工作台" aria-pressed="false" data-i18n-title="workbench.toggle" data-i18n-aria-label="workbench.toggle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h4v5H4zM10 5.5h4v8h-4zM16 5.5h4v12h-4z"></path><path d="M4 13.5h4v5H4zM10 16.5h4v2h-4z"></path></svg></button>
-        <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端" data-i18n-title="terminal.title"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
-        <button id="mobileSearchBtn" class="mobile-icon-btn" type="button" title="搜索" data-i18n-title="staticExtra.shell.search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m15.5 15.5 4.2 4.2"></path></svg></button>
+      <header class="mobile-topbar" aria-label="移动端工具栏" data-i18n-aria-label="shell.mobileTopbar">
+        <div class="mobile-topbar-left">
+          <button id="mobileMenuBtn" class="mobile-icon-btn" type="button" title="菜单" aria-label="打开菜单" aria-expanded="false" aria-controls="sessionSidebar" data-i18n-title="staticExtra.shell.mobileMenu" data-i18n-aria-label="staticExtra.shell.mobileMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
+        </div>
+        <div class="mobile-topbar-center">
+          <div class="mobile-brand" aria-hidden="true">Autoto</div>
+          <div id="mobilePageTitle" class="mobile-page-title" role="status" aria-live="polite" aria-atomic="true" data-i18n="shell.nav.conversation">对话</div>
+          <div class="mobile-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon" aria-hidden="true">♙</span><span id="mobileVersionChip">更新: v0.1.0 → …</span></div>
+        </div>
+        <div class="mobile-topbar-actions" role="group" aria-label="页面操作" data-i18n-aria-label="shell.mobilePageActions">
+          <button id="mobileWorkbenchBtn" class="mobile-icon-btn" type="button" title="切换任务工作台" aria-label="切换任务工作台" aria-pressed="false" data-i18n-title="workbench.toggle" data-i18n-aria-label="workbench.toggle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h4v5H4zM10 5.5h4v8h-4zM16 5.5h4v12h-4z"></path><path d="M4 13.5h4v5H4zM10 16.5h4v2h-4z"></path></svg></button>
+          <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端" aria-label="终端" data-i18n-title="terminal.title" data-i18n-aria-label="terminal.title"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
+          <button id="mobileSearchBtn" class="mobile-icon-btn mobile-primary-action" type="button" title="搜索" aria-label="搜索" data-i18n-title="staticExtra.shell.search" data-i18n-aria-label="staticExtra.shell.search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m15.5 15.5 4.2 4.2"></path></svg></button>
+        </div>
       </header>
       <button id="mobileSidebarBackdrop" class="mobile-backdrop hidden" type="button" aria-label="关闭菜单" data-i18n-aria-label="staticExtra.shell.closeMenu"></button>
       <aside class="global-rail" aria-label="全局导航" data-i18n-aria-label="shell.globalNavigation">
@@ -46,9 +54,16 @@
       <aside id="sessionSidebar" class="sidebar" aria-label="会话栏" data-i18n-aria-label="shell.sessionSidebar">
         <div class="mobile-drawer-header" aria-label="移动端菜单标题栏" data-i18n-aria-label="staticExtra.shell.mobileDrawerHeader">
           <button id="mobileSidebarCloseBtn" class="mobile-icon-btn mobile-drawer-close-btn" type="button" title="关闭菜单" aria-label="关闭菜单" data-i18n-title="staticExtra.shell.closeMenu" data-i18n-aria-label="staticExtra.shell.closeMenu">×</button>
-          <div class="mobile-update-pill drawer-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon">♙</span><span id="mobileDrawerVersionChip">更新: v0.1.0 → …</span></div>
-          <div class="mobile-drawer-brand">Autoto</div>
+          <div class="mobile-drawer-brand-group">
+            <span class="mobile-drawer-brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12.5"></circle><path d="M10.5 17.5c1.6 2 3.4 3 5.5 3s3.9-1 5.5-3"></path><path d="M11.5 12.5h.01M20.5 12.5h.01"></path></svg></span>
+            <span class="mobile-drawer-brand">Autoto</span>
+          </div>
+          <div class="mobile-update-pill drawer-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon" aria-hidden="true">♙</span><span id="mobileDrawerVersionChip">更新: v0.1.0 → …</span></div>
           <button id="mobileDrawerSearchBtn" class="mobile-icon-btn mobile-drawer-search-btn" type="button" title="搜索项目或目录" aria-label="搜索项目或目录" data-i18n-title="shell.searchProjectsLabel" data-i18n-aria-label="shell.searchProjectsLabel">⌕</button>
+        </div>
+        <div class="mobile-drawer-primary-actions" role="group" aria-label="对话快捷操作" data-i18n-aria-label="shell.mobileConversationActions">
+          <button id="mobileNewConversationBtn" class="mobile-drawer-primary-action" type="button" data-open-directory-shortcut="new" title="新建对话" aria-label="新建对话" data-i18n="shell.newConversation" data-i18n-title="shell.newConversation" data-i18n-aria-label="shell.newConversation">新建对话</button>
+          <button id="mobileChooseDirectoryBtn" class="mobile-drawer-secondary-action" type="button" data-open-directory-shortcut="current" title="选择资料夹" aria-label="选择资料夹" data-i18n="shell.chooseFolder" data-i18n-title="shell.chooseFolder" data-i18n-aria-label="shell.chooseFolder">选择资料夹</button>
         </div>
         <header class="session-sidebar-header">
           <div class="session-sidebar-heading">
@@ -75,6 +90,10 @@
           </div>
           <div id="navigationListHeading" class="navigation-list-heading" data-i18n="shell.filters.projects">项目</div>
           <div id="projects" class="project-list navigation-list"></div>
+          <div id="navigationContextMenu" class="navigation-context-menu hidden" role="menu" aria-label="项目或对话操作" data-i18n-aria-label="shell.navigationActions">
+            <button type="button" role="menuitem" data-navigation-menu-action="pin"></button>
+            <button type="button" role="menuitem" data-navigation-menu-action="archive"></button>
+          </div>
           <div class="recent-sidebar recent-conversations-sidebar conversation-mode-only">
             <div class="recent-title" data-i18n="shell.recentConversations">最近会话</div>
             <div id="recentSidebarConversations" class="recent-list"></div>
@@ -85,9 +104,16 @@
           </div>
         </section>
 
-        <div class="mobile-sidebar-quick-actions" aria-label="移动端设置操作" data-i18n-aria-label="shell.mobileSettingsActions">
-          <button id="mobileSidebarSettingsBtn" class="mobile-sidebar-action" type="button"><span aria-hidden="true">⚙</span> <span data-i18n="common.settings">设置</span></button>
-          <button id="mobileSidebarLogoutBtn" class="mobile-sidebar-action danger" type="button"><span aria-hidden="true">⇥</span> <span data-i18n="shell.signOut">退出登录</span></button>
+        <div id="mobileSidebarAccountSummary" class="mobile-sidebar-account-summary" role="group" aria-label="当前账户" data-i18n-aria-label="shell.currentAccount" data-account-summary-source="sidebarAccountBtn">
+          <span id="mobileSidebarAvatar" class="sidebar-avatar" data-account-field="avatar" aria-hidden="true">AT</span>
+          <span class="sidebar-account-main">
+            <strong id="mobileSidebarAccountName" class="sidebar-account-name" data-account-field="name">Autoto</strong>
+            <span id="mobileSidebarAccountMeta" class="sidebar-account-meta" data-account-field="meta" aria-live="polite">v0.1.0-dev · 本地</span>
+          </span>
+        </div>
+        <div class="mobile-sidebar-quick-actions" role="group" aria-label="移动端设置操作" data-i18n-aria-label="shell.mobileSettingsActions">
+          <button id="mobileSidebarSettingsBtn" class="mobile-sidebar-action" type="button" aria-label="打开设置" data-i18n-aria-label="settings.open"><span aria-hidden="true">⚙</span> <span data-i18n="common.settings">设置</span></button>
+          <button id="mobileSidebarLogoutBtn" class="mobile-sidebar-action danger" type="button" aria-label="退出登录" data-i18n-aria-label="shell.signOut"><span aria-hidden="true">⇥</span> <span data-i18n="shell.signOut">退出登录</span></button>
         </div>
         <div class="mobile-drawer-footer" aria-label="版本和开源协议" data-i18n-aria-label="staticExtra.shell.mobileFooter">
           <span id="mobileDrawerVersionText">v0.1.0-dev</span>
@@ -189,6 +215,11 @@
             </div>
           </div>
         </header>
+        <section id="mobileConversationWelcome" class="mobile-conversation-welcome" role="status" aria-live="polite" aria-atomic="true">
+          <span class="mobile-conversation-brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12.5"></circle><path d="M10.5 17.5c1.6 2 3.4 3 5.5 3s3.9-1 5.5-3"></path><path d="M11.5 12.5h.01M20.5 12.5h.01"></path></svg></span>
+          <strong id="mobileWelcomeTitle" data-i18n="chat.mobileWelcomeTitle">开始新的对话</strong>
+          <span id="mobileWelcomeDescription" data-i18n="chat.mobileWelcomeDescription">选择资料夹并告诉 Autoto 你想完成什么。</span>
+        </section>
         <div id="messages" class="messages empty" data-initial-chat-state="loading" aria-busy="true">
           <div class="empty-workspace-card workspace-loading-card" role="status" aria-live="polite">
             <div class="empty-workspace-icon" aria-hidden="true">…</div>
@@ -253,7 +284,7 @@
             <div id="pendingAttachments" class="pending-attachments hidden" aria-live="polite"></div>
             <div id="composerInputShell" class="composer-input-shell">
               <div class="composer-attach-wrap" title="导入文件到聊天框" data-i18n-title="chat.attachFile">
-                <button id="attachFileBtn" class="composer-attach-btn" type="button" tabindex="-1" aria-hidden="true">＋</button>
+                <button id="attachFileBtn" class="composer-attach-btn" type="button" title="导入文件到聊天框" aria-label="导入文件到聊天框" data-i18n-title="chat.attachFile" data-i18n-aria-label="chat.attachFile">＋</button>
                 <input id="attachFileInput" class="attachment-native-input" type="file" multiple aria-label="导入文件到聊天框" data-i18n-aria-label="chat.attachFile" />
               </div>
               <div class="message-input-frame">
@@ -418,10 +449,10 @@
 
     <div id="settingsModal" class="modal hidden legacy-settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" tabindex="-1">
       <div class="modal-card settings-modal-card legacy-settings-modal-card settings-dialog-shell">
-        <aside class="settings-sidebar legacy-settings-topbar" aria-label="设置导航" data-i18n-aria-label="settings.categories">
+        <aside id="settingsSidebar" class="settings-sidebar legacy-settings-topbar" aria-label="设置目录" data-i18n-aria-label="settings.directory">
           <header class="settings-sidebar-header">
             <div id="settingsModalTitle" class="settings-title" data-i18n="settings.dialogTitle">设置</div>
-            <button id="closeSettingsModalBtn" class="settings-close-btn legacy-settings-close" type="button" aria-label="关闭设置" data-i18n-aria-label="settings.close">×</button>
+            <button id="closeSettingsModalBtn" class="settings-close-btn legacy-settings-close" type="button" title="返回聊天" aria-label="返回聊天" data-i18n-title="settings.backToChat" data-i18n-aria-label="settings.backToChat">×</button>
           </header>
           <button id="settingsIdentityBtn" class="settings-identity-card" type="button" aria-label="打开个人资料">
             <span id="settingsIdentityAvatar" class="sidebar-avatar">AT</span>
@@ -433,7 +464,7 @@
             <button id="clearSettingsSearchBtn" type="button" aria-label="清空设置搜索" data-i18n-aria-label="settings.clearSearch">×</button>
           </div>
           <nav id="settingsCategoryNav" class="settings-mobile-category-nav legacy-settings-category-nav" aria-label="设置分类" data-i18n-aria-label="settings.categories"></nav>
-          <nav id="settingsNav" class="settings-nav settings-nav-groups legacy-settings-subnav" aria-label="设置页面" data-i18n-aria-label="settings.pages"></nav>
+          <nav id="settingsNav" class="settings-nav settings-nav-groups legacy-settings-subnav" aria-label="设置目录" data-i18n-aria-label="settings.directory"></nav>
           <button id="settingsWizardBtn" class="settings-wizard-btn legacy-settings-wizard hidden" type="button" tabindex="-1" data-i18n="settings.wizard">设置向导</button>
         </aside>
         <section class="settings-main settings-content legacy-settings-content" aria-labelledby="settingsContentTitle">
@@ -444,7 +475,7 @@
             </div>
             <button id="settingsHelpBtn" class="settings-help-trigger" type="button" aria-label="查看本页帮助" aria-haspopup="dialog" aria-controls="settingsHelpPanel" aria-expanded="false" data-i18n-aria-label="settings.pageHelp.open">?</button>
           </header>
-          <div class="settings-page-scroll"><div id="settingsContentBody" class="settings-content-body legacy-settings-content-body"></div></div>
+          <div class="settings-page-scroll" role="region" aria-label="设置详情" data-i18n-aria-label="settings.details"><div id="settingsContentBody" class="settings-content-body legacy-settings-content-body"></div></div>
           <div id="settingsHelpBackdrop" class="settings-help-backdrop hidden" aria-hidden="true"></div>
           <aside id="settingsHelpPanel" class="settings-help-panel hidden" role="dialog" aria-modal="false" aria-hidden="true" aria-labelledby="settingsHelpTitle" tabindex="-1">
             <header class="settings-help-panel-header">
@@ -622,6 +653,6 @@
       </div>
     </div>
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-folder-picker-remote-2-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-1-codex-import-open-1-terminal-actions-compact-1-users-panel-removed-1-remote-control-full-1-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-1-codex-browser-login-1-shared-api-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-provider-secrets-1-model-picker-1"></script>
+    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-1-codex-import-open-1-terminal-actions-compact-1-users-panel-removed-1-remote-control-full-2-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-shared-api-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-provider-secrets-1-model-picker-1-navigation-state-2-agent-admin-removed-1-archive-1-switch-fix-1-provider-full-page-2-provider-placeholders-1-settings-icons-1-autoto-themes-1"></script>
   </body>
 </html>

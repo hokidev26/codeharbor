@@ -566,7 +566,7 @@ func validateProviderBinding(binding ProviderBinding) error {
 func SecretLastFive(secret string) string {
 	runes := []rune(secret)
 	if len(runes) <= 5 {
-		return string(runes)
+		return ""
 	}
 	return string(runes[len(runes)-5:])
 }

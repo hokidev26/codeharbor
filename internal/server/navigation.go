@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 
 	"autoto/internal/db"
 )
@@ -17,21 +18,22 @@ func (s *Server) navigation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	includeArchived := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("includeArchived")), "true") || strings.TrimSpace(r.URL.Query().Get("includeArchived")) == "1"
 	var projects []db.Project
 	if hasUsers {
 		user, ok := s.requireUser(w, r)
 		if !ok {
 			return
 		}
-		projects, err = s.store.ListProjectsForUser(r.Context(), user.ID)
+		projects, err = s.store.ListProjectsForUserWithOptions(r.Context(), user.ID, includeArchived)
 	} else {
-		projects, err = s.store.ListProjects(r.Context())
+		projects, err = s.store.ListProjectsWithOptions(r.Context(), includeArchived)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	conversations, err := s.store.ListNavigationConversations(r.Context())
+	conversations, err := s.store.ListNavigationConversationsWithOptions(r.Context(), includeArchived)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

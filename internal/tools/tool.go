@@ -68,6 +68,7 @@ type Env struct {
 	Store                        *db.Store
 	Output                       func(OutputChunk)
 	Background                   BackgroundTaskService
+	ContextAsk                   ContextAskService
 	ToolOutputPipeline           ToolOutputPipelineService
 	PermissionModeCap            string
 	PermissionGenerationSnapshot int64

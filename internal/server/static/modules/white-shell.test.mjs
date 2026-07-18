@@ -181,6 +181,25 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
   assert.match(appMain, /autoto:auth-changed[\s\S]*?disconnectAgentTransports\(\)[\s\S]*?projectKanban\.setAgent\(null\)[\s\S]*?init\(\)\.catch\(showError\)/);
 });
 
+test("project switching preserves the current view until the next Agent is ready", async () => {
+  const [appMain, styles] = await Promise.all([
+    readFile(appMainURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+  ]);
+  const selectStart = appMain.indexOf("async function selectProject");
+  const selectEnd = appMain.indexOf("async function selectNavigationConversation", selectStart);
+  const selectBody = appMain.slice(selectStart, selectEnd);
+
+  assert.match(selectBody, /const preserveConversationView = Boolean\([\s\S]*?state\.agent\?\.id/);
+  assert.match(selectBody, /beginNavigationSelection\(project, \{ preserveConversationView \}\)/);
+  assert.match(selectBody, /markMessageViewportBusy\(\{ contextSwitch: true, label: am\("projectLoadingTitle"\) \}\)/);
+  assert.match(selectBody, /await enterAgent\(\);[\s\S]*?clearMessageViewportBusy\(\);/);
+  assert.match(appMain, /function beginNavigationSelection\(project, options = \{\}\)[\s\S]*?if \(!options\.preserveConversationView\) renderConversationHeaderIdentity\(\);/);
+  assert.match(appMain, /function markMessageViewportBusy\(options = \{\}\)[\s\S]*?dataset\.contextSwitching = "true"/);
+  assert.match(styles, /\.messages\[data-context-switching="true"\]::before/);
+  assert.match(styles, /\.messages\[data-context-switching="true"\]::after/);
+});
+
 test("static entry points share throughput and usage-history cache stamps", async () => {
   const [html, app] = await Promise.all([
     readFile(indexURL, "utf8"),
@@ -220,6 +239,48 @@ test("settings help cache stamps reach the shell and locale catalogs", async () 
   assert.equal((i18n.match(/messages-(?:en|zh-CN|zh-TW)\.mjs\?v=[^"\n]*settings-help-1/g) || []).length, 3);
 });
 
+test("storage settings cards keep visible vertical spacing", async () => {
+  const [html, styles] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+  ]);
+
+  assert.match(styles, /body\.white-shell\.theme-light \.legacy-settings-content-body \.storage-entry-list\s*\{[\s\S]*?gap:\s*12px/);
+  assert.match(html, /styles\.css\?v=[^"\n]*storage-card-gap-1/);
+});
+
+test("agent settings keep long model names inside their metric cards", async () => {
+  const [html, styles] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+  ]);
+
+  assert.match(styles, /#settingsContentBody \.agent-settings-page \.usage-summary-grid \.usage-metric-value\s*\{[\s\S]*?overflow-wrap:\s*anywhere[\s\S]*?word-break:\s*break-word/);
+  assert.match(styles, /\.usage-metric-card:nth-child\(-n \+ 2\) \.usage-metric-value\s*\{[\s\S]*?font-size:\s*clamp\(16px, 1\.4vw, 20px\)/);
+  assert.match(html, /styles\.css\?v=[^"\n]*agent-model-wrap-1/);
+});
+
+test("network proxy settings remove duplicate agent management while keeping the backend modal", async () => {
+  const [html, app, appMain, settingsData, settingsCategories, backendRegistry] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(new URL("./settings-data.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./settings-categories.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./backend-registry.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(html, /id="manageBackendsBtn"/);
+  assert.match(html, /id="backendsModal"[^>]*role="dialog"/);
+  assert.doesNotMatch(settingsData, /settingItem\("agent-admin"/);
+  assert.doesNotMatch(settingsCategories, /items:\s*\["network-search",\s*"agent-admin"\]/);
+  assert.doesNotMatch(appMain, /\["agent-admin",\s*\{\s*render:/);
+  assert.doesNotMatch(backendRegistry, /renderAgentAdminSettingsContent|bindAgentAdminSettingsActions|settingsBackendForm/);
+  assert.match(appMain, /backend-registry\.mjs\?v=agent-admin-removed-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*agent-admin-removed-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*agent-admin-removed-1/);
+});
+
 test("folder picker uses stable SVG actions and directory icons instead of font glyphs", async () => {
   const [html, directoryBrowser, styles, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
@@ -238,6 +299,10 @@ test("folder picker uses stable SVG actions and directory icons instead of font 
   assert.match(directoryBrowser, /const directoryFolderIcon = `[\s\S]*class="directory-folder-svg"/);
   assert.match(directoryBrowser, /class="directory-icon" aria-hidden="true">\$\{directoryFolderIcon\}/);
   assert.doesNotMatch(directoryBrowser, /class="directory-icon">▱/);
+  assert.match(directoryBrowser, /shortcut\.name === "Root"/);
+  assert.match(directoryBrowser, /folder-root-section/);
+  assert.match(directoryBrowser, /folder-root-card/);
+  assert.match(styles, /\.folder-root-card\s*\{/);
   assert.match(directoryBrowser, /trigger\?\.setAttribute\("aria-expanded", "true"\)/);
   assert.match(directoryBrowser, /trigger\?\.setAttribute\("aria-expanded", "false"\)/);
   assert.match(styles, /\.folder-tool-btn-labeled \{/);
@@ -263,6 +328,29 @@ test("conversation sidebar keeps navigation content and moves its existing actio
   assert.match(html, /id="recentSidebarDirectories"/);
   assert.match(html, /id="globalThemeToggleBtn"/);
   assert.match(html, /id="globalHealthText"/);
+});
+
+test("conversation navigation exposes archive, pin, and accessible context-menu controls", async () => {
+  const [html, appMain, navigation, styles] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(new URL("./conversation-navigation.mjs", import.meta.url), "utf8"),
+    readFile(stylesURL, "utf8"),
+  ]);
+
+  assert.doesNotMatch(html, /id="navigationArchiveToggleBtn"/);
+  assert.match(html, /id="navigationContextMenu"[^>]*role="menu"/);
+  assert.match(html, /data-navigation-menu-action="pin"/);
+  assert.match(html, /data-navigation-menu-action="archive"/);
+  assert.match(navigation, /data-navigation-menu-trigger/);
+  assert.match(navigation, /navigation-state-badge pinned/);
+  assert.match(navigation, /navigation-state-badge archived/);
+  assert.match(appMain, /createArchiveSettingsController/);
+  assert.match(appMain, /archiveSettings/);
+  assert.match(appMain, /document\.addEventListener\("contextmenu", handleNavigationContextMenu\)/);
+  assert.match(appMain, /applyNavigationMenuAction\(action\)/);
+  assert.match(styles, /\.navigation-context-menu\s*\{[\s\S]*?position:\s*fixed/);
+  assert.match(styles, /\.navigation-row-actions\s*\{[\s\S]*?opacity:\s*0/);
 });
 
 test("conversation and task modes expose separate creation boundaries", async () => {
@@ -331,10 +419,12 @@ test("lightning control is a capability-gated Fast mode toggle", async () => {
     readFile(stylesURL, "utf8"),
     readFile(appMainURL, "utf8"),
   ]);
+  assert.match(html, /styles\.css\?v=[^"]*lightning-icon-1/);
   assert.match(html, /id="openProviderLoginBtn"[^>]*class="[^"]*toolbar-lightning-btn[^"]*hidden[^"]*"[^>]*aria-pressed="false"[^>]*data-i18n-title="chat\.fastModeDisabled"/);
   assert.match(appMain, /openProviderLoginBtn"\)\?\.addEventListener\("click", \(\) => toggleFastMode\(\)\.catch\(showError\)\)/);
   assert.doesNotMatch(appMain, /openProviderLoginBtn"\)\.addEventListener\("click", \(\) => openSettingsModal\("providers"\)\)/);
-  assert.match(styles, /\.toolbar-lightning-btn\.fast-mode-active\s*\{[\s\S]*?background:\s*#edf0ff/);
+  assert.match(styles, /\.toolbar-lightning-btn:not\(\.hidden\)\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none/);
+  assert.match(styles, /\.toolbar-lightning-btn\.fast-mode-active\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none/);
   assert.match(styles, /\.toolbar-lightning-btn\.fast-mode-active svg\s*\{[\s\S]*?fill:\s*currentColor/);
 });
 
@@ -418,7 +508,7 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(styles, /body\.white-shell\.theme-light \.navigation-project-group \+ \.navigation-project-group\s*\{[\s\S]*?margin-top:\s*2px/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\)\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)[\s\S]*?grid-auto-rows:\s*max-content[\s\S]*?justify-content:\s*start[\s\S]*?row-gap:\s*14px[\s\S]*?padding:\s*14px 16px 14px/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\s*\{[^}]*justify-self:\s*stretch[^}]*width:\s*100%[^}]*max-width:\s*100%[^}]*white-space:\s*normal/);
-  assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*justify-self:\s*start[^}]*align-self:\s*start[^}]*width:\s*fit-content[^}]*min-width:\s*126px[^}]*max-width:\s*min\(760px, 82%\)[^}]*height:\s*fit-content[^}]*margin:\s*0 0 14px[^}]*background:\s*var\(--ws-primary-soft\)[^}]*color:\s*var\(--ws-text\)/);
+  assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*justify-self:\s*start[^}]*align-self:\s*start[^}]*width:\s*100%[^}]*min-width:\s*126px[^}]*max-width:\s*100%[^}]*height:\s*fit-content[^}]*margin:\s*0 0 14px[^}]*background:\s*var\(--ws-primary-soft\)[^}]*color:\s*var\(--ws-text\)/);
   assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\] \.message-head-actions\s*\{[^}]*position:\s*absolute[^}]*display:\s*flex/);
   assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\] \.message-copy-btn\s*\{[^}]*width:\s*22px[^}]*font-size:\s*0/);
   assert.match(styles, /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*width:\s*fit-content[^}]*max-width:\s*92%[^}]*margin-left:\s*0/);
@@ -443,10 +533,25 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(appMain, /navigationRefresh\.start\(\)/);
   assert.match(appMain, /syncNavigationConversationFromAgent\(state\.agent/);
   assert.match(appMain, /preserveMessageState:\s*true/);
-  assert.match(appMain, /function markMessageViewportBusy\(\)[\s\S]*?dataset\.initialChatState = "loading"/);
+  assert.match(appMain, /navigationTransitionTitle/);
+  assert.match(appMain, /const preserveConversationView = Boolean\(state\.agent\?\.id\)/);
+  assert.match(appMain, /clearLiveAssistantText\(\{ preserveView: true \}\)/);
+  assert.match(appMain, /clearRunSummary\(\{ preserveView: true \}\)/);
+  assert.match(appMain, /function markMessageViewportBusy\(options = \{\}\)[\s\S]*?dataset\.initialChatState = "loading"/);
+  assert.match(appMain, /messageViewportBusyDelayMs = 140/);
+  assert.match(appMain, /clearMessageViewportBusyTimer\(\)/);
   assert.match(appMain, /selectNavigationConversation[\s\S]*?markMessageViewportBusy\(\)/);
   assert.doesNotMatch(appMain, /conversationOpeningTitle/);
   assert.match(chatRendering, /state\.chatHydrating && options\.forceRender !== true/);
+  assert.match(chatRendering, /function clearRunSummary\(\{ preserveView = false \} = \{\}\)/);
+  assert.match(chatRendering, /if \(html\) existing\.outerHTML = html/);
+  assert.match(chatRendering, /if \(state\.runSummaryLoading\) return;/);
+  assert.match(chatRendering, /if \(!run && state\.runSummaryLoading && !state\.runSummaryError\) return ""/);
+  assert.doesNotMatch(chatRendering, /runStatusLabel\(status\)\}\)\}\$\{state\.runSummaryLoading/);
+  assert.match(chatRendering, /function renderLiveAssistantCard\(\{ preserveView = false \} = \{\}\)/);
+  assert.match(styles, /\.messages\[data-context-switching="true"\]::before[\s\S]*?background: color-mix\(in srgb, var\(--bg\) 34%, transparent\)/);
+  assert.match(styles, /content: attr\(data-switching-label\) " …"/);
+  assert.match(styles, /@keyframes message-context-pulse/);
   assert.match(chatRendering, /class="empty-conversation-state"/);
 });
 
@@ -758,7 +863,9 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
   assert.match(appMain, /createSettingsHelpController/);
   assert.match(appMain, /settingsHelp\.sync\(\{ key: item\.key, label: item\.label, overview: item\.subtitle \}\)/);
   assert.match(appMain, /settingsHelp\.handleKeydown\(event\)/);
-  assert.doesNotMatch(appMain, /settings-nav-label[^\n]*<small>\$\{escapeHtml\(item\.subtitle\)\}/);
+  const desktopNav = appMain.slice(appMain.indexOf("function renderSettingsNav"), appMain.indexOf("function updateSettingsSearchQuery"));
+  assert.doesNotMatch(desktopNav, /settings-nav-label[^\n]*<small>\$\{escapeHtml\(item\.subtitle\)\}/);
+  assert.match(appMain, /settings-mobile-index-copy[^\n]*<strong>\$\{escapeHtml\(item\.label\)\}<\/strong><small>\$\{escapeHtml\(item\.subtitle\)\}<\/small>/);
   assert.match(appMain, /groupSettingsItemsByLegacyCategory/);
   assert.match(appMain, /class="settings-nav-group"/);
   assert.match(appMain, /aria-current="page"/);
@@ -777,28 +884,136 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
   assert.doesNotMatch(appMain, /\["users",\s*\{\s*render:/);
 });
 
-test("settings shadcn shell stays centered and keeps complete mobile navigation", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+test("settings shell docks beside the global rail and keeps complete mobile navigation", async () => {
+  const [html, styles, app, appMain] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+  ]);
   const settingsMarker = "Settings shadcn system — scoped integration.";
+  const dockMarker = "/* Settings mode occupies the workbench beside the persistent global rail. */";
   const providerMarker = "/* Model provider settings. Scoped after legacy settings overrides by design. */";
   const settingsIndex = styles.indexOf(settingsMarker);
+  const dockIndex = styles.indexOf(dockMarker, settingsIndex);
   const providerIndex = styles.indexOf(providerMarker);
-  assert.ok(settingsIndex > 0 && providerIndex > settingsIndex);
+  assert.ok(settingsIndex > 0 && dockIndex > settingsIndex && providerIndex > dockIndex);
   const settingsStyles = styles.slice(settingsIndex, providerIndex);
-  assert.match(settingsStyles, /#settingsModal\s*\{[\s\S]*?align-items:\s*center;[\s\S]*?justify-content:\s*center;/);
-  assert.match(settingsStyles, /#settingsModal \.settings-dialog-shell\s*\{[\s\S]*?width:\s*min\(1520px, calc\(100vw - 24px\)\);[\s\S]*?grid-template-columns:\s*240px minmax\(0, 1fr\);/);
+  const dockStyles = settingsStyles.slice(settingsStyles.indexOf(dockMarker));
+  assert.match(dockStyles, /@media \(min-width:\s*768px\)[\s\S]*?#settingsModal\s*\{[\s\S]*?align-items:\s*stretch;[\s\S]*?justify-content:\s*stretch;[\s\S]*?backdrop-filter:\s*none;/);
+  assert.match(dockStyles, /#settingsModal \.settings-dialog-shell\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?grid-template-columns:\s*var\(--session-sidebar-width, 296px\) minmax\(0, 1fr\);[\s\S]*?border-radius:\s*0;/);
   assert.doesNotMatch(settingsStyles, /\.settings-dialog-shell:has\(\.codex-account-console\)/);
   assert.match(settingsStyles, /\.settings-main\.legacy-settings-content\s*\{[\s\S]*?overflow:\s*hidden !important;/);
+  assert.match(settingsStyles, /#settingsModal \.settings-page-frame\s*\{[^}]*width:\s*min\(1120px, 100%\);[^}]*margin:\s*0;/);
+  assert.doesNotMatch(settingsStyles, /#settingsModal \.settings-page-frame\s*\{[^}]*margin:\s*0 auto;/);
   assert.match(settingsStyles, /#settingsContentBody \[data-settings-help-copy\]\s*\{\s*display:\s*none !important;/);
   assert.match(settingsStyles, /#settingsModal \.settings-help-panel\s*\{[\s\S]*?width:\s*min\(440px, 88%\);/);
   assert.match(settingsStyles, /#settingsModal \.settings-help-body\s*\{[\s\S]*?overflow:\s*auto;/);
   assert.match(settingsStyles, /\.automation-hero p/);
+
+  const enterStart = appMain.indexOf("function enterSettingsShell");
+  const enterEnd = appMain.indexOf("function exitSettingsShell", enterStart);
+  const enterBody = appMain.slice(enterStart, enterEnd);
+  assert.ok(enterStart > 0 && enterEnd > enterStart);
+  assert.match(enterBody, /saveCurrentChatDraft\(\);[\s\S]*?appShell\.appendChild\(modal\)/);
+  for (const id of ["sessionSidebar", "sidebarResizeHandle", "conversationPanel", "workbenchPanel", "terminalPanel"]) {
+    assert.match(enterBody, new RegExp(`"${id}"`));
+  }
+  assert.match(enterBody, /modal\.setAttribute\("role", "region"\);[\s\S]*?modal\.removeAttribute\("aria-modal"\)/);
+  assert.doesNotMatch(enterBody, /disconnectAgentTransports|selectNavigationConversation|beginNavigationSelection/);
+  assert.match(appMain, /function exitSettingsShell\(\)[\s\S]*?restoreInlineProperties\(session\.appShellStyle\)[\s\S]*?originalParent\.insertBefore\(modal, originalNextSibling\)/);
+  assert.match(appMain, /closeSettingsModal\(\{ restoreWorkbench: false, restoreFocus: false \}\)/);
+  assert.match(html, /class="settings-sidebar legacy-settings-topbar"[^>]*data-i18n-aria-label="settings\.directory"/);
+  assert.match(html, /id="closeSettingsModalBtn"[^>]*data-i18n-title="settings\.backToChat"[^>]*data-i18n-aria-label="settings\.backToChat"/);
+  assert.match(html, /class="settings-page-scroll"[^>]*role="region"[^>]*data-i18n-aria-label="settings\.details"/);
+  assert.match(appMain, /settingsIconSVG\(item\.icon\)/);
+  assert.doesNotMatch(appMain, /escapeHtml\(item\.icon\)/);
+  assert.match(html, /styles\.css\?v=[^"\n]*settings-icons-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*settings-content-left-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*settings-icons-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*settings-icons-1/);
+  assert.match(appMain, /settings-data\.mjs\?v=[^"\n]*settings-icons-1/);
+  assert.match(settingsStyles, /\.settings-nav-icon \.settings-icon-svg\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;/);
+  assert.match(settingsStyles, /\[aria-current="page"\] \.settings-nav-icon\s*\{[^}]*background:[^}]*color:\s*var\(--settings-primary\)/);
+
   const mobile = settingsStyles.slice(settingsStyles.indexOf("@media (max-width: 767px)"));
   assert.match(mobile, /\.settings-sidebar\s*\{[\s\S]*?display:\s*grid;/);
   assert.doesNotMatch(mobile, /\.settings-sidebar\s*\{[^}]*display:\s*none;/);
   assert.match(mobile, /\.settings-mobile-category-nav,[\s\S]*?\.settings-nav-groups\s*\{[\s\S]*?display:\s*flex;/);
   assert.match(mobile, /\.settings-nav-group\s*\{[\s\S]*?display:\s*contents;/);
   assert.match(mobile, /\.settings-help-panel\s*\{\s*width:\s*100%;\s*border-left:\s*0;/);
+});
+
+test("mobile shell refresh keeps the new home, drawer, settings index, and model sheet wired", async () => {
+  const [html, styles, appMain, uiShell, settingsPreferences, messagesCN, messagesTW, messagesEN] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(uiShellURL, "utf8"),
+    readFile(new URL("./settings-preferences.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./messages-zh-CN.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./messages-zh-TW.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./messages-en.mjs", import.meta.url), "utf8"),
+  ]);
+
+  for (const id of [
+    "mobilePageTitle",
+    "mobileNewConversationBtn",
+    "mobileChooseDirectoryBtn",
+    "mobileConversationWelcome",
+    "mobileSidebarBackdrop",
+    "mobileSidebarCloseBtn",
+    "mobileDrawerSearchBtn",
+    "mobileSidebarAccountSummary",
+    "mobileSidebarSettingsBtn",
+    "mobileSidebarLogoutBtn",
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /class="[^"]*mobile-drawer-header/);
+  assert.match(html, /class="[^"]*mobile-drawer-footer/);
+  assert.doesNotMatch(html, /id="mobileSettingsIndex"/);
+  assert.doesNotMatch(html, /id="mobileModelPanel"/);
+  assert.match(html, /id="attachFileBtn"[^>]*data-i18n-aria-label="chat\.attachFile"/);
+
+  const marker = "/* Mobile shell refresh: home, drawer, settings, and composer selection sheets. */";
+  const refreshedStyles = styles.slice(styles.indexOf(marker));
+  assert.ok(refreshedStyles.startsWith(marker));
+  assert.match(refreshedStyles, /\.mobile-select-sheet-backdrop\s*\{[\s\S]*?align-items:\s*flex-end/);
+  assert.match(refreshedStyles, /@media \(max-width:\s*767px\)[\s\S]*?\.mobile-page-title\s*\{[\s\S]*?text-align:\s*center/);
+  assert.match(refreshedStyles, /\.chat-panel:has\(\.messages\.empty:not\(\[data-initial-chat-state="loading"\]\)\) \.mobile-conversation-welcome\s*\{\s*display:\s*flex/);
+  assert.match(refreshedStyles, /#settingsModal\.mobile-settings-index \.settings-main\s*\{\s*display:\s*none/);
+  assert.match(refreshedStyles, /#settingsModal\.mobile-settings-detail \.settings-sidebar\s*\{[\s\S]*?flex:\s*0 0 auto/);
+  assert.match(refreshedStyles, /\.mobile-sidebar-account-summary\s*\{[\s\S]*?grid-template-columns:\s*42px minmax\(0, 1fr\)/);
+  assert.match(refreshedStyles, /\.mobile-sidebar-quick-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  const guardMarker = "/* Mobile shell final cascade guard: keep the redesigned composer above legacy responsive tiers. */";
+  const guardIndex = styles.lastIndexOf(guardMarker);
+  assert.ok(guardIndex > styles.indexOf("/* Narrow composer icon rail"));
+  const cascadeGuard = styles.slice(guardIndex);
+  assert.match(cascadeGuard, /\.composer-task-summary,[\s\S]*?display:\s*none !important/);
+  assert.match(cascadeGuard, /\.composer-select-value,[\s\S]*?position:\s*static;[\s\S]*?clip-path:\s*none/);
+  assert.match(cascadeGuard, /\.composer-model-field \.composer-select-trigger\s*\{\s*max-width:\s*min\(58vw, 246px\)/);
+
+  assert.match(appMain, /mobileSettingsView:\s*"detail"/);
+  assert.match(appMain, /function showMobileSettingsIndex[\s\S]*?settings\.mobile\.indexTitle/);
+  assert.match(appMain, /function requestCloseSettingsModal[\s\S]*?mobileSettingsView === "detail"/);
+  assert.match(appMain, /function syncMobilePageTitle/);
+  assert.match(uiShell, /mobile-select-sheet-backdrop hidden/);
+  assert.match(uiShell, /mobileSidebarBackdrop/);
+  assert.match(uiShell, /mobileSidebarCloseBtn/);
+  assert.equal((uiShell.match(/function closeMobileSidebar/g) || []).length, 1);
+  assert.match(uiShell, /translate\("chat\.selectModel"\)/);
+  assert.match(uiShell, /translate\("chat\.manageModels"\)/);
+  assert.match(uiShell, /openModelSettings\(\)/);
+  assert.doesNotMatch(uiShell, /mobileComposerSelectStyles/);
+  assert.match(settingsPreferences, /mobileSidebarAvatar/);
+  assert.match(settingsPreferences, /mobileSidebarAccountName/);
+  assert.match(settingsPreferences, /mobileSidebarAccountMeta/);
+
+  for (const messages of [messagesCN, messagesTW, messagesEN]) {
+    assert.match(messages, /mobileWelcomeTitle:/);
+    assert.match(messages, /selectModel:/);
+    assert.match(messages, /backToIndex:/);
+    assert.match(messages, /personalInterface:/);
+  }
 });
 
 test("about settings use the legacy version layout and real update status", () => {
@@ -909,7 +1124,7 @@ test("initial shell and default appearance use the versioned light theme", async
   assert.equal(defaultAppearancePrefs.themePreset, "light");
   assert.equal(defaultAppearancePrefs.theme, "light");
   assert.equal(defaultAppearancePrefs.styleVersion, appearanceStyleVersion);
-  assert.equal(appearanceStyleVersion, 3);
+  assert.equal(appearanceStyleVersion, 4);
   assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
 });
 
@@ -946,7 +1161,8 @@ test("unversioned dark appearance migrates once to light and explicit versioned 
     const controller = createController({ activeSettingsPanel: "" });
     const migrated = controller.loadAppearancePreferences();
     assert.deepEqual(migrated, {
-      styleVersion: 3,
+      styleVersion: 4,
+      themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "compact",
@@ -958,7 +1174,7 @@ test("unversioned dark appearance migrates once to light and explicit versioned 
     controller.saveAppearancePreferences({ ...migrated, themePreset: "dark" });
     assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).themePreset, "dark");
     assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).theme, "dark");
-    assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).styleVersion, 3);
+    assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).styleVersion, 4);
   });
 });
 
@@ -977,7 +1193,8 @@ test("appearance backup import and export normalize the new schema without rejec
 
     assert.equal(imported, 1);
     assert.deepEqual(JSON.parse(storage.getItem(appearancePrefsKey)), {
-      styleVersion: 3,
+      styleVersion: 4,
+      themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "comfortable",
@@ -985,7 +1202,8 @@ test("appearance backup import and export normalize the new schema without rejec
       showEventLog: true,
     });
     assert.deepEqual(controller.createLocalPreferencesBackup().preferences[appearancePrefsKey], {
-      styleVersion: 3,
+      styleVersion: 4,
+      themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "comfortable",
@@ -1040,7 +1258,9 @@ test("model provider settings styles remain scoped, responsive, and independent 
   assert.match(providerStyles, /\.mp-provider-card\.is-disabled[\s\S]*?opacity:\s*\.68/);
   assert.match(providerStyles, /\.mp-status-badge\s*\{/);
   assert.match(providerStyles, /\.mp-model-chip\s*\{/);
-  assert.doesNotMatch(providerStyles, /\.mp-provider-switch|data-mp-provider-toggle/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-switch\s*\{/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-delete\s*\{/);
+  assert.doesNotMatch(providerStyles, /(?:^|\n)\s*\.mp-provider-(?:switch|delete)\b/m);
   assert.match(providerStyles, /\.mp-provider-type-modal\s*\{[\s\S]*?z-index:\s*90/);
   assert.match(providerStyles, /\.mp-modal-panel\s*\{[\s\S]*?width:\s*min\(680px, 100%\)/);
   assert.match(providerStyles, /\.mp-provider-type-grid\s*\{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);

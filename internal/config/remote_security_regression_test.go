@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRemoteSecurityRegressionEnvironmentOverridesDoNotPersistThroughUnrelatedSave(t *testing.T) {
+func TestRemoteSecurityRegressionEnvironmentOverridesDoNotReplacePersistedPasswordHash(t *testing.T) {
 	for _, setting := range []struct {
 		name  string
 		value string
@@ -52,8 +52,8 @@ func TestRemoteSecurityRegressionEnvironmentOverridesDoNotPersistThroughUnrelate
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !runtime.Security.Exposed || runtime.Security.AccessPassword != "Environment-Only-Remote-Password-1!" || !runtime.Security.AllowRemoteFullAccess || runtime.Security.DefaultRemoteAccessMode != "full" || !runtime.Security.AllowRemoteNativePicker {
-		t.Fatalf("environment security overrides were not active at runtime: %+v", runtime.Security)
+	if !runtime.Security.Exposed || runtime.Security.AccessPassword != "" || runtime.Security.AccessPasswordHash != persistedSecurity.AccessPasswordHash || !runtime.Security.AllowRemoteFullAccess || runtime.Security.DefaultRemoteAccessMode != "full" || !runtime.Security.AllowRemoteNativePicker {
+		t.Fatalf("environment security overrides were not active without replacing the persisted password hash: %+v", runtime.Security)
 	}
 
 	// Simulate an unrelated settings update made while environment overrides are active.

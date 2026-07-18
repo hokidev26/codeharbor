@@ -75,6 +75,8 @@ type Project struct {
 	GitPath       string `json:"gitPath,omitempty"`
 	RemoteURL     string `json:"remoteUrl,omitempty"`
 	DefaultBranch string `json:"defaultBranch,omitempty"`
+	Pinned        bool   `json:"pinned"`
+	ArchivedAt    string `json:"archivedAt,omitempty"`
 	CreatedAt     string `json:"createdAt"`
 	UpdatedAt     string `json:"updatedAt"`
 }
@@ -129,6 +131,8 @@ type Agent struct {
 	ExecutionDeviceID      string `json:"executionDeviceId"`
 	Status                 string `json:"status"`
 	PlanMode               bool   `json:"planMode"`
+	Pinned                 bool   `json:"pinned"`
+	ArchivedAt             string `json:"archivedAt,omitempty"`
 	CWD                    string `json:"cwd,omitempty"`
 	MessageCount           int    `json:"messageCount"`
 	ContextSummary         string `json:"-"`
@@ -143,6 +147,8 @@ type NavigationConversation struct {
 	ProjectName       string `json:"projectName"`
 	ProjectPath       string `json:"projectPath"`
 	ProjectUpdatedAt  string `json:"projectUpdatedAt"`
+	ProjectPinned     bool   `json:"projectPinned"`
+	ProjectArchivedAt string `json:"projectArchivedAt,omitempty"`
 	WorklineID        string `json:"worklineId"`
 	WorklineTitle     string `json:"worklineTitle"`
 	WorklineRole      string `json:"worklineRole"`
@@ -152,6 +158,8 @@ type NavigationConversation struct {
 	AgentTitle        string `json:"agentTitle"`
 	AgentType         string `json:"agentType"`
 	AgentStatus       string `json:"agentStatus"`
+	AgentPinned       bool   `json:"agentPinned"`
+	AgentArchivedAt   string `json:"agentArchivedAt,omitempty"`
 	Model             string `json:"model"`
 	PermissionMode    string `json:"permissionMode"`
 	CWD               string `json:"cwd"`
@@ -634,28 +642,113 @@ func sqliteDSN(path string) string {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	path = filepath.Clean(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err := secureSQLiteFile(path, true, false); err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	database.SetMaxOpenConns(1)
+	store := &Store{db: database}
 	if err := store.migrate(ctx); err != nil {
-		db.Close()
+		database.Close()
 		return nil, err
 	}
 	if err := store.ensureRuntimeSettings(ctx); err != nil {
-		db.Close()
+		database.Close()
 		return nil, err
 	}
 	if err := store.revalidateSkills(ctx); err != nil {
-		db.Close()
+		database.Close()
+		return nil, err
+	}
+	if err := secureSQLiteFiles(path); err != nil {
+		database.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+func secureSQLiteFiles(path string) error {
+	if err := secureSQLiteFile(path, false, false); err != nil {
+		return err
+	}
+	for _, candidate := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if err := secureSQLiteFile(candidate, false, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func secureSQLiteFile(path string, create, missingOK bool) error {
+	initial, err := os.Lstat(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect SQLite file %s: %w", path, err)
+		}
+		if !create {
+			if missingOK {
+				return nil
+			}
+			return fmt.Errorf("inspect SQLite file %s: %w", path, err)
+		}
+	} else if err := validateSQLiteFileInfo(path, initial); err != nil {
+		return err
+	}
+
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		if missingOK && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open SQLite file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	opened, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened SQLite file %s: %w", path, err)
+	}
+	if err := validateSQLiteFileInfo(path, opened); err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		if missingOK && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reinspect SQLite file %s: %w", path, err)
+	}
+	if err := validateSQLiteFileInfo(path, current); err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return fmt.Errorf("SQLite file %s changed while being opened", path)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure SQLite file %s: %w", path, err)
+	}
+	return nil
+}
+
+func validateSQLiteFileInfo(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("SQLite file %s must not be a symbolic link", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("SQLite file %s must be a regular file", path)
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -2083,54 +2176,97 @@ func (s *Store) ListRollingBackRuns(ctx context.Context) ([]Run, error) {
 	return runs, rows.Err()
 }
 
+func scanProject(scan func(...any) error) (Project, error) {
+	var project Project
+	var pinned int
+	err := scan(
+		&project.ID,
+		&project.Name,
+		&project.Description,
+		&project.Status,
+		&project.FlowMode,
+		&project.GitPath,
+		&project.RemoteURL,
+		&project.DefaultBranch,
+		&pinned,
+		&project.ArchivedAt,
+		&project.CreatedAt,
+		&project.UpdatedAt,
+	)
+	project.Pinned = pinned != 0
+	return project, err
+}
+
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, COALESCE(description,''), status, flow_mode, COALESCE(git_path,''), COALESCE(remote_url,''), COALESCE(default_branch,''), created_at, updated_at FROM projects ORDER BY updated_at DESC`)
+	return s.ListProjectsWithOptions(ctx, false)
+}
+
+func (s *Store) ListProjectsWithOptions(ctx context.Context, includeArchived bool) ([]Project, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, name, COALESCE(description,''), status, flow_mode,
+       COALESCE(git_path,''), COALESCE(remote_url,''), COALESCE(default_branch,''),
+       COALESCE(pinned, 0), COALESCE(archived_at, ''), created_at, updated_at
+FROM projects
+WHERE (? = 1 OR archived_at IS NULL)
+ORDER BY CASE WHEN archived_at IS NULL THEN 0 ELSE 1 END ASC,
+         pinned DESC, updated_at DESC, id ASC`, boolInt(includeArchived))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	projects := make([]Project, 0)
 	for rows.Next() {
-		var p Project
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Status, &p.FlowMode, &p.GitPath, &p.RemoteURL, &p.DefaultBranch, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		project, err := scanProject(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		projects = append(projects, p)
+		projects = append(projects, project)
 	}
 	return projects, rows.Err()
 }
 
 func (s *Store) ListProjectsForUser(ctx context.Context, userID string) ([]Project, error) {
+	return s.ListProjectsForUserWithOptions(ctx, userID, false)
+}
+
+func (s *Store) ListProjectsForUserWithOptions(ctx context.Context, userID string, includeArchived bool) ([]Project, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT p.id, p.name, COALESCE(p.description,''), p.status, p.flow_mode,
        COALESCE(p.git_path,''), COALESCE(p.remote_url,''), COALESCE(p.default_branch,''),
-       p.created_at, p.updated_at
+       COALESCE(p.pinned, 0), COALESCE(p.archived_at, ''), p.created_at, p.updated_at
 FROM projects p
 JOIN project_members pm ON pm.project_id = p.id
-WHERE pm.user_id = ?
-ORDER BY p.updated_at DESC`, strings.TrimSpace(userID))
+WHERE pm.user_id = ? AND (? = 1 OR p.archived_at IS NULL)
+ORDER BY CASE WHEN p.archived_at IS NULL THEN 0 ELSE 1 END ASC,
+         p.pinned DESC, p.updated_at DESC, p.id ASC`, strings.TrimSpace(userID), boolInt(includeArchived))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	projects := make([]Project, 0)
 	for rows.Next() {
-		var p Project
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Status, &p.FlowMode, &p.GitPath, &p.RemoteURL, &p.DefaultBranch, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		project, err := scanProject(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		projects = append(projects, p)
+		projects = append(projects, project)
 	}
 	return projects, rows.Err()
 }
 
 func (s *Store) ListNavigationConversations(ctx context.Context) ([]NavigationConversation, error) {
+	return s.ListNavigationConversationsWithOptions(ctx, false)
+}
+
+func (s *Store) ListNavigationConversationsWithOptions(ctx context.Context, includeArchived bool) ([]NavigationConversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
   p.id,
   p.name,
   COALESCE(p.git_path, ''),
   p.updated_at,
+  COALESCE(p.pinned, 0),
+  COALESCE(p.archived_at, ''),
   w.id,
   w.title,
   w.role,
@@ -2140,6 +2276,8 @@ SELECT
   a.title,
   a.type,
   a.status,
+  COALESCE(a.pinned, 0),
+  COALESCE(a.archived_at, ''),
   a.model,
   a.permission_mode,
   COALESCE(a.cwd, ''),
@@ -2149,7 +2287,12 @@ FROM projects p
 JOIN worklines w ON w.project_id = p.id
 JOIN agents a ON a.workline_id = w.id
 WHERE p.status = 'active'
-ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
+  AND (? = 1 OR (p.archived_at IS NULL AND a.archived_at IS NULL))
+ORDER BY CASE WHEN p.archived_at IS NULL THEN 0 ELSE 1 END ASC,
+         p.pinned DESC,
+         CASE WHEN a.archived_at IS NULL THEN 0 ELSE 1 END ASC,
+         a.pinned DESC,
+         last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`, boolInt(includeArchived))
 	if err != nil {
 		return nil, err
 	}
@@ -2158,11 +2301,14 @@ ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
 	conversations := make([]NavigationConversation, 0)
 	for rows.Next() {
 		var conversation NavigationConversation
+		var projectPinned, agentPinned int
 		if err := rows.Scan(
 			&conversation.ProjectID,
 			&conversation.ProjectName,
 			&conversation.ProjectPath,
 			&conversation.ProjectUpdatedAt,
+			&projectPinned,
+			&conversation.ProjectArchivedAt,
 			&conversation.WorklineID,
 			&conversation.WorklineTitle,
 			&conversation.WorklineRole,
@@ -2172,6 +2318,8 @@ ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
 			&conversation.AgentTitle,
 			&conversation.AgentType,
 			&conversation.AgentStatus,
+			&agentPinned,
+			&conversation.AgentArchivedAt,
 			&conversation.Model,
 			&conversation.PermissionMode,
 			&conversation.CWD,
@@ -2180,6 +2328,8 @@ ORDER BY last_activity_at DESC, p.id ASC, w.id ASC, a.id ASC`)
 		); err != nil {
 			return nil, err
 		}
+		conversation.ProjectPinned = projectPinned != 0
+		conversation.AgentPinned = agentPinned != 0
 		conversations = append(conversations, conversation)
 	}
 	return conversations, rows.Err()
@@ -2243,9 +2393,63 @@ func (s *Store) createProject(ctx context.Context, ownerID, name, description, g
 }
 
 func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {
-	var p Project
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(description,''), status, flow_mode, COALESCE(git_path,''), COALESCE(remote_url,''), COALESCE(default_branch,''), created_at, updated_at FROM projects WHERE id = ?`, id).Scan(&p.ID, &p.Name, &p.Description, &p.Status, &p.FlowMode, &p.GitPath, &p.RemoteURL, &p.DefaultBranch, &p.CreatedAt, &p.UpdatedAt)
-	return p, err
+	return scanProject(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(description,''), status, flow_mode, COALESCE(git_path,''), COALESCE(remote_url,''), COALESCE(default_branch,''), COALESCE(pinned, 0), COALESCE(archived_at, ''), created_at, updated_at FROM projects WHERE id = ?`, id).Scan(dest...)
+	})
+}
+
+func updateNavigationState(ctx context.Context, db *sql.DB, table, id string, pinned, archived *bool) error {
+	if table != "projects" && table != "agents" {
+		return errors.New("unsupported navigation state table")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("navigation state id is required")
+	}
+	if pinned == nil && archived == nil {
+		return errors.New("navigation state patch is empty")
+	}
+	now := Now()
+	sets := make([]string, 0, 3)
+	args := make([]any, 0, 4)
+	if pinned != nil {
+		sets = append(sets, "pinned = ?")
+		args = append(args, boolInt(*pinned))
+	}
+	if archived != nil {
+		if *archived {
+			sets = append(sets, "archived_at = COALESCE(NULLIF(archived_at, ''), ?)")
+			args = append(args, now)
+		} else {
+			sets = append(sets, "archived_at = NULL")
+		}
+	}
+	sets = append(sets, "updated_at = ?")
+	args = append(args, now, id)
+	result, err := db.ExecContext(ctx, "UPDATE "+table+" SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) UpdateProjectNavigationState(ctx context.Context, id string, pinned, archived *bool) (Project, error) {
+	if err := updateNavigationState(ctx, s.db, "projects", id, pinned, archived); err != nil {
+		return Project{}, err
+	}
+	return s.GetProject(ctx, id)
+}
+
+func (s *Store) UpdateAgentNavigationState(ctx context.Context, id string, pinned, archived *bool) (Agent, error) {
+	if err := updateNavigationState(ctx, s.db, "agents", id, pinned, archived); err != nil {
+		return Agent{}, err
+	}
+	return s.GetAgent(ctx, id)
 }
 
 func (s *Store) ListWorklinesByProject(ctx context.Context, projectID string) ([]Workline, error) {
@@ -2333,16 +2537,17 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 	return s.GetWorkline(ctx, sourceWorklineID)
 }
 
-const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(fast_mode,0), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
+const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(fast_mode,0), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(pinned,0), COALESCE(archived_at,''), COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
 
 type agentScanner func(dest ...any) error
 
 func scanAgent(scan agentScanner) (Agent, error) {
 	var agent Agent
-	var fastMode, planMode int
-	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &fastMode, &agent.ExecutionDeviceID, &agent.Status, &planMode, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	var fastMode, planMode, pinned int
+	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &fastMode, &agent.ExecutionDeviceID, &agent.Status, &planMode, &pinned, &agent.ArchivedAt, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
 	agent.FastMode = fastMode != 0
 	agent.PlanMode = planMode != 0
+	agent.Pinned = pinned != 0
 	return agent, err
 }
 

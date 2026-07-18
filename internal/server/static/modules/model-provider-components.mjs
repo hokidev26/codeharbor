@@ -144,8 +144,8 @@ export function isAnthropicAccountProvider(provider = {}) {
 export function providerCategory(provider = {}) {
   const type = stringValue(provider.type).toLowerCase();
   const name = providerKey(provider);
-  if (type === "openai-compatible" || type === "anthropic-compatible" || provider.profile === "cliproxyapi") return "compatible";
   if (stringValue(provider.origin).toLowerCase() === "custom") return "custom";
+  if (type === "openai-compatible" || type === "anthropic-compatible" || provider.profile === "cliproxyapi") return "compatible";
   if (isBuiltinProvider(provider) || ["codex", "openai", "anthropic", "ollama"].includes(type) || name === "ollama") return "official";
   return "custom";
 }
@@ -277,12 +277,14 @@ export function createProviderDraft(typeKey, provider = null) {
     || providerTypeTemplates.find((item) => item.type === typeKey)
     || providerTypeTemplates[3];
   const source = provider ? normalizeConsoleProvider(provider) : null;
+  const hasProviderName = Boolean(provider && Object.hasOwn(provider, "name"));
+  const hasProviderBaseUrl = Boolean(provider && Object.hasOwn(provider, "baseUrl"));
   const localApiKey = provider?.apiKeyDraft === true ? stringValue(provider.apiKey) : "";
   return {
-    name: source?.name || template.name,
+    name: hasProviderName ? stringValue(provider.name) : (source?.name || template.name),
     type: source?.type || template.type,
     profile: source?.profile || "",
-    baseUrl: source?.baseUrl || template.baseUrl || "",
+    baseUrl: hasProviderBaseUrl ? stringValue(provider.baseUrl) : (source?.baseUrl || template.baseUrl || ""),
     // Saved provider responses never contribute a secret; only an explicitly marked
     // in-progress draft may retain its local key between redraws.
     apiKey: localApiKey,
@@ -324,25 +326,35 @@ export function providerTestPayload(draft = {}, provider = {}) {
   return providerConfigPayload({ ...provider, ...draft });
 }
 
+export function providerMessageTestPayload(draft = {}, provider = {}, prompt = "") {
+  return {
+    ...providerTestPayload(draft, provider),
+    prompt: stringValue(prompt),
+  };
+}
+
 export function providerConsoleRequest(action, provider, values = {}) {
-  const name = stringValue(values.name || provider?.name);
+  const name = stringValue(values.pathName || values.name || provider?.name);
   const path = `/api/providers/${encodeURIComponent(name)}`;
   switch (action) {
-    case "toggle":
+    case "toggle": {
+      const model = stringValue(values.model || provider?.defaultModel || provider?.model);
+      const body = { enabled: Boolean(values.enabled) };
+      if (model) body.model = model;
       return {
         path,
-        options: {
-          method: "PATCH",
-          body: JSON.stringify({
-            enabled: Boolean(values.enabled),
-            model: stringValue(values.model || provider?.defaultModel || provider?.model),
-          }),
-        },
+        options: { method: "PATCH", body: JSON.stringify(body) },
       };
+    }
     case "test":
       return {
         path: "/api/providers/test",
         options: { method: "POST", body: JSON.stringify(providerTestPayload(values, provider)) },
+      };
+    case "message-test":
+      return {
+        path: "/api/providers/test-message",
+        options: { method: "POST", body: JSON.stringify(providerMessageTestPayload(values, provider, values.prompt)) },
       };
     case "delete":
       return { path, options: { method: "DELETE" } };
@@ -369,6 +381,24 @@ function renderModelChoiceSelect(models, selectedModel, id) {
   </div>`;
 }
 
+function renderProviderMessageTestDialog(state = {}, draft = {}) {
+  if (!state.testOpen) return "";
+  const test = state.test && typeof state.test === "object" ? state.test : {};
+  const busy = Boolean(state.busy?.[`message-test:${draft.name}`]);
+  const result = test.result && typeof test.result === "object" ? test.result : null;
+  const resultHTML = result
+    ? `<div class="mp-provider-test-result settings-alert ${escapeAttr(result.tone || (result.success ? "success" : "attention"))}" role="status" aria-live="polite"><strong>${escapeHtml(result.success ? ct("test.successTitle") : ct("test.failureTitle"))}</strong>${result.output ? `<pre>${escapeHtml(result.output)}</pre>` : `<span>${escapeHtml(result.message || ct("messages.requestFailed"))}</span>`}</div>`
+    : "";
+  return `<div class="mp-provider-test-backdrop" data-mp-backdrop="test" role="presentation"><section class="mp-provider-test-dialog settings-card" role="dialog" aria-modal="true" tabindex="-1" aria-labelledby="mp-provider-test-title" aria-describedby="mp-provider-test-description" aria-busy="${busy ? "true" : "false"}">
+    <header class="mp-provider-test-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("test.kicker"))}</p><h2 id="mp-provider-test-title" class="settings-card-title">${escapeHtml(ct("test.title"))}</h2><p id="mp-provider-test-description" class="settings-card-description" data-settings-help-copy>${escapeHtml(ct("test.description", { provider: draft.name || ct("labels.provider"), model: draft.model || ct("labels.notSet") }))}</p></div><button class="mp-icon-button" type="button" data-mp-close-test aria-label="${escapeAttr(ct("actions.closeModal"))}">×</button></header>
+    <form class="mp-provider-test-form settings-card-content" data-mp-provider-test-form>
+      <label class="settings-form-field"><span>${escapeHtml(ct("test.promptLabel"))}</span><textarea name="prompt" data-mp-test-prompt rows="4" maxlength="8192" required placeholder="${escapeAttr(ct("test.promptPlaceholder"))}">${escapeHtml(test.prompt || ct("test.defaultPrompt"))}</textarea><small data-settings-help-copy>${escapeHtml(ct("test.promptHelp"))}</small></label>
+      ${resultHTML}
+      <footer class="mp-provider-test-foot settings-card-footer settings-inline-actions"><button class="mp-action" type="button" data-mp-close-test>${escapeHtml(ct("actions.cancel"))}</button><button class="mp-action primary" type="submit" data-mp-send-test ${busy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(busy ? ct("test.sending") : ct("test.send"))}</button></footer>
+    </form>
+  </section></div>`;
+}
+
 function renderModelChips(models) {
   const choices = normalizedDiscoveredModels(models);
   if (!choices.length) return "";
@@ -379,6 +409,7 @@ function renderModelChips(models) {
 
 export function renderProviderCreatePage(consoleState = {}) {
   const state = {
+    mode: "create",
     type: "openai-compatible",
     draft: null,
     busy: {},
@@ -386,36 +417,47 @@ export function renderProviderCreatePage(consoleState = {}) {
     ...consoleState,
   };
   const draft = createProviderDraft(state.type, state.draft || null);
-  const testBusy = Boolean(state.busy?.[`test:${draft.name}`]);
+  const editing = state.mode === "edit";
+  const createDraftPlaceholder = !editing && !state.dirty;
+  const nameEditable = !editing || isProviderDeletable(draft);
+  const deleteName = editing ? stringValue(state.providerName || draft.name) : draft.name;
+  const messageTestBusy = Boolean(state.busy?.[`message-test:${draft.name}`]);
   const modelBusy = Boolean(state.busy?.[`models:${draft.name}`]);
   const saveBusy = Boolean(state.busy?.[`save:${draft.name}`]);
-  const busy = testBusy || modelBusy || saveBusy;
+  const deleteBusy = Boolean(state.busy?.[`delete:${draft.name}`]);
+  const busy = messageTestBusy || modelBusy || saveBusy || deleteBusy;
   const discoveredModels = normalizedDiscoveredModels(draft.models);
   const modelList = discoveredModels.length
     ? `<datalist id="mp-provider-create-model-options">${discoveredModels.map((model) => `<option value="${escapeAttr(model)}"></option>`).join("")}</datalist>`
     : "";
   const modelChoices = renderModelChoiceSelect(discoveredModels, draft.model, "mp-provider-create-model-choice");
   const modelReference = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+  const apiKeyHelp = editing && draft.apiKeyPersisted
+    ? ct("fields.apiKeyPersisted", { lastFive: draft.apiKeyLastFive })
+    : editing
+      ? ct("fields.apiKeyBlankKeepsCurrent")
+      : ct("createPage.apiKeyHelp");
+  const apiKeyPlaceholder = editing ? ct("fields.apiKeyEditingPlaceholder") : ct("createPage.apiKeyPlaceholder");
   const result = state.result && typeof state.result === "object"
     ? `<div class="mp-provider-result settings-alert ${escapeAttr(state.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(state.result.message || "")}</div>`
     : "";
-  return `<form class="mp-provider-page mp-provider-create-page mp-provider-create-form settings-page-section" data-mp-provider-form aria-labelledby="mp-provider-create-title" aria-describedby="mp-provider-create-description" aria-busy="${busy ? "true" : "false"}">
+  return `<form class="mp-provider-page mp-provider-create-page mp-provider-create-form settings-page-section${editing ? " mp-provider-edit-page" : ""}" data-mp-provider-form aria-labelledby="mp-provider-create-title" aria-describedby="mp-provider-create-description" aria-busy="${busy ? "true" : "false"}">
     <header class="mp-provider-create-header">
-      <p class="mp-provider-kicker">${escapeHtml(ct("createPage.kicker"))}</p>
+      <p class="mp-provider-kicker">${escapeHtml(ct(editing ? "drawer.editProvider" : "createPage.kicker"))}</p>
       <div class="mp-provider-create-heading">
         <button class="mp-provider-create-back" type="button" data-mp-close-drawer><span aria-hidden="true">←</span><span>${escapeHtml(ct("createPage.back"))}</span></button>
-        <div><h1 id="mp-provider-create-title">${escapeHtml(providerDisplayName(draft))}</h1><p id="mp-provider-create-description" data-settings-help-copy>${escapeHtml(ct("createPage.description"))}</p></div>
+        <div><h1 id="mp-provider-create-title">${escapeHtml(providerDisplayName(draft))}</h1><p id="mp-provider-create-description" data-settings-help-copy>${escapeHtml(ct(editing ? "drawer.configurationDescription" : "createPage.description"))}</p></div>
       </div>
     </header>
     <div class="mp-provider-create-body">
       <section class="mp-provider-create-section" aria-labelledby="mp-provider-create-connection-title">
         <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-connection-title">${escapeHtml(ct("createPage.connectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.connectionDescription"))}</p></div>
         <div class="mp-provider-create-fields">
-          <div class="mp-provider-create-field"><label for="mp-provider-create-name">${escapeHtml(ct("fields.name"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.nameHelp", { example: modelReference }))}</small><input id="mp-provider-create-name" name="name" value="${escapeAttr(draft.name)}" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false" required></div>
-          <div class="mp-provider-create-field"><label for="mp-provider-create-api-key">${escapeHtml(ct("fields.apiKey"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.apiKeyHelp"))}</small><input id="mp-provider-create-api-key" name="apiKey" type="password" value="" autocomplete="new-password" placeholder="${escapeAttr(ct("createPage.apiKeyPlaceholder"))}" spellcheck="false"></div>
-          <div class="mp-provider-create-field"><label for="mp-provider-create-base-url">${escapeHtml(ct("fields.baseUrl"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.baseUrlHelp"))}</small><input id="mp-provider-create-base-url" name="baseUrl" type="url" value="${escapeAttr(draft.baseUrl)}" autocomplete="url" placeholder="https://api.example.com/v1" spellcheck="false"></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-name">${escapeHtml(ct("fields.name"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.nameHelp", { example: modelReference }))}</small><input id="mp-provider-create-name" name="name" value="${escapeAttr(createDraftPlaceholder ? "" : draft.name)}" autocomplete="off" placeholder="${escapeAttr(createDraftPlaceholder ? draft.name : "")}" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false" ${nameEditable ? "required" : "readonly"}></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-api-key">${escapeHtml(ct("fields.apiKey"))}</label><small data-settings-help-copy>${escapeHtml(apiKeyHelp)}</small><input id="mp-provider-create-api-key" name="apiKey" type="password" value="" autocomplete="new-password" placeholder="${escapeAttr(apiKeyPlaceholder)}" spellcheck="false">${editing && draft.apiKeyPersisted ? `<label class="mp-provider-create-clear-key"><input name="clearApiKey" type="checkbox" ${draft.clearApiKey ? "checked" : ""} data-mp-clear-api-key><span>${escapeHtml(ct("fields.clearApiKey"))}</span></label>` : ""}</div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-base-url">${escapeHtml(ct("fields.baseUrl"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.baseUrlHelp"))}</small><input id="mp-provider-create-base-url" name="baseUrl" type="url" value="${escapeAttr(createDraftPlaceholder ? "" : draft.baseUrl)}" autocomplete="url" placeholder="${escapeAttr(createDraftPlaceholder ? (draft.baseUrl || "https://api.example.com/v1") : "https://api.example.com/v1")}" spellcheck="false"></div>
         </div>
-        <div class="mp-provider-create-inline-actions"><button class="mp-action" type="button" data-mp-test-provider ${testBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(testBusy ? ct("actions.testingConnection") : ct("actions.testConnection"))}</button></div>
+        <div class="mp-provider-create-inline-actions"><button class="mp-action" type="button" data-mp-test-provider ${messageTestBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(messageTestBusy ? ct("test.sending") : ct("actions.sendTest"))}</button></div>
       </section>
       <section class="mp-provider-create-section" aria-labelledby="mp-provider-create-protocol-title">
         <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-protocol-title">${escapeHtml(ct("fields.protocol"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.protocolHelp"))}</p></div>
@@ -425,15 +467,15 @@ export function renderProviderCreatePage(consoleState = {}) {
       <section class="mp-provider-create-section" aria-labelledby="mp-provider-create-model-title">
         <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-model-title">${escapeHtml(ct("createPage.modelTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.modelDescription"))}</p></div>
         <div class="mp-provider-create-fields">
-          <div class="mp-provider-create-field"><label for="mp-provider-create-model">${escapeHtml(ct("fields.defaultModel"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.defaultModelHelp"))}</small><div class="mp-provider-create-input-action"><input id="mp-provider-create-model" name="model" value="${escapeAttr(draft.model)}" autocomplete="off" placeholder="${escapeAttr(ct("fields.defaultModelPlaceholder"))}" spellcheck="false" required ${discoveredModels.length ? "list=\"mp-provider-create-model-options\"" : ""}>${modelList}<button class="mp-action" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : ct("actions.fetchModels"))}</button></div>${modelChoices}</div>
-          <div class="mp-provider-create-field"><label for="mp-provider-create-max-tokens">${escapeHtml(ct("fields.maxTokens"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.maxTokensHelp"))}</small><input id="mp-provider-create-max-tokens" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(draft.maxTokens || "")}"></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-model">${escapeHtml(ct("fields.defaultModel"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.defaultModelHelp"))}</small><div class="mp-provider-create-input-action"><input id="mp-provider-create-model" name="model" data-select-on-focus="true" value="${escapeAttr(draft.model)}" autocomplete="off" placeholder="${escapeAttr(ct("fields.defaultModelPlaceholder"))}" spellcheck="false" required ${discoveredModels.length ? "list=\"mp-provider-create-model-options\"" : ""}>${modelList}<button class="mp-action" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : ct("actions.fetchModels"))}</button></div>${modelChoices}</div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-max-tokens">${escapeHtml(ct("fields.maxTokens"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.maxTokensHelp"))}</small><input id="mp-provider-create-max-tokens" name="maxTokens" data-select-on-focus="true" type="number" min="0" step="1" value="${escapeAttr(draft.maxTokens || "")}"></div>
           <div class="mp-provider-create-field"><label for="mp-provider-create-reference">${escapeHtml(ct("createPage.modelReference"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.modelReferenceHelp"))}</small><input id="mp-provider-create-reference" value="${escapeAttr(modelReference)}" readonly data-mp-model-example></div>
         </div>
       </section>
       ${result}
     </div>
-    <footer class="mp-provider-create-footer"><span>${escapeHtml(ct("createPage.footerHint"))}</span><div class="mp-provider-create-footer-actions settings-inline-actions"><button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.discardChanges"))}</button><button class="mp-action primary" type="submit" data-mp-save-provider ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? ct("actions.saving") : ct("actions.saveAndEnable"))}</button></div></footer>
-  </form>`;
+    <footer class="mp-provider-create-footer"><span>${escapeHtml(ct("createPage.footerHint"))}</span><div class="mp-provider-create-footer-actions settings-inline-actions">${isProviderDeletable(draft) && editing ? `<button class="mp-action danger" type="button" data-mp-delete-provider="${escapeAttr(deleteName)}" ${deleteBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(ct("actions.delete"))}</button>` : ""}<button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.discardChanges"))}</button><button class="mp-action primary" type="submit" data-mp-save-provider ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? ct("actions.saving") : ct("actions.saveAndEnable"))}</button></div></footer>
+  </form>${renderProviderMessageTestDialog(state, draft)}`;
 }
 
 function renderCreateProtocolChoices(selected) {
@@ -458,7 +500,7 @@ export function renderProviderConsolePage({ providers = [], consoleState = {}, r
     result: null,
     ...consoleState,
   };
-  if (state.drawer === "provider" && state.mode === "create") return renderProviderCreatePage(state);
+  if (state.drawer === "provider" && (state.mode === "create" || state.mode === "edit")) return renderProviderCreatePage(state);
   const stats = providerConsoleStats(providers);
   const filtered = filterConsoleProviders(providers, state);
   const categories = ["official", "custom", "compatible"];
@@ -472,7 +514,7 @@ export function renderProviderConsolePage({ providers = [], consoleState = {}, r
       const headingId = `mp-provider-section-title-${category}`;
       return `<section class="mp-provider-section settings-card" id="${panelId}" data-mp-category-section="${escapeAttr(category)}" aria-labelledby="${headingId}">
         <header class="mp-provider-section-head settings-card-header"><h2 id="${headingId}">${escapeHtml(ct(categoryMeta[category].titleKey))}</h2><span class="settings-badge">${escapeHtml(String(cards.length + (relayCard ? 1 : 0)))}</span></header>
-        <div class="mp-provider-grid settings-card-content">${cards.map((provider) => renderProviderCard(provider)).join("")}${relayCard}</div>
+        <div class="mp-provider-grid settings-card-content">${cards.map((provider) => renderProviderCard(provider, state)).join("")}${relayCard}</div>
       </section>`;
     }).join("");
   const result = state.result && typeof state.result === "object"
@@ -494,7 +536,6 @@ export function renderProviderConsolePage({ providers = [], consoleState = {}, r
     </section>
     ${result}
     <div class="mp-provider-sections">${sectionHTML || `<div class="mp-empty settings-card settings-alert" role="status">${escapeHtml(ct("messages.noResults"))}</div>`}</div>
-    ${state.modal === "types" ? renderProviderTypeModal() : ""}
     ${state.drawer ? renderProviderDrawer(state, relayDrawer) : ""}
   </div>`;
 }
@@ -503,22 +544,29 @@ function renderStat(label, value) {
   return `<div class="mp-stat settings-stat-card"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span></div>`;
 }
 
-function renderProviderCard(provider) {
+function renderProviderCard(provider, state = {}) {
   const status = providerStatus(provider);
   const models = provider.models.length;
   const baseURL = compactBaseUrl(provider.baseUrl);
   const disabled = !provider.enabled;
+  const deletable = isProviderDeletable(provider);
+  const toggleBusy = Boolean(state.busy?.[`toggle:${provider.name}`]);
+  const deleteBusy = Boolean(state.busy?.[`delete:${provider.name}`]);
+  const busy = toggleBusy || deleteBusy;
+  const displayName = providerDisplayName(provider);
+  const toggleLabel = ct(provider.enabled ? "actions.disableProvider" : "actions.enableProvider");
   const originLabel = provider.origin === "custom"
     ? ct("origins.custom")
     : provider.origin === "builtin"
       ? ct("origins.builtin")
       : ct("origins.unknown");
-  return `<article class="mp-provider-card settings-card${disabled ? " is-disabled" : ""}" data-mp-provider-card="${escapeAttr(provider.name)}" data-disabled="${disabled ? "true" : "false"}" role="button" tabindex="0" aria-label="${escapeAttr(ct("aria.configureProvider", { provider: providerDisplayName(provider) }))}">
-    <header class="mp-provider-card-head settings-card-header"><div><h3 class="settings-card-title">${escapeHtml(providerDisplayName(provider))}</h3><span class="mp-provider-badge settings-badge">${escapeHtml(provider.type)}</span></div></header>
+  return `<article class="mp-provider-card settings-card${disabled ? " is-disabled" : ""}${deletable ? " is-custom" : ""}" data-mp-provider-card="${escapeAttr(provider.name)}" data-disabled="${disabled ? "true" : "false"}" data-origin="${escapeAttr(provider.origin || "unknown")}" aria-busy="${busy ? "true" : "false"}">
+    <header class="mp-provider-card-head settings-card-header"><div class="mp-provider-card-identity"><div><h3 class="settings-card-title">${escapeHtml(displayName)}</h3><span class="mp-provider-badge settings-badge">${escapeHtml(provider.type)}</span></div></div><div class="mp-provider-card-controls"><button class="mp-provider-switch ${provider.enabled ? "is-on" : "is-off"}" type="button" role="switch" aria-checked="${provider.enabled ? "true" : "false"}" aria-label="${escapeAttr(`${toggleLabel}: ${displayName}`)}" title="${escapeAttr(toggleLabel)}" data-mp-provider-toggle="${escapeAttr(provider.name)}" ${busy ? "disabled" : ""}><span class="mp-provider-switch-thumb" aria-hidden="true"></span></button></div></header>
     <div class="settings-card-content"><div class="mp-provider-card-meta"><span class="mp-status settings-badge ${escapeAttr(status.tone)}">${escapeHtml(status.label)}</span><span>${escapeHtml(originLabel)}</span></div>
     <dl class="mp-provider-facts"><div><dt>${escapeHtml(ct("fields.defaultModel"))}</dt><dd>${escapeHtml(provider.defaultModel || ct("labels.notSet"))}</dd></div><div><dt>${escapeHtml(ct("fields.modelCount"))}</dt><dd>${escapeHtml(String(models))}</dd></div><div><dt>${escapeHtml(ct("fields.baseUrl"))}</dt><dd title="${escapeAttr(provider.baseUrl || "")}">${escapeHtml(baseURL)}</dd></div></dl>
     ${renderModelChips(provider.models)}
     ${provider.error ? `<p class="mp-provider-error settings-alert" role="alert">${escapeHtml(provider.error)}</p>` : ""}</div>
+    <footer class="mp-provider-card-actions"><button class="mp-provider-card-open" type="button" data-mp-provider-open="${escapeAttr(provider.name)}" aria-label="${escapeAttr(ct("aria.configureProvider", { provider: displayName }))}">${escapeHtml(ct("drawer.editProvider"))}</button>${deletable ? `<button class="mp-provider-delete" type="button" data-mp-delete-provider="${escapeAttr(provider.name)}" aria-label="${escapeAttr(`${ct("actions.delete")}: ${displayName}`)}" title="${escapeAttr(ct("actions.delete"))}" ${busy ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5"/></svg><span>${escapeHtml(ct("actions.delete"))}</span></button>` : ""}</footer>
   </article>`;
 }
 
@@ -541,6 +589,7 @@ function renderProviderTypeModal() {
 function renderProviderDrawer(state, relayDrawer) {
   let content = "";
   if (state.mode === "relay") content = relayDrawer;
+  else if (state.mode === "create" || state.mode === "edit") content = renderProviderCreatePage(state);
   else content = renderConfigDrawerForm(state);
   const busy = Object.values(state.busy || {}).some(Boolean);
   return `<div class="mp-provider-drawer-backdrop" data-mp-backdrop="drawer" role="presentation"><aside class="mp-provider-drawer settings-card" role="dialog" aria-modal="true" tabindex="-1" aria-busy="${busy ? "true" : "false"}" aria-labelledby="mp-drawer-title" aria-describedby="mp-drawer-description">${content}</aside></div>`;
@@ -549,7 +598,10 @@ function renderProviderDrawer(state, relayDrawer) {
 function renderConfigDrawerForm(state) {
   const draft = createProviderDraft(state.type, state.draft || null);
   const editing = state.mode === "edit";
-  const testBusy = Boolean(state.busy?.[`test:${draft.name}`]);
+  const createDraftPlaceholder = !editing && !state.dirty;
+  const nameEditable = !editing || isProviderDeletable(draft);
+  const deleteName = editing ? stringValue(state.providerName || draft.name) : draft.name;
+  const messageTestBusy = Boolean(state.busy?.[`message-test:${draft.name}`]);
   const modelBusy = Boolean(state.busy?.[`models:${draft.name}`]);
   const saveBusy = Boolean(state.busy?.[`save:${draft.name}`]);
   const deleteBusy = Boolean(state.busy?.[`delete:${draft.name}`]);
@@ -562,21 +614,21 @@ function renderConfigDrawerForm(state) {
     <header class="mp-drawer-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(editing ? ct("drawer.editProvider") : ct("drawer.createProvider"))}</p><h2 id="mp-drawer-title" class="settings-card-title">${escapeHtml(providerDisplayName(draft))}</h2><p id="mp-drawer-description" class="settings-card-description" data-settings-help-copy>${escapeHtml(ct("drawer.configurationDescription"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
     <div class="mp-drawer-body settings-card-content">
       <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("steps.basic"))}</h3>
-        <label class="settings-form-field">${escapeHtml(ct("fields.name"))}<input name="name" value="${escapeAttr(draft.name)}" autocomplete="off" ${editing ? "readonly" : ""}></label>
+        <label class="settings-form-field">${escapeHtml(ct("fields.name"))}<input name="name" value="${escapeAttr(createDraftPlaceholder ? "" : draft.name)}" autocomplete="off" placeholder="${escapeAttr(createDraftPlaceholder ? draft.name : "")}" ${nameEditable ? "required" : "readonly"}></label>
         <label class="settings-form-field">${escapeHtml(ct("fields.protocol"))}<select name="type">${renderTypeOptions(draft.type)}</select></label>
         <label class="settings-form-field">${escapeHtml(ct("fields.finalModelExample", { provider: draft.name || "provider", model: draft.model || "your-model" }))}<input value="${escapeAttr(`${draft.name || "provider"}:${draft.model || "your-model"}`)}" readonly data-mp-model-example></label>
         <label class="settings-form-field">${escapeHtml(ct("fields.apiKey"))}<input name="apiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct(editing ? "fields.apiKeyEditingPlaceholder" : "createPage.apiKeyPlaceholder"))}"></label><small data-settings-help-copy>${escapeHtml(editing && draft.apiKeyPersisted ? ct("fields.apiKeyPersisted", { lastFive: draft.apiKeyLastFive }) : ct("fields.apiKeyBlankKeepsCurrent"))}</small>
         ${editing && draft.apiKeyPersisted ? `<label class="mp-check settings-form-field"><input name="clearApiKey" type="checkbox" ${draft.clearApiKey ? "checked" : ""} data-mp-clear-api-key> ${escapeHtml(ct("fields.clearApiKey"))}</label>` : ""}
-        <label class="settings-form-field">${escapeHtml(ct("fields.baseUrl"))}<input name="baseUrl" value="${escapeAttr(draft.baseUrl)}" autocomplete="url" placeholder="https://api.example.com/v1"></label>
-        <label class="settings-form-field">${escapeHtml(ct("fields.defaultModel"))}<input name="model" value="${escapeAttr(draft.model)}" autocomplete="off" placeholder="${escapeAttr(ct("fields.defaultModelPlaceholder"))}" ${discoveredModels.length ? "list=\"mp-provider-model-options\"" : ""}>${modelList}</label>${modelChoices}
+        <label class="settings-form-field">${escapeHtml(ct("fields.baseUrl"))}<input name="baseUrl" type="url" value="${escapeAttr(createDraftPlaceholder ? "" : draft.baseUrl)}" autocomplete="url" placeholder="${escapeAttr(createDraftPlaceholder ? (draft.baseUrl || "https://api.example.com/v1") : "https://api.example.com/v1")}"></label>
+        <label class="settings-form-field">${escapeHtml(ct("fields.defaultModel"))}<input name="model" data-select-on-focus="true" value="${escapeAttr(draft.model)}" autocomplete="off" placeholder="${escapeAttr(ct("fields.defaultModelPlaceholder"))}" ${discoveredModels.length ? "list=\"mp-provider-model-options\"" : ""}>${modelList}</label>${modelChoices}
       </section>
       <details class="mp-config-section settings-page-section"><summary>${escapeHtml(ct("steps.advanced"))}</summary>
-        <label class="settings-form-field">${escapeHtml(ct("fields.maxTokens"))}<input name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(draft.maxTokens || "")}"></label>
+        <label class="settings-form-field">${escapeHtml(ct("fields.maxTokens"))}<input name="maxTokens" data-select-on-focus="true" type="number" min="0" step="1" value="${escapeAttr(draft.maxTokens || "")}"></label>
         <label class="mp-check settings-form-field"><input name="apiKeyOptional" type="checkbox" ${draft.apiKeyOptional ? "checked" : ""}> ${escapeHtml(ct("fields.apiKeyOptional"))}</label>
       </details>
       ${state.result && typeof state.result === "object" ? `<div class="mp-provider-result settings-alert ${escapeAttr(state.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(state.result.message || "")}</div>` : ""}
     </div>
-    <footer class="mp-drawer-foot settings-card-footer settings-inline-actions"><div class="settings-inline-actions"><button class="mp-action" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : ct("actions.fetchModels"))}</button><button class="mp-action" type="button" data-mp-test-provider ${testBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(testBusy ? ct("actions.testingConnection") : ct("actions.testConnection"))}</button></div><div class="settings-inline-actions">${isProviderDeletable(draft) && editing ? `<button class="mp-action danger" type="button" data-mp-delete-provider="${escapeAttr(draft.name)}" ${deleteBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(ct("actions.delete"))}</button>` : ""}<button class="mp-action primary" type="submit" data-mp-save-provider ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? ct("actions.saving") : ct("actions.saveAndEnable"))}</button></div></footer>
+    <footer class="mp-drawer-foot settings-card-footer settings-inline-actions"><div class="settings-inline-actions"><button class="mp-action" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : ct("actions.fetchModels"))}</button><button class="mp-action" type="button" data-mp-test-provider ${messageTestBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(messageTestBusy ? ct("test.sending") : ct("actions.sendTest"))}</button></div><div class="settings-inline-actions">${isProviderDeletable(draft) && editing ? `<button class="mp-action danger" type="button" data-mp-delete-provider="${escapeAttr(deleteName)}" ${deleteBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(ct("actions.delete"))}</button>` : ""}<button class="mp-action primary" type="submit" data-mp-save-provider ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? ct("actions.saving") : ct("actions.saveAndEnable"))}</button></div></footer>
   </form>`;
 }
 

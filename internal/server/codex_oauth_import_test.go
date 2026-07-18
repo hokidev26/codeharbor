@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"autoto/internal/codexauth"
 	"autoto/internal/config"
@@ -260,6 +261,21 @@ func TestNativeCodexAccountManagementEndpointsAndSecretSafety(t *testing.T) {
 	if !strings.HasPrefix(id, "codex_") || listed.Accounts[0].Priority != codexauth.DefaultPriority {
 		t.Fatalf("missing stable account metadata: %+v", listed.Accounts[0])
 	}
+	if _, err := database.DB().Exec(`INSERT INTO api_requests (id, provider, credential_id, input_tokens, output_tokens, cost_usd, created_at) VALUES ('codex-usage-fixture', 'codex', ?, 120, 30, 1.25, ?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	accountsRecorder = httptest.NewRecorder()
+	app.Routes().ServeHTTP(accountsRecorder, authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts", nil))
+	if accountsRecorder.Code != http.StatusOK {
+		t.Fatalf("usage list failed: %d %s", accountsRecorder.Code, accountsRecorder.Body.String())
+	}
+	if err := json.NewDecoder(accountsRecorder.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	usage := listed.Accounts[0].Usage
+	if usage.Total.RequestCount != 1 || usage.Total.InputTokens != 120 || usage.Total.OutputTokens != 30 || usage.Total.TotalTokens != 150 || usage.Total.CostUSD != 1.25 || usage.Last5Hours.RequestCount != 1 || usage.Last7Days.RequestCount != 1 {
+		t.Fatalf("unexpected account usage: %+v", usage)
+	}
 
 	missingConfirmation := httptest.NewRecorder()
 	app.Routes().ServeHTTP(missingConfirmation, authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts/"+id+"/export", nil))
@@ -308,6 +324,13 @@ func TestNativeCodexAccountManagementEndpointsAndSecretSafety(t *testing.T) {
 		t.Fatalf("refresh failed: %d %s", refreshRecorder.Code, refreshRecorder.Body.String())
 	}
 	assertCodexResponseHasNoSecrets(t, refreshRecorder.Body.Bytes())
+	var refreshed codexOAuthAccountResponse
+	if err := json.Unmarshal(refreshRecorder.Body.Bytes(), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Usage.Total.RequestCount != 1 || refreshed.Usage.Total.TotalTokens != 150 || refreshed.Usage.Total.CostUSD != 1.25 {
+		t.Fatalf("refresh response omitted account usage: %+v", refreshed.Usage)
+	}
 
 	if _, err := database.DB().Exec(`CREATE TRIGGER fail_codex_stats_delete BEFORE DELETE ON provider_account_stats BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`); err != nil {
 		t.Fatal(err)

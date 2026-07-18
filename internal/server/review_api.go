@@ -50,32 +50,50 @@ type reviewPlanMutationRequest struct {
 	Comment  string `json:"comment,omitempty"`
 }
 
+type reviewPlanTestSummary struct {
+	Text   string `json:"text"`
+	Status string `json:"status"`
+}
+
 type reviewPlanSummary struct {
-	ID             string   `json:"id"`
-	AgentID        string   `json:"agentId"`
-	Status         string   `json:"status"`
-	Revision       int64    `json:"revision"`
-	Summary        string   `json:"summary,omitempty"`
-	Goal           string   `json:"goal,omitempty"`
-	Steps          []string `json:"steps,omitempty"`
-	Risks          []string `json:"risks,omitempty"`
-	ReviewVerdict  string   `json:"reviewVerdict,omitempty"`
-	ReviewFindings []string `json:"reviewFindings,omitempty"`
-	StaleReason    string   `json:"staleReason,omitempty"`
-	CreatedAt      string   `json:"createdAt"`
-	UpdatedAt      string   `json:"updatedAt"`
+	ID             string                  `json:"id"`
+	AgentID        string                  `json:"agentId"`
+	Status         string                  `json:"status"`
+	Revision       int64                   `json:"revision"`
+	Summary        string                  `json:"summary,omitempty"`
+	Goal           string                  `json:"goal,omitempty"`
+	Steps          []string                `json:"steps"`
+	Risks          []string                `json:"risks"`
+	Tests          []reviewPlanTestSummary `json:"tests"`
+	ReviewVerdict  string                  `json:"reviewVerdict,omitempty"`
+	ReviewFindings []string                `json:"reviewFindings"`
+	StaleReason    string                  `json:"staleReason,omitempty"`
+	CreatedAt      string                  `json:"createdAt"`
+	UpdatedAt      string                  `json:"updatedAt"`
+}
+
+func declaredReviewPlanTests(tests []string) []reviewPlanTestSummary {
+	out := make([]reviewPlanTestSummary, 0, len(tests))
+	for _, test := range tests {
+		if text := strings.TrimSpace(test); text != "" {
+			out = append(out, reviewPlanTestSummary{Text: text, Status: "declared"})
+		}
+	}
+	return out
 }
 
 func summarizeReviewPlan(plan db.Plan) reviewPlanSummary {
 	summary := reviewPlanSummary{
 		ID: plan.ID, AgentID: plan.AgentID, Status: plan.Status, Revision: plan.Revision,
 		Summary: plan.Summary, StaleReason: plan.StaleReason, CreatedAt: plan.CreatedAt, UpdatedAt: plan.UpdatedAt,
+		Steps: []string{}, Risks: []string{}, Tests: []reviewPlanTestSummary{}, ReviewFindings: []string{},
 	}
 	var draft reviewpkg.PlanDraft
 	if json.Unmarshal(plan.ContentJSON, &draft) == nil {
 		summary.Goal = draft.Goal
-		summary.Steps = draft.Steps
-		summary.Risks = draft.Risks
+		summary.Steps = append(summary.Steps, draft.Steps...)
+		summary.Risks = append(summary.Risks, draft.Risks...)
+		summary.Tests = declaredReviewPlanTests(draft.Tests)
 	}
 	return summary
 }

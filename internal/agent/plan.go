@@ -101,6 +101,21 @@ func samePlanSnapshot(plan db.Plan, snapshot db.PlanSnapshot) bool {
 		plan.WorkspaceFingerprint == snapshot.WorkspaceFingerprint
 }
 
+type planDeclaredTest struct {
+	Text   string `json:"text"`
+	Status string `json:"status"`
+}
+
+func declaredPlanTests(tests []string) []planDeclaredTest {
+	out := make([]planDeclaredTest, 0, len(tests))
+	for _, test := range tests {
+		if text := strings.TrimSpace(test); text != "" {
+			out = append(out, planDeclaredTest{Text: text, Status: "declared"})
+		}
+	}
+	return out
+}
+
 func (r *Runner) publishPlanRunStatus(ctx context.Context, runID, eventType string) {
 	if r == nil || r.store == nil || strings.TrimSpace(runID) == "" {
 		return
@@ -116,12 +131,14 @@ func (r *Runner) publishPlanRunStatus(ctx context.Context, runID, eventType stri
 	data := map[string]any{
 		"id": plan.ID, "agentId": plan.AgentID, "status": plan.Status, "revision": plan.Revision,
 		"summary": plan.Summary, "staleReason": plan.StaleReason, "createdAt": plan.CreatedAt, "updatedAt": plan.UpdatedAt,
+		"steps": []string{}, "risks": []string{}, "tests": []planDeclaredTest{},
 	}
 	var draft review.PlanDraft
 	if json.Unmarshal(plan.ContentJSON, &draft) == nil {
 		data["goal"] = draft.Goal
-		data["steps"] = draft.Steps
-		data["risks"] = draft.Risks
+		data["steps"] = append([]string{}, draft.Steps...)
+		data["risks"] = append([]string{}, draft.Risks...)
+		data["tests"] = declaredPlanTests(draft.Tests)
 	}
 	r.publish(Event{Type: eventType, AgentID: plan.AgentID, Data: map[string]any{"plan": data}})
 }
@@ -215,7 +232,7 @@ func (r *Runner) persistAndReviewPlan(ctx context.Context, policy PolicyContext,
 			"plan": map[string]any{
 				"id": plan.ID, "agentId": plan.AgentID, "status": plan.Status, "revision": plan.Revision,
 				"summary": plan.Summary, "goal": draft.Goal, "steps": draft.Steps, "risks": draft.Risks,
-				"reviewVerdict": result.Verdict, "reviewFindings": []string{result.Reason},
+				"tests": declaredPlanTests(draft.Tests), "reviewVerdict": result.Verdict, "reviewFindings": []string{result.Reason},
 				"createdAt": plan.CreatedAt, "updatedAt": plan.UpdatedAt,
 			},
 		}})

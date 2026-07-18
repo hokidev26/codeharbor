@@ -136,6 +136,10 @@ function text(value) {
   return String(value ?? "").trim();
 }
 
+function booleanValue(value) {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
 function compactDisplayPath(value) {
   return text(value)
     .replace(/^\/Users\/[^/]+(?=\/)/, "~")
@@ -184,6 +188,8 @@ function normalizeProject(value = {}) {
     name: text(value.name || value.projectName) || gitPath || id,
     gitPath,
     updatedAt: timestamp(value.updatedAt || value.projectUpdatedAt),
+    pinned: booleanValue(value.pinned || value.projectPinned),
+    archivedAt: timestamp(value.archivedAt || value.projectArchivedAt),
   };
 }
 
@@ -197,6 +203,8 @@ function normalizeConversation(value = {}) {
     projectName: text(value.projectName) || projectId,
     projectPath: text(value.projectPath),
     projectUpdatedAt: timestamp(value.projectUpdatedAt),
+    projectPinned: booleanValue(value.projectPinned),
+    projectArchivedAt: timestamp(value.projectArchivedAt),
     worklineId,
     worklineTitle: text(value.worklineTitle) || worklineId,
     worklineRole: text(value.worklineRole),
@@ -206,6 +214,8 @@ function normalizeConversation(value = {}) {
     agentTitle: text(value.agentTitle) || agentId,
     agentType: text(value.agentType),
     agentStatus: text(value.agentStatus),
+    agentPinned: booleanValue(value.agentPinned),
+    agentArchivedAt: timestamp(value.agentArchivedAt),
     model: text(value.model),
     permissionMode: text(value.permissionMode),
     cwd: text(value.cwd),
@@ -215,10 +225,33 @@ function normalizeConversation(value = {}) {
   return { ...conversation, targetId: createNavigationTargetId(conversation) };
 }
 
+function conversationActivity(value) {
+  return Date.parse(value.lastActivityAt || value.worklineUpdatedAt || value.projectUpdatedAt || "") || 0;
+}
+
 function compareRecent(left, right) {
-  const leftTime = Date.parse(left.lastActivityAt || left.worklineUpdatedAt || left.projectUpdatedAt || "") || 0;
-  const rightTime = Date.parse(right.lastActivityAt || right.worklineUpdatedAt || right.projectUpdatedAt || "") || 0;
-  return rightTime - leftTime || left.agentTitle.localeCompare(right.agentTitle);
+  const leftArchived = left.projectArchivedAt || left.agentArchivedAt ? 1 : 0;
+  const rightArchived = right.projectArchivedAt || right.agentArchivedAt ? 1 : 0;
+  const leftProjectPinned = left.projectPinned ? 1 : 0;
+  const rightProjectPinned = right.projectPinned ? 1 : 0;
+  const leftAgentPinned = left.agentPinned ? 1 : 0;
+  const rightAgentPinned = right.agentPinned ? 1 : 0;
+  return leftArchived - rightArchived
+    || rightProjectPinned - leftProjectPinned
+    || rightAgentPinned - leftAgentPinned
+    || conversationActivity(right) - conversationActivity(left)
+    || left.agentTitle.localeCompare(right.agentTitle);
+}
+
+function compareConversationList(left, right) {
+  const leftArchived = left.projectArchivedAt || left.agentArchivedAt ? 1 : 0;
+  const rightArchived = right.projectArchivedAt || right.agentArchivedAt ? 1 : 0;
+  const leftPinned = left.agentPinned ? 1 : 0;
+  const rightPinned = right.agentPinned ? 1 : 0;
+  return leftArchived - rightArchived
+    || rightPinned - leftPinned
+    || conversationActivity(right) - conversationActivity(left)
+    || left.agentTitle.localeCompare(right.agentTitle);
 }
 
 export function normalizeNavigationPayload(payload = {}) {
@@ -245,6 +278,8 @@ export function normalizeNavigationPayload(payload = {}) {
       name: conversation.projectName,
       gitPath: conversation.projectPath,
       updatedAt: conversation.projectUpdatedAt,
+      pinned: conversation.projectPinned,
+      archivedAt: conversation.projectArchivedAt,
     }));
   });
 
@@ -291,7 +326,9 @@ export function buildNavigationView(payload = {}, options = {}) {
   });
 
   const projects = normalized.projects.filter((project) => projectMatchesSearch(project, normalized.conversations, query));
-  const conversations = normalized.conversations.filter((conversation) => conversationMatchesSearch(conversation, query));
+  const conversations = normalized.conversations
+    .filter((conversation) => conversationMatchesSearch(conversation, query))
+    .sort(compareConversationList);
   const groups = projects.map((project) => {
     const projectConversations = conversationsByProject.get(project.id) || [];
     const projectOwnMatch = includesQuery([project.name, project.gitPath], query);
@@ -351,6 +388,22 @@ export function navigationAgentStatusClass(value) {
   return text(value).toLocaleLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "idle";
 }
 
+function navigationStateMarkup({ pinned = false, archivedAt = "" } = {}) {
+  const marks = [];
+  if (pinned) {
+    marks.push(`<span class="navigation-state-badge pinned" title="${escapeNavigationHtml(t("shell.pinned"))}" aria-label="${escapeNavigationHtml(t("shell.pinned"))}">P</span>`);
+  }
+  if (archivedAt) {
+    marks.push(`<span class="navigation-state-badge archived" title="${escapeNavigationHtml(t("shell.archived"))}" aria-label="${escapeNavigationHtml(t("shell.archived"))}">A</span>`);
+  }
+  return marks.join("");
+}
+
+function navigationMoreTrigger(kind, id) {
+  const label = t("shell.navigationActions");
+  return `<button class="navigation-row-actions" type="button" data-navigation-menu-trigger data-navigation-kind="${escapeNavigationHtml(kind)}" data-navigation-id="${escapeNavigationHtml(id)}" aria-haspopup="menu" aria-label="${escapeNavigationHtml(label)}" title="${escapeNavigationHtml(label)}">…</button>`;
+}
+
 function renderProject(project, activeProjectId, options = {}) {
   const active = project.id === activeProjectId;
   const path = project.gitPath || project.id;
@@ -360,16 +413,19 @@ function renderProject(project, activeProjectId, options = {}) {
   const taskMeta = options.taskContext
     ? `<span class="project-task-counts"><span>${escapeNavigationHtml(String(activeTasks))}</span>${Number(counts.blocked || 0) ? `<span class="blocked">${escapeNavigationHtml(String(counts.blocked))}</span>` : ""}</span>`
     : "";
+  const stateClass = `${project.pinned ? "pinned " : ""}${project.archivedAt ? "archived " : ""}`;
+  const stateMeta = navigationStateMarkup({ pinned: project.pinned, archivedAt: project.archivedAt });
   const icon = `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <button class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "conversation"}">
+    <div class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}${stateClass}" role="button" tabindex="0" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-kind="project" data-navigation-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "conversation"}">
       <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
-        <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span></span>
+        <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span>${stateMeta}</span>
         <span class="navigation-conversation-meta project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
       </span>
       ${taskMeta}
-    </button>`;
+      ${navigationMoreTrigger("project", project.id)}
+    </div>`;
 }
 
 function renderConversation(conversation, activeAgentId, nested = false, options = {}) {
@@ -384,17 +440,20 @@ function renderConversation(conversation, activeAgentId, nested = false, options
   const metaParts = [context, conversation.model, conversation.agentStatus];
   if (!taskContext) metaParts.push(t("workspace.navigation.messageCount", { count: conversation.messageCount }));
   const meta = metaParts.filter(Boolean).join(" · ");
+  const stateClass = `${conversation.agentPinned ? "pinned " : ""}${conversation.agentArchivedAt ? "archived " : ""}`;
+  const stateMeta = navigationStateMarkup({ pinned: conversation.agentPinned, archivedAt: conversation.agentArchivedAt });
   const icon = taskContext
     ? `<svg viewBox="0 0 20 20"><circle cx="10" cy="6.5" r="3"></circle><path d="M4.5 17c.7-3.5 2.5-5.2 5.5-5.2s4.8 1.7 5.5 5.2"></path></svg>`
     : `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <button class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass}" type="button" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
+    <div class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass} ${stateClass}" role="button" tabindex="0" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-navigation-kind="conversation" data-navigation-id="${escapeNavigationHtml(conversation.agentId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
       <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
-        <span class="navigation-conversation-title">${escapeNavigationHtml(conversation.agentTitle)}</span>
+        <span class="navigation-conversation-title"><span class="navigation-title-text">${escapeNavigationHtml(conversation.agentTitle)}</span>${stateMeta}</span>
         <span class="navigation-conversation-meta" title="${escapeNavigationHtml(meta)}">${escapeNavigationHtml(meta)}</span>
       </span>
-    </button>`;
+      ${navigationMoreTrigger("conversation", conversation.agentId)}
+    </div>`;
 }
 
 export function renderNavigationHTML(view = {}, options = {}) {

@@ -4,11 +4,13 @@ go 1.26
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.2
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/creack/pty v1.1.24
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/google/uuid v1.6.0
 	github.com/openai/openai-go/v3 v3.40.0
 	golang.org/x/crypto v0.41.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.28.0
 	modernc.org/sqlite v1.40.1
 	mvdan.cc/sh/v3 v3.13.1
@@ -19,6 +21,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect

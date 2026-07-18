@@ -56,6 +56,37 @@ test("policy and password payloads carry currentPassword only when supplied", ()
   });
 });
 
+test("normalizes and controls a temporary tunnel through the security endpoint", async () => {
+  const requests = [];
+  const state = { remoteAccess: localAccess };
+  const controller = createRemoteAccessSettingsController({
+    state,
+    request: async (path, options) => {
+      requests.push({ path, options });
+      return options.method === "POST"
+        ? { available: true, status: "running", publicUrl: "https://bright-sun.trycloudflare.com", startedAt: "2026-07-18T00:00:00Z" }
+        : { available: true, status: "idle" };
+    },
+  });
+
+  const running = await controller.startTunnel();
+  assert.deepEqual(running, {
+    available: true,
+    status: "running",
+    publicUrl: "https://bright-sun.trycloudflare.com",
+    error: "",
+    startedAt: "2026-07-18T00:00:00Z",
+  });
+  assert.equal(state.remoteAccess.tunnel.publicUrl, "https://bright-sun.trycloudflare.com");
+
+  const stopped = await controller.stopTunnel();
+  assert.equal(stopped.status, "idle");
+  assert.deepEqual(requests.map(({ path, options }) => [path, options.method]), [
+    ["/api/security/remote-access/tunnel", "POST"],
+    ["/api/security/remote-access/tunnel", "DELETE"],
+  ]);
+});
+
 test("saves host-local policy with revision", async () => {
   const requests = [];
   const state = { remoteAccess: localAccess };
@@ -141,6 +172,22 @@ test("renders remote security settings read-only and host-local settings editabl
     assert.ok(tag);
     assert.equal(tag.includes("disabled"), false);
   }
+
+  const environmentLocal = createRemoteAccessSettingsController({
+    state: { remoteAccess: { ...localAccess, credential: { configured: true, source: "environment" } } },
+  });
+  const environmentLocalHTML = environmentLocal.render();
+  assert.match(environmentLocalHTML, /id="remoteAccessGeneratePasswordForm"/);
+  assert.match(environmentLocalHTML, /id="remoteAccessCustomPasswordForm"/);
+  assert.doesNotMatch(environmentLocalHTML, /data-remote-generate-submit[^>]*disabled/);
+  assert.doesNotMatch(environmentLocalHTML, /data-remote-custom-submit[^>]*disabled/);
+
+  const environmentRemote = createRemoteAccessSettingsController({
+    state: { remoteAccess: { ...baseAccess, credential: { configured: true, source: "environment" } } },
+  });
+  const environmentRemoteHTML = environmentRemote.render();
+  assert.match(environmentRemoteHTML, /data-remote-generate-submit[^>]*disabled/);
+  assert.match(environmentRemoteHTML, /data-remote-custom-submit[^>]*disabled/);
 });
 
 test("updates a custom password locally without exposing a generated password", async () => {

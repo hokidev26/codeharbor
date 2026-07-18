@@ -40,6 +40,18 @@ export function compactComposerModelLabel(value, fallback = "模型") {
   return `${model.slice(0, 8)}…`;
 }
 
+export function modelOptionPresentation(value, label) {
+  const rawValue = String(value || "").trim();
+  const rawLabel = String(label || "").trim();
+  const separator = rawValue.indexOf(":");
+  const provider = separator > 0 ? rawValue.slice(0, separator).trim() : "";
+  const model = separator >= 0 ? rawValue.slice(separator + 1).trim() : rawValue;
+  return {
+    name: rawLabel || model || rawValue || "模型",
+    provider,
+  };
+}
+
 const permissionMenuIconMarkup = Object.freeze({
   default: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.5-2.5 7.8-7 10-4.5-2.2-7-5.5-7-10V6z"></path><path d="M9.5 12h5"></path></svg>',
   acceptEdits: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 5.3 4 4"></path><path d="M5 19h4l9.7-9.7a2.8 2.8 0 0 0-4-4L5 15z"></path><path d="M13 7 17 11"></path></svg>',
@@ -77,6 +89,7 @@ export function createUIShellController({
   focusSettingsSearchInput,
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
+  openModelSettings = () => {},
   renderProjects,
   resizeTerminal,
   showError,
@@ -224,12 +237,26 @@ export function createUIShellController({
   }
 
   function openMobileSidebar() {
+    if (!mobileViewport()) return;
+    closeSidebarSettingsMenu({ restoreFocus: false });
     document.body.classList.add("mobile-sidebar-open");
+    $("mobileMenuBtn")?.setAttribute("aria-expanded", "true");
+    $("mobileSidebarBackdrop")?.classList.remove("hidden");
+    $("sessionSidebar")?.setAttribute("aria-hidden", "false");
+    $("mobileSidebarCloseBtn")?.focus();
+    resizeTerminal?.();
   }
 
-  function closeMobileSidebar() {
-    closeSidebarSettingsMenu();
+  function closeMobileSidebar(options = {}) {
+    const wasOpen = document.body.classList.contains("mobile-sidebar-open");
     document.body.classList.remove("mobile-sidebar-open");
+    $("mobileMenuBtn")?.setAttribute("aria-expanded", "false");
+    $("mobileSidebarBackdrop")?.classList.add("hidden");
+    if (mobileViewport()) $("sessionSidebar")?.setAttribute("aria-hidden", "true");
+    else $("sessionSidebar")?.removeAttribute("aria-hidden");
+    closeSidebarSettingsMenu({ restoreFocus: false });
+    if (wasOpen && options.restoreFocus !== false) $("mobileMenuBtn")?.focus();
+    resizeTerminal?.();
   }
 
   function toggleMobileTerminal() {
@@ -277,13 +304,53 @@ export function createUIShellController({
     menu.setAttribute("role", "listbox");
     document.body.appendChild(menu);
 
+    const mobileBackdrop = document.createElement("div");
+    mobileBackdrop.className = "mobile-select-sheet-backdrop hidden";
+    mobileBackdrop.setAttribute("aria-hidden", "true");
+
+    const mobileSheet = document.createElement("section");
+    mobileSheet.id = "mobileComposerSelectSheet";
+    mobileSheet.className = "mobile-select-sheet";
+    mobileSheet.setAttribute("role", "dialog");
+    mobileSheet.setAttribute("aria-modal", "true");
+    mobileSheet.setAttribute("aria-labelledby", "mobileComposerSelectSheetTitle");
+
+    const mobileHandle = document.createElement("div");
+    mobileHandle.className = "mobile-select-sheet-drag-handle";
+    mobileHandle.setAttribute("aria-hidden", "true");
+
+    const mobileHeader = document.createElement("div");
+    mobileHeader.className = "mobile-select-sheet-header";
+    const mobileTitle = document.createElement("h2");
+    mobileTitle.id = "mobileComposerSelectSheetTitle";
+    mobileTitle.className = "mobile-select-sheet-title";
+    const mobileClose = document.createElement("button");
+    mobileClose.type = "button";
+    mobileClose.className = "mobile-select-sheet-close";
+    mobileClose.setAttribute("aria-label", translate("common.close"));
+    mobileClose.textContent = "×";
+    mobileHeader.append(mobileTitle, mobileClose);
+
+    const mobileBody = document.createElement("div");
+    mobileBody.className = "mobile-select-sheet-body";
+    mobileSheet.append(mobileHandle, mobileHeader, mobileBody);
+    mobileBackdrop.appendChild(mobileSheet);
+    document.body.appendChild(mobileBackdrop);
+
     let active = null;
+    let bodyOverflow = "";
     const observers = [];
     const bindings = triggers.map((trigger) => {
       const select = $(trigger.dataset.composerSelect);
       const valueNode = trigger.querySelector(".composer-select-value");
       const label = document.querySelector(`label[for="${trigger.dataset.composerSelect}"]`);
-      const binding = { trigger, select, valueNode, label };
+      const binding = {
+        trigger,
+        select,
+        valueNode,
+        label,
+        ariaHaspopup: trigger.getAttribute("aria-haspopup") || "listbox",
+      };
       const sync = () => {
         const option = select?.selectedOptions?.[0] || select?.options?.[select?.selectedIndex];
         if (valueNode && option) {
@@ -308,16 +375,30 @@ export function createUIShellController({
       return binding;
     }).filter(({ select }) => select);
 
+    const mobileViewport = () => window.matchMedia?.("(max-width: 767px)")?.matches
+      ?? (globalThis.innerWidth || document.documentElement.clientWidth) <= 767;
+    const usesMobileSheet = (binding) => mobileViewport()
+      && ["modelSelect", "reasoningEffort"].includes(binding.select.id);
+
     const close = ({ focus = false } = {}) => {
       if (!active) return;
-      const trigger = active.trigger;
+      const { binding, mobile, returnFocus } = active;
       active = null;
-      menu.classList.add("hidden");
-      menu.classList.remove("composer-permission-popover");
-      menu.replaceChildren();
-      trigger.setAttribute("aria-expanded", "false");
-      trigger.removeAttribute("aria-controls");
-      if (focus) trigger.focus();
+      if (mobile) {
+        mobileBackdrop.classList.add("hidden");
+        mobileBackdrop.setAttribute("aria-hidden", "true");
+        mobileSheet.className = "mobile-select-sheet";
+        mobileBody.replaceChildren();
+        document.body.style.overflow = bodyOverflow;
+      } else {
+        menu.classList.add("hidden");
+        menu.classList.remove("composer-permission-popover");
+        menu.replaceChildren();
+      }
+      binding.trigger.setAttribute("aria-expanded", "false");
+      binding.trigger.setAttribute("aria-haspopup", binding.ariaHaspopup);
+      binding.trigger.removeAttribute("aria-controls");
+      if (focus && returnFocus?.isConnected !== false) returnFocus?.focus?.();
     };
 
     const choose = (binding, option) => {
@@ -347,6 +428,43 @@ export function createUIShellController({
         main.append(icon, label);
         button.appendChild(main);
       } else {
+        button.appendChild(label);
+      }
+
+      const check = document.createElement("span");
+      check.className = "composer-select-option-check";
+      check.setAttribute("aria-hidden", "true");
+      check.textContent = selected ? "✓" : "";
+      button.appendChild(check);
+      button.addEventListener("click", () => choose(binding, option));
+      return button;
+    };
+
+    const createMobileOptionButton = (binding, option, { model = false } = {}) => {
+      const selected = option.value === binding.select.value;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "composer-select-option mobile-select-sheet-option";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+      button.disabled = option.disabled;
+
+      if (model) {
+        const presentation = modelOptionPresentation(option.value, option.textContent);
+        const copy = document.createElement("span");
+        copy.className = "mobile-model-option-copy";
+        const name = document.createElement("span");
+        name.className = "mobile-model-option-name";
+        name.textContent = presentation.name;
+        copy.appendChild(name);
+        const provider = document.createElement("span");
+        provider.className = "mobile-model-option-provider";
+        provider.textContent = presentation.provider || translate("chat.modelProviderFallback");
+        copy.appendChild(provider);
+        button.appendChild(copy);
+      } else {
+        const label = document.createElement("span");
+        label.textContent = option.textContent?.trim() || option.value;
         button.appendChild(label);
       }
 
@@ -408,13 +526,88 @@ export function createUIShellController({
       menu.style.bottom = `${Math.max(8, (globalThis.innerHeight || document.documentElement.clientHeight) - rect.top + 6)}px`;
     };
 
+    const createMobileAction = (title, detail, handler) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mobile-model-sheet-action";
+      const copy = document.createElement("span");
+      copy.className = "mobile-model-sheet-action-copy";
+      const titleNode = document.createElement("span");
+      titleNode.className = "mobile-model-sheet-action-title";
+      titleNode.textContent = title;
+      copy.appendChild(titleNode);
+      if (detail) {
+        const detailNode = document.createElement("span");
+        detailNode.className = "mobile-model-sheet-action-detail";
+        detailNode.textContent = detail;
+        copy.appendChild(detailNode);
+      }
+      const chevron = document.createElement("span");
+      chevron.className = "mobile-model-sheet-action-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.textContent = "›";
+      button.append(copy, chevron);
+      button.addEventListener("click", handler);
+      return button;
+    };
+
+    const openMobile = (binding, { returnFocus = binding.trigger } = {}) => {
+      const isModel = binding.select.id === "modelSelect";
+      active = { binding, mobile: true, returnFocus };
+      mobileSheet.className = `mobile-select-sheet ${isModel ? "mobile-model-sheet" : "mobile-reasoning-sheet"}`;
+      mobileTitle.textContent = isModel ? translate("chat.selectModel") : (binding.label?.textContent?.trim() || translate("chat.reasoningEffort"));
+
+      const options = document.createElement("div");
+      options.className = "mobile-select-sheet-options";
+      options.setAttribute("role", "listbox");
+      options.setAttribute("aria-label", mobileTitle.textContent);
+      [...binding.select.options]
+        .filter((option) => !option.hidden)
+        .forEach((option) => options.appendChild(createMobileOptionButton(binding, option, { model: isModel })));
+      mobileBody.replaceChildren(options);
+
+      if (isModel) {
+        const actions = document.createElement("div");
+        actions.className = "mobile-model-sheet-actions";
+        const reasoningBinding = bindings.find(({ select }) => select.id === "reasoningEffort");
+        if (reasoningBinding) {
+          const currentReasoning = reasoningBinding.select.selectedOptions?.[0]
+            || reasoningBinding.select.options?.[reasoningBinding.select.selectedIndex];
+          const reasoningText = currentReasoning?.textContent?.trim() || currentReasoning?.value || "";
+          actions.appendChild(createMobileAction(translate("chat.reasoningEffort"), reasoningText, () => {
+            const focusTarget = active?.returnFocus || binding.trigger;
+            close();
+            openMobile(reasoningBinding, { returnFocus: focusTarget });
+          }));
+        }
+        actions.appendChild(createMobileAction(translate("chat.manageModels"), "", () => {
+          close({ focus: true });
+          openModelSettings();
+        }));
+        mobileBody.appendChild(actions);
+      }
+
+      bodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      mobileBackdrop.classList.remove("hidden");
+      mobileBackdrop.setAttribute("aria-hidden", "false");
+      binding.trigger.setAttribute("aria-haspopup", "dialog");
+      binding.trigger.setAttribute("aria-expanded", "true");
+      binding.trigger.setAttribute("aria-controls", mobileSheet.id);
+      (options.querySelector('[aria-selected="true"]') || options.querySelector("button") || mobileClose).focus?.();
+    };
+
     const open = (binding) => {
-      if (active?.trigger === binding.trigger) {
+      if (active?.binding.trigger === binding.trigger) {
         close();
         return;
       }
       close();
-      active = binding;
+      if (usesMobileSheet(binding)) {
+        openMobile(binding);
+        return;
+      }
+      active = { binding, mobile: false, returnFocus: binding.trigger };
       const isPermissionMenu = binding.select.id === "permissionMode";
       menu.classList.toggle("composer-permission-popover", isPermissionMenu);
       const heading = document.createElement("div");
@@ -445,30 +638,59 @@ export function createUIShellController({
       return [binding.trigger, handler];
     });
     const handleDocumentPointer = (event) => {
-      if (!active || menu.contains(event.target) || active.trigger.contains(event.target)) return;
+      if (!active || active.mobile || menu.contains(event.target) || active.binding.trigger.contains(event.target)) return;
       close();
     };
     const handleDocumentKey = (event) => {
       if (event.key === "Escape" && active) {
         close({ focus: true });
         event.preventDefault();
+        return;
       }
+      if (event.key !== "Tab" || !active?.mobile) return;
+      const focusable = [...mobileSheet.querySelectorAll("button:not([disabled]), [tabindex]:not([tabindex=\"-1\"])")];
+      if (!focusable.length) return;
+      const currentIndex = focusable.indexOf(document.activeElement);
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+        : (currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
+      focusable[nextIndex]?.focus?.();
+      event.preventDefault();
     };
-    const handleViewportChange = () => close();
+    const handleBackdropClick = (event) => {
+      if (event.target !== mobileBackdrop || !active?.mobile) return;
+      close({ focus: true });
+    };
+    const handleCloseClick = () => close({ focus: true });
+    const handleViewportChange = () => {
+      const restoreFocus = Boolean(active?.mobile);
+      close({ focus: restoreFocus });
+    };
+    const handleDocumentScroll = (event) => {
+      if (active?.mobile && mobileSheet.contains(event.target)) return;
+      close();
+    };
+    mobileBackdrop.addEventListener("click", handleBackdropClick);
+    mobileClose.addEventListener("click", handleCloseClick);
     document.addEventListener("pointerdown", handleDocumentPointer);
     document.addEventListener("keydown", handleDocumentKey);
     window.addEventListener("resize", handleViewportChange);
-    window.addEventListener("scroll", handleViewportChange, true);
+    window.addEventListener("orientationchange", handleViewportChange);
+    window.addEventListener("scroll", handleDocumentScroll, true);
 
     return () => {
       close();
       triggerHandlers.forEach(([trigger, handler]) => trigger.removeEventListener("click", handler));
       bindings.forEach(({ select, sync }) => select.removeEventListener("change", sync));
       observers.forEach((observer) => observer.disconnect());
+      mobileBackdrop.removeEventListener("click", handleBackdropClick);
+      mobileClose.removeEventListener("click", handleCloseClick);
       document.removeEventListener("pointerdown", handleDocumentPointer);
       document.removeEventListener("keydown", handleDocumentKey);
       window.removeEventListener("resize", handleViewportChange);
-      window.removeEventListener("scroll", handleViewportChange, true);
+      window.removeEventListener("orientationchange", handleViewportChange);
+      window.removeEventListener("scroll", handleDocumentScroll, true);
+      mobileBackdrop.remove();
       menu.remove();
     };
   }

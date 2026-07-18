@@ -74,9 +74,9 @@ INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permissi
 	}
 	conversation := response.Conversations[0]
 	allowedKeys := map[string]bool{
-		"projectId": true, "projectName": true, "projectPath": true, "projectUpdatedAt": true,
+		"projectId": true, "projectName": true, "projectPath": true, "projectUpdatedAt": true, "projectPinned": true,
 		"worklineId": true, "worklineTitle": true, "worklineRole": true, "worklineBranch": true, "worklineUpdatedAt": true,
-		"agentId": true, "agentTitle": true, "agentType": true, "agentStatus": true, "model": true, "permissionMode": true,
+		"agentId": true, "agentTitle": true, "agentType": true, "agentStatus": true, "agentPinned": true, "model": true, "permissionMode": true,
 		"cwd": true, "messageCount": true, "lastActivityAt": true,
 	}
 	if len(conversation) != len(allowedKeys) {
@@ -93,6 +93,87 @@ INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permissi
 	second := response.Conversations[1]
 	if string(second["projectId"]) != `"project-chat"` || string(second["agentId"]) != `"agent-review"` || string(second["agentStatus"]) != `"running"` {
 		t.Fatalf("expected the second agent to remain grouped under the same project: %+v", second)
+	}
+}
+
+func TestNavigationStateRoutesPinArchiveAndRestore(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "navigation-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	project, _, agent, err := store.CreateProject(ctx, "Navigation state", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{}, store, nil, nil)
+	patch := func(path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := newTestRequest(http.MethodPatch, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		app.Routes().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	projectResponse := patch("/api/projects/"+project.ID+"/navigation-state", `{"pinned":true}`)
+	if projectResponse.Code != http.StatusOK {
+		t.Fatalf("expected project pin 200, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	var pinnedProject db.Project
+	if err := json.Unmarshal(projectResponse.Body.Bytes(), &pinnedProject); err != nil {
+		t.Fatal(err)
+	}
+	if !pinnedProject.Pinned || pinnedProject.ArchivedAt != "" {
+		t.Fatalf("unexpected pinned project response: %+v", pinnedProject)
+	}
+
+	agentResponse := patch("/api/agents/"+agent.ID+"/navigation-state", `{"archived":true}`)
+	if agentResponse.Code != http.StatusOK {
+		t.Fatalf("expected agent archive 200, got %d: %s", agentResponse.Code, agentResponse.Body.String())
+	}
+	var archivedAgent db.Agent
+	if err := json.Unmarshal(agentResponse.Body.Bytes(), &archivedAgent); err != nil {
+		t.Fatal(err)
+	}
+	if archivedAgent.ArchivedAt == "" {
+		t.Fatalf("expected archived agent timestamp: %+v", archivedAgent)
+	}
+
+	defaultNavigation := httptest.NewRecorder()
+	app.Routes().ServeHTTP(defaultNavigation, newTestRequest(http.MethodGet, "/api/navigation", nil))
+	if defaultNavigation.Code != http.StatusOK || !strings.Contains(defaultNavigation.Body.String(), project.ID) || strings.Contains(defaultNavigation.Body.String(), agent.ID) {
+		t.Fatalf("default navigation should retain project and hide archived conversation: %d %s", defaultNavigation.Code, defaultNavigation.Body.String())
+	}
+	archivedNavigation := httptest.NewRecorder()
+	app.Routes().ServeHTTP(archivedNavigation, newTestRequest(http.MethodGet, "/api/navigation?includeArchived=true", nil))
+	if archivedNavigation.Code != http.StatusOK || !strings.Contains(archivedNavigation.Body.String(), agent.ID) || !strings.Contains(archivedNavigation.Body.String(), `"agentArchivedAt"`) || !strings.Contains(archivedNavigation.Body.String(), `"projectPinned":true`) {
+		t.Fatalf("archived navigation should expose safe state fields: %d %s", archivedNavigation.Code, archivedNavigation.Body.String())
+	}
+
+	restoreResponse := patch("/api/narrators/"+agent.ID+"/navigation-state", `{"archived":false,"pinned":true}`)
+	if restoreResponse.Code != http.StatusOK {
+		t.Fatalf("expected narrator alias restore 200, got %d: %s", restoreResponse.Code, restoreResponse.Body.String())
+	}
+	projectArchive := patch("/api/projects/"+project.ID+"/navigation-state", `{"archived":true}`)
+	if projectArchive.Code != http.StatusOK {
+		t.Fatalf("expected project archive 200, got %d: %s", projectArchive.Code, projectArchive.Body.String())
+	}
+	defaultNavigation = httptest.NewRecorder()
+	app.Routes().ServeHTTP(defaultNavigation, newTestRequest(http.MethodGet, "/api/navigation", nil))
+	if strings.Contains(defaultNavigation.Body.String(), project.ID) || strings.Contains(defaultNavigation.Body.String(), agent.ID) {
+		t.Fatalf("archived project and conversations should be hidden by default: %s", defaultNavigation.Body.String())
+	}
+	archivedNavigation = httptest.NewRecorder()
+	app.Routes().ServeHTTP(archivedNavigation, newTestRequest(http.MethodGet, "/api/navigation?includeArchived=1", nil))
+	if !strings.Contains(archivedNavigation.Body.String(), project.ID) || !strings.Contains(archivedNavigation.Body.String(), agent.ID) || !strings.Contains(archivedNavigation.Body.String(), `"projectArchivedAt"`) {
+		t.Fatalf("includeArchived should retain archived project hierarchy: %s", archivedNavigation.Body.String())
+	}
+
+	for _, invalid := range []string{`{}`, `{"pinned":null}`, `{"pinned":"true"}`, `{"unknown":true}`} {
+		if response := patch("/api/projects/"+project.ID+"/navigation-state", invalid); response.Code != http.StatusBadRequest {
+			t.Fatalf("expected invalid patch 400 for %s, got %d: %s", invalid, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -146,6 +227,32 @@ func TestNavigationRequiresMembershipWhenUsersExist(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("member navigation leaked %q: %s", forbidden, body)
 		}
+	}
+
+	unauthenticatedPatch := httptest.NewRecorder()
+	unauthenticatedPatchRequest := newTestRequest(http.MethodPatch, "/api/projects/"+firstProject.ID+"/navigation-state", strings.NewReader(`{"pinned":true}`))
+	unauthenticatedPatchRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(unauthenticatedPatch, unauthenticatedPatchRequest)
+	if unauthenticatedPatch.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated navigation patch 401, got %d: %s", unauthenticatedPatch.Code, unauthenticatedPatch.Body.String())
+	}
+
+	crossTenantPatch := httptest.NewRecorder()
+	crossTenantPatchRequest := newTestRequest(http.MethodPatch, "/api/agents/"+secondAgent.ID+"/navigation-state", strings.NewReader(`{"archived":true}`))
+	crossTenantPatchRequest.Header.Set("Content-Type", "application/json")
+	crossTenantPatchRequest.AddCookie(firstCookie)
+	app.Routes().ServeHTTP(crossTenantPatch, crossTenantPatchRequest)
+	if crossTenantPatch.Code != http.StatusNotFound {
+		t.Fatalf("expected cross-tenant navigation patch 404, got %d: %s", crossTenantPatch.Code, crossTenantPatch.Body.String())
+	}
+
+	ownPatch := httptest.NewRecorder()
+	ownPatchRequest := newTestRequest(http.MethodPatch, "/api/agents/"+firstAgent.ID+"/navigation-state", strings.NewReader(`{"pinned":true}`))
+	ownPatchRequest.Header.Set("Content-Type", "application/json")
+	ownPatchRequest.AddCookie(firstCookie)
+	app.Routes().ServeHTTP(ownPatch, ownPatchRequest)
+	if ownPatch.Code != http.StatusOK {
+		t.Fatalf("expected own navigation patch 200, got %d: %s", ownPatch.Code, ownPatch.Body.String())
 	}
 }
 

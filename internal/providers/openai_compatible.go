@@ -357,7 +357,8 @@ func (u openAICompatibleUsage) toUsage() Usage {
 func handleOpenAICompatibleJSON(out chan<- Event, reader io.Reader) {
 	var body struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content   string `json:"content"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
@@ -379,19 +380,26 @@ func handleOpenAICompatibleJSON(out chan<- Event, reader io.Reader) {
 	if usage != (Usage{}) {
 		out <- Event{Type: "usage", Usage: &usage}
 	}
-	if len(body.Choices) > 0 {
-		message := body.Choices[0].Message
-		if message.Content != "" {
-			out <- Event{Type: "text", Text: message.Content}
-		}
-		for _, call := range message.ToolCalls {
-			if strings.TrimSpace(call.Type) != "" && call.Type != "function" {
-				continue
-			}
-			emitOpenAICompatibleToolCall(out, call.ID, call.Function.Name, call.Function.Arguments)
-		}
+	if len(body.Choices) == 0 {
+		out <- Event{Type: "error", Text: "OpenAI-compatible response contained no choices"}
+		return
 	}
-	out <- Event{Type: "done", Done: true}
+	choice := body.Choices[0]
+	message := choice.Message
+	if message.Content != "" {
+		out <- Event{Type: "text", Text: message.Content}
+	}
+	for _, call := range message.ToolCalls {
+		if strings.TrimSpace(call.Type) != "" && call.Type != "function" {
+			continue
+		}
+		emitOpenAICompatibleToolCall(out, call.ID, call.Function.Name, call.Function.Arguments)
+	}
+	stopReason := strings.ToLower(strings.TrimSpace(choice.FinishReason))
+	if stopReason == "" {
+		stopReason = "stop"
+	}
+	out <- Event{Type: "done", Done: true, StopReason: stopReason}
 }
 
 type openAICompatibleStreamToolCall struct {
@@ -406,6 +414,8 @@ func handleOpenAICompatibleStream(out chan<- Event, reader io.Reader) {
 	toolCalls := map[int]*openAICompatibleStreamToolCall{}
 	var order []int
 	var usage Usage
+	var stopReason string
+	sawDoneMarker := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") {
@@ -416,11 +426,13 @@ func handleOpenAICompatibleStream(out chan<- Event, reader io.Reader) {
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			sawDoneMarker = true
 			break
 		}
 		var chunk struct {
 			Choices []struct {
-				Delta struct {
+				FinishReason string `json:"finish_reason"`
+				Delta        struct {
 					Content   string `json:"content"`
 					ToolCalls []struct {
 						Index    int    `json:"index"`
@@ -443,6 +455,9 @@ func handleOpenAICompatibleStream(out chan<- Event, reader io.Reader) {
 			usage = parsedUsage
 		}
 		for _, choice := range chunk.Choices {
+			if reason := strings.ToLower(strings.TrimSpace(choice.FinishReason)); reason != "" {
+				stopReason = reason
+			}
 			if choice.Delta.Content != "" {
 				out <- Event{Type: "text", Text: choice.Delta.Content}
 			}
@@ -475,12 +490,19 @@ func handleOpenAICompatibleStream(out chan<- Event, reader io.Reader) {
 	if usage != (Usage{}) {
 		out <- Event{Type: "usage", Usage: &usage}
 	}
+	if stopReason == "" && !sawDoneMarker {
+		out <- Event{Type: "error", Text: "OpenAI-compatible stream closed before a terminal event"}
+		return
+	}
+	if stopReason == "" {
+		stopReason = "stop"
+	}
 	sort.Ints(order)
 	for _, index := range order {
 		call := toolCalls[index]
 		emitOpenAICompatibleToolCall(out, call.ID, call.Name, call.Arguments.String())
 	}
-	out <- Event{Type: "done", Done: true}
+	out <- Event{Type: "done", Done: true, StopReason: stopReason}
 }
 
 func emitOpenAICompatibleToolCall(out chan<- Event, id, name, arguments string) {

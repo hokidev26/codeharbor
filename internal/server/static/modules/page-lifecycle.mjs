@@ -165,5 +165,3 @@ export function createPageLifecycleController({
     pendingReasons: () => [...pendingReasons],
   };
 }
-
-export const createPageLifecycleResumeController = createPageLifecycleController;

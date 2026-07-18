@@ -83,6 +83,36 @@ test("normalizeNavigationPayload normalizes the backend contract and target ids"
   assert.equal(normalized.conversations[0].targetId, createNavigationTargetId({ projectId: "p1", worklineId: "w1", agentId: "a1" }));
 });
 
+test("navigation preserves pin and archive state and exposes action triggers", () => {
+  const statePayload = {
+    projects: [
+      { id: "p1", name: "Pinned project", pinned: true },
+      { id: "p2", name: "Archived project", archivedAt: "2026-01-04T00:00:00Z" },
+      { id: "p3", name: "Independent conversation pin" },
+    ],
+    conversations: [
+      { projectId: "p1", projectName: "Pinned project", projectPinned: true, worklineId: "w1", worklineTitle: "main", agentId: "a1", agentTitle: "Recent", lastActivityAt: "2026-01-03T00:00:00Z" },
+      { projectId: "p1", projectName: "Pinned project", projectPinned: true, worklineId: "w2", worklineTitle: "pin", agentId: "a2", agentTitle: "Pinned", agentPinned: true, lastActivityAt: "2026-01-01T00:00:00Z" },
+      { projectId: "p2", projectName: "Archived project", projectArchivedAt: "2026-01-04T00:00:00Z", worklineId: "w3", worklineTitle: "old", agentId: "a3", agentTitle: "Archived", agentArchivedAt: "2026-01-04T00:00:00Z", lastActivityAt: "2026-01-05T00:00:00Z" },
+      { projectId: "p3", projectName: "Independent conversation pin", worklineId: "w4", worklineTitle: "pin", agentId: "a4", agentTitle: "Pinned elsewhere", agentPinned: true, lastActivityAt: "2025-01-01T00:00:00Z" },
+    ],
+  };
+  const normalized = normalizeNavigationPayload(statePayload);
+  assert.equal(normalized.projects[0].pinned, true);
+  assert.equal(normalized.projects[1].archivedAt, "2026-01-04T00:00:00Z");
+  assert.deepEqual(normalized.conversations.map((item) => item.agentId), ["a2", "a1", "a4", "a3"]);
+  assert.equal(normalized.conversations[0].agentPinned, true);
+  assert.equal(normalized.conversations[3].agentArchivedAt, "2026-01-04T00:00:00Z");
+  assert.deepEqual(buildNavigationView(statePayload, { mode: "conversations" }).conversations.map((item) => item.agentId), ["a2", "a4", "a1", "a3"]);
+
+  const html = renderNavigationHTML(buildNavigationView(statePayload, { mode: "all" }));
+  assert.match(html, /data-navigation-kind="project" data-navigation-id="p1"/);
+  assert.match(html, /data-navigation-kind="conversation" data-navigation-id="a2"/);
+  assert.match(html, /data-navigation-menu-trigger/);
+  assert.match(html, /navigation-state-badge pinned/);
+  assert.match(html, /navigation-state-badge archived/);
+});
+
 test("navigation status classes remain safe for live agent state styling", () => {
   assert.equal(navigationAgentStatusClass("RUNNING"), "running");
   assert.equal(navigationAgentStatusClass("agent error"), "agent-error");

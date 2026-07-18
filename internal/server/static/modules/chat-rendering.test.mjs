@@ -737,6 +737,28 @@ test("live tool events retain all tools and preserve streamed Bash output after 
   }
 });
 
+test("run review loading keeps the existing card stable without transient loading labels", () => {
+  const summary = {
+    run: { id: "run-1", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:01:00Z" },
+    toolCalls: [],
+    recentMessages: [],
+  };
+  const existing = renderSnapshot([{ role: "assistant", contentText: "reply" }], {
+    activeRunSummary: summary,
+    activeRunSummaryRunId: "run-1",
+    runSummaryLoading: true,
+  });
+  assert.match(existing.html, /data-run-summary-card/);
+  assert.doesNotMatch(existing.html, /正在載入任務回顧|正在重新整理|正在加载任务回顾|正在重新整理/);
+
+  const firstLoad = renderSnapshot([{ role: "assistant", contentText: "reply" }], {
+    activeRunSummary: null,
+    activeRunSummaryRunId: "run-1",
+    runSummaryLoading: true,
+  });
+  assert.doesNotMatch(firstLoad.html, /data-run-summary-card/);
+});
+
 test("run review uses complete tool calls and falls back to summary calls when detail loading fails", async () => {
   const fullCall = { toolUseId: "full-1", toolName: "Read", status: "completed", inputJson: { file_path: "full.txt" }, outputJson: { output: "full output", meta: { path: "full.txt" } }, durationMs: 31 };
   const fallbackCall = { toolUseId: "summary-1", toolName: "Grep", status: "error", inputJson: { path: "src", pattern: "x" }, errorMessage: "failed" };

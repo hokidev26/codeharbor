@@ -2,10 +2,12 @@ import { $ } from "./dom.mjs";
 import { applyDocumentLocale, applyStaticTranslations, currentUILocale } from "./i18n.mjs";
 import { setRegionalPreferences } from "./locale-registry.mjs";
 import {
+  accountPreferenceStorageKeys,
   appearancePrefsKey,
   appearanceStyleVersion,
-  appearanceThemeForPreset,
+  appearanceThemeForRef,
   normalizeAppearanceThemePreset,
+  normalizeAppearanceThemeRef,
   chatDraftsKey,
   defaultAppearancePrefs,
   defaultIMGatewayPrefs,
@@ -22,6 +24,7 @@ import {
   localPreferenceBackupKind,
   localPreferenceBackupVersion,
   migrateLegacyLocalPreferences,
+  modelVisibilityPrefsKey,
   notificationPrefsKey,
   normalizeImportedRegionalPreferences,
   normalizePrimaryModePreference,
@@ -37,14 +40,16 @@ import {
   searchPrefsKey,
   skillsPrefsKey,
   terminalPrefsKey,
-} from "./preferences-data.mjs?v=apple-theme-1";
+} from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1";
 import { preferencesMessage } from "./messages-preferences.mjs";
 
 export function createSettingsPreferencesController({
   state,
+  accountPreferences,
   activeBackend,
   appendTerminal,
   applyPrimaryMode,
+  applyThemePreference,
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -65,6 +70,7 @@ export function createSettingsPreferencesController({
   updateGlobalThemeToggle,
 } = {}) {
   let localPreferencesMigrated = false;
+  const accountPreferenceStorageKeySet = new Set(accountPreferenceStorageKeys);
 
   function pt(key, params = {}) {
     return preferencesMessage(key, params, currentUILocale());
@@ -77,6 +83,7 @@ export function createSettingsPreferencesController({
   }
 
   function loadProfilePreferences() {
+    if (accountPreferences) return normalizeProfilePreferences(accountPreferences.getProfile());
     try {
       return normalizeProfilePreferences(JSON.parse(safeReadLocalPreference(profilePrefsKey) || "{}"));
     } catch {
@@ -85,6 +92,7 @@ export function createSettingsPreferencesController({
   }
 
   function normalizeProfilePreferences(value = {}) {
+    if (accountPreferences?.normalizeProfile) return accountPreferences.normalizeProfile(value);
     const displayName = String(value.displayName || "").trim().slice(0, 80);
     const roleLabel = String(value.roleLabel || defaultProfilePrefs.roleLabel).trim().slice(0, 80) || defaultProfilePrefs.roleLabel;
     const avatarInitials = String(value.avatarInitials || defaultProfilePrefs.avatarInitials).trim().slice(0, 4).toUpperCase() || defaultProfilePrefs.avatarInitials;
@@ -95,22 +103,34 @@ export function createSettingsPreferencesController({
   }
 
   function currentProfilePreferences() {
-    if (!state.profile) state.profile = loadProfilePreferences();
+    if (accountPreferences) state.profile = normalizeProfilePreferences(accountPreferences.getProfile());
+    else if (!state.profile) state.profile = loadProfilePreferences();
     return state.profile;
   }
 
   function saveProfilePreferences(next, { notify = false } = {}) {
     state.profile = normalizeProfilePreferences(next);
-    try {
-      localStorage.setItem(profilePrefsKey, JSON.stringify(state.profile));
-    } catch {}
+    const saving = accountPreferences
+      ? accountPreferences.setProfile(state.profile)
+      : Promise.resolve().then(() => {
+        try {
+          localStorage.setItem(profilePrefsKey, JSON.stringify(state.profile));
+        } catch {}
+      });
     applyProfilePreferences();
     if (state.activeSettingsPanel === "profile") refreshActiveSettingsPanel?.();
-    if (notify) showToast?.(pt("settings.profileSaved"), "success", { force: true });
+    if (notify) saving.then(() => {
+      const syncStatus = accountPreferences?.getStatus?.();
+      const key = syncStatus === "synced"
+        ? "settings.profileSynced"
+        : (syncStatus === "offline" || syncStatus === "unauthorized" ? "settings.profileOffline" : "settings.profilePending");
+      showToast?.(pt(key), syncStatus === "synced" ? "success" : "warn", { force: true });
+    });
+    return saving;
   }
 
   function resetProfilePreferences() {
-    saveProfilePreferences({ ...defaultProfilePrefs }, { notify: true });
+    return saveProfilePreferences({ ...defaultProfilePrefs }, { notify: true });
   }
 
   function applyProfilePreferences() {
@@ -126,6 +146,8 @@ export function createSettingsPreferencesController({
     const settingsAvatar = $("settingsIdentityAvatar");
     const settingsName = $("settingsIdentityName");
     const settingsMeta = $("settingsIdentityMeta");
+    const mobileAvatar = $("mobileSidebarAvatar");
+    const mobileName = $("mobileSidebarAccountName");
     if (avatar) avatar.textContent = profile.avatarInitials;
     if (accountName) accountName.textContent = displayName;
     if (menuName) menuName.textContent = displayName;
@@ -133,6 +155,8 @@ export function createSettingsPreferencesController({
     if (settingsAvatar) settingsAvatar.textContent = profile.avatarInitials;
     if (settingsName) settingsName.textContent = displayName;
     if (settingsMeta) settingsMeta.textContent = profile.roleLabel || pt("settings.localWorkspace");
+    if (mobileAvatar) mobileAvatar.textContent = profile.avatarInitials;
+    if (mobileName) mobileName.textContent = displayName;
     updateSidebarAccountSummary();
   }
 
@@ -154,6 +178,8 @@ export function createSettingsPreferencesController({
     if (mobileDrawerVersionChip) mobileDrawerVersionChip.textContent = pt("settings.updateVersion", { version });
     const mobileDrawerVersionText = $("mobileDrawerVersionText");
     if (mobileDrawerVersionText) mobileDrawerVersionText.textContent = `v${version}`;
+    const mobileSidebarMeta = $("mobileSidebarAccountMeta");
+    if (mobileSidebarMeta) mobileSidebarMeta.textContent = `v${version} · ${backend?.name || pt("settings.localBackend")}`;
   }
 
   function profileGitEnvExample(profile = currentProfilePreferences()) {
@@ -505,14 +531,25 @@ export function createSettingsPreferencesController({
     const legacyTheme = ["dark", "light"].includes(value.theme) ? value.theme : defaultAppearancePrefs.theme;
     // Version 2 stored only a light/dark value. Older, unversioned preferences
     // retain the previous safe migration to light instead of reviving a stale dark shell.
-    const themePreset = hasThemePreset
+    const migratedPreset = hasThemePreset
       ? (requestedPreset || defaultAppearancePrefs.themePreset)
       : (sourceStyleVersion >= 2 ? legacyTheme : defaultAppearancePrefs.themePreset);
+    let themeRef = (sourceStyleVersion >= appearanceStyleVersion || value.themeRef)
+      ? normalizeAppearanceThemeRef(value.themeRef, migratedPreset)
+      : { kind: "preset", id: migratedPreset };
+    // Preserve callers that update only themePreset through saveAppearancePreferences.
+    if (themeRef.kind === "preset" && requestedPreset && requestedPreset !== themeRef.id) {
+      themeRef = { kind: "preset", id: requestedPreset };
+    }
+    const themePreset = themeRef.kind === "preset"
+      ? themeRef.id
+      : (requestedPreset || themeRef.colorScheme || defaultAppearancePrefs.themePreset);
     const density = ["comfortable", "compact"].includes(value.density) ? value.density : defaultAppearancePrefs.density;
     return {
       styleVersion: appearanceStyleVersion,
+      themeRef,
       themePreset,
-      theme: appearanceThemeForPreset(themePreset),
+      theme: appearanceThemeForRef(themeRef, themePreset),
       density,
       terminalDefaultOpen: value.terminalDefaultOpen !== undefined ? Boolean(value.terminalDefaultOpen) : defaultAppearancePrefs.terminalDefaultOpen,
       showEventLog: value.showEventLog !== undefined ? Boolean(value.showEventLog) : defaultAppearancePrefs.showEventLog,
@@ -532,6 +569,7 @@ export function createSettingsPreferencesController({
     applyAppearancePreferences({ applyTerminalDefault });
     if (state.activeSettingsPanel === "appearance") refreshActiveSettingsPanel?.();
     if (notify) showToast?.(pt("settings.appearanceSaved"), "success");
+    return state.appearance;
   }
 
   function applyAppearancePreferences({ applyTerminalDefault = false } = {}) {
@@ -544,6 +582,8 @@ export function createSettingsPreferencesController({
     if (document.body.dataset) document.body.dataset.themePreset = prefs.themePreset;
     document.body.classList.toggle("ui-density-compact", prefs.density === "compact");
     document.body.classList.toggle("ui-density-comfortable", prefs.density !== "compact");
+    const themeResult = applyThemePreference?.(prefs);
+    themeResult?.catch?.(() => {});
     updateGlobalThemeToggle?.();
     if (applyTerminalDefault && $("appShell")) {
       toggleTerminal?.(!prefs.terminalDefaultOpen);
@@ -552,15 +592,18 @@ export function createSettingsPreferencesController({
 
   function setAppearancePreference(field, value) {
     const prefs = { ...currentAppearancePreferences() };
-    if (field === "theme") {
-      // Preserve the legacy public setter while persisting the preset as the source of truth.
-      prefs.themePreset = value;
+    if (field === "theme" || field === "themePreset") {
+      const preset = normalizeAppearanceThemePreset(value) || defaultAppearancePrefs.themePreset;
+      prefs.themePreset = preset;
+      prefs.themeRef = { kind: "preset", id: preset };
+    } else if (field === "themeRef") {
+      prefs.themeRef = normalizeAppearanceThemeRef(value, prefs.themePreset);
     } else if (field === "terminalDefaultOpen" || field === "showEventLog") {
       prefs[field] = value === true || value === "true";
     } else {
       prefs[field] = value;
     }
-    saveAppearancePreferences(prefs, { notify: true });
+    return saveAppearancePreferences(prefs, { notify: true });
   }
 
   function shouldLogAgentEvents() {
@@ -615,7 +658,8 @@ export function createSettingsPreferencesController({
   }
 
   function localPreferencesBackupSummary() {
-    return localPreferenceBackupKeys.reduce((acc, entry) => {
+    const summary = localPreferenceBackupKeys.reduce((acc, entry) => {
+      if (accountPreferences && accountPreferenceStorageKeySet.has(entry.key)) return acc;
       const raw = safeReadLocalPreference(entry.key);
       if (raw === null) return acc;
       acc.count += 1;
@@ -623,15 +667,31 @@ export function createSettingsPreferencesController({
       acc.labels.push(entry.label);
       return acc;
     }, { count: 0, bytes: 0, labels: [] });
+    if (!accountPreferences) return summary;
+    const accountSnapshot = accountPreferences.getSnapshot();
+    const accountEntries = [
+      [profilePrefsKey, accountSnapshot.profile],
+      [preferredModelKey, accountSnapshot.preferredModel],
+      [modelVisibilityPrefsKey, accountSnapshot.modelVisibility],
+    ];
+    accountEntries.forEach(([key, value]) => {
+      const entry = localPreferenceBackupKeys.find((item) => item.key === key);
+      const raw = typeof value === "string" ? value : JSON.stringify(value);
+      summary.count += 1;
+      summary.bytes += raw.length;
+      if (entry) summary.labels.push(entry.label);
+    });
+    return summary;
   }
 
   function createLocalPreferencesBackup() {
     const preferences = {};
     localPreferenceBackupKeys.forEach((entry) => {
+      if (accountPreferences && accountPreferenceStorageKeySet.has(entry.key)) return;
       const raw = safeReadLocalPreference(entry.key);
       if (raw !== null) preferences[entry.key] = localPreferenceValueForBackup(entry, raw);
     });
-    return {
+    const backup = {
       kind: localPreferenceBackupKind,
       version: localPreferenceBackupVersion,
       app: "Autoto",
@@ -639,6 +699,15 @@ export function createSettingsPreferencesController({
       exportedAt: new Date().toISOString(),
       preferences,
     };
+    if (accountPreferences) {
+      const accountSnapshot = accountPreferences.getSnapshot();
+      backup.accountPreferences = {
+        profile: accountSnapshot.profile,
+        preferredModel: accountSnapshot.preferredModel,
+        modelVisibility: accountSnapshot.modelVisibility,
+      };
+    }
+    return backup;
   }
 
   function localPreferencesBackupText() {
@@ -647,6 +716,10 @@ export function createSettingsPreferencesController({
 
   function normalizeImportedJSONPreference(key, value) {
     if (key === profilePrefsKey) return normalizeProfilePreferences(value || {});
+    if (key === modelVisibilityPrefsKey) return accountPreferences?.normalizeModelVisibility?.(value || {}) || {
+      hiddenModels: value?.hiddenModels && typeof value.hiddenModels === "object" ? value.hiddenModels : {},
+      showUnconfiguredProviders: Boolean(value?.showUnconfiguredProviders),
+    };
     if (key === searchPrefsKey) return normalizeSearchPreferences(value || {});
     if (key === imGatewayPrefsKey) return normalizeIMGatewayPreferences(value || {});
     if (key === skillsPrefsKey) return normalizeSkillsPreferences(value || {});
@@ -690,18 +763,44 @@ export function createSettingsPreferencesController({
     if (kind && kind !== localPreferenceBackupKind && kind !== legacyLocalPreferenceBackupKind) {
       throw new Error(pt("backup.unsupportedFormat"));
     }
-    const preferences = payload?.preferences || payload?.settings || payload?.values;
-    if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+    const preferences = payload?.preferences || payload?.settings || payload?.values || {};
+    const accountPayload = payload?.accountPreferences;
+    if ((!preferences || typeof preferences !== "object" || Array.isArray(preferences))
+      || (accountPayload !== undefined && (!accountPayload || typeof accountPayload !== "object" || Array.isArray(accountPayload)))) {
       throw new Error(pt("backup.preferencesMissing"));
     }
     const hasPreference = (key) => Object.prototype.hasOwnProperty.call(preferences, key);
     const updates = localPreferenceBackupKeys
-      .filter((entry) => hasPreference(entry.key) || hasPreference(legacyLocalPreferenceKey(entry.key)))
+      .filter((entry) => (!accountPreferences || !accountPreferenceStorageKeySet.has(entry.key))
+        && (hasPreference(entry.key) || hasPreference(legacyLocalPreferenceKey(entry.key))))
       .map((entry) => {
         const key = hasPreference(entry.key) ? entry.key : legacyLocalPreferenceKey(entry.key);
         return { entry, raw: normalizeImportedLocalPreference(entry, preferences[key]) };
       });
-    if (!updates.length) throw new Error(pt("backup.noImportablePreferences"));
+    const accountPatch = {};
+    if (accountPreferences) {
+      const accountSource = accountPayload && typeof accountPayload === "object" ? accountPayload : {};
+      const accountValue = (field, key) => {
+        if (Object.prototype.hasOwnProperty.call(accountSource, field)) return accountSource[field];
+        if (hasPreference(key)) return preferences[key];
+        const legacyKey = legacyLocalPreferenceKey(key);
+        return hasPreference(legacyKey) ? preferences[legacyKey] : undefined;
+      };
+      const profile = accountValue("profile", profilePrefsKey);
+      const preferredModel = accountValue("preferredModel", preferredModelKey);
+      const modelVisibility = accountValue("modelVisibility", modelVisibilityPrefsKey);
+      if (profile !== undefined) {
+        const parsed = typeof profile === "string" ? safeParseImportedJSON(profile, localPreferenceBackupLabel({ labelKey: "profile" })) : profile;
+        accountPatch.profile = normalizeProfilePreferences(parsed || {});
+      }
+      if (preferredModel !== undefined) accountPatch.preferredModel = String(preferredModel || "").trim().slice(0, 240);
+      if (modelVisibility !== undefined) {
+        const parsed = typeof modelVisibility === "string" ? safeParseImportedJSON(modelVisibility, localPreferenceBackupLabel({ labelKey: "modelVisibility" })) : modelVisibility;
+        accountPatch.modelVisibility = accountPreferences.normalizeModelVisibility(parsed || {});
+      }
+    }
+    const accountCount = Object.keys(accountPatch).length;
+    if (!updates.length && !accountCount) throw new Error(pt("backup.noImportablePreferences"));
     try {
       updates.forEach(({ entry, raw }) => {
         if (!raw && entry.key !== relayProtocolPrefsKey) localStorage.removeItem(entry.key);
@@ -711,7 +810,21 @@ export function createSettingsPreferencesController({
       throw new Error(pt("backup.storageWriteFailed"));
     }
     reloadLocalPreferencesFromStorage();
-    return updates.length;
+    if (!accountCount) return updates.length;
+    return accountPreferences.importPreferences(accountPatch).then((imported) => {
+      state.profile = loadProfilePreferences();
+      applyProfilePreferences();
+      renderModelOptions?.();
+      return updates.length + imported;
+    });
+  }
+
+  function safeParseImportedJSON(value, label) {
+    try {
+      return JSON.parse(value || "null");
+    } catch {
+      throw new Error(pt("backup.invalidJSON", { label }));
+    }
   }
 
   function reloadLocalPreferencesFromStorage() {

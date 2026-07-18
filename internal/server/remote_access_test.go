@@ -477,6 +477,58 @@ func TestGeneratedRemotePasswordIsReturnedOnceAndPersistedOnlyAsHash(t *testing.
 	}
 }
 
+func TestEnvironmentAccessPasswordCanBeRotatedLocally(t *testing.T) {
+	environmentPassword := "Environment-Remote-Password-1!"
+	app := New(config.Config{Security: config.SecurityConfig{
+		AccessPassword:          environmentPassword,
+		AllowRemoteFullAccess:   true,
+		DefaultRemoteAccessMode: remoteAccessModeRestricted,
+		CredentialRevision:      1,
+	}}, nil, nil, nil)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(path, app.configSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	app.SetConfigPath(path)
+
+	request := newTestRequest(http.MethodPut, "/api/security/remote-access/password", strings.NewReader(`{"strategy":"generate"}`))
+	request.Host = "localhost:7788"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("environment-backed local password generation returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		GeneratedPassword string `json:"generatedPassword"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.GeneratedPassword == "" {
+		t.Fatal("expected a one-time generated password")
+	}
+	cfg := app.configSnapshot()
+	if cfg.Security.AccessPassword != "" || !config.VerifyAccessPassword(cfg.Security.AccessPasswordHash, response.GeneratedPassword) {
+		t.Fatalf("expected local hash to replace environment credential, got %+v", cfg.Security)
+	}
+	if app.verifyRemoteAccessPassword(environmentPassword) {
+		t.Fatal("the replaced environment password must no longer authenticate")
+	}
+	if !app.verifyRemoteAccessPassword(response.GeneratedPassword) {
+		t.Fatal("the generated local password must authenticate")
+	}
+	settings := newTestRequest(http.MethodGet, "/api/security/remote-access", nil)
+	settings.Host = "localhost:7788"
+	settings.Header.Set(localTokenHeader, app.localToken)
+	settingsRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(settingsRecorder, settings)
+	if settingsRecorder.Code != http.StatusOK || !strings.Contains(settingsRecorder.Body.String(), `"source":"config"`) {
+		t.Fatalf("expected config-backed credential after rotation, got %d: %s", settingsRecorder.Code, settingsRecorder.Body.String())
+	}
+}
+
 func TestRestrictedAndFullRemoteFilesystemScopes(t *testing.T) {
 	root := t.TempDir()
 	projects := filepath.Join(root, "projects")

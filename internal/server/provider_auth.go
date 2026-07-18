@@ -62,6 +62,38 @@ type codexOAuthAccountResponse struct {
 	codexauth.AccountSummary
 	Stats *db.ProviderAccountStats `json:"stats,omitempty"`
 	Quota *codexauth.QuotaSnapshot `json:"quota,omitempty"`
+	Usage codexAccountUsage        `json:"usage"`
+}
+
+type codexAccountUsageWindow struct {
+	RequestCount int64   `json:"requestCount"`
+	InputTokens  int64   `json:"inputTokens"`
+	OutputTokens int64   `json:"outputTokens"`
+	TotalTokens  int64   `json:"totalTokens"`
+	CostUSD      float64 `json:"costUsd"`
+}
+
+type codexAccountUsage struct {
+	Total      codexAccountUsageWindow `json:"total"`
+	Last5Hours codexAccountUsageWindow `json:"last5Hours"`
+	Last7Days  codexAccountUsageWindow `json:"last7Days"`
+}
+
+func normalizeCodexAccountUsage(usage db.ProviderAccountUsage) codexAccountUsage {
+	window := func(value db.ProviderAccountUsageWindow) codexAccountUsageWindow {
+		return codexAccountUsageWindow{
+			RequestCount: value.RequestCount,
+			InputTokens:  value.InputTokens,
+			OutputTokens: value.OutputTokens,
+			TotalTokens:  value.TotalTokens(),
+			CostUSD:      value.CostUSD,
+		}
+	}
+	return codexAccountUsage{
+		Total:      window(usage.Total),
+		Last5Hours: window(usage.Last5Hours),
+		Last7Days:  window(usage.Last7Days),
+	}
 }
 
 type codexOAuthAccountsResponse struct {
@@ -89,14 +121,25 @@ func (s *Server) listCodexOAuthAccounts(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	statsByID := map[string]db.ProviderAccountStats{}
+	usageByID := map[string]db.ProviderAccountUsage{}
 	if s.store != nil {
 		if stats, statsErr := s.store.ListProviderAccountStats(r.Context(), codexauth.DefaultProviderName); statsErr == nil {
 			statsByID = stats
 		}
+		accountIDs := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			accountIDs = append(accountIDs, account.ID)
+		}
+		var usageErr error
+		usageByID, usageErr = s.store.ListProviderAccountUsage(r.Context(), codexauth.DefaultProviderName, accountIDs, s.now())
+		if usageErr != nil {
+			writeError(w, http.StatusInternalServerError, "Codex 账号用量统计失败")
+			return
+		}
 	}
 	response := make([]codexOAuthAccountResponse, 0, len(accounts))
 	for _, account := range accounts {
-		item := codexOAuthAccountResponse{AccountSummary: account}
+		item := codexOAuthAccountResponse{AccountSummary: account, Usage: normalizeCodexAccountUsage(usageByID[account.ID])}
 		if stats, ok := statsByID[account.ID]; ok {
 			statsCopy := stats
 			item.Stats = &statsCopy
@@ -225,6 +268,12 @@ func (s *Server) refreshCodexOAuthAccount(w http.ResponseWriter, r *http.Request
 		if stats, statsErr := s.store.GetProviderAccountStats(r.Context(), codexauth.DefaultProviderName, account.ID); statsErr == nil {
 			response.Stats = &stats
 		}
+		usageByID, usageErr := s.store.ListProviderAccountUsage(r.Context(), codexauth.DefaultProviderName, []string{account.ID}, s.now())
+		if usageErr != nil {
+			writeError(w, http.StatusInternalServerError, "Codex 账号用量统计失败")
+			return
+		}
+		response.Usage = normalizeCodexAccountUsage(usageByID[account.ID])
 	}
 	writeJSON(w, http.StatusOK, response)
 }

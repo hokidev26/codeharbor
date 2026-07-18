@@ -1,11 +1,9 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
-import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 
 export function createBackendRegistryController({
   state,
-  refreshActiveSettingsPanel,
   showError,
   showToast,
   updateSidebarAccountSummary,
@@ -22,7 +20,6 @@ export function createBackendRegistryController({
       renderBackendsList();
       if (checkHealth) await refreshActiveBackendHealth();
       if (seq !== state.backendLoadSeq) return;
-      if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
     } catch (err) {
       if (seq === state.backendLoadSeq) throw err;
     } finally {
@@ -105,7 +102,6 @@ export function createBackendRegistryController({
       state.backendActionBusy = next;
     }
     renderBackendsList();
-    if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
   }
 
   function renderBackendActionButton({ backendId, action, dataAttr, label, busyLabel, className = "" }) {
@@ -218,7 +214,6 @@ export function createBackendRegistryController({
     if (state.backendDeleteConfirmId !== id) {
       state.backendDeleteConfirmId = id;
       renderBackendsList();
-      if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
       showToast?.(t("backend.deleteConfirmHint"), "warn");
       return;
     }
@@ -250,172 +245,15 @@ export function createBackendRegistryController({
       state.backendHealth = health;
       if (activeBackend()?.id === id) setBackendHealthBadge(health.ok, health.status || t(health.ok ? "backend.online" : "backend.offline"));
       renderBackendsList();
-      if (state.activeSettingsPanel === "agent-admin") refreshActiveSettingsPanel?.();
     } finally {
       setBackendActionBusy(id, "test", false);
     }
   }
 
-  function renderAgentAdminSettingsContent() {
-    const backends = Array.isArray(state.backends) ? state.backends : [];
-    const active = activeBackend();
-    const keyedCount = backends.filter((backend) => backend.apiKeyConfigured).length;
-    const activeHealth = active && state.backendHealth?.backendId === active.id ? state.backendHealth : null;
-    const activeHealthText = activeHealth ? (activeHealth.status || t(activeHealth.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
-    return `
-    <div class="settings-live-page agent-admin-page">
-      <section class="settings-hero-card settings-page-section settings-card">
-        <div class="settings-card-header">
-          <div class="settings-hero-kicker">${escapeHtml(t("backend.heroKicker"))}</div>
-          <div class="settings-hero-title settings-card-title">${escapeHtml(active?.name || t("backend.noAgentServer"))}</div>
-          <p class="settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.heroDescription"))}</p>
-        </div>
-        <div class="settings-action-row settings-toolbar settings-inline-actions settings-card-footer">
-          <button id="refreshAgentBackendsBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("backend.refreshBackends"))}</button>
-          <button id="openBackendModalFromSettingsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.manageInModal"))}</button>
-        </div>
-      </section>
-      <div class="settings-status-strip settings-stat-grid">
-        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(backends.length))}</strong><span>${escapeHtml(t("backend.count"))}</span></div>
-        <div class="settings-stat-card"><strong>${escapeHtml(activeHealthText)}</strong><span>${escapeHtml(t("backend.currentHealth"))}</span></div>
-        <div class="settings-stat-card"><strong>${escapeHtml(formatNumber(keyedCount))}</strong><span>${escapeHtml(t("backend.configuredKeys"))}</span></div>
-      </div>
-      <section class="settings-provider-section highlighted settings-page-section settings-card">
-        <div class="settings-provider-section-head settings-card-header">
-          <div>
-            <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.agentServerBackends"))}</div>
-            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.apiKeyDescription"))}</div>
-          </div>
-        </div>
-        <div class="settings-backend-list settings-data-list settings-card-content">
-          ${backends.length ? backends.map(renderSettingsBackendCard).join("") : `<div class="settings-empty-card settings-empty-state compact">${escapeHtml(t("backend.emptySettingsList"))}</div>`}
-        </div>
-      </section>
-      <section class="settings-provider-section settings-page-section settings-card">
-        <div class="settings-provider-section-head settings-card-header">
-          <div>
-            <div class="settings-provider-title settings-card-title">${escapeHtml(t("backend.addTitle"))}</div>
-            <div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(t("backend.addDescription"))}</div>
-          </div>
-        </div>
-        <form id="settingsBackendForm" class="settings-backend-form settings-card-content">
-          <div class="settings-provider-form-grid settings-form-grid">
-            <label class="settings-form-field">${escapeHtml(t("backend.nameLabel"))}<input id="settingsBackendName" class="settings-field" placeholder="${escapeAttr(t("backend.namePlaceholder"))}" /></label>
-            <label class="settings-form-field">${escapeHtml(t("backend.kindLabel"))}<select id="settingsBackendKind" class="settings-field"><option value="local">local</option><option value="cloud">cloud</option></select></label>
-            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("backend.urlLabel"))}<input id="settingsBackendBaseUrl" class="settings-field" placeholder="http://127.0.0.1:8000" /></label>
-            <label class="settings-form-span-2 settings-form-field">${escapeHtml(t("backend.apiKeyLabel"))}<input id="settingsBackendApiKey" class="settings-field" type="password" placeholder="${escapeAttr(t("backend.apiKeyPlaceholder"))}" /></label>
-          </div>
-          <div class="settings-action-row settings-form-actions settings-inline-actions settings-card-footer">
-            <button id="resetSettingsBackendFormBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("backend.clear"))}</button>
-            <button class="settings-action-btn primary" type="submit" data-backend-submit>${escapeHtml(t("backend.add"))}</button>
-          </div>
-        </form>
-      </section>
-    </div>
-  `;
-  }
-
-  function renderSettingsBackendCard(backend) {
-    const health = state.backendHealth?.backendId === backend.id ? state.backendHealth : null;
-    const healthText = health ? (health.status || t(health.ok ? "backend.online" : "backend.offline")) : t("backend.notChecked");
-    const pendingDelete = state.backendDeleteConfirmId === backend.id;
-    return `
-    <div class="settings-backend-card settings-data-row ${backend.active ? "active" : ""} ${pendingDelete ? "confirm-delete" : ""}">
-      <div class="settings-backend-main">
-        <div class="settings-backend-title">
-          ${escapeHtml(backend.name || t("backend.agentServer"))}
-          ${backend.active ? `<span class='settings-status-pill settings-badge ok'>${escapeHtml(t("backend.active"))}</span>` : ""}
-          <span class="settings-status-pill settings-badge ${backendHealthPillClass(health)}">${escapeHtml(healthText)}</span>
-        </div>
-        <div class="settings-provider-meta path">${escapeHtml(backend.baseUrl || t("backend.urlNotConfigured"))}</div>
-        <div class="settings-backend-meta">${escapeHtml(backend.kind || "local")} · ${escapeHtml(t(backend.apiKeyConfigured ? "backend.apiKeyConfigured" : "backend.noApiKey"))} · ${escapeHtml(t("backend.updatedAt", { timestamp: formatTimestamp(backend.updatedAt) }))}</div>
-        ${health?.error ? `<div class="settings-inline-alert settings-alert compact" role="alert">${escapeHtml(health.error)}</div>` : ""}
-        ${health?.checks?.length ? renderBackendHealthChecks(health.checks) : ""}
-      </div>
-      <div class="settings-backend-actions settings-inline-actions">
-        ${renderBackendActionButton({ backendId: backend.id, action: "test", dataAttr: "settings-backend-test", label: t("backend.test"), busyLabel: t("backend.testing"), className: "settings-action-btn subtle" })}
-        ${backend.active ? "" : renderBackendActionButton({ backendId: backend.id, action: "activate", dataAttr: "settings-backend-activate", label: t("backend.setCurrent"), busyLabel: t("backend.switching"), className: "settings-action-btn subtle" })}
-        ${renderBackendActionButton({ backendId: backend.id, action: "delete", dataAttr: "settings-backend-delete", label: t(pendingDelete ? "backend.confirmDelete" : "backend.delete"), busyLabel: t("backend.deleting"), className: `settings-action-btn danger ${pendingDelete ? "confirm" : ""}` })}
-      </div>
-    </div>
-  `;
-  }
-
-  function backendHealthPillClass(health) {
-    if (!health) return "";
-    if (health.ok) return "ok";
-    if (health.status === "initializing") return "warn";
-    return "warn";
-  }
-
-  function renderBackendHealthChecks(checks) {
-    return `
-    <div class="settings-backend-checks settings-data-list">
-      ${checks.map((check) => `
-        <div class="settings-backend-check settings-data-row ${check.ok ? "ok" : "warn"}">
-          <span>${escapeHtml(check.name || t("backend.check"))}</span>
-          <strong>${escapeHtml(check.statusCode ? String(check.statusCode) : (check.error || t("backend.notAvailable")))}</strong>
-        </div>
-      `).join("")}
-    </div>
-  `;
-  }
-
-  function bindAgentAdminSettingsActions() {
-    $("refreshAgentBackendsBtn")?.addEventListener("click", () => loadBackends().catch(showError));
-    $("openBackendModalFromSettingsBtn")?.addEventListener("click", openBackendsModal);
-    $("settingsBackendForm")?.addEventListener("submit", (event) => saveSettingsBackend(event).catch(showError));
-    $("resetSettingsBackendFormBtn")?.addEventListener("click", resetSettingsBackendForm);
-    document.querySelectorAll("[data-settings-backend-test]").forEach((node) => {
-      node.addEventListener("click", () => testBackend(node.dataset.settingsBackendTest).catch(showError));
-    });
-    document.querySelectorAll("[data-settings-backend-activate]").forEach((node) => {
-      node.addEventListener("click", () => activateBackend(node.dataset.settingsBackendActivate).catch(showError));
-    });
-    document.querySelectorAll("[data-settings-backend-delete]").forEach((node) => {
-      node.addEventListener("click", () => requestDeleteBackend(node.dataset.settingsBackendDelete).catch(showError));
-    });
-  }
-
-  async function saveSettingsBackend(event) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const submitButton = form?.querySelector("[data-backend-submit]");
-    if (submitButton?.disabled) return;
-    const payload = {
-      name: $("settingsBackendName").value.trim(),
-      kind: $("settingsBackendKind").value,
-      baseUrl: $("settingsBackendBaseUrl").value.trim(),
-      apiKey: $("settingsBackendApiKey").value.trim(),
-      active: state.backends.length === 0,
-    };
-    if (!payload.baseUrl) throw new Error(t("backend.urlRequired"));
-    setBackendFormSubmitting(form, true);
-    try {
-      await api("/api/backends", { method: "POST", body: JSON.stringify(payload) });
-      state.backendDeleteConfirmId = "";
-      resetSettingsBackendForm();
-      showToast?.(t("backend.added"), "success");
-      await loadBackends();
-    } finally {
-      setBackendFormSubmitting(form, false);
-    }
-  }
-
-  function resetSettingsBackendForm() {
-    if ($("settingsBackendName")) $("settingsBackendName").value = "";
-    if ($("settingsBackendKind")) $("settingsBackendKind").value = "local";
-    if ($("settingsBackendBaseUrl")) $("settingsBackendBaseUrl").value = "";
-    if ($("settingsBackendApiKey")) $("settingsBackendApiKey").value = "";
-  }
-
   return {
-    activeBackend,
-    bindAgentAdminSettingsActions,
     closeBackendsModal,
     loadBackends,
     openBackendsModal,
-    renderAgentAdminSettingsContent,
     renderBackendPanel,
     resetBackendForm,
     saveBackend,

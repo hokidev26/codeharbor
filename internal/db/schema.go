@@ -50,9 +50,13 @@ CREATE TABLE IF NOT EXISTS projects (
   copy_files TEXT,
   workline_settings TEXT,
   proxy_domain TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  CHECK (pinned IN (0, 1))
 );
+CREATE INDEX IF NOT EXISTS idx_projects_navigation_state ON projects(pinned DESC, archived_at, updated_at DESC, id ASC);
 
 CREATE TABLE IF NOT EXISTS project_members (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -140,14 +144,18 @@ CREATE TABLE IF NOT EXISTS agents (
   background_status TEXT,
   background_result TEXT,
   background_completed_at TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (execution_generation >= 0),
+  CHECK (pinned IN (0, 1)),
   CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('auto', 'low', 'medium', 'high', 'xhigh')),
   CHECK (length(CAST(execution_device_id AS BLOB)) BETWEEN 1 AND 128)
 );
 CREATE INDEX IF NOT EXISTS idx_agents_workline ON agents(workline_id);
 CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id);
+CREATE INDEX IF NOT EXISTS idx_agents_navigation_state ON agents(pinned DESC, archived_at, updated_at DESC, id ASC);
 
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -519,7 +527,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + providerSecretsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL + gatewaySchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + providerSecretsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL + gatewaySchemaSQL + accountPreferencesSchemaSQL + oauthAppSchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -1303,4 +1311,36 @@ BEGIN SELECT RAISE(ABORT, 'invalid tool call execution device'); END;
 CREATE TRIGGER IF NOT EXISTS tool_calls_execution_device_update BEFORE UPDATE OF execution_device_id ON agent_tool_calls
 WHEN NEW.execution_device_id IS NULL OR length(CAST(NEW.execution_device_id AS BLOB)) NOT BETWEEN 1 AND 128 OR NOT EXISTS (SELECT 1 FROM execution_devices WHERE id = NEW.execution_device_id)
 BEGIN SELECT RAISE(ABORT, 'invalid tool call execution device'); END;
+`
+
+const accountPreferencesSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS account_preferences (
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  profile_json TEXT NOT NULL DEFAULT '{}',
+  preferred_model TEXT NOT NULL DEFAULT '',
+  model_visibility_json TEXT NOT NULL DEFAULT '{}',
+  revision INTEGER NOT NULL DEFAULT 1,
+  local_storage_import_version INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope_kind, scope_id),
+  CHECK (scope_kind IN ('instance', 'user')),
+  CHECK ((scope_kind = 'instance' AND scope_id = 'default') OR (scope_kind = 'user' AND length(CAST(scope_id AS BLOB)) BETWEEN 1 AND 128)),
+  CHECK (revision >= 1),
+  CHECK (local_storage_import_version IN (0, 1)),
+  CHECK (json_valid(profile_json)),
+  CHECK (json_valid(model_visibility_json)),
+  CHECK (length(CAST(preferred_model AS BLOB)) <= 1024),
+  CHECK (length(CAST(profile_json AS BLOB)) + length(CAST(preferred_model AS BLOB)) + length(CAST(model_visibility_json AS BLOB)) <= 262144)
+);
+
+CREATE TABLE IF NOT EXISTS account_preference_claims (
+  claim_kind TEXT PRIMARY KEY,
+  claimed_user_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (claim_kind = 'instance_to_first_user'),
+  CHECK (length(CAST(claimed_user_id AS BLOB)) BETWEEN 1 AND 128)
+);
 `

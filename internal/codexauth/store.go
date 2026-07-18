@@ -422,7 +422,10 @@ func (s *Store) Delete(id string) error {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("Codex 凭据目标路径不安全")
 		}
-		return os.Remove(path)
+		if err := os.Remove(path); err != nil {
+			return errors.New("删除 Codex 凭据失败")
+		}
+		return syncDirectory(s.dir)
 	}
 	return os.ErrNotExist
 }
@@ -585,7 +588,7 @@ func (s *Store) writeCredentialLocked(filename string, credential Credential) er
 		return errors.New("设置 Codex 凭据权限失败")
 	}
 	complete = true
-	return nil
+	return syncDirectory(s.dir)
 }
 
 func decodeCredential(data []byte) (Credential, error) {
@@ -777,6 +780,18 @@ func safeCredentialFilename(value string) (string, error) {
 		return "", errors.New("Codex 凭据文件名无效")
 	}
 	return value, nil
+}
+
+func syncDirectory(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return errors.New("同步 Codex 本地凭据库失败")
+	}
+	defer file.Close()
+	if err := file.Sync(); err != nil {
+		return errors.New("同步 Codex 本地凭据库失败")
+	}
+	return nil
 }
 
 func (c Credential) ExpiresAt() time.Time {

@@ -72,6 +72,91 @@ func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 	}
 }
 
+func TestUpdateProviderConfigRenamesCustomProviderAndMigratesModelReferences(t *testing.T) {
+	provider := config.ProviderConfig{
+		Name:    "relay",
+		Type:    "openai-compatible",
+		BaseURL: "http://127.0.0.1:8081/v1",
+		APIKey:  "runtime-key",
+		Model:   "old-model",
+	}
+	fallback := config.ProviderConfig{
+		Name:           "fallback",
+		Type:           "openai-compatible",
+		BaseURL:        "http://127.0.0.1:8082/v1",
+		APIKeyOptional: true,
+		Model:          "fallback-model",
+	}
+	registry := providers.NewRegistry()
+	registry.Register(providers.NewOpenAICompatible(provider))
+	registry.Register(providers.NewOpenAICompatible(fallback))
+	if !registry.SetDefaultFromConfig("relay:old-model", []config.ProviderConfig{provider, fallback}) {
+		t.Fatal("expected relay to become default")
+	}
+	app := New(config.Config{
+		Agent: config.AgentConfig{
+			DefaultModel:       "relay:old-model",
+			SummaryModel:       "relay:summary-model",
+			ReviewModel:        "relay:review-model",
+			SubagentModels:     map[string]string{"explore": "relay:explore-model"},
+			SubagentModelPools: map[string][]string{"general": {"relay:pool-model", "fallback:fallback-model"}},
+		},
+		Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{provider, fallback}},
+	}, nil, nil, nil, registry)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	app.SetConfigPath(configPath)
+
+	payload := []byte(`{"name":"renamed-relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:8081/v1","model":"new-model"}`)
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPut, "/api/providers/relay/config", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rename failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	if _, ok := app.providerConfig("relay"); ok {
+		t.Fatal("old provider name remained in config")
+	}
+	updated, ok := app.providerConfig("renamed-relay")
+	if !ok || updated.Model != "new-model" {
+		t.Fatalf("renamed provider missing or stale: %+v", updated)
+	}
+	if _, _, err := registry.Resolve("relay:old-model"); err == nil {
+		t.Fatal("old provider name remained resolvable")
+	}
+	if _, _, err := registry.Resolve("renamed-relay:new-model"); err != nil {
+		t.Fatalf("renamed provider is not resolvable: %v", err)
+	}
+
+	cfg := app.configSnapshot()
+	if cfg.Agent.DefaultModel != "renamed-relay:new-model" || cfg.Agent.SummaryModel != "renamed-relay:summary-model" || cfg.Agent.ReviewModel != "renamed-relay:review-model" {
+		t.Fatalf("agent model references were not migrated: %+v", cfg.Agent)
+	}
+	if cfg.Agent.SubagentModels["explore"] != "renamed-relay:explore-model" || cfg.Agent.SubagentModelPools["general"][0] != "renamed-relay:pool-model" {
+		t.Fatalf("subagent model references were not migrated: %+v", cfg.Agent)
+	}
+}
+
+func TestUpdateProviderConfigRejectsProviderRenameConflict(t *testing.T) {
+	relay := config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8081/v1", APIKeyOptional: true, Model: "relay-model"}
+	occupied := config.ProviderConfig{Name: "occupied", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8082/v1", APIKeyOptional: true, Model: "occupied-model"}
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{relay, occupied}}}, nil, nil, nil, providers.NewRegistry())
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPut, "/api/providers/relay/config", strings.NewReader(`{"name":"occupied","type":"openai-compatible","baseUrl":"http://127.0.0.1:8081/v1","model":"relay-model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected rename conflict, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, ok := app.providerConfig("relay"); !ok {
+		t.Fatal("rename conflict removed the original provider")
+	}
+}
+
 func TestUpdateProviderConfigPreservesRuntimeAPIKeyWhenBlank(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer runtime-secret" {
@@ -689,6 +774,99 @@ func TestProviderTestsAllowOptionalAPIKey(t *testing.T) {
 
 	if upstreamCalls != 2 {
 		t.Fatalf("optional API Key tests should reach upstream twice, got %d", upstreamCalls)
+	}
+}
+
+func TestProviderMessageTestSendsPromptWithoutMutatingDraftProvider(t *testing.T) {
+	var requestBody struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/draft/v1/chat/completions" {
+			t.Fatalf("unexpected message test path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer draft-secret" {
+			t.Fatalf("unexpected message test authorization %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"测试回复正常"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`))
+	}))
+	defer upstream.Close()
+
+	existing := config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: upstream.URL + "/saved/v1", APIKey: "runtime-secret", Model: "saved-model"}
+	registry := providers.NewRegistry()
+	registry.Register(providers.NewOpenAICompatible(existing))
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{existing}}}, nil, nil, nil, registry)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	app.SetConfigPath(configPath)
+
+	payload := `{"name":"relay","type":"openai-compatible","baseUrl":"` + upstream.URL + `/draft/v1","apiKey":"draft-secret","model":"draft-model","prompt":"请回复测试结果"}`
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/providers/test-message", strings.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("message test failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var result providerMessageTestResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Model != "draft-model" || result.Output != "测试回复正常" || result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 3 {
+		t.Fatalf("unexpected message test response: %+v", result)
+	}
+	if requestBody.Model != "draft-model" || len(requestBody.Messages) != 1 || requestBody.Messages[0].Role != "user" || requestBody.Messages[0].Content != "请回复测试结果" {
+		t.Fatalf("unexpected upstream message test request: %+v", requestBody)
+	}
+	if strings.Contains(recorder.Body.String(), "draft-secret") || strings.Contains(recorder.Body.String(), "Authorization") {
+		t.Fatalf("message test leaked credentials: %s", recorder.Body.String())
+	}
+	stored, ok := app.providerConfig("relay")
+	if !ok || stored.BaseURL != existing.BaseURL || stored.Model != existing.Model || stored.APIKey != existing.APIKey {
+		t.Fatalf("message test mutated saved provider: %+v", stored)
+	}
+	if names := registry.Names(); len(names) != 1 || names[0] != "relay" {
+		t.Fatalf("message test mutated registry: %v", names)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("message test must not persist config, stat error=%v", err)
+	}
+}
+
+func TestProviderMessageTestRejectsMissingAPIKeyWithoutUpstreamCall(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		t.Fatalf("missing key message test reached upstream: %s", r.URL.Path)
+	}))
+	defer upstream.Close()
+	app := New(config.Config{}, nil, nil, nil, providers.NewRegistry())
+	payload := `{"name":"draft-required","type":"openai-compatible","baseUrl":"` + upstream.URL + `/v1","model":"draft-model","prompt":"test"}`
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/providers/test-message", strings.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("missing key message test status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result providerMessageTestResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success || result.ErrorCode != "not_configured" || result.Output != "" {
+		t.Fatalf("unexpected missing key result: %+v", result)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("missing key message test reached upstream %d times", upstreamCalls)
 	}
 }
 

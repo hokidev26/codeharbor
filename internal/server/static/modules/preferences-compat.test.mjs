@@ -12,13 +12,17 @@ import {
   defaultSearchPrefs,
   legacyLocalPreferenceBackupKind,
   localPreferenceBackupKind,
+  localPreferenceBackupVersion,
+  modelVisibilityPrefsKey,
   normalizeImportedRegionalPreferences,
   normalizePrimaryModePreference,
   normalizeRegionalPreferences,
+  preferredModelKey,
   primaryModePrefsKey,
   profilePrefsKey,
   regionalPrefsKey,
 } from "./preferences-data.mjs";
+import { normalizeAccountProfile, normalizeModelVisibility } from "./account-preferences.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs";
 
@@ -71,11 +75,18 @@ function withBrowserStorage(storage, callback) {
       return null;
     },
   });
-  try {
-    return callback(body);
-  } finally {
+  const restore = () => {
     restoreDocument();
     restoreStorage();
+  };
+  try {
+    const result = callback(body);
+    if (result && typeof result.then === "function") return result.finally(restore);
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
   }
 }
 
@@ -180,6 +191,77 @@ test("backup export uses Autoto format and import accepts legacy CodeHarbor form
   });
 });
 
+test("v2 backup exports account snapshot and imports both v1 and v2 account fields through the service", async () => {
+  const storage = new MemoryStorage([[appearancePrefsKey, JSON.stringify({ styleVersion: 3, themePreset: "dark" })]]);
+  const imported = [];
+  let accountSnapshot = {
+    scopeKey: "user-a",
+    profile: normalizeAccountProfile({ displayName: "Server user", avatarInitials: "su" }),
+    preferredModel: "openai:gpt-server",
+    modelVisibility: normalizeModelVisibility({ hiddenModels: { "openai:hidden": true } }),
+    revision: 4,
+    localStorageImportVersion: 1,
+    updatedAt: "2026-07-18T00:00:00Z",
+  };
+  const accountPreferences = {
+    getSnapshot: () => structuredClone(accountSnapshot),
+    getProfile: () => structuredClone(accountSnapshot.profile),
+    normalizeProfile: normalizeAccountProfile,
+    normalizeModelVisibility,
+    setProfile: async (profile) => { accountSnapshot.profile = normalizeAccountProfile(profile); },
+    getStatus: () => "synced",
+    importPreferences: async (patch) => {
+      imported.push(structuredClone(patch));
+      accountSnapshot = { ...accountSnapshot, ...patch };
+      return Object.keys(patch).length;
+    },
+  };
+
+  await withBrowserStorage(storage, async () => {
+    const controller = createController({}, { accountPreferences });
+    const backup = controller.createLocalPreferencesBackup();
+    assert.equal(localPreferenceBackupVersion, 2);
+    assert.equal(backup.version, 2);
+    assert.deepEqual(backup.accountPreferences, {
+      profile: accountSnapshot.profile,
+      preferredModel: "openai:gpt-server",
+      modelVisibility: { hiddenModels: { "openai:hidden": true }, showUnconfiguredProviders: false },
+    });
+    assert.equal(Object.hasOwn(backup.preferences, profilePrefsKey), false);
+    assert.equal(Object.hasOwn(backup.preferences, preferredModelKey), false);
+    assert.equal(Object.hasOwn(backup.preferences, modelVisibilityPrefsKey), false);
+
+    const v1Count = await controller.restoreLocalPreferencesBackup(JSON.stringify({
+      kind: legacyLocalPreferenceBackupKind,
+      version: 1,
+      preferences: {
+        "codeharbor.profile": { displayName: "V1 user" },
+        "codeharbor.preferredModel": "anthropic:v1",
+        "codeharbor.modelVisibility": { showUnconfiguredProviders: true },
+      },
+    }));
+    assert.equal(v1Count, 3);
+    assert.equal(imported.at(-1).profile.displayName, "V1 user");
+    assert.equal(imported.at(-1).preferredModel, "anthropic:v1");
+    assert.equal(imported.at(-1).modelVisibility.showUnconfiguredProviders, true);
+
+    const v2Count = await controller.restoreLocalPreferencesBackup(JSON.stringify({
+      kind: localPreferenceBackupKind,
+      version: 2,
+      preferences: {},
+      accountPreferences: {
+        profile: { displayName: "V2 user" },
+        preferredModel: "openai:v2",
+        modelVisibility: { hiddenModels: { "openai:v2": true } },
+      },
+    }));
+    assert.equal(v2Count, 3);
+    assert.equal(imported.at(-1).profile.displayName, "V2 user");
+    assert.equal(imported.at(-1).preferredModel, "openai:v2");
+    assert.deepEqual(imported.at(-1).modelVisibility.hiddenModels, { "openai:v2": true });
+  });
+});
+
 test("primary mode import reloads state and reapplies the injected UI callback", () => {
   const storage = new MemoryStorage();
   const appliedModes = [];
@@ -272,10 +354,11 @@ test("regional preferences default to auto and import legacy field names", () =>
 });
 
 test("appearance presets default to light and migrate version 2 and unversioned preferences", () => {
-  assert.equal(appearanceStyleVersion, 3);
+  assert.equal(appearanceStyleVersion, 4);
   assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
   assert.deepEqual(defaultAppearancePrefs, {
-    styleVersion: 3,
+    styleVersion: 4,
+    themeRef: { kind: "preset", id: "light" },
     themePreset: "light",
     theme: "light",
     density: "comfortable",
@@ -289,12 +372,14 @@ test("appearance presets default to light and migrate version 2 and unversioned 
     density: "compact",
   })]]), () => {
     const appearance = createController().loadAppearancePreferences();
+    assert.deepEqual(appearance.themeRef, { kind: "preset", id: "dark" });
     assert.equal(appearance.themePreset, "dark");
     assert.equal(appearance.theme, "dark");
   });
 
   withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({ theme: "dark" })]]), () => {
     const appearance = createController().loadAppearancePreferences();
+    assert.deepEqual(appearance.themeRef, { kind: "preset", id: "light" });
     assert.equal(appearance.themePreset, "light");
     assert.equal(appearance.theme, "light");
   });
@@ -340,6 +425,30 @@ test("appearance preset derives the palette, rejects unknown values, and updates
   });
 });
 
+test("appearance package references retain revision and derive the color scheme", () => {
+  withBrowserStorage(new MemoryStorage([[appearancePrefsKey, JSON.stringify({
+    styleVersion: 4,
+    themeRef: {
+      kind: "package",
+      id: "argentina-spain-final",
+      revision: "rev-1",
+      colorScheme: "dark",
+    },
+    themePreset: "dark",
+  })]]), () => {
+    const controller = createController();
+    const appearance = controller.loadAppearancePreferences();
+    assert.deepEqual(appearance.themeRef, {
+      kind: "package",
+      id: "argentina-spain-final",
+      revision: "rev-1",
+      colorScheme: "dark",
+    });
+    assert.equal(appearance.theme, "dark");
+    assert.equal(appearance.themePreset, "dark");
+  });
+});
+
 test("appearance backup retains the normalized theme preset", () => {
   withBrowserStorage(new MemoryStorage(), () => {
     const controller = createController();
@@ -352,7 +461,8 @@ test("appearance backup retains the normalized theme preset", () => {
     }));
 
     assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)), {
-      styleVersion: 3,
+      styleVersion: 4,
+      themeRef: { kind: "preset", id: "apple" },
       themePreset: "apple",
       theme: "light",
       density: "compact",

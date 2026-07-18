@@ -1007,6 +1007,7 @@ func (r *Runner) toolExecutionEnv(ctx context.Context, agent db.Agent, runID str
 		Store:              r.store,
 		Output:             output,
 		Background:         r.backgroundTaskService(),
+		ContextAsk:         r,
 		ToolOutputPipeline: r.toolOutputPipeline,
 	}
 	generations, err := r.store.GetPermissionGenerations(ctx, agent.ID)
