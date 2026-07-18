@@ -608,6 +608,38 @@ func TestProviderTestsSkipMissingRequiredAPIKey(t *testing.T) {
 	}
 }
 
+func TestProviderTestsDoNotMisreportOfficialOpenAIWithoutAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		t.Fatalf("unconfigured official OpenAI provider must not reach upstream: %s", r.URL.String())
+	}))
+	defer upstream.Close()
+
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
+		Name: "custom-openai", Type: "openai", BaseURL: upstream.URL + "/v1", Model: "gpt-test", APIKeyOptional: true,
+	}}}}, nil, nil, nil, providers.NewRegistry())
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/providers/custom-openai/test", nil)
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result providerTestResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Configured || result.Reachable || result.ModelCount != 0 || result.ErrorCode != "not_configured" {
+		t.Fatalf("official OpenAI provider was incorrectly reported usable without a key: %+v", result)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("unconfigured official OpenAI test reached upstream %d times", upstreamCalls)
+	}
+}
+
 func TestProviderTestsAllowOptionalAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_COMPATIBLE_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")

@@ -111,6 +111,9 @@ type ProviderConfig struct {
 	MaxTokens      int64  `json:"maxTokens,omitempty"`
 	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
 	GatewayEnabled bool   `json:"gatewayEnabled,omitempty"`
+	// SecretRevision coordinates crash-safe Provider API key updates between
+	// config.json and the encrypted SQLite secret vault. It contains no secret.
+	SecretRevision int64 `json:"secretRevision,omitempty"`
 	// Disabled is persisted instead of Enabled so configs written before this
 	// field existed remain enabled after an upgrade.
 	Disabled bool `json:"disabled,omitempty"`
@@ -121,6 +124,9 @@ type ProviderConfig struct {
 	CodexAllowInsecureTestEndpoint bool   `json:"-"`
 	CodexRefreshURLForTest         string `json:"-"`
 	CodexUsageURL                  string `json:"-"`
+	// APIKeySource is runtime-only provenance used to keep environment values
+	// ahead of the encrypted database vault without exposing either value.
+	APIKeySource string `json:"-"`
 }
 
 type OpenAICompatibleConfig = ProviderConfig

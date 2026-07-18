@@ -455,6 +455,9 @@ test("runtime prefers the Autoto token and falls back to the CodeHarbor token", 
   try {
     const canonicalRuntime = await import(new URL("./runtime.mjs?compat=canonical", import.meta.url).href);
     assert.equal(new URL(canonicalRuntime.withLocalToken("/api/status"), "https://local.example.test").searchParams.get("token"), "autoto-token");
+    const socketURL = new URL(canonicalRuntime.webSocketURL("/ws/agent?id=agent-1"));
+    assert.equal(socketURL.protocol, "wss:");
+    assert.equal(socketURL.searchParams.get("token"), null);
 
     const restoreLegacyWindow = replaceGlobal("window", { CODEHARBOR_LOCAL_TOKEN: "legacy-token" });
     try {

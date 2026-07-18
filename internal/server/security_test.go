@@ -250,6 +250,31 @@ func TestLegacyLocalTokenWarningOnceCanonicalPriorityAndNoSecret(t *testing.T) {
 	}
 }
 
+func TestWebSocketTokenUsesCookieAndWarnsOnceForQueryFallback(t *testing.T) {
+	app := New(config.Config{}, nil, nil, nil)
+	capture := captureLegacyWarnings(app)
+
+	cookieRequest := newTestRequest(http.MethodGet, "/ws/agent?id=agent-1", nil)
+	cookieRequest.AddCookie(&http.Cookie{Name: localTokenCookieName, Value: app.localToken})
+	if !app.validWebSocketToken(cookieRequest) {
+		t.Fatal("expected local-token cookie to authorize websocket")
+	}
+	if usages := capture.snapshot(); len(usages) != 0 {
+		t.Fatalf("cookie authentication must not emit legacy warnings: %+v", usages)
+	}
+
+	for i := 0; i < 2; i++ {
+		queryRequest := newTestRequest(http.MethodGet, "/ws/agent?id=agent-1&token="+app.localToken, nil)
+		if !app.validWebSocketToken(queryRequest) {
+			t.Fatal("expected legacy websocket query token to remain compatible")
+		}
+	}
+	usages := capture.snapshot()
+	if len(usages) != 1 || usages[0].Kind != "query-parameter" || strings.Contains(fmt.Sprint(usages), app.localToken) {
+		t.Fatalf("expected one non-secret query-token warning, got %+v", usages)
+	}
+}
+
 func TestLegacyLocalTokenWarningConcurrentOnce(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	capture := captureLegacyWarnings(app)
@@ -303,6 +328,17 @@ func TestIndexInjectsLocalToken(t *testing.T) {
 	cookies := recorder.Result().Cookies()
 	if len(cookies) == 0 || cookies[0].Name != localTokenCookieName {
 		t.Fatalf("expected canonical local token cookie, got %+v", cookies)
+	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy": uiDocumentCSP,
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+		"Permissions-Policy":      "camera=(), geolocation=(), microphone=()",
+	} {
+		if got := recorder.Header().Get(header); got != want {
+			t.Fatalf("expected index security header %s=%q, got %q", header, want, got)
+		}
 	}
 }
 

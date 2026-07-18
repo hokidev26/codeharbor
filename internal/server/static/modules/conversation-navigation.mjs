@@ -351,18 +351,24 @@ export function navigationAgentStatusClass(value) {
   return text(value).toLocaleLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "idle";
 }
 
-function renderProject(project, activeProjectId) {
+function renderProject(project, activeProjectId, options = {}) {
   const active = project.id === activeProjectId;
   const path = project.gitPath || project.id;
   const displayPath = compactDisplayPath(path);
+  const counts = options.taskCounts?.[project.id] || {};
+  const activeTasks = Number(counts.todo || 0) + Number(counts.doing || 0) + Number(counts.blocked || 0);
+  const taskMeta = options.taskContext
+    ? `<span class="project-task-counts"><span>${escapeNavigationHtml(String(activeTasks))}</span>${Number(counts.blocked || 0) ? `<span class="blocked">${escapeNavigationHtml(String(counts.blocked))}</span>` : ""}</span>`
+    : "";
   const icon = `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <button class="navigation-conversation-row navigation-project-row ${active ? "active " : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}">
+    <button class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}" type="button" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "conversation"}">
       <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span></span>
         <span class="navigation-conversation-meta project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
       </span>
+      ${taskMeta}
     </button>`;
 }
 
@@ -397,12 +403,14 @@ export function renderNavigationHTML(view = {}, options = {}) {
   const activeAgentId = text(options.activeAgentId);
   const taskContext = options.taskContext === true;
   let html = "";
-  if (mode === "all" || taskContext) {
+  if (taskContext) {
+    html = (view.projects || []).map((project) => renderProject(project, activeProjectId, { taskContext: true, taskCounts: options.taskCounts })).join("");
+  } else if (mode === "all") {
     html = (view.groups || []).map((group) => `
-      <section class="navigation-project-group ${taskContext ? "task-context" : ""}" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
+      <section class="navigation-project-group" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="conversation">
         ${renderProject(group.project, activeProjectId)}
         <div class="navigation-project-conversations" data-project-conversations="${escapeNavigationHtml(group.project.id)}">
-          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true, { taskContext })).join("")}
+          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true)).join("")}
         </div>
       </section>`).join("");
   } else if (mode === "projects") {

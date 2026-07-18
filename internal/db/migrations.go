@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const CurrentDBVersion = 41
+const CurrentDBVersion = 42
 
 type migration struct {
 	version int
@@ -59,6 +59,7 @@ var migrations = []migration{
 	{version: 39, name: "durable background tasks and output", up: migrateV39BackgroundTasks},
 	{version: 40, name: "run continuation metadata", up: migrateV40RunContinuations},
 	{version: 41, name: "private api gateway", up: migrateV41PrivateAPIGateway},
+	{version: 42, name: "provider api key secrets", up: migrateV42ProviderSecrets},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -1295,6 +1296,11 @@ BEGIN SELECT RAISE(ABORT, 'invalid auto_continuation_mode'); END;
 	return err
 }
 
+func migrateV42ProviderSecrets(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, providerSecretsSchemaSQL)
+	return err
+}
+
 func migrateV41PrivateAPIGateway(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, gatewaySchemaSQL); err != nil {
 		return err
@@ -1345,7 +1351,7 @@ func migrateLegacyZeroVersion(ctx context.Context, db *sql.DB) error {
 func legacyNamingSchemaSQL() string {
 	// P2-P3 tables were introduced after the agent/workline naming migration and
 	// must be created by their own migrations with modern column names.
-	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL+gatewaySchemaSQL)
+	legacySchema := strings.TrimSuffix(schemaSQL, schedulesSchemaSQL+notificationDeliveriesSchemaSQL+channelPersistenceSchemaSQL+deviceActionRequestsSchemaSQL+specSchemaSQL+modelClientSchemaSQL+remoteExecutionSchemaSQL+providerAccountStatsSchemaSQL+providerSecretsSchemaSQL+pluginSchemaSQL+backgroundTaskSchemaSQL+planSchemaSQL+gatewaySchemaSQL)
 	return strings.NewReplacer(
 		"agent_message_attachments", "narrator_message_attachments",
 		"agent_messages", "narrator_messages",

@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -18,11 +19,60 @@ import (
 const (
 	authSessionCookieName = "autoto_session"
 	authSessionLifetime   = 30 * 24 * time.Hour
+
+	userPasswordHashV1 = "sha256-bcrypt-v1$"
+	// This is bcrypt(SHA-256("autoto-dummy-user-password")); it keeps unknown
+	// handles on the same password-verification path without granting access.
+	dummyUserPasswordHash = userPasswordHashV1 + "$2a$10$bIFgXcQB.dJA6YIcyZrK5OVy1Xjgtk.uVk03o9D0wtWT37h6yAB86"
+
+	authLoginMaxFailures    = 10
+	authLoginFailureWindow  = 15 * time.Minute
+	authLoginLockDuration   = 15 * time.Minute
+	authLoginFailureEntries = 2048
 )
+
+type authLoginFailure struct {
+	Count       int
+	FirstFailed time.Time
+	LockedUntil time.Time
+}
 
 type authCredentialsRequest struct {
 	Handle   string `json:"handle"`
 	Password string `json:"password"`
+}
+
+func validUserPasswordLength(password string) bool {
+	return len(password) >= 8 && len(password) <= 1024
+}
+
+func hashUserPassword(password string) (string, error) {
+	digest := sha256.Sum256([]byte(password))
+	hash, err := bcrypt.GenerateFromPassword(digest[:], bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return userPasswordHashV1 + string(hash), nil
+}
+
+func verifyUserPassword(encoded, password string) bool {
+	encoded = strings.TrimSpace(encoded)
+	if strings.HasPrefix(encoded, userPasswordHashV1) {
+		digest := sha256.Sum256([]byte(password))
+		return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(encoded, userPasswordHashV1)), digest[:]) == nil
+	}
+	// Preserve compatibility with users created before the versioned pre-hash
+	// format was introduced.
+	return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+}
+
+func authLoginFailureKey(r *http.Request, handle string) string {
+	_, canonical, err := db.CanonicalHandle(handle)
+	if err != nil {
+		digest := sha256.Sum256([]byte(strings.TrimSpace(handle)))
+		canonical = base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+	return remoteAccessClientKey(r) + "\x00" + canonical
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +81,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(req.Password) < 8 || len(req.Password) > 1024 {
+	if !validUserPasswordLength(req.Password) {
 		writeError(w, http.StatusBadRequest, "password must be between 8 and 1024 bytes")
 		return
 	}
@@ -44,7 +94,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "registration is closed")
 		return
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := hashUserPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "hash password: "+err.Error())
 		return
@@ -67,12 +117,44 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	user, passwordHash, err := s.store.GetUserByHandle(r.Context(), req.Handle)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)) != nil {
-		// Keep account existence private from unauthenticated callers.
+	if !validUserPasswordLength(req.Password) {
+		writeError(w, http.StatusBadRequest, "password must be between 8 and 1024 bytes")
+		return
+	}
+	failureKey := authLoginFailureKey(r, req.Handle)
+	if locked, until := s.authLoginLocked(failureKey); locked {
+		s.writeAuthLoginLocked(w, until)
+		return
+	}
+
+	var user db.User
+	passwordHash := dummyUserPasswordHash
+	found := false
+	if _, _, err := db.CanonicalHandle(req.Handle); err == nil {
+		storedUser, storedHash, loadErr := s.store.GetUserByHandle(r.Context(), req.Handle)
+		switch {
+		case loadErr == nil:
+			user = storedUser
+			passwordHash = storedHash
+			found = true
+		case errors.Is(loadErr, sql.ErrNoRows):
+			// Continue through the same password verification path so account
+			// existence is not exposed by the response or a cheap fast path.
+		default:
+			writeError(w, http.StatusInternalServerError, "login is temporarily unavailable")
+			return
+		}
+	}
+	validPassword := verifyUserPassword(passwordHash, req.Password)
+	if !found || !validPassword {
+		if until := s.recordAuthLoginFailure(failureKey); !until.IsZero() {
+			s.writeAuthLoginLocked(w, until)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid handle or password")
 		return
 	}
+	s.clearAuthLoginFailures(failureKey)
 	if err := s.startSession(w, r, user); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -176,4 +258,86 @@ func newSessionToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func (s *Server) authLoginLocked(key string) (bool, time.Time) {
+	now := s.now()
+	s.authLoginMu.Lock()
+	defer s.authLoginMu.Unlock()
+	failure, ok := s.authLoginFailures[key]
+	if !ok {
+		return false, time.Time{}
+	}
+	if authLoginFailureExpired(failure, now) {
+		delete(s.authLoginFailures, key)
+		return false, time.Time{}
+	}
+	if !failure.LockedUntil.IsZero() {
+		return true, failure.LockedUntil
+	}
+	return false, time.Time{}
+}
+
+func (s *Server) recordAuthLoginFailure(key string) time.Time {
+	now := s.now()
+	s.authLoginMu.Lock()
+	defer s.authLoginMu.Unlock()
+	if s.authLoginFailures == nil {
+		s.authLoginFailures = make(map[string]authLoginFailure)
+	}
+	for existingKey, failure := range s.authLoginFailures {
+		if authLoginFailureExpired(failure, now) {
+			delete(s.authLoginFailures, existingKey)
+		}
+	}
+	failure := s.authLoginFailures[key]
+	if failure.FirstFailed.IsZero() || now.Sub(failure.FirstFailed) > authLoginFailureWindow {
+		failure = authLoginFailure{FirstFailed: now}
+	}
+	failure.Count++
+	if failure.Count >= authLoginMaxFailures {
+		failure.LockedUntil = now.Add(authLoginLockDuration)
+	}
+	s.authLoginFailures[key] = failure
+	for len(s.authLoginFailures) > authLoginFailureEntries {
+		oldestKey := ""
+		oldest := time.Time{}
+		for candidateKey, candidate := range s.authLoginFailures {
+			if oldestKey == "" || candidate.FirstFailed.Before(oldest) {
+				oldestKey = candidateKey
+				oldest = candidate.FirstFailed
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.authLoginFailures, oldestKey)
+	}
+	return failure.LockedUntil
+}
+
+func (s *Server) clearAuthLoginFailures(key string) {
+	s.authLoginMu.Lock()
+	defer s.authLoginMu.Unlock()
+	delete(s.authLoginFailures, key)
+}
+
+func (s *Server) writeAuthLoginLocked(w http.ResponseWriter, until time.Time) {
+	remaining := until.Sub(s.now())
+	seconds := int64((remaining + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
+}
+
+func authLoginFailureExpired(failure authLoginFailure, now time.Time) bool {
+	if !failure.LockedUntil.IsZero() {
+		return !now.Before(failure.LockedUntil)
+	}
+	if failure.FirstFailed.IsZero() {
+		return true
+	}
+	return now.Sub(failure.FirstFailed) > authLoginFailureWindow
 }

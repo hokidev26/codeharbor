@@ -42,7 +42,7 @@ type remoteAccessFailure struct {
 func newLocalToken() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		return base64.RawURLEncoding.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+		panic(fmt.Sprintf("crypto/rand failed while generating local token: %v", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
 }
@@ -151,10 +151,17 @@ func (s *Server) validHeaderToken(r *http.Request) bool {
 }
 
 func (s *Server) validWebSocketToken(r *http.Request) bool {
-	if constantTimeEqualToken(r.URL.Query().Get(localTokenQuery), s.localToken) {
+	if cookie, err := r.Cookie(localTokenCookieName); err == nil && constantTimeEqualToken(cookie.Value, s.localToken) {
 		return true
 	}
-	return s.validHeaderToken(r)
+	if s.validHeaderToken(r) {
+		return true
+	}
+	if constantTimeEqualToken(r.URL.Query().Get(localTokenQuery), s.localToken) {
+		s.warnLegacy("credential:websocket-query-token", "WebSocket ?token= query parameter", localTokenCookieName+" cookie or "+localTokenHeader+" header", "query-parameter")
+		return true
+	}
+	return false
 }
 
 func validTokenFromHeaders(r *http.Request, want string, canonicalName, legacyName string) bool {

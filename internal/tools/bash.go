@@ -16,6 +16,7 @@ type BashTool struct{}
 const (
 	bashResultMaxBytes = 20000
 	bashStreamMaxBytes = 100000
+	bashMaxTimeout     = 30 * time.Minute
 )
 
 type bashInput struct {
@@ -60,43 +61,43 @@ func legacyBashDangerWarning(command string) string {
 	if len(fields) > 0 {
 		switch fields[0] {
 		case "rm", "rmdir":
-			return "删除命令会永久移除文件或目录，本轮安全策略禁止自动执行。"
+			return commandDangerWarning("file-delete")
 		case "sudo", "dd":
-			return "高权限或磁盘级命令风险过高，本轮安全策略禁止自动执行。"
+			return commandDangerWarning("privilege-escalation")
 		}
 		if strings.HasPrefix(fields[0], "mkfs") {
-			return "格式化磁盘命令风险过高，本轮安全策略禁止自动执行。"
+			return commandDangerWarning("disk-format")
 		}
 	}
 	if strings.Contains(cmd, " shred ") || strings.HasPrefix(cmd, "shred ") {
-		return "shred 会破坏文件内容，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("file-destroy")
 	}
 	if strings.Contains(cmd, "find ") && strings.Contains(cmd, " -delete") {
-		return "find -delete 会批量删除文件，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("find-delete")
 	}
 	if strings.HasPrefix(cmd, "find ") && strings.Contains(cmd, " -delete") {
-		return "find -delete 会批量删除文件，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("find-delete")
 	}
 	if strings.HasPrefix(cmd, "git clean") && strings.Contains(cmd, "-f") {
-		return "git clean -f 会删除未跟踪文件，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("git-clean")
 	}
 	if strings.HasPrefix(cmd, "git reset") && strings.Contains(cmd, "--hard") {
-		return "git reset --hard 会丢弃本地改动，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("git-reset-hard")
 	}
 	if strings.Contains(cmd, "curl") && shellPipesToShell(cmd) {
-		return "curl 管道执行 shell 风险过高，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("network-pipe-shell")
 	}
 	if strings.Contains(cmd, "wget") && shellPipesToShell(cmd) {
-		return "wget 管道执行 shell 风险过高，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("network-pipe-shell")
 	}
 	if strings.Contains(cmd, "chmod") && strings.Contains(cmd, "-r") && strings.Contains(cmd, "777") {
-		return "递归 chmod 777 会放宽大量文件权限，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("permission-weaken")
 	}
 	if strings.Contains(cmd, " /dev/null") && strings.HasPrefix(cmd, "mv ") {
-		return "移动到 /dev/null 可能破坏文件，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("file-delete")
 	}
 	if truncatingRedirectPattern.MatchString(cmd) {
-		return "shell 重定向截断文件风险较高，本轮安全策略禁止自动执行。"
+		return commandDangerWarning("file-truncate")
 	}
 	return ""
 }
@@ -116,10 +117,10 @@ func bashBackgroundEscapeWarning(command string) string {
 	}
 	facts := AnalyzeBashCommand(command)
 	if facts.Background {
-		return "后台任务必须由 Autoto 管理，命令中不能再使用 shell 的 & 后台化。"
+		return "Background tasks must be managed by Autoto; do not add shell '&' backgrounding."
 	}
 	if backgroundEscapeCommandPattern.MatchString(command) {
-		return "后台任务不能使用 nohup 或 disown 逃逸 Autoto 的取消与生命周期管理。"
+		return "Background tasks cannot use nohup or disown to escape Autoto cancellation and lifecycle management."
 	}
 	return ""
 }
@@ -131,6 +132,9 @@ func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 	}
 	if strings.TrimSpace(input.Command) == "" {
 		return Result{Output: "command is required", IsError: true}, nil
+	}
+	if input.Timeout > int(bashMaxTimeout/time.Millisecond) {
+		return Result{Output: "timeout exceeds the 30 minute maximum", IsError: true}, nil
 	}
 	timeout := time.Duration(input.Timeout) * time.Millisecond
 	if timeout <= 0 {

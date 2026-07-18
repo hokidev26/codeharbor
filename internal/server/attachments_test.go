@@ -57,6 +57,9 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	if err := writer.WriteField("text", "请读取附件"); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.WriteField("createdBy", "spoofed"); err != nil {
+		t.Fatal(err)
+	}
 	part, err := writer.CreateFormFile("files", "note.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +81,9 @@ func TestPostMultipartMessagePersistsAttachmentAndServesData(t *testing.T) {
 	var posted db.Message
 	if err := json.NewDecoder(recorder.Body).Decode(&posted); err != nil {
 		t.Fatal(err)
+	}
+	if posted.CreatedBy != "" {
+		t.Fatalf("expected unauthenticated multipart createdBy to be ignored, got %q", posted.CreatedBy)
 	}
 	if len(posted.Attachments) != 1 {
 		t.Fatalf("expected one attachment in response, got %+v", posted.Attachments)

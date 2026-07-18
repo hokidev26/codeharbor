@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	agentpkg "autoto/internal/agent"
 	"autoto/internal/config"
@@ -83,6 +86,119 @@ func TestAuthSessionCookieAndMe(t *testing.T) {
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected revoked session to be unauthorized, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthLongPasswordAndLegacyHashCompatibility(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth-passwords.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	app := New(config.Config{Auth: config.AuthConfig{RegistrationOpen: true}}, store, nil, nil)
+
+	longPassword := strings.Repeat("界", 300) // 900 bytes, beyond bcrypt's native limit.
+	registerBody, _ := json.Marshal(authCredentialsRequest{Handle: "long-password", Password: longPassword})
+	registered := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(registered, request)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("long password registration returned %d: %s", registered.Code, registered.Body.String())
+	}
+	_, storedHash, err := store.GetUserByHandle(ctx, "long-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(storedHash, userPasswordHashV1) || !verifyUserPassword(storedHash, longPassword) {
+		t.Fatal("long password was not stored in the versioned pre-hash format")
+	}
+
+	login := httptest.NewRecorder()
+	request = newTestRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(registerBody))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(login, request)
+	if login.Code != http.StatusOK {
+		t.Fatalf("long password login returned %d: %s", login.Code, login.Body.String())
+	}
+
+	legacyPassword := "legacy password"
+	legacyHash, err := bcrypt.GenerateFromPassword([]byte(legacyPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser(ctx, "legacy-user", string(legacyHash)); err != nil {
+		t.Fatal(err)
+	}
+	legacyBody, _ := json.Marshal(authCredentialsRequest{Handle: "legacy-user", Password: legacyPassword})
+	legacyLogin := httptest.NewRecorder()
+	request = newTestRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(legacyBody))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(legacyLogin, request)
+	if legacyLogin.Code != http.StatusOK {
+		t.Fatalf("legacy bcrypt login returned %d: %s", legacyLogin.Code, legacyLogin.Body.String())
+	}
+
+	tooLongBody, _ := json.Marshal(authCredentialsRequest{Handle: "too-long", Password: strings.Repeat("x", 1025)})
+	for _, path := range []string{"/api/auth/register", "/api/auth/login"} {
+		recorder := httptest.NewRecorder()
+		request = newTestRequest(http.MethodPost, path, bytes.NewReader(tooLongBody))
+		request.Header.Set("Content-Type", "application/json")
+		app.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s oversized password returned %d: %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestAuthLoginFailuresLockAndReset(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth-lockout.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hash, err := hashUserPassword("correct password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser(ctx, "lock-user", hash); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	app := New(config.Config{}, store, nil, nil)
+	app.clock = func() time.Time { return now }
+
+	login := func(password string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(authCredentialsRequest{Handle: "lock-user", Password: password})
+		recorder := httptest.NewRecorder()
+		request := newTestRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "127.0.0.1:4000"
+		app.Routes().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for attempt := 1; attempt < authLoginMaxFailures; attempt++ {
+		if recorder := login("wrong password"); recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d returned %d: %s", attempt, recorder.Code, recorder.Body.String())
+		}
+	}
+	locked := login("wrong password")
+	if locked.Code != http.StatusTooManyRequests || locked.Header().Get("Retry-After") == "" {
+		t.Fatalf("lockout returned %d with Retry-After %q: %s", locked.Code, locked.Header().Get("Retry-After"), locked.Body.String())
+	}
+	if recorder := login("correct password"); recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password bypassed active lockout: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	now = now.Add(authLoginLockDuration + time.Second)
+	if recorder := login("correct password"); recorder.Code != http.StatusOK {
+		t.Fatalf("login after lock expiry returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := login("wrong password"); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("successful login did not reset failures: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -174,6 +290,47 @@ func TestMessageDraftsAreIsolatedByUserAndUseCAS(t *testing.T) {
 	if recorder := putDraft(first, `{"contentText":"stale","version":0}`); recorder.Code != http.StatusConflict {
 		t.Fatalf("expected CAS conflict, got %d: %s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestUnauthenticatedMessageIgnoresClientCreatedByWithoutUsers(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(attachmentTestProvider{})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, nil, hub, config.AgentConfig{})
+	app := New(config.Config{}, store, runner, hub, registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages", strings.NewReader(`{"text":"hello","createdBy":"spoofed"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected message 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var message db.Message
+	if err := json.NewDecoder(recorder.Body).Decode(&message); err != nil {
+		t.Fatal(err)
+	}
+	if message.CreatedBy != "" {
+		t.Fatalf("expected unauthenticated createdBy to be ignored, got %q", message.CreatedBy)
+	}
+	var createdBy string
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(created_by, '') FROM agent_messages WHERE id = ?`, message.ID).Scan(&createdBy); err != nil {
+		t.Fatal(err)
+	}
+	if createdBy != "" {
+		t.Fatalf("expected empty stored created_by, got %q", createdBy)
+	}
+	waitForAgentIdle(t, store, agent.ID)
 }
 
 func TestAuthenticatedMessageOverridesClientCreatedBy(t *testing.T) {

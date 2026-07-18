@@ -570,7 +570,7 @@ func TestSubmitUserMessageExpandsServerSkillAuthoritatively(t *testing.T) {
 	if message.CommandText != "/REVIEW-DIFF src/main.go --strict" {
 		t.Fatalf("unexpected command text %q", message.CommandText)
 	}
-	want := "Review the current diff carefully.\n\n用户参数：\nsrc/main.go --strict"
+	want := "Review the current diff carefully.\n\nUser arguments:\nsrc/main.go --strict"
 	if message.ContentText != want {
 		t.Fatalf("unexpected expanded prompt %q", message.ContentText)
 	}
@@ -631,7 +631,7 @@ func TestSubmitUserMessageDoesNotAcceptClientPromptForServerSkill(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(message.ContentText, "Trusted database prompt.\n\n用户参数：\n") || message.ContentText == "Client supplied replacement prompt" {
+	if !strings.HasPrefix(message.ContentText, "Trusted database prompt.\n\nUser arguments:\n") || message.ContentText == "Client supplied replacement prompt" {
 		t.Fatalf("client text replaced authoritative prompt: %q", message.ContentText)
 	}
 
@@ -1102,7 +1102,7 @@ func TestRunnerSummarizesOldContextWithLocalFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := providers.GenerateRequest{Messages: providerMessages}
-	if !requestHasSystemText(request, "较早对话摘要（本地降级生成）") {
+	if !requestHasSystemText(request, "Older conversation summary (local fallback)") {
 		t.Fatalf("expected local fallback summary message, got %+v", request.Messages)
 	}
 	if requestHasRoleText(request, "user", oldFullText) {
@@ -1196,7 +1196,7 @@ func TestProviderMessagesCompactOnlyOldToolResults(t *testing.T) {
 
 	providerMessages := providerMessagesForContext(db.Agent{}, messages)
 	oldOutput := toolResultOutput(providerMessages, "old-tool")
-	if strings.Contains(oldOutput, "very long") || oldOutput != "[工具 Read 已执行，输出已省略]" {
+	if strings.Contains(oldOutput, "very long") || oldOutput != "[Tool Read executed; output omitted]" {
 		t.Fatalf("expected old tool output to be compacted, got %q", oldOutput)
 	}
 	if strings.Contains(providerMessages[0].Content, "very long") {
@@ -1665,6 +1665,37 @@ func TestRunnerWorkflowPreferenceRequiresWriteApproval(t *testing.T) {
 	}
 	if call.Status != "completed" || call.PermissionDecidedBy != "test" {
 		t.Fatalf("expected approved write call, got %+v", call)
+	}
+}
+
+func TestRunnerDirectToolSetupFailureFinalizesAuditRow(t *testing.T) {
+	ctx := context.Background()
+	projectDir := t.TempDir()
+	if err := writeTestFile(projectDir, "note.txt", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	store, agent := newAgentTestStore(t, projectDir, "acceptEdits")
+	defer store.Close()
+	registry := tools.NewRegistry()
+	tools.RegisterCore(registry)
+	runner := NewRunner(store, nil, registry, NewHub(), config.AgentConfig{})
+	runner.SetPlanSnapshotProvider(func(context.Context, string) (db.PlanSnapshot, error) {
+		return db.PlanSnapshot{}, errors.New("snapshot unavailable")
+	})
+
+	result, err := runner.ExecuteTool(ctx, agent.ID, tools.Call{ID: "read-setup-error", Name: "Read", Input: json.RawMessage(`{"file_path":"note.txt"}`)})
+	if err == nil || !strings.Contains(err.Error(), "snapshot unavailable") {
+		t.Fatalf("expected snapshot setup error, got result=%+v err=%v", result, err)
+	}
+	if !result.IsError || !strings.Contains(result.Output, "snapshot unavailable") {
+		t.Fatalf("expected surfaced setup failure result, got %+v", result)
+	}
+	call, err := store.GetToolCallByUseID(ctx, agent.ID, "read-setup-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != "error" || !strings.Contains(call.ErrorMessage, "snapshot unavailable") || call.CompletedAt == "" {
+		t.Fatalf("expected terminal error audit row, got %+v", call)
 	}
 }
 

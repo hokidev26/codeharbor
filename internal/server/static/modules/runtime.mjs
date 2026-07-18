@@ -26,7 +26,7 @@ export function withLocalToken(path) {
 
 export function webSocketURL(path) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}${withLocalToken(path)}`;
+  return `${proto}://${location.host}${path}`;
 }
 
 async function throwAPIResponseError(res, fallback, path, authorizationError) {

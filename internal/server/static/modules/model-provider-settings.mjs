@@ -14,7 +14,7 @@ import {
   providerConfigPayload,
   providerConsoleRequest,
   renderProviderConsolePage,
-} from "./model-provider-components.mjs?v=provider-card-clean-1-provider-create-page-1";
+} from "./model-provider-components.mjs?v=provider-card-clean-1-provider-create-page-1-provider-secrets-1-model-picker-1";
 
 const providerConsoleInteractiveSelector = "button, input, select, textarea, a, details, summary, [role=\"switch\"], [contenteditable=\"true\"]";
 const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
@@ -68,6 +68,8 @@ export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackTy
     profile: String(currentDraft.profile || ""),
     baseUrl: value("baseUrl", currentDraft.baseUrl),
     apiKey: value("apiKey", currentDraft.apiKey),
+    apiKeyDraft: true,
+    clearApiKey: Boolean(fields.clearApiKey?.checked),
     model: value("model", currentDraft.model),
     maxTokens: Number(fields.maxTokens?.value || 0),
     apiKeyOptional: Boolean(fields.apiKeyOptional?.checked),
@@ -2010,8 +2012,10 @@ export function createModelProviderSettingsController({
               <input class="settings-field" name="baseUrl" value="${escapeAttr(baseUrl)}" placeholder="${escapeAttr(providerBaseURLPlaceholder(type, provider.profile))}" />
             </label>
             <label class="settings-form-span-2">${escapeHtml(mt("apiKey"))}
-              <input class="settings-field" name="apiKey" type="password" autocomplete="off" placeholder="${escapeAttr(provider.configured ? mt("apiKeyPreservePlaceholder") : mt("apiKeyPastePlaceholder"))}" />
+              <input class="settings-field" name="apiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(provider.configured ? mt("apiKeyPreservePlaceholder") : mt("apiKeyPastePlaceholder"))}" />
+              ${provider.apiKeyPersisted ? `<small data-settings-help-copy>${escapeHtml(mt("apiKeyPersisted", { lastFive: provider.apiKeyLastFive }))}</small>` : ""}
             </label>
+            ${provider.apiKeyPersisted ? `<label class="settings-checkbox-field"><input name="clearApiKey" type="checkbox" data-provider-clear-api-key /> <span>${escapeHtml(mt("clearApiKey"))}</span></label>` : ""}
             <label>${escapeHtml(mt("maxTokens"))}
               <input class="settings-field" name="maxTokens" type="number" min="0" step="1" value="${escapeAttr(maxTokens || "")}" placeholder="${escapeAttr(mt("maxTokensAnthropic"))}" />
             </label>
@@ -2094,7 +2098,8 @@ export function createModelProviderSettingsController({
       name: providerName,
       type: form.elements.type?.value || "openai-compatible",
       baseUrl: form.elements.baseUrl?.value.trim() || "",
-      apiKey: form.elements.apiKey?.value.trim() || "",
+      apiKey: form.elements.clearApiKey?.checked ? "" : (form.elements.apiKey?.value.trim() || ""),
+      ...(form.elements.clearApiKey?.checked ? { clearApiKey: true } : {}),
       model: form.elements.model?.value.trim() || "",
       maxTokens: Number.isFinite(maxTokens) ? maxTokens : 0,
       apiKeyOptional: Boolean(form.elements.apiKeyOptional?.checked),
@@ -2105,6 +2110,8 @@ export function createModelProviderSettingsController({
     setButtonBusy(saveButton, true, mt("saving"));
     try {
       const response = await api(`/api/providers/${encodeURIComponent(providerName)}/config`, { method: "PUT", body: JSON.stringify(payload) });
+      if (form.elements.apiKey) form.elements.apiKey.value = "";
+      if (form.elements.clearApiKey) form.elements.clearApiKey.checked = false;
       state.providerConfigStatus = response.message || mt("providerConfigSaved");
       await loadSettings();
       await loadModelCatalog();
@@ -2849,10 +2856,21 @@ export function createModelProviderSettingsController({
   }
 
   function handleProviderConsoleChange(event) {
-    const updated = updateProviderConsoleDraftFromEvent(event);
     const target = event.target;
-    if (!updated || !["baseUrl", "apiKey"].includes(target?.name)) return;
-    const form = target.closest?.("[data-mp-provider-form]");
+    const form = target?.closest?.("[data-mp-provider-form]");
+    if (target?.matches?.("[data-mp-model-choice]") && form?.elements?.model) {
+      form.elements.model.value = target.value || "";
+    } else if (target?.name === "model" && form) {
+      const choice = form.querySelector?.("[data-mp-model-choice]");
+      if (choice && choice.value !== target.value) choice.value = "";
+    }
+    if (target?.matches?.("[data-mp-clear-api-key]") && target.checked) {
+      if (!globalThis.confirm?.(ct("messages.clearApiKeyConfirm"))) {
+        target.checked = false;
+      }
+    }
+    const updated = updateProviderConsoleDraftFromEvent(event);
+    if (!updated || !["baseUrl", "apiKey", "clearApiKey"].includes(target?.name)) return;
     if (!form) return;
     const draft = providerConsoleState().draft;
     if (consoleDraftCanDiscoverModels(draft)) {
@@ -3216,7 +3234,8 @@ export function createModelProviderSettingsController({
   function isModelSelectable(provider, model) {
     const prefs = modelVisibilityPreferences();
     if (!provider.enabled) return false;
-    if (!provider.configured && !prefs.showUnconfiguredProviders) return false;
+    const hasFetchedCatalog = provider.discovered === true && provider.modelsSource === "remote";
+    if (!provider.configured && !prefs.showUnconfiguredProviders && !hasFetchedCatalog) return false;
     return !prefs.hiddenModels?.[modelOptionValue(provider, model)];
   }
 
@@ -3323,10 +3342,19 @@ export function createModelProviderSettingsController({
       defaultModel: provider.defaultModel || provider.model || "",
       maxTokens: Number(provider.maxTokens || 0),
       models: Array.isArray(provider.models) ? provider.models.filter(Boolean) : [],
+      modelsSource: String(provider.modelsSource || ""),
+      discovered: Boolean(provider.discovered),
+      available: Boolean(provider.available),
       configured: Boolean(provider.configured),
       enabled: provider.enabled === undefined ? Boolean(provider.configured) : Boolean(provider.enabled),
       origin: String(provider.origin || (isBuiltinProvider(provider) ? "builtin" : "custom")),
       apiKeyOptional: Boolean(provider.apiKeyOptional),
+      apiKeyConfigured: Boolean(provider.apiKeyConfigured),
+      apiKeyPersisted: Boolean(provider.apiKeyPersisted),
+      apiKeyLastFive: String(provider.apiKeyLastFive || "").slice(-5),
+      apiKeySource: ["stored", "environment", "runtime", "optional", "none", "stored_unavailable"].includes(String(provider.apiKeySource || "").toLowerCase())
+        ? String(provider.apiKeySource).toLowerCase()
+        : "none",
       capabilities: {
         tools: Boolean(capabilities.tools),
         streaming: Boolean(capabilities.streaming),

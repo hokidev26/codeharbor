@@ -11,6 +11,8 @@ import (
 //go:embed static/* static/modules/*
 var staticFiles embed.FS
 
+const uiDocumentCSP = "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+
 func (s *Server) mountUI(r interface {
 	Get(pattern string, h http.HandlerFunc)
 	Handle(pattern string, h http.Handler)
@@ -35,6 +37,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setNoStore(w)
+	setUIDocumentSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if s.remoteAccessGateRequired(r) {
 		// Remote sessions authenticate with their own HttpOnly cookie. Never expose
@@ -76,4 +79,12 @@ func setNoStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
+}
+
+func setUIDocumentSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", uiDocumentCSP)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
 }

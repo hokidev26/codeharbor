@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"autoto/internal/db"
@@ -315,6 +316,35 @@ func TestBashRiskFlagsDangerousCommands(t *testing.T) {
 		if BashDangerWarning(command) == "" {
 			t.Fatalf("expected warning for %q", command)
 		}
+	}
+}
+
+func TestBashRiskParsesRecursiveChmodFlagsWithoutOperandFalsePositives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("BashTool executes cmd.exe on Windows")
+	}
+	for _, command := range []string{"chmod 777 README", "chmod -- 777 README"} {
+		input, _ := json.Marshal(map[string]string{"command": command})
+		if got := (BashTool{}).Risk(input); got != RiskExec {
+			t.Fatalf("expected operand %q not to imply recursive chmod, got %s", command, got)
+		}
+	}
+	for _, command := range []string{"chmod -Rv 777 .", "chmod -r 777 .", "chmod --recursive 777 ."} {
+		input, _ := json.Marshal(map[string]string{"command": command})
+		if got := (BashTool{}).Risk(input); got != RiskDanger {
+			t.Fatalf("expected recursive chmod %q to be danger, got %s", command, got)
+		}
+	}
+}
+
+func TestBashTimeoutRejectsValuesAboveMaximum(t *testing.T) {
+	input, _ := json.Marshal(bashInput{Command: "printf ok", Timeout: int(bashMaxTimeout/time.Millisecond) + 1})
+	result, err := (BashTool{}).Execute(context.Background(), Call{ID: "timeout-max", Name: "Bash", Input: input}, Env{CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Output, "30 minute maximum") {
+		t.Fatalf("expected bounded timeout rejection, got %+v", result)
 	}
 }
 

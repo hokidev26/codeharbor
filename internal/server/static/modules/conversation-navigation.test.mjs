@@ -169,14 +169,19 @@ test("buildNavigationView supports all, projects, and conversations modes", () =
   assert.deepEqual(conversations.projects, []);
 });
 
-test("task navigation keeps project and agent context without exposing project creation", () => {
-  const taskHTML = renderNavigationHTML(buildNavigationView(payload, { mode: "projects" }), { taskContext: true });
+test("task navigation stays project-level and exposes aggregate counts", () => {
+  const taskHTML = renderNavigationHTML(buildNavigationView(payload, { mode: "projects" }), {
+    taskContext: true,
+    taskCounts: { p1: { todo: 2, doing: 1, blocked: 1 }, p2: { blocked: 0 } },
+  });
   const taskEmptyHTML = renderNavigationHTML(buildNavigationView({}, { mode: "projects" }), { taskContext: true });
   const conversationEmptyHTML = renderNavigationHTML(buildNavigationView({}, { mode: "projects" }));
 
   assert.match(taskHTML, /data-navigation-context="tasks"/);
-  assert.match(taskHTML, /navigation-conversation-row nested task-context/);
-  assert.doesNotMatch(taskHTML, /12 (?:条消息|條訊息|messages)/);
+  assert.match(taskHTML, /navigation-project-row task-context/);
+  assert.match(taskHTML, /project-task-counts/);
+  assert.match(taskHTML, /<span>4<\/span><span class="blocked">1<\/span>/);
+  assert.doesNotMatch(taskHTML, /data-navigation-target|navigation-project-conversations|12 (?:条消息|條訊息|messages)/);
   assert.match(taskEmptyHTML, /data-task-project-boundary="true"/);
   assert.match(taskEmptyHTML, /data-primary-workbench-target="conversation"/);
   assert.doesNotMatch(taskEmptyHTML, /data-open-directory-shortcut/);

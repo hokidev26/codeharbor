@@ -662,7 +662,17 @@ func hasForceArgument(args []*syntax.Word) bool {
 
 func hasRecursiveArgument(args []*syntax.Word) bool {
 	for _, arg := range args {
-		if value, ok := safeStaticWord(arg); ok && (value == "-R" || value == "-r" || strings.Contains(value, "R")) {
+		value, ok := safeStaticWord(arg)
+		if !ok {
+			continue
+		}
+		if value == "--" {
+			return false
+		}
+		if value == "--recursive" || value == "-R" || value == "-r" {
+			return true
+		}
+		if strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "--") && strings.ContainsAny(value[1:], "Rr") {
 			return true
 		}
 	}
@@ -703,28 +713,36 @@ func mergeFactLabels(left, right []string) []string {
 
 func commandDangerWarningFromFacts(facts CommandFacts) string {
 	for _, dangerous := range facts.Dangerous {
-		switch dangerous {
-		case "file-delete":
-			return "删除命令会永久移除文件或目录，本轮安全策略禁止自动执行。"
-		case "privilege-escalation", "disk-write":
-			return "高权限或磁盘级命令风险过高，本轮安全策略禁止自动执行。"
-		case "disk-format":
-			return "格式化磁盘命令风险过高，本轮安全策略禁止自动执行。"
-		case "file-destroy":
-			return "shred 会破坏文件内容，本轮安全策略禁止自动执行。"
-		case "find-delete":
-			return "find -delete 会批量删除文件，本轮安全策略禁止自动执行。"
-		case "git-clean":
-			return "git clean -f 会删除未跟踪文件，本轮安全策略禁止自动执行。"
-		case "git-reset-hard":
-			return "git reset --hard 会丢弃本地改动，本轮安全策略禁止自动执行。"
-		case "network-pipe-shell":
-			return "curl 或 wget 管道执行 shell 风险过高，本轮安全策略禁止自动执行。"
-		case "permission-weaken":
-			return "递归 chmod 777 会放宽大量文件权限，本轮安全策略禁止自动执行。"
-		case "file-truncate":
-			return "shell 重定向截断文件风险较高，本轮安全策略禁止自动执行。"
+		if warning := commandDangerWarning(dangerous); warning != "" {
+			return warning
 		}
 	}
 	return ""
+}
+
+func commandDangerWarning(dangerous string) string {
+	switch dangerous {
+	case "file-delete":
+		return "Delete commands permanently remove files or directories and cannot run automatically under the current safety policy."
+	case "privilege-escalation", "disk-write":
+		return "Privileged or disk-level commands are too risky to run automatically under the current safety policy."
+	case "disk-format":
+		return "Disk-formatting commands are too risky to run automatically under the current safety policy."
+	case "file-destroy":
+		return "shred destroys file contents and cannot run automatically under the current safety policy."
+	case "find-delete":
+		return "find -delete can remove files in bulk and cannot run automatically under the current safety policy."
+	case "git-clean":
+		return "git clean -f deletes untracked files and cannot run automatically under the current safety policy."
+	case "git-reset-hard":
+		return "git reset --hard discards local changes and cannot run automatically under the current safety policy."
+	case "network-pipe-shell":
+		return "Piping curl or wget into a shell is too risky to run automatically under the current safety policy."
+	case "permission-weaken":
+		return "Recursive chmod 777 weakens permissions broadly and cannot run automatically under the current safety policy."
+	case "file-truncate":
+		return "Shell redirection can truncate files and cannot run automatically under the current safety policy."
+	default:
+		return ""
+	}
 }

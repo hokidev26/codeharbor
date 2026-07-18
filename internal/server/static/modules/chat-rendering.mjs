@@ -307,6 +307,7 @@ export function normalizeToolActivity(call = {}, fallback = {}) {
   const toolUseId = firstToolValue(source, "toolUseId", "tool_use_id", "id");
   const durationMs = Number(firstToolValue(source, "durationMs", "duration_ms") || 0);
   const eventVersionValue = firstToolValue(source, "eventVersion", "event_version");
+  const shellSafeValue = firstToolValue(source, "shellSafe", "shell_safe");
   const permissionDecidedBy = normalizedDecisionSource(firstToolValue(source, "permissionDecidedBy", "permission_decided_by"));
   const decisionSource = normalizedDecisionSource(firstToolValue(source, "decisionSource", "decision_source")) || permissionDecidedBy;
   return {
@@ -331,6 +332,7 @@ export function normalizeToolActivity(call = {}, fallback = {}) {
     ruleId: safeToolRuleId(firstToolValue(source, "ruleId", "rule_id")),
     decisionScope: safeToolEnum(firstToolValue(source, "decisionScope", "decision_scope"), toolDecisionScopes),
     commandFacts: normalizeCommandFacts(firstToolValue(source, "commandFacts", "command_facts")),
+    shellSafe: typeof shellSafeValue === "boolean" ? shellSafeValue : null,
     permissionDecidedBy,
     permissionDecisionReason: safeToolSafetyReason(firstToolValue(source, "permissionDecisionReason", "permission_decision_reason", "reason")),
   };
@@ -472,6 +474,13 @@ function renderToolActivityFactTags(item) {
   return `<div class="tool-activity-facts" aria-label="${escapeAttr(cr("activity.commandFacts"))}">${labels.map((label) => `<span class="tool-activity-fact">${escapeHtml(label)}</span>`).join("")}</div>`;
 }
 
+function renderToolActivityClassificationWarning(item) {
+  const facts = item?.commandFacts;
+  const dynamicProgram = String(facts?.program || "").trim().toLowerCase() === "dynamic";
+  if (!isBashToolActivity(item) || (item?.shellSafe !== false && facts?.parseKnown !== false && !dynamicProgram)) return "";
+  return `<div class="tool-activity-warning" role="alert">${escapeHtml(cr("activity.unclassifiedDynamicWarning"))}</div>`;
+}
+
 function renderToolActivitySafetySummary(item) {
   const decision = toolDecisionLabel(item.decision);
   const source = toolDecisionSourceLabel(item.decisionSource);
@@ -554,6 +563,7 @@ export function renderToolActivityCardHTML(item = {}) {
   const device = compactToolText(toolActivityDeviceLabel(tool.executionDeviceId), 80);
   const diff = String(tool.toolName).toLowerCase().includes("edit") ? renderToolDiffHTML(tool) : "";
   const factTags = renderToolActivityFactTags(tool);
+  const classificationWarning = renderToolActivityClassificationWarning(tool);
   const safetySummary = renderToolActivitySafetySummary(tool);
   const meta = [
     compactToolText(tool.risk, 40),
@@ -571,6 +581,7 @@ export function renderToolActivityCardHTML(item = {}) {
           <div class="tool-activity-title live-tool-output-title">${escapeHtml(tool.toolName)}</div>
           ${target ? `<div class="tool-activity-target">${escapeHtml(target)}</div>` : ""}
           ${factTags}
+          ${classificationWarning}
           ${meta ? `<div class="tool-activity-meta live-tool-output-meta">${escapeHtml(meta)}</div>` : ""}
         </div>
         <span class="tool-activity-status live-tool-output-dot">${escapeHtml(toolActivityStatusLabel(status))}</span>
@@ -1675,6 +1686,7 @@ export function createChatRenderingController({
     const isDanger = risk === "danger";
     const commandOmitted = approval.commandOmitted === true;
     const commandLoadFailed = approval.commandLoadFailed === true;
+    const commandUnclassified = tool.commandFacts?.parseKnown === false || tool.commandFacts?.program === "dynamic";
     const projectedCommand = approval.command || approval.input?.command || tool.inputJson?.command || JSON.stringify(approval.input || tool.inputJson || {});
     const command = commandLoadFailed
       ? cr("approval.commandLoadFailed")
@@ -1689,7 +1701,9 @@ export function createChatRenderingController({
       ? cr("approval.commandLoadFailed")
       : commandOmitted && !isDanger
         ? cr("approval.loadingCommand")
-        : approval.warning || (isDanger ? cr("approval.blockedWarning") : cr("approval.warning"));
+        : commandUnclassified && !isDanger
+          ? cr("approval.unclassifiedWarning")
+          : approval.warning || (isDanger ? cr("approval.blockedWarning") : cr("approval.warning"));
     const allowDisabled = commandOmitted || commandLoadFailed;
     return `
       <section class="approval-card chat-flow-item chat-flow-left chat-report-card ${isDanger ? "danger" : ""}" data-chat-alignment="left" data-chat-report="tool-approval" data-approval-card="${escapeAttr(approval.toolUseId || "")}">

@@ -1058,6 +1058,8 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if ok {
 		req.CreatedBy = user.ID
+	} else {
+		req.CreatedBy = ""
 	}
 	mode, err := s.reviewModeForMessage(r.Context(), agentID, req.Mode)
 	if err != nil {
@@ -1094,6 +1096,8 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if ok {
 		createdBy = user.ID
+	} else {
+		createdBy = ""
 	}
 	mode, err := s.reviewModeForMessage(r.Context(), agentID, r.FormValue("mode"))
 	if err != nil {

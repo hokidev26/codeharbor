@@ -1386,12 +1386,22 @@ func TestForeignKeysEnabledAfterOpen(t *testing.T) {
 	}
 	defer store.Close()
 
+	// Force the first connection back to the pool boundary. The DSN pragma
+	// must apply again when database/sql opens a replacement connection.
+	store.DB().SetMaxIdleConns(0)
 	var enabled int
 	if err := store.DB().QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
 		t.Fatal(err)
 	}
 	if enabled != 1 {
 		t.Fatalf("expected foreign keys to be enabled, got %d", enabled)
+	}
+	var busyTimeout int
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("expected busy timeout 5000ms, got %d", busyTimeout)
 	}
 }
 

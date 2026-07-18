@@ -519,7 +519,7 @@ CREATE TABLE IF NOT EXISTS tool_permission_rules (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_permission_rules_match ON tool_permission_rules(enabled, mode, tool_name, risk, priority);
-` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL + gatewaySchemaSQL
+` + automationAuditSchemaSQL + integrationConnectionsSchemaSQL + memorySchemaSQL + schedulesSchemaSQL + notificationDeliveriesSchemaSQL + channelPersistenceSchemaSQL + deviceActionRequestsSchemaSQL + specSchemaSQL + modelClientSchemaSQL + remoteExecutionSchemaSQL + providerAccountStatsSchemaSQL + providerSecretsSchemaSQL + pluginSchemaSQL + backgroundTaskSchemaSQL + planSchemaSQL + gatewaySchemaSQL
 
 const automationAuditSchemaSQL = `
 
@@ -1094,6 +1094,48 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   CHECK (revision >= 1),
   CHECK (length(CAST(installation_id AS BLOB)) = 36)
 );
+`
+
+const providerSecretsSchemaSQL = `
+
+CREATE TABLE IF NOT EXISTS provider_secrets (
+  provider_name TEXT NOT NULL,
+  secret_kind TEXT NOT NULL,
+  active_ciphertext BLOB,
+  active_nonce BLOB,
+  active_binding_fingerprint BLOB,
+  active_key_version INTEGER NOT NULL DEFAULT 0,
+  active_last_five TEXT NOT NULL DEFAULT '',
+  active_secret_revision INTEGER NOT NULL DEFAULT 0,
+  pending_action TEXT NOT NULL DEFAULT 'none',
+  pending_ciphertext BLOB,
+  pending_nonce BLOB,
+  pending_binding_fingerprint BLOB,
+  pending_key_version INTEGER NOT NULL DEFAULT 0,
+  pending_last_five TEXT NOT NULL DEFAULT '',
+  pending_secret_revision INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (provider_name, secret_kind),
+  CHECK (length(CAST(provider_name AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (length(CAST(secret_kind AS BLOB)) BETWEEN 1 AND 128),
+  CHECK (active_key_version >= 0),
+  CHECK (active_secret_revision >= 0),
+  CHECK (pending_action IN ('none', 'set', 'clear', 'delete')),
+  CHECK (pending_key_version >= 0),
+  CHECK (pending_secret_revision >= 0),
+  CHECK (pending_action <> 'set' OR pending_ciphertext IS NOT NULL),
+  CHECK (pending_action <> 'set' OR pending_nonce IS NOT NULL),
+  CHECK (pending_action <> 'set' OR pending_key_version > 0),
+  CHECK (pending_action <> 'set' OR pending_binding_fingerprint IS NOT NULL),
+  CHECK (pending_action NOT IN ('set', 'clear') OR pending_secret_revision > 0),
+  CHECK (pending_action <> 'clear' OR pending_binding_fingerprint IS NOT NULL),
+  CHECK (active_ciphertext IS NULL OR active_nonce IS NOT NULL),
+  CHECK (active_ciphertext IS NULL OR active_binding_fingerprint IS NOT NULL),
+  CHECK (active_ciphertext IS NULL OR active_key_version > 0),
+  CHECK (active_ciphertext IS NULL OR active_secret_revision > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_secrets_updated ON provider_secrets(updated_at DESC, provider_name, secret_kind);
 `
 
 const providerAccountStatsSchemaSQL = `

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -623,11 +624,20 @@ type ToolPermissionRule struct {
 	UpdatedAt   string `json:"updatedAt"`
 }
 
+func sqliteDSN(path string) string {
+	fileURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Clean(path))}
+	query := fileURL.Query()
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "busy_timeout(5000)")
+	fileURL.RawQuery = query.Encode()
+	return fileURL.String()
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}

@@ -240,6 +240,31 @@ func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {
 	}
 }
 
+func TestModelsRouteDoesNotMarkUnconfiguredFallbackAsDiscovered(t *testing.T) {
+	registry := providers.NewRegistry()
+	registry.Register(fakeModelProvider{name: "relay", models: []string{"fallback-model"}})
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
+		Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8080/v1", Model: "fallback-model",
+	}}}}, nil, nil, nil, registry)
+
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/models", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body modelsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	provider := body.Providers[0]
+	if provider.Configured || provider.Discovered || provider.Available || provider.ModelsSource != "configured-default" {
+		t.Fatalf("unconfigured fallback was reported as discovered: %+v", provider)
+	}
+	if len(provider.Models) != 1 || provider.Models[0] != "fallback-model" {
+		t.Fatalf("fallback model should remain visible as a configured default: %+v", provider.Models)
+	}
+}
+
 func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *testing.T) {
 	calls := 0
 	registry := providers.NewRegistry()

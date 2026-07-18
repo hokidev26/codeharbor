@@ -16,6 +16,7 @@ import (
 	"autoto/internal/codexauth"
 	"autoto/internal/config"
 	"autoto/internal/providers"
+	"autoto/internal/secrets"
 )
 
 type providerConfigUpdateRequest struct {
@@ -24,6 +25,7 @@ type providerConfigUpdateRequest struct {
 	Profile        string `json:"profile"`
 	BaseURL        string `json:"baseUrl"`
 	APIKey         string `json:"apiKey"`
+	ClearAPIKey    bool   `json:"clearApiKey"`
 	Model          string `json:"model"`
 	MaxTokens      int64  `json:"maxTokens"`
 	APIKeyOptional bool   `json:"apiKeyOptional"`
@@ -31,10 +33,10 @@ type providerConfigUpdateRequest struct {
 }
 
 type providerConfigUpdateResponse struct {
-	Provider        config.ProviderSummary `json:"provider"`
-	Persisted       bool                   `json:"persisted"`
-	APIKeyPersisted bool                   `json:"apiKeyPersisted"`
-	Message         string                 `json:"message"`
+	Provider        settingsProviderResponse `json:"provider"`
+	Persisted       bool                     `json:"persisted"`
+	APIKeyPersisted bool                     `json:"apiKeyPersisted"`
+	Message         string                   `json:"message"`
 }
 
 type providerConfigPatchRequest struct {
@@ -94,11 +96,38 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	defer s.configMutationMu.Unlock()
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
-	existing, _ := s.providerConfig(providerName)
+	existing, existed := s.providerConfig(providerName)
 	updated, err := providerConfigFromUpdateRequest(providerName, existing, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	incomingAPIKey := strings.TrimSpace(req.APIKey)
+	secretMutation := ""
+	switch {
+	case incomingAPIKey != "":
+		updated.SecretRevision = nextProviderSecretRevision(existing.SecretRevision)
+		updated.APIKey = incomingAPIKey
+		if s.providerVault != nil {
+			updated.APIKeySource = secrets.ProviderSecretSourceStored
+		} else {
+			updated.APIKeySource = secrets.ProviderSecretSourceRuntime
+		}
+		secretMutation = "set"
+	case req.ClearAPIKey:
+		updated.SecretRevision = nextProviderSecretRevision(existing.SecretRevision)
+		updated.APIKey = ""
+		updated.APIKeySource = secrets.ProviderSecretSourceNone
+		secretMutation = "clear"
+	case existed && providerSecretBindingChanged(existing, updated) && storedProviderSecretSource(existing.APIKeySource):
+		// A stored key is scoped to the endpoint where it was entered. Changing
+		// protocol/profile/Base URL without a replacement key clears it instead
+		// of silently forwarding the old credential to a new endpoint.
+		updated.SecretRevision = nextProviderSecretRevision(existing.SecretRevision)
+		updated.APIKey = ""
+		updated.APIKeySource = secrets.ProviderSecretSourceNone
+		secretMutation = "clear"
 	}
 
 	adapter, err := s.newRuntimeProvider(updated)
@@ -117,11 +146,42 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secretPrepared := false
+	if s.providerVault != nil && secretMutation != "" {
+		switch secretMutation {
+		case "set":
+			_, err = s.providerVault.PrepareSet(r.Context(), serverProviderSecretBinding(updated), incomingAPIKey)
+		case "clear":
+			err = s.providerVault.PrepareClear(r.Context(), serverProviderSecretBinding(updated))
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "无法安全保存 Provider 凭据。")
+			return
+		}
+		secretPrepared = true
+	}
+
 	s.runProviderMutationHook()
 	persisted, err := s.persistProviderConfig(configPath, cfg)
 	if err != nil {
+		if secretPrepared {
+			_ = s.providerVault.RollbackPending(r.Context(), providerName)
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存配置失败：%v", err))
 		return
+	}
+	if secretPrepared && !persisted {
+		_ = s.providerVault.RollbackPending(r.Context(), providerName)
+		writeError(w, http.StatusInternalServerError, "配置路径不可用，Provider 凭据未保存。")
+		return
+	}
+	if secretPrepared {
+		if err := s.providerVault.CommitPending(r.Context(), providerName); err != nil {
+			// config.json already contains the target revision. Keep the pending
+			// record so startup recovery can finish without crossing bindings.
+			writeError(w, http.StatusInternalServerError, "Provider 凭据提交未完成；重启后将自动恢复。")
+			return
+		}
 	}
 	if updated.Disabled {
 		s.unregisterProvider(updated.Name)
@@ -133,11 +193,16 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	s.cfg = cfg
 	s.cfgMu.Unlock()
 
+	status := s.providerAPIKeyStatus(r.Context(), updated)
+	message := "Provider 配置已持久化并在当前运行时生效。"
+	if incomingAPIKey != "" && s.providerVault == nil {
+		message = "Provider 配置已生效；当前测试实例未启用持久凭据仓库。"
+	}
 	writeJSON(w, http.StatusOK, providerConfigUpdateResponse{
-		Provider:        updated.Summary(),
+		Provider:        s.settingsProviderResponse(r.Context(), updated),
 		Persisted:       persisted,
-		APIKeyPersisted: false,
-		Message:         "配置已在当前运行时生效；API Key 不写入磁盘，重启后请通过环境变量或重新保存。",
+		APIKeyPersisted: status.Persisted,
+		Message:         message,
 	})
 }
 
@@ -221,10 +286,11 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 	s.cfg = cfg
 	s.cfgMu.Unlock()
 
+	status := s.providerAPIKeyStatus(r.Context(), updated)
 	writeJSON(w, http.StatusOK, providerConfigUpdateResponse{
-		Provider:        updated.Summary(),
+		Provider:        s.settingsProviderResponse(r.Context(), updated),
 		Persisted:       persisted,
-		APIKeyPersisted: false,
+		APIKeyPersisted: status.Persisted,
 		Message:         "Provider 生命周期更新已在当前运行时生效。",
 	})
 }
@@ -264,11 +330,40 @@ func (s *Server) deleteProviderConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secretPrepared := false
+	if s.providerVault != nil {
+		if err := s.providerVault.PrepareDelete(r.Context(), providerName); err != nil {
+			writeError(w, http.StatusInternalServerError, "无法安全删除 Provider 凭据。")
+			return
+		}
+		secretPrepared = true
+	}
 	s.runProviderMutationHook()
 	persisted, err := s.persistProviderConfig(configPath, cfg)
 	if err != nil {
+		if secretPrepared {
+			_ = s.providerVault.RollbackPending(r.Context(), providerName)
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存配置失败：%v", err))
 		return
+	}
+	if secretPrepared && !persisted {
+		_ = s.providerVault.RollbackPending(r.Context(), providerName)
+		writeError(w, http.StatusInternalServerError, "配置路径不可用，Provider 未删除。")
+		return
+	}
+	if secretPrepared {
+		if err := s.providerVault.CommitPending(r.Context(), providerName); err != nil {
+			// The config no longer references this Provider. Remove it from the
+			// current registry as well; startup recovery will finish DB cleanup.
+			s.unregisterProvider(providerName)
+			s.refreshProviderDefault(cfg)
+			s.cfgMu.Lock()
+			s.cfg = cfg
+			s.cfgMu.Unlock()
+			writeError(w, http.StatusInternalServerError, "Provider 已移除，凭据清理将在重启后自动完成。")
+			return
+		}
 	}
 	s.unregisterProvider(providerName)
 	s.refreshProviderDefault(cfg)
@@ -306,6 +401,10 @@ func (s *Server) testProviderConfigDraft(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.ClearAPIKey {
+		writeError(w, http.StatusBadRequest, "provider test does not support clearing API keys")
+		return
+	}
 	providerName := strings.TrimSpace(req.Name)
 	if err := validateProviderName(providerName); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -335,7 +434,7 @@ func (s *Server) testProviderAdapter(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	configured := providers.ConfiguredFor(adapter, provider.IsConfigured())
-	if !configured && !provider.APIKeyOptional {
+	if !configured {
 		writeJSON(w, http.StatusOK, providerTestResponse{
 			Configured: false,
 			ErrorCode:  "not_configured",
@@ -409,6 +508,9 @@ func decodeProviderConfigUpdateRequest(r *http.Request, dst *providerConfigUpdat
 }
 
 func validateProviderConfigRequest(req providerConfigUpdateRequest) error {
+	if req.ClearAPIKey && strings.TrimSpace(req.APIKey) != "" {
+		return errors.New("apiKey and clearApiKey cannot be used together")
+	}
 	for _, field := range []struct {
 		name  string
 		value string
@@ -526,6 +628,8 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		APIKeyOptional: apiKeyOptional,
 		GatewayEnabled: gatewayEnabled,
 		Disabled:       existing.Disabled,
+		SecretRevision: existing.SecretRevision,
+		APIKeySource:   existing.APIKeySource,
 	}, nil
 }
 

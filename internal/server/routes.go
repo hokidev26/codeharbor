@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"os"
@@ -29,32 +30,43 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsProviderResponse struct {
-	Name           string                      `json:"name"`
-	Type           string                      `json:"type"`
-	Profile        string                      `json:"profile,omitempty"`
-	BaseURL        string                      `json:"baseUrl,omitempty"`
-	Model          string                      `json:"model"`
-	MaxTokens      int64                       `json:"maxTokens,omitempty"`
-	Configured     bool                        `json:"configured"`
-	APIKeyOptional bool                        `json:"apiKeyOptional,omitempty"`
-	GatewayEnabled bool                        `json:"gatewayEnabled"`
-	Enabled        bool                        `json:"enabled"`
-	Origin         string                      `json:"origin"`
-	Capabilities   providers.Capabilities      `json:"capabilities"`
-	Management     *providerManagementResponse `json:"management,omitempty"`
+	Name             string                      `json:"name"`
+	Type             string                      `json:"type"`
+	Profile          string                      `json:"profile,omitempty"`
+	BaseURL          string                      `json:"baseUrl,omitempty"`
+	Model            string                      `json:"model"`
+	MaxTokens        int64                       `json:"maxTokens,omitempty"`
+	Configured       bool                        `json:"configured"`
+	APIKeyConfigured bool                        `json:"apiKeyConfigured"`
+	APIKeyPersisted  bool                        `json:"apiKeyPersisted"`
+	APIKeyLastFive   string                      `json:"apiKeyLastFive,omitempty"`
+	APIKeySource     string                      `json:"apiKeySource"`
+	APIKeyOptional   bool                        `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled   bool                        `json:"gatewayEnabled"`
+	Enabled          bool                        `json:"enabled"`
+	Origin           string                      `json:"origin"`
+	Capabilities     providers.Capabilities      `json:"capabilities"`
+	Management       *providerManagementResponse `json:"management,omitempty"`
+}
+
+func (s *Server) settingsProviderResponse(ctx context.Context, provider config.ProviderConfig) settingsProviderResponse {
+	summary := provider.Summary()
+	metadata := s.providerSettingsMetadata(summary)
+	keyStatus := s.providerAPIKeyStatus(ctx, provider)
+	return settingsProviderResponse{
+		Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
+		MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyConfigured: keyStatus.Configured,
+		APIKeyPersisted: keyStatus.Persisted, APIKeyLastFive: keyStatus.LastFive, APIKeySource: keyStatus.Source,
+		APIKeyOptional: summary.APIKeyOptional, GatewayEnabled: summary.GatewayEnabled, Enabled: summary.Enabled,
+		Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
+	}
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configSnapshot()
-	summaries := cfg.Providers.Summaries()
-	providerResponses := make([]settingsProviderResponse, 0, len(summaries))
-	for _, summary := range summaries {
-		metadata := s.providerSettingsMetadata(summary)
-		providerResponses = append(providerResponses, settingsProviderResponse{
-			Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
-			MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyOptional: summary.APIKeyOptional,
-			GatewayEnabled: summary.GatewayEnabled, Enabled: summary.Enabled, Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
-		})
+	providerResponses := make([]settingsProviderResponse, 0, len(cfg.Providers.Instances))
+	for _, provider := range cfg.Providers.Instances {
+		providerResponses = append(providerResponses, s.settingsProviderResponse(r.Context(), provider))
 	}
 	runtimeSettings, err := s.runtimeSettingsForResponse(r.Context())
 	if err != nil {

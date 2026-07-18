@@ -428,6 +428,26 @@ test("tool activity keeps legacy data compatible when safety facts are absent", 
   assert.equal(normalized.permissionDecisionReason, "");
 });
 
+test("tool activity warns when dynamic commands cannot be classified reliably", () => {
+  const call = {
+    toolUseId: "dynamic-bash",
+    toolName: "Bash",
+    status: "waiting_approval",
+    shellSafe: false,
+    commandFacts: {
+      parseKnown: true,
+      program: "dynamic",
+      commandCount: 1,
+    },
+  };
+  const normalized = normalizeToolActivity(call);
+  const html = renderToolActivityStackHTML([call]);
+
+  assert.equal(normalized.shellSafe, false);
+  assert.equal(normalized.commandFacts.program, "dynamic");
+  assert.match(html, /无法可靠分类该动态命令；批准前请核对完整命令与展开后的行为/);
+});
+
 test("tool activity renders bounded localized safety facts without command parameters", () => {
   const secret = "super-secret-token";
   const call = {
@@ -547,6 +567,25 @@ test("approval cards reuse normalized safety facts without a second approval sta
   assert.match(html, /作用域：本次工具调用/);
   assert.match(html, /单条/);
   assert.match(html, /程序：git/);
+});
+
+test("approval cards prominently warn for unclassified dynamic commands", () => {
+  const { html } = renderSnapshot([], {
+    pendingToolApprovals: {
+      dynamicCommand: {
+        agentId: "agent-1",
+        toolUseId: "dynamic-command",
+        toolName: "Bash",
+        inputJson: { command: "x=rm; $x -rf tmp" },
+        risk: "exec",
+        commandFacts: { parseKnown: false, program: "dynamic", commandCount: 1, compound: true, effects: [], dangerous: [] },
+      },
+    },
+  });
+
+  assert.match(html, /语法未知/);
+  assert.match(html, /程序：dynamic/);
+  assert.match(html, /无法可靠分类该命令/);
 });
 
 test("tool activity localizes every backend decision source", () => {

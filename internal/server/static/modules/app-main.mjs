@@ -15,7 +15,7 @@ import {
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1";
 import {
   basename,
   canonicalLocalPath,
@@ -26,7 +26,7 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
@@ -34,9 +34,10 @@ import { createLocalPreferencesSettingsController } from "./local-preferences-se
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-1-codex-browser-login-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-1-codex-browser-login-1-provider-secrets-1-model-picker-1";
 import { createPageLifecycleController } from "./page-lifecycle.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
+import { createTaskWorkspaceController } from "./task-workspace.mjs?v=task-workspace-1";
 import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=apple-theme-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-1";
@@ -1062,7 +1063,29 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["about", { render: renderAboutSettingsContent, bind: bindAboutSettingsActions, layout: "about" }],
 ].forEach(([key, panel]) => settingsPanelRegistry.register(key, panel));
 
+const taskWorkspace = createTaskWorkspaceController({
+  request: api,
+  host: "#taskWorkspaceOverview",
+  kanbanHost: "#projectKanbanBody",
+  scopeHost: "#taskWorkspaceScopes",
+  translate: (key, params) => t(key, params),
+  showError,
+  showToast,
+  confirmAction: async (message) => window.confirm(message),
+  onChange: () => {
+    if (state.activeWorkbench !== "workbench") return;
+    renderWorkbenchHeaderIdentity();
+    renderProjects();
+  },
+  onOpenAgent: (agent, project) => openTaskWorkspaceAgent(agent, project).catch(showError),
+});
+taskWorkspace.bind();
+$("taskWorkspaceScopes")?.querySelector('[data-task-workspace-scope="agent"]')?.addEventListener("click", () => {
+  if (state.agent?.id) specBoard.load().catch(showError);
+});
+
 const settingsHelp = createSettingsHelpController({
+
   getRoot: () => $("settingsContentBody"),
   trigger: $("settingsHelpBtn"),
   panel: $("settingsHelpPanel"),
@@ -1735,7 +1758,10 @@ function renderPrimaryModeSidebar() {
   newProjectButton?.classList.toggle("hidden", taskMode);
   newTaskButton?.classList.toggle("hidden", !taskMode);
   if (newTaskButton) {
-    const enabled = Boolean(state.agent?.id);
+    const workspaceState = taskWorkspace.getState();
+    const enabled = workspaceState.scope === "agent"
+      ? Boolean(state.agent?.id)
+      : workspaceState.workspace.summary.agentCount > 0;
     const taskActionKey = enabled ? "workbench.createTask" : "workbench.selectAgentToCreate";
     newTaskButton.disabled = !enabled;
     setTranslatedAttribute(newTaskButton, "title", taskActionKey);
@@ -1746,22 +1772,43 @@ function renderPrimaryModeSidebar() {
 function renderWorkbenchShell() {
   const agent = state.agent;
   const project = state.project;
+  const workspaceState = taskWorkspace.getState();
+  const scope = workspaceState.scope;
+  const selectedProject = workspaceState.workspace.projects.find((item) => item.id === workspaceState.projectId) || null;
+  const summary = scope === "project" && selectedProject ? selectedProject.counts : workspaceState.workspace.summary;
   const meta = $("workbenchMeta");
   const status = $("workbenchAgentStatus");
   const agentTitle = String(agent?.title || agent?.id || "").trim();
   const projectTitle = String(project?.name || "").trim();
   renderWorkbenchHeaderIdentity();
   if (meta) {
-    meta.textContent = agent
-      ? `${t("workbench.currentAgent", { agent: agentTitle })} · ${t("workbench.currentProject", { project: projectTitle || "—" })}`
-      : t("workbench.selectAgent");
+    if (scope === "agent") {
+      meta.textContent = agent
+        ? `${t("workbench.currentAgent", { agent: agentTitle })} · ${t("workbench.currentProject", { project: projectTitle || "—" })}`
+        : t("workbench.selectAgent");
+    } else if (scope === "project" && selectedProject) {
+      meta.textContent = `${selectedProject.agents.length} ${t("taskWorkspace.agents")} · ${selectedProject.counts.total} ${t("taskWorkspace.tasks")}`;
+    } else {
+      meta.textContent = `${workspaceState.workspace.summary.projectCount} ${t("taskWorkspace.projects")} · ${workspaceState.workspace.summary.agentCount} ${t("taskWorkspace.agents")}`;
+    }
   }
   if (status) {
-    status.textContent = agent?.status || "idle";
-    status.classList.toggle("ok", Boolean(agent && agent.status === "idle"));
-    status.classList.toggle("warn", Boolean(agent && ["running", "interrupted"].includes(agent.status)));
+    if (scope === "agent") {
+      status.textContent = agent?.status || "idle";
+      status.classList.toggle("ok", Boolean(agent && agent.status === "idle"));
+      status.classList.toggle("warn", Boolean(agent && ["running", "interrupted"].includes(agent.status)));
+    } else {
+      status.textContent = `${Number(summary?.blocked || 0)} ${t("taskWorkspace.blocked")}`;
+      status.classList.toggle("ok", Number(summary?.blocked || 0) === 0);
+      status.classList.toggle("warn", Number(summary?.blocked || 0) > 0);
+    }
   }
-  const enabled = Boolean(agent?.id);
+  const enabled = scope === "agent" && Boolean(agent?.id);
+  const boardButton = $("workbenchBoardBtn");
+  if (boardButton) {
+    boardButton.disabled = !state.agent?.id;
+    boardButton.classList.toggle("active", scope === "agent");
+  }
   ["workbenchFilesBtn", "workbenchGitBtn", "workbenchRunBtn", "workbenchPreviewBtn"].forEach((id) => {
     const button = $(id);
     if (button) button.disabled = !enabled;
@@ -1802,9 +1849,14 @@ function applyPrimaryWorkbench(value) {
   document.body.classList.toggle("workbench-mode", workbench);
   const modalOpen = elementVisible("settingsModal") || elementVisible("employeeOverviewModal");
   if (!modalOpen) setGlobalRailActive(primaryWorkbenchRailTarget(mode));
+  if (workbench) {
+    taskWorkspace.setContext({ projectId: state.project?.id || "", agentId: state.agent?.id || "" });
+    if (previousMode !== mode) taskWorkspace.setScope("dispatch");
+    taskWorkspace.load({ silent: taskWorkspace.getState().loaded }).catch(showError);
+  }
   renderWorkbenchShell();
   renderProjects();
-  if (workbench && state.agent?.id) specBoard.load().catch(showError);
+  if (workbench && taskWorkspace.getState().scope === "agent" && state.agent?.id) specBoard.load().catch(showError);
   return mode;
 }
 
@@ -1818,11 +1870,18 @@ function switchPrimaryWorkbench(value) {
 
 async function focusTaskCreation() {
   if (state.activeWorkbench !== "workbench") return false;
+  closeMobileSidebar();
+  if (taskWorkspace.getState().scope !== "agent") {
+    if (taskWorkspace.focusCreate()) return true;
+    await taskWorkspace.load();
+    if (taskWorkspace.focusCreate()) return true;
+    showToast(t("taskWorkspace.noAgents"), "info", { force: true });
+    return false;
+  }
   if (!state.agent?.id) {
     showToast(t("workbench.selectAgentToCreate"), "info", { force: true });
     return false;
   }
-  closeMobileSidebar();
   if (projectKanban.focusCreate()) return true;
   await specBoard.load();
   if (projectKanban.focusCreate()) return true;
@@ -1832,7 +1891,10 @@ async function focusTaskCreation() {
 
 async function refreshPrimaryMode() {
   await init();
-  if (state.activeWorkbench === "workbench" && state.agent?.id) await specBoard.load();
+  if (state.activeWorkbench === "workbench") {
+    await taskWorkspace.load();
+    if (taskWorkspace.getState().scope === "agent" && state.agent?.id) await specBoard.load();
+  }
   renderProjects();
 }
 
@@ -2476,7 +2538,30 @@ function renderConversationHeaderIdentity() {
 }
 
 function renderWorkbenchHeaderIdentity() {
-  renderAgentTitleEditor("workbench");
+  const workspaceState = taskWorkspace.getState();
+  if (workspaceState.scope === "agent") {
+    renderAgentTitleEditor("workbench");
+    return;
+  }
+  if (state.titleEditSurface === "workbench") {
+    state.titleEditing = false;
+    state.titleSaving = false;
+    state.titleDraft = "";
+  }
+  const { display, input, edit, save, cancel } = titleEditorElements("workbench");
+  const project = workspaceState.workspace.projects.find((item) => item.id === workspaceState.projectId);
+  const title = workspaceState.scope === "project" && project ? project.name : t("taskWorkspace.dispatchTitle");
+  if (display) {
+    display.textContent = title;
+    display.disabled = true;
+    display.title = title;
+    display.setAttribute("aria-label", title);
+    display.classList.remove("hidden");
+  }
+  input?.classList.add("hidden");
+  edit?.classList.add("hidden");
+  save?.classList.add("hidden");
+  cancel?.classList.add("hidden");
 }
 
 function renderAllTitleEditors() {
@@ -2678,10 +2763,12 @@ function renderProjects() {
   setTranslatedText(heading, taskContext
     ? "workbench.contextHeading"
     : (state.navigationMode === "conversations" ? "shell.filters.conversations" : "shell.filters.projects"));
+  const taskCounts = Object.fromEntries(taskWorkspace.getState().workspace.projects.map((project) => [project.id, project.counts]));
   el.innerHTML = renderNavigationHTML(view, {
     activeProjectId: state.project?.id || "",
     activeAgentId: state.agent?.id || "",
     taskContext,
+    taskCounts,
   });
   $("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node) => {
     const active = node.dataset.navigationMode === state.navigationMode;
@@ -2689,7 +2776,11 @@ function renderProjects() {
     node.setAttribute("aria-pressed", active ? "true" : "false");
   });
   el.querySelectorAll("[data-project-id]").forEach((node) => {
-    node.addEventListener("click", () => selectProject(node.dataset.projectId).catch(showError));
+    node.addEventListener("click", () => selectProject(node.dataset.projectId).then(() => {
+      if (state.activeWorkbench === "workbench") {
+        taskWorkspace.setContext({ projectId: node.dataset.projectId, agentId: state.agent?.id || "", scope: "project" });
+      }
+    }).catch(showError));
   });
   el.querySelectorAll("[data-navigation-target]").forEach((node) => {
     node.addEventListener("click", () => selectNavigationConversation(node.dataset.navigationTarget).catch(showError));
@@ -2777,6 +2868,7 @@ function beginNavigationSelection(project) {
   clearLiveAssistantText();
   setWorkspaceExplorerAgent(null);
   projectKanban.setAgent(null);
+  taskWorkspace.setContext({ projectId: project?.id || "", agentId: "" });
   renderWorkbenchShell();
   syncMessageComposerBusy();
   refreshReasoningEffortControl();
@@ -2908,6 +3000,22 @@ async function selectNavigationConversation(target, options = {}) {
   }
 }
 
+async function openTaskWorkspaceAgent(agent, project) {
+  const agentId = String(agent?.id || "").trim();
+  const projectId = String(project?.id || agent?.projectId || "").trim();
+  if (!agentId || !projectId) return;
+  let target = state.navigationConversations.find((conversation) => conversation.projectId === projectId && conversation.agentId === agentId);
+  if (!target) {
+    await loadProjects({ autoEnter: false, reason: "task-workspace-agent" });
+    target = state.navigationConversations.find((conversation) => conversation.projectId === projectId && conversation.agentId === agentId);
+  }
+  if (!target) throw new Error(t("taskWorkspace.selectAgentFirst"));
+  await selectNavigationConversation(target.targetId, { preserveSidebar: true });
+  taskWorkspace.setContext({ projectId, agentId, scope: "agent" });
+  await specBoard.load();
+  projectKanban.render();
+}
+
 async function enterAgent() {
   if (!state.agent) return;
   closeConversationDetails();
@@ -2915,8 +3023,9 @@ async function enterAgent() {
   backgroundTasks.setAgent(agentId);
   setWorkspaceExplorerAgent(state.agent);
   projectKanban.setAgent(state.agent);
+  taskWorkspace.setContext({ projectId: state.project?.id || "", agentId });
   renderWorkbenchShell();
-  if (state.activeWorkbench === "workbench") specBoard.load().catch(showError);
+  if (state.activeWorkbench === "workbench" && taskWorkspace.getState().scope === "agent") specBoard.load().catch(showError);
   renderConversationHeaderIdentity();
   $("permissionMode").value = state.agent.permissionMode || "acceptEdits";
   enforcePermissionSelectCap();
@@ -3355,6 +3464,9 @@ $("runtimeStatusBtn")?.addEventListener("click", () => {
 });
 $("gitWorkflowBtn")?.addEventListener("click", openGitModal);
 $("workbenchBoardBtn")?.addEventListener("click", () => {
+  if (!state.agent?.id) return;
+  taskWorkspace.setContext({ projectId: state.project?.id || "", agentId: state.agent.id, scope: "agent" });
+  specBoard.load().catch(showError);
   projectKanban.render();
   $("projectKanbanBody")?.scrollTo?.({ top: 0, behavior: "smooth" });
 });
@@ -3452,6 +3564,7 @@ window.addEventListener("autoto:auth-changed", () => {
   clearLiveAssistantText();
   setWorkspaceExplorerAgent(null);
   projectKanban.setAgent(null);
+  taskWorkspace.setContext({ projectId: "", agentId: "", scope: "dispatch" });
   resetGitWorkflowState();
   renderWorkbenchShell();
   renderProjects();

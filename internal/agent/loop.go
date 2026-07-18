@@ -729,7 +729,7 @@ func (r *Runner) expandServerSkillCommand(ctx context.Context, values ...string)
 	}
 	contentText = skill.Prompt
 	if args := strings.TrimSpace(match[2]); args != "" {
-		contentText += "\n\n用户参数：\n" + args
+		contentText += "\n\nUser arguments:\n" + args
 	}
 	return contentText, text, nil
 }
@@ -1031,165 +1031,6 @@ func (r *Runner) unregisterRun(agentID string, active *activeRun) runCompletion 
 		active.cancel()
 	}
 	return completion
-}
-
-func (r *Runner) runSingleSegmentLegacy(ctx context.Context, agentID, runID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := r.store.SetAgentStatus(ctx, agentID, "running", ""); err != nil {
-		return err
-	}
-	r.publish(Event{Type: "agent.started", AgentID: agentID, Data: runEventData(runID)})
-
-	agent, policy, err := r.policyContext(ctx, agentID, runID)
-	if err != nil {
-		return err
-	}
-	if !policy.IsPlan() {
-		r.captureRunCheckpoint(ctx, agent, runID)
-	}
-	projectInstructions := loadProjectInstructions(agent.CWD)
-	if strings.TrimSpace(projectInstructions.Text) != "" {
-		agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
-		r.publish(Event{Type: "project.instructions_loaded", AgentID: agentID, Data: mergeEventData(projectInstructions.eventData(), runID)})
-	}
-	messages, err := r.store.ListMessagesWithAttachmentData(ctx, agentID)
-	if err != nil {
-		return err
-	}
-	triggerText, err := r.runTriggerUserText(ctx, agentID, runID, messages)
-	if err != nil {
-		return err
-	}
-	if triggerText != "" {
-		memoryPrompt, injectedCount, err := r.prepareMemorySystemPrompt(ctx, agentID, triggerText, agent.SystemPrompt)
-		if err != nil {
-			return err
-		}
-		agent.SystemPrompt = memoryPrompt
-		if injectedCount > 0 {
-			r.publish(Event{Type: "memory.injected", AgentID: agentID, Data: mergeEventData(map[string]any{"count": injectedCount}, runID)})
-		}
-	}
-	if policy.IsPlan() {
-		agent.SystemPrompt = mergePlanDraftSystemPrompt(agent.SystemPrompt)
-	}
-	provider, model, err := r.providers.Resolve(agent.Model)
-	if err != nil {
-		return err
-	}
-
-	maxTurns := r.cfg.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 20
-	}
-	toolSnapshot, err := r.snapshotToolsForPolicy(ctx, tools.ResolutionContext{AgentID: agentID, CWD: agent.CWD}, policy)
-	if err != nil {
-		return fmt.Errorf("snapshot tools: %w", err)
-	}
-	toolSpecs := toolSnapshot.specs
-	if !providers.CapabilitiesFor(provider).Tools {
-		toolSpecs = nil
-	}
-	for turn := 0; turn < maxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs, turnSystemControls{})
-		if err != nil {
-			return err
-		}
-		agent = updatedAgent
-		providerMessages = r.appendToolOutputPipelineControl(providerMessages, agentID, runID)
-		result, err := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort), agent.FastMode)
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
-			return err
-		}
-		if len(result.ToolCalls) == 0 {
-			if r.toolOutputPipelineActive(agentID, runID) {
-				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
-				continue
-			}
-			assistantText := result.Text
-			var planReview review.Result
-			if policy.IsPlan() {
-				assistantText, planReview, err = r.persistAndReviewPlan(ctx, policy, assistantText)
-				if err != nil {
-					r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
-					return err
-				}
-			} else if assistantText == "" {
-				assistantText = "Done."
-			}
-			assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, TurnUsage: result.TurnUsage})
-			if err != nil {
-				r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
-				return err
-			}
-			r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
-			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: runEventData(runID)})
-			if !policy.IsPlan() {
-				r.captureRunEndHead(runID)
-			}
-			if err := r.store.CompleteRun(ctx, runID, "completed", ""); err != nil {
-				return err
-			}
-			r.closeToolOutputPipelineRun(agentID, runID)
-			r.publishPlanRunStatus(ctx, runID, "plan.executed")
-			doneData := map[string]any{"stopReason": result.StopReason}
-			if policy.IsPlan() {
-				doneData["executionMode"] = policy.ExecutionMode
-				doneData["reviewVerdict"] = planReview.Verdict
-				doneData["reviewReason"] = planReview.Reason
-			}
-			r.publish(Event{Type: "agent.done", AgentID: agentID, Data: mergeEventData(doneData, runID)})
-			r.notify(NotificationEvent{Event: "completed", RunID: runID, AgentID: agentID, Status: "completed"})
-			if err := r.store.SetAgentStatus(ctx, agentID, "idle", ""); err != nil {
-				return err
-			}
-			return nil
-		}
-
-		assistantBlocks := assistantToolUseBlocks(result.Text, result.ToolCalls)
-		assistantJSON, _ := json.Marshal(assistantBlocks)
-		assistantStateJSON := providerStateForBlocks(assistantBlocks)
-		assistantText := assistantToolUseText(result.Text, result.ToolCalls)
-		assistantMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "assistant", ContentText: assistantText, ContentJSON: assistantJSON, ProviderStateJSON: assistantStateJSON, TurnUsage: result.TurnUsage})
-		if err != nil {
-			r.recordCompletedModelTurn(agentID, runID, "", provider.Name(), model, result)
-			return err
-		}
-		r.recordCompletedModelTurn(agentID, runID, assistantMsg.ID, provider.Name(), model, result)
-		r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: assistantMsg.ID, Text: assistantText, Data: mergeEventData(map[string]any{"toolCalls": len(result.ToolCalls)}, runID)})
-		messages = append(messages, assistantMsg)
-
-		for _, call := range result.ToolCalls {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			toolCall := normalizeProviderToolCall(call)
-			rawToolResult, err := r.executeToolForLoop(ctx, agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, assistantMsg.ID, toolSnapshot.tools)
-			if err != nil {
-				rawToolResult = tools.Result{Output: err.Error(), IsError: true}
-			}
-			modelToolResult := r.processToolResultForModel(agentID, runID, tools.Call{ID: toolCall.ID, Name: toolCall.Name, Input: toolCall.Input}, rawToolResult)
-			toolResultBlock := providers.ContentBlock{Type: "tool_result", ToolUseID: toolCall.ID, ToolName: toolCall.Name, Output: modelToolResult.Output, IsError: modelToolResult.IsError}
-			toolResultJSON, _ := json.Marshal([]providers.ContentBlock{toolResultBlock})
-			toolResultText := toolResultMessageText(toolCall, modelToolResult)
-			toolMsg, err := r.store.AddMessage(ctx, db.Message{AgentID: agentID, RunID: runID, Role: "user", ParentToolID: toolCall.ID, ContentText: toolResultText, ContentJSON: toolResultJSON})
-			if err != nil {
-				return err
-			}
-			r.publish(Event{Type: "message.created", AgentID: agentID, MessageID: toolMsg.ID, Text: toolResultText, Data: mergeEventData(map[string]any{"parentToolUseId": toolCall.ID, "toolName": toolCall.Name, "isError": modelToolResult.IsError}, runID)})
-			messages = append(messages, toolMsg)
-		}
-	}
-	return fmt.Errorf("agent reached max turns (%d) while model kept requesting tools", maxTurns)
 }
 
 func (r *Runner) runTriggerUserText(ctx context.Context, agentID, runID string, messages []db.Message) (string, error) {
@@ -1525,9 +1366,9 @@ func truncateContextSummaryForBudget(systemPrompt string, messages []providers.M
 func compactToolResultOutput(toolName string) string {
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" {
-		toolName = "工具"
+		toolName = "tool"
 	}
-	return fmt.Sprintf("[工具 %s 已执行，输出已省略]", toolName)
+	return fmt.Sprintf("[Tool %s executed; output omitted]", toolName)
 }
 
 func contextMessageContent(blocks []providers.ContentBlock) string {
@@ -1539,13 +1380,13 @@ func contextMessageContent(blocks []providers.ContentBlock) string {
 				parts = append(parts, text)
 			}
 		case "tool_use":
-			parts = append(parts, fmt.Sprintf("[请求工具 %s %s]", strings.TrimSpace(block.ToolName), strings.TrimSpace(block.ToolUseID)))
+			parts = append(parts, fmt.Sprintf("[Tool request %s %s]", strings.TrimSpace(block.ToolName), strings.TrimSpace(block.ToolUseID)))
 		case "image":
 			name := strings.TrimSpace(block.Filename)
 			if name == "" {
 				name = "image"
 			}
-			parts = append(parts, fmt.Sprintf("[图片附件 %s]", name))
+			parts = append(parts, fmt.Sprintf("[Image attachment %s]", name))
 		default:
 			if text := strings.TrimSpace(block.Text); text != "" {
 				parts = append(parts, text)
@@ -1630,8 +1471,8 @@ func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string,
 	if err != nil {
 		return "", err
 	}
-	prompt := "请把下面较早的对话历史压缩成一段供后续 Agent 继续工作的中文摘要。保留用户目标、关键决策、文件路径、工具执行结果状态和未完成事项；省略大段工具输出。不要编造。\n\n" + renderMessagesForSummary(existingSummary, candidates)
-	request := providers.GenerateRequest{Model: model, SystemPrompt: "你是 Autoto 的长期上下文摘要器，只输出摘要正文。", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}, Scenario: providers.CallScenarioInternal}
+	prompt := "Compress the older conversation history below into a concise summary that a later Agent can use to continue the work. Preserve the user's goals, key decisions, file paths, tool-result status, and unfinished tasks. Omit large tool outputs and do not invent details.\n\n" + renderMessagesForSummary(existingSummary, candidates)
+	request := providers.GenerateRequest{Model: model, SystemPrompt: "You are Autoto's long-term context summarizer. Return only the summary body.", Messages: []providers.Message{{Role: "user", Content: prompt, Blocks: []providers.ContentBlock{{Type: "text", Text: prompt}}}}, Scenario: providers.CallScenarioInternal}
 	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	events, err := provider.Generate(summaryCtx, request)
@@ -1673,9 +1514,9 @@ func (r *Runner) summarizeWithModel(ctx context.Context, existingSummary string,
 func renderMessagesForSummary(existingSummary string, messages []db.Message) string {
 	var builder strings.Builder
 	if summary := strings.TrimSpace(existingSummary); summary != "" {
-		builder.WriteString("已有摘要：\n")
+		builder.WriteString("Existing summary:\n")
 		builder.WriteString(truncateRunes(summary, maxDeterministicSummary/2))
-		builder.WriteString("\n\n新增压缩内容：\n")
+		builder.WriteString("\n\nNew material to summarize:\n")
 	}
 	for _, message := range messages {
 		builder.WriteString(messageSummaryLine(message, maxSummaryLineRunes*2))
@@ -1686,13 +1527,13 @@ func renderMessagesForSummary(existingSummary string, messages []db.Message) str
 
 func deterministicSummary(existingSummary string, messages []db.Message) string {
 	var builder strings.Builder
-	builder.WriteString("较早对话摘要（本地降级生成）：\n")
+	builder.WriteString("Older conversation summary (local fallback):\n")
 	if summary := strings.TrimSpace(existingSummary); summary != "" {
-		builder.WriteString("已有摘要：\n")
+		builder.WriteString("Existing summary:\n")
 		builder.WriteString(truncateRunes(summary, maxDeterministicSummary/2))
 		builder.WriteString("\n")
 	}
-	builder.WriteString("新增压缩内容：\n")
+	builder.WriteString("New material to summarize:\n")
 	for _, message := range messages {
 		builder.WriteString(messageSummaryLine(message, maxSummaryLineRunes))
 		builder.WriteByte('\n')
@@ -1713,27 +1554,27 @@ func messageSummaryLine(message db.Message, maxRunes int) string {
 	for _, block := range blocks {
 		switch block.Type {
 		case "tool_result":
-			status := "已执行"
+			status := "executed"
 			if block.IsError {
-				status = "执行出错"
+				status = "failed"
 			}
 			name := strings.TrimSpace(block.ToolName)
 			if name == "" {
-				name = "工具"
+				name = "tool"
 			}
-			parts = append(parts, fmt.Sprintf("[工具 %s %s，输出已省略]", name, status))
+			parts = append(parts, fmt.Sprintf("[Tool %s %s; output omitted]", name, status))
 		case "tool_use":
 			name := strings.TrimSpace(block.ToolName)
 			if name == "" {
-				name = "工具"
+				name = "tool"
 			}
-			parts = append(parts, fmt.Sprintf("[请求工具 %s %s]", name, strings.TrimSpace(block.ToolUseID)))
+			parts = append(parts, fmt.Sprintf("[Tool request %s %s]", name, strings.TrimSpace(block.ToolUseID)))
 		case "image":
 			name := strings.TrimSpace(block.Filename)
 			if name == "" {
 				name = "image"
 			}
-			parts = append(parts, fmt.Sprintf("[图片附件 %s 已省略]", name))
+			parts = append(parts, fmt.Sprintf("[Image attachment %s omitted]", name))
 		default:
 			if text := strings.TrimSpace(block.Text); text != "" {
 				parts = append(parts, text)
@@ -1745,7 +1586,7 @@ func messageSummaryLine(message db.Message, maxRunes int) string {
 	}
 	text := strings.Join(parts, " ")
 	if text == "" {
-		text = "[空消息]"
+		text = "[Empty message]"
 	}
 	return fmt.Sprintf("- %s: %s", role, truncateRunes(text, maxRunes))
 }
@@ -2509,7 +2350,7 @@ func (r *Runner) executeTool(ctx context.Context, agentID, runID string, call to
 	r.publish(Event{Type: "tool.started", AgentID: agentID, Data: toolStartedEventDataWithResolution(call, risk, executionDeviceID, runID, permission)})
 	env, err := r.toolExecutionEnv(ctx, agent, runID, r.toolOutputPublisher(agentID, runID, call))
 	if err != nil {
-		return tools.Result{}, err
+		return r.finishToolSetupFailure(ctx, agentID, runID, call, risk, executionDeviceID, permission, err)
 	}
 	started := time.Now()
 	result, err := tool.Execute(ctx, call, env)
@@ -2530,6 +2371,20 @@ func (r *Runner) executeTool(ctx context.Context, agentID, runID string, call to
 	}
 	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, status, duration, nil, permission)})
 	return result, err
+}
+
+func (r *Runner) finishToolSetupFailure(ctx context.Context, agentID, runID string, call tools.Call, risk tools.Risk, executionDeviceID string, permission toolPermissionResolution, setupErr error) (tools.Result, error) {
+	message := strings.TrimSpace(setupErr.Error())
+	if message == "" {
+		message = "tool execution environment is unavailable"
+	}
+	result := tools.Result{Output: message, IsError: true}
+	output, _ := json.Marshal(result)
+	if recordErr := r.store.UpdateToolCallResult(ctx, agentID, call.ID, output, "error", 0, message); recordErr != nil {
+		slog.Warn("finalize tool setup failure failed", "agentId", agentID, "toolUseId", call.ID, "error", recordErr)
+	}
+	r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "error", 0, nil, permission)})
+	return result, setupErr
 }
 
 func (r *Runner) toolOutputPublisher(agentID, runID string, call tools.Call) func(tools.OutputChunk) {
@@ -2563,7 +2418,7 @@ func (r *Runner) executeApprovedTool(ctx context.Context, agent db.Agent, runID 
 	gitBefore := r.captureRunToolGitBefore(ctx, agent, runID, risk)
 	env, err := r.toolExecutionEnv(ctx, agent, runID, r.toolOutputPublisher(agent.ID, runID, call))
 	if err != nil {
-		return tools.Result{}, err
+		return r.finishToolSetupFailure(ctx, agent.ID, runID, call, risk, normalizedExecutionDeviceID(agent.ExecutionDeviceID), permission, err)
 	}
 	started := time.Now()
 	result, err := tool.Execute(ctx, call, env)

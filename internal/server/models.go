@@ -36,6 +36,10 @@ type modelProviderResponse struct {
 	Available         bool                                   `json:"available"`
 	Discovered        bool                                   `json:"discovered"`
 	Configured        bool                                   `json:"configured"`
+	APIKeyConfigured  bool                                   `json:"apiKeyConfigured"`
+	APIKeyPersisted   bool                                   `json:"apiKeyPersisted"`
+	APIKeyLastFive    string                                 `json:"apiKeyLastFive,omitempty"`
+	APIKeySource      string                                 `json:"apiKeySource"`
 	APIKeyOptional    bool                                   `json:"apiKeyOptional,omitempty"`
 	GatewayEnabled    bool                                   `json:"gatewayEnabled"`
 	Enabled           bool                                   `json:"enabled"`
@@ -66,23 +70,29 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) modelProviderResponse(ctx context.Context, provider config.ProviderSummary) modelProviderResponse {
 	metadata := s.providerSettingsMetadata(provider)
+	providerConfig, _ := s.providerConfig(provider.Name)
+	keyStatus := s.providerAPIKeyStatus(ctx, providerConfig)
 	response := modelProviderResponse{
-		Name:           provider.Name,
-		Type:           provider.Type,
-		Profile:        metadata.Profile,
-		BaseURL:        provider.BaseURL,
-		DefaultModel:   provider.Model,
-		MaxTokens:      provider.MaxTokens,
-		Models:         fallbackModels(provider.Model),
-		ModelsSource:   "configured-default",
-		Configured:     s.providerConfigured(provider),
-		APIKeyOptional: provider.APIKeyOptional,
-		GatewayEnabled: provider.GatewayEnabled,
-		Enabled:        provider.Enabled,
-		Origin:         provider.Origin,
-		Capabilities:   metadata.Capabilities,
-		Management:     metadata.Management,
-		ManagementURL:  providerManagementURL(provider),
+		Name:             provider.Name,
+		Type:             provider.Type,
+		Profile:          metadata.Profile,
+		BaseURL:          provider.BaseURL,
+		DefaultModel:     provider.Model,
+		MaxTokens:        provider.MaxTokens,
+		Models:           fallbackModels(provider.Model),
+		ModelsSource:     "configured-default",
+		Configured:       s.providerConfigured(provider),
+		APIKeyConfigured: keyStatus.Configured,
+		APIKeyPersisted:  keyStatus.Persisted,
+		APIKeyLastFive:   keyStatus.LastFive,
+		APIKeySource:     keyStatus.Source,
+		APIKeyOptional:   provider.APIKeyOptional,
+		GatewayEnabled:   provider.GatewayEnabled,
+		Enabled:          provider.Enabled,
+		Origin:           provider.Origin,
+		Capabilities:     metadata.Capabilities,
+		Management:       metadata.Management,
+		ManagementURL:    providerManagementURL(provider),
 	}
 	// Disabled providers remain visible for settings cards but must not perform
 	// upstream discovery or be resolved through the runtime registry.
@@ -113,6 +123,16 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	}
 	response.Models = normalizeModelNames(models, provider.Model)
 	attachFastModelCapabilities(&response, registered)
+	// Some adapters return the configured default as a local fallback when no
+	// credential is available. Do not label that placeholder as remotely
+	// discovered; only a configured adapter's successful list is selectable as a
+	// fetched catalog entry.
+	if !response.Configured {
+		response.ModelsSource = "configured-default"
+		response.Discovered = false
+		response.Available = false
+		return response
+	}
 	response.ModelsSource = "remote"
 	response.Discovered = len(response.Models) > 0
 	response.Available = response.Configured && response.Discovered

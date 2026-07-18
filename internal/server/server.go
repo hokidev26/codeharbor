@@ -28,6 +28,7 @@ import (
 	"autoto/internal/preview"
 	"autoto/internal/providers"
 	"autoto/internal/review"
+	"autoto/internal/secrets"
 	"autoto/internal/tools"
 )
 
@@ -82,6 +83,8 @@ type Server struct {
 	remoteAccessConnectionSeq uint64
 	remoteAccessFailure       map[string]remoteAccessFailure
 	remoteAccessMu            sync.Mutex
+	authLoginFailures         map[string]authLoginFailure
+	authLoginMu               sync.Mutex
 	agentMutationLocksMu      sync.Mutex
 	agentMutationLocks        map[string]*agentMutationLock
 	legacyWarnings            *compat.Registry
@@ -89,6 +92,7 @@ type Server struct {
 	runner                    *agentpkg.Runner
 	hub                       *agentpkg.Hub
 	providers                 *providers.Registry
+	providerVault             *secrets.ProviderVault
 	codexCredentials          *codexauth.Store
 	codexCredentialsMu        sync.Mutex
 	codexOAuthMu              sync.Mutex
@@ -124,6 +128,7 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		remoteAccessSessions:    make(map[string]remoteAccessSession),
 		remoteAccessConnections: make(map[string]map[uint64]context.CancelFunc),
 		remoteAccessFailure:     make(map[string]remoteAccessFailure),
+		authLoginFailures:       make(map[string]authLoginFailure),
 		agentMutationLocks:      make(map[string]*agentMutationLock),
 		legacyWarnings: compat.NewRegistry(func(usage compat.Usage) {
 			slog.Warn(
@@ -218,6 +223,10 @@ func (s *Server) SetConfigPath(path string) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	s.configPath = path
+}
+
+func (s *Server) SetProviderVault(vault *secrets.ProviderVault) {
+	s.providerVault = vault
 }
 
 func (s *Server) SetWebhookNotifier(notifier *WebhookNotifier) {
@@ -315,6 +324,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/usage/summary", s.usageSummary)
 	r.Get("/api/usage/history", s.usageHistory)
 	r.Get("/api/navigation", s.navigation)
+	r.Get("/api/task-workspace", s.taskWorkspace)
 	r.Group(func(r chi.Router) {
 		r.Use(s.sensitiveLocalTokenGuard)
 		r.Post("/api/providers/test", s.testProviderConfigDraft)
@@ -524,6 +534,7 @@ func (s *Server) Routes() http.Handler {
 	}
 	r.Route("/api/agents", agentRoutes)
 	r.Route("/api/narrators", agentRoutes)
+	r.Post("/api/agents/{id}/spec/tasks/{taskId}/assign", s.assignSpecTask)
 	s.mountLearnedFeatureRoutes(r)
 	s.MountUpdateRoutes(r)
 	r.Get("/api/model-aggregates", s.listModelAggregates)

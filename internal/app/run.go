@@ -70,6 +70,11 @@ func Run(options Options) int {
 		logger.Error("load config", "error", err)
 		return 1
 	}
+	providerAPIKeyInputs, err := config.InspectProviderAPIKeyInputs(resolvedConfigPath, cfg)
+	if err != nil {
+		logger.Error("inspect provider credential sources", "error", err)
+		return 1
+	}
 	if !legacyReport.Empty() {
 		logger.Warn(
 			"legacy compatibility used",
@@ -85,6 +90,11 @@ func Run(options Options) int {
 		return 1
 	}
 	defer store.Close()
+	providerVault := secrets.NewProviderVault(store, cfg.Paths.HomeDir)
+	cfg, providerSecretWarnings := hydrateProviderSecrets(context.Background(), cfg, providerVault, providerAPIKeyInputs, resolvedConfigPath)
+	for _, warning := range providerSecretWarnings {
+		logger.Warn("provider credential recovery warning", "error", warning)
+	}
 	runtimeSettings, err := store.GetRuntimeSettings(context.Background())
 	if err != nil {
 		logger.Error("load runtime settings", "error", err)
@@ -174,6 +184,7 @@ func Run(options Options) int {
 	reviewService := server.NewReviewService(providerRegistry, cfg.Agent.ReviewModel)
 	runner.SetReviewService(reviewService)
 	application := server.New(cfg, store, runner, hub, providerRegistry)
+	application.SetProviderVault(providerVault)
 	application.SetToolRegistry(toolRegistry)
 	application.SetBackgroundTaskService(backgroundService)
 	application.SetAutomationManager(automationManager)
