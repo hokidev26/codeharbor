@@ -1,12 +1,11 @@
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-settings-cleanup-1";
 
 export const legacySettingsCategories = Object.freeze([
   { key: "api", label: t("settings.category.api"), items: ["providers", "shared-api", "models", "profile", "appearance"] },
   { key: "chat", label: t("settings.category.chat"), items: ["im-gateway"] },
   { key: "memory", label: t("settings.category.memory"), items: ["memory"] },
   { key: "diagnostics", label: t("settings.category.diagnostics"), items: ["runtime", "servers-system", "storage", "terminals"] },
-  { key: "network", label: t("settings.category.network"), items: ["network-search"] },
-  { key: "permissions", label: t("settings.category.permissions"), items: ["agents", "worklines-containers", "remote-access"] },
+  { key: "network", label: t("settings.category.network"), items: ["network-search", "remote-access"] },
   { key: "market", label: t("settings.category.market"), items: ["skills"] },
   { key: "logs", label: t("settings.category.logs"), items: ["notifications", "usage", "archive"] },
   { key: "about", label: t("settings.category.about"), items: ["about"] },

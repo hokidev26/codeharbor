@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,7 +30,8 @@ func NewOpenAICompatible(cfg config.OpenAICompatibleConfig) *OpenAICompatible {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.openai.com/v1"
 	}
-	return &OpenAICompatible{cfg: cfg, client: providerHTTPClient(90 * time.Second), configErr: validateProviderRuntimeConfig(cfg)}
+	client, clientErr := providerHTTPClient(cfg, 90*time.Second)
+	return &OpenAICompatible{cfg: cfg, client: client, configErr: errors.Join(validateProviderRuntimeConfig(cfg), clientErr)}
 }
 
 func (p *OpenAICompatible) Name() string { return p.cfg.Name }

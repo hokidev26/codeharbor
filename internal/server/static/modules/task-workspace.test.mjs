@@ -166,7 +166,7 @@ test("controller rejects project and agent scopes without matching context", asy
   assert.equal(controller.setScope("agent"), true);
 });
 
-test("static shell mounts the three-level task workspace in the main workbench only", async () => {
+test("static shell mounts the three-level task workspace in the main workbench", async () => {
   const [indexHTML, appMain, styles, appEntry] = await Promise.all([
     readFile(new URL("../index.html", import.meta.url), "utf8"),
     readFile(new URL("./app-main.mjs", import.meta.url), "utf8"),
@@ -174,18 +174,20 @@ test("static shell mounts the three-level task workspace in the main workbench o
     readFile(new URL("../app.js", import.meta.url), "utf8"),
   ]);
   const workbenchMarkup = indexHTML.slice(indexHTML.indexOf('id="workbenchPanel"'), indexHTML.indexOf('id="terminalPanel"'));
-  const employeeMarkup = indexHTML.slice(indexHTML.indexOf('id="employeeOverviewModal"'), indexHTML.indexOf('id="workspacePreviewPanel"'));
   const ids = [...indexHTML.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
 
   assert.match(workbenchMarkup, /id="taskWorkspaceScopes"/);
   assert.match(workbenchMarkup, /id="taskWorkspaceOverview"/);
   assert.match(workbenchMarkup, /id="projectKanbanBody" class="project-kanban-body hidden"/);
-  assert.match(employeeMarkup, /id="employeeOverviewBody"/);
-  assert.doesNotMatch(employeeMarkup, /taskWorkspaceScopes|taskWorkspaceOverview|projectKanbanBody/);
+  assert.doesNotMatch(indexHTML, /employeeOverviewModal|employeeOverviewBody/);
   assert.equal(new Set(ids).size, ids.length);
   assert.match(appMain, /createTaskWorkspaceController/);
   assert.match(appMain, /taskWorkspace\.load/);
   assert.match(styles, /\.task-workspace-scopes/);
   assert.match(styles, /\.task-workspace-inspector/);
+  const workspaceViewRule = styles.match(/\.task-workspace-view\s*\{([^}]*)\}/)?.[1] || "";
+  assert.match(workspaceViewRule, /width:\s*100%/);
+  assert.match(workspaceViewRule, /margin:\s*0/);
+  assert.doesNotMatch(workspaceViewRule, /1280px|auto/);
   assert.match(appEntry, /task-workspace-1/);
 });

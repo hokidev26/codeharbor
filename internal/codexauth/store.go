@@ -86,6 +86,13 @@ type MetadataUpdate struct {
 	Disabled *bool
 }
 
+type BatchMutationResult struct {
+	ID      string
+	Item    StoredCredential
+	Deleted bool
+	Err     error
+}
+
 type QuotaSnapshot struct {
 	PlanType             string                `json:"plan_type,omitempty"`
 	PrimaryWindow        *RateLimitWindow      `json:"primary_window,omitempty"`
@@ -349,21 +356,41 @@ func (s *Store) ExportByID(id string) (ImportDocument, error) {
 }
 
 func (s *Store) UpdateMetadata(id string, update MetadataUpdate) (StoredCredential, error) {
-	if s == nil || strings.TrimSpace(s.dir) == "" {
-		return StoredCredential{}, errors.New("Codex 本地凭据库路径未配置")
+	results, err := s.BatchUpdateMetadata([]string{id}, update)
+	if err != nil {
+		return StoredCredential{}, err
 	}
-	id = strings.TrimSpace(id)
-	if id == "" {
+	if len(results) != 1 {
 		return StoredCredential{}, os.ErrNotExist
+	}
+	return results[0].Item, results[0].Err
+}
+
+// BatchUpdateMetadata holds the store lock once and loads the credential
+// directory once. Each credential is still persisted independently; callers
+// must not treat the returned results as a cross-file transaction.
+func (s *Store) BatchUpdateMetadata(ids []string, update MetadataUpdate) ([]BatchMutationResult, error) {
+	if s == nil || strings.TrimSpace(s.dir) == "" {
+		return nil, errors.New("Codex 本地凭据库路径未配置")
 	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	items, err := s.loadLocked()
 	if err != nil {
-		return StoredCredential{}, err
+		return nil, err
 	}
+	byID := make(map[string]StoredCredential, len(items))
 	for _, item := range items {
-		if item.Credential.ID != id {
+		byID[item.Credential.ID] = item
+	}
+	results := make([]BatchMutationResult, 0, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		result := BatchMutationResult{ID: id}
+		item, ok := byID[id]
+		if id == "" || !ok {
+			result.Err = os.ErrNotExist
+			results = append(results, result)
 			continue
 		}
 		if update.Alias != nil {
@@ -376,14 +403,20 @@ func (s *Store) UpdateMetadata(id string, update MetadataUpdate) (StoredCredenti
 			item.Credential.Disabled = *update.Disabled
 		}
 		if err := validateCredential(item.Credential); err != nil {
-			return StoredCredential{}, err
+			result.Err = err
+			results = append(results, result)
+			continue
 		}
 		if err := s.writeCredentialLocked(item.Filename, item.Credential); err != nil {
-			return StoredCredential{}, err
+			result.Err = err
+			results = append(results, result)
+			continue
 		}
-		return item, nil
+		result.Item = item
+		byID[id] = item
+		results = append(results, result)
 	}
-	return StoredCredential{}, os.ErrNotExist
+	return results, nil
 }
 
 func (s *Store) Disable(id string) error {
@@ -393,41 +426,81 @@ func (s *Store) Disable(id string) error {
 }
 
 func (s *Store) Delete(id string) error {
-	if s == nil || strings.TrimSpace(s.dir) == "" {
-		return errors.New("Codex 本地凭据库路径未配置")
+	results, err := s.BatchDelete([]string{id})
+	if err != nil {
+		return err
 	}
-	id = strings.TrimSpace(id)
-	if id == "" {
+	if len(results) != 1 {
 		return os.ErrNotExist
+	}
+	return results[0].Err
+}
+
+// BatchDelete holds the store lock once and loads the credential directory
+// once. Files are removed independently and the directory is synced once after
+// all removals; this is not atomic with external database cleanup.
+func (s *Store) BatchDelete(ids []string) ([]BatchMutationResult, error) {
+	if s == nil || strings.TrimSpace(s.dir) == "" {
+		return nil, errors.New("Codex 本地凭据库路径未配置")
 	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	items, err := s.loadLocked()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	byID := make(map[string]StoredCredential, len(items))
 	for _, item := range items {
-		if item.Credential.ID != id {
+		byID[item.Credential.ID] = item
+	}
+	results := make([]BatchMutationResult, 0, len(ids))
+	removedIndexes := make([]int, 0, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		result := BatchMutationResult{ID: id}
+		item, ok := byID[id]
+		if id == "" || !ok {
+			result.Err = os.ErrNotExist
+			results = append(results, result)
 			continue
 		}
 		filename, err := safeCredentialFilename(item.Filename)
 		if err != nil {
-			return err
+			result.Err = err
+			results = append(results, result)
+			continue
 		}
 		path := filepath.Join(s.dir, filename)
 		info, err := os.Lstat(path)
 		if err != nil {
-			return err
+			result.Err = err
+			results = append(results, result)
+			continue
 		}
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("Codex 凭据目标路径不安全")
+			result.Err = errors.New("Codex 凭据目标路径不安全")
+			results = append(results, result)
+			continue
 		}
 		if err := os.Remove(path); err != nil {
-			return errors.New("删除 Codex 凭据失败")
+			result.Err = errors.New("删除 Codex 凭据失败")
+			results = append(results, result)
+			continue
 		}
-		return syncDirectory(s.dir)
+		result.Item = item
+		result.Deleted = true
+		delete(byID, id)
+		removedIndexes = append(removedIndexes, len(results))
+		results = append(results, result)
 	}
-	return os.ErrNotExist
+	if len(removedIndexes) > 0 {
+		if err := syncDirectory(s.dir); err != nil {
+			for _, index := range removedIndexes {
+				results[index].Err = err
+			}
+		}
+	}
+	return results, nil
 }
 
 func (s *Store) loadLocked() ([]StoredCredential, error) {
@@ -651,6 +724,11 @@ func newCredentialID() (string, error) {
 		return "", err
 	}
 	return "codex_" + base64.RawURLEncoding.EncodeToString(random[:]), nil
+}
+
+// ValidCredentialID reports whether value is a canonical opaque Codex account ID.
+func ValidCredentialID(value string) bool {
+	return validCredentialID(strings.TrimSpace(value))
 }
 
 func validCredentialID(value string) bool {

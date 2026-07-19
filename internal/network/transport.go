@@ -267,7 +267,7 @@ func directDialContext(policy Policy, cfg options) DialContextFunc {
 }
 
 func resolveAllowed(ctx context.Context, policy Policy, host string, cfg options) ([]net.IPAddr, error) {
-	if policy != PolicyPublicDirect && policy != PolicyPrivateLANDirect && policy != PolicyProviderDirect {
+	if policy != PolicyPublicDirect && policy != PolicyPrivateLANDirect && policy != PolicyProviderDirect && policy != PolicyProviderProxy {
 		return nil, ErrInvalidPolicy
 	}
 	if host == "" || host != strings.TrimSpace(host) || strings.ContainsAny(host, "\x00\r\n") {
@@ -332,6 +332,9 @@ func resolveAllowed(ctx context.Context, policy Policy, host string, cfg options
 	if policy == PolicyProviderDirect && !allProviderAddressesAllowed(validated) {
 		return nil, ErrDestinationDenied
 	}
+	if policy == PolicyProviderProxy && !allProviderProxyAddressesAllowed(validated) {
+		return nil, ErrDestinationDenied
+	}
 	return validated, nil
 }
 
@@ -355,6 +358,8 @@ func addressAllowed(policy Policy, addr netip.Addr) bool {
 		return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 	case PolicyProviderDirect:
 		return addr.IsLoopback() || addressAllowed(PolicyPublicDirect, addr)
+	case PolicyProviderProxy:
+		return addressAllowed(PolicyPublicDirect, addr) || addressAllowed(PolicyPrivateLANDirect, addr)
 	default:
 		return false
 	}
@@ -388,6 +393,24 @@ func allProviderAddressesAllowed(addresses []net.IPAddr) bool {
 		}
 	}
 	return true
+}
+
+func allProviderProxyAddressesAllowed(addresses []net.IPAddr) bool {
+	if len(addresses) == 0 {
+		return false
+	}
+	allPublic := true
+	allPrivate := true
+	for _, resolved := range addresses {
+		addr, ok := netip.AddrFromSlice(resolved.IP)
+		if !ok {
+			return false
+		}
+		addr = addr.Unmap()
+		allPublic = allPublic && addressAllowed(PolicyPublicDirect, addr)
+		allPrivate = allPrivate && addressAllowed(PolicyPrivateLANDirect, addr)
+	}
+	return allPublic || allPrivate
 }
 
 func isLocalHostname(host string) bool {

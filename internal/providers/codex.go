@@ -61,14 +61,36 @@ func NewCodexProvider(cfg config.ProviderConfig) *CodexProvider {
 	if configuredEndpoint, err := codexRefreshEndpointForConfig(cfg); err == nil {
 		refreshEndpoint = configuredEndpoint
 	}
+	endpointErr := ValidateCodexProviderConfig(cfg)
+	client, clientErr := providerHTTPClient(cfg, 5*time.Minute)
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	client.CheckRedirect = codexRedirectPolicy
+	refreshConfig := cfg
+	// Custom API headers are scoped to the configured Codex API origin and must
+	// never be forwarded to the separate OAuth token endpoint.
+	refreshConfig.RequestHeaders = nil
+	refreshClient, refreshClientErr := providerHTTPClient(refreshConfig, 5*time.Minute)
+	if refreshClient == nil {
+		refreshClient = &http.Client{Timeout: 5 * time.Minute}
+	}
+	refreshClient.CheckRedirect = codexRefreshRedirectPolicy
+	if endpointErr == nil {
+		if clientErr != nil {
+			endpointErr = clientErr
+		} else if refreshClientErr != nil {
+			endpointErr = refreshClientErr
+		}
+	}
 	return &CodexProvider{
 		cfg:               cfg,
 		store:             codexauth.NewStore(cfg.CredentialStorePath),
-		client:            &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRedirectPolicy},
-		refreshClient:     &http.Client{Timeout: 5 * time.Minute, CheckRedirect: codexRefreshRedirectPolicy},
+		client:            client,
+		refreshClient:     refreshClient,
 		refreshEndpoint:   refreshEndpoint,
 		clock:             time.Now,
-		endpointErr:       ValidateCodexProviderConfig(cfg),
+		endpointErr:       endpointErr,
 		refreshGate:       make(chan struct{}, 1),
 		modelCapabilities: fallbackCodexModelCapabilities(cfg.BaseURL),
 	}

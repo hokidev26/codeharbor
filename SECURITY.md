@@ -76,7 +76,7 @@ The removal schedule and gates are defined only in `PROJECT_PLAN.md`: no runtime
 
 ## Remote tunnel checklist
 
-Do not expose a raw `localhost:7788` URL to the public Internet without an authentication layer.
+Do not expose a raw `localhost:16888` URL to the public Internet without an authentication layer.
 
 Recommended personal setup:
 

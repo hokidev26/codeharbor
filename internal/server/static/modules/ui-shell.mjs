@@ -90,6 +90,8 @@ export function createUIShellController({
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
   openModelSettings = () => {},
+  compactContext = () => {},
+  getContextStatus = () => ({}),
   renderProjects,
   resizeTerminal,
   showError,
@@ -392,7 +394,7 @@ export function createUIShellController({
         document.body.style.overflow = bodyOverflow;
       } else {
         menu.classList.add("hidden");
-        menu.classList.remove("composer-permission-popover");
+        menu.classList.remove("composer-permission-popover", "composer-model-popover");
         menu.replaceChildren();
       }
       binding.trigger.setAttribute("aria-expanded", "false");
@@ -493,7 +495,7 @@ export function createUIShellController({
       label.textContent = translate("chat.permissionGuard");
       const state = document.createElement("span");
       state.className = "composer-permission-safety-state";
-      state.textContent = translate("workspaceSettings.enabled");
+      state.textContent = translate("common.enabled");
       status.append(icon, label, state);
       menu.append(divider, status);
     };
@@ -526,10 +528,11 @@ export function createUIShellController({
       menu.style.bottom = `${Math.max(8, (globalThis.innerHeight || document.documentElement.clientHeight) - rect.top + 6)}px`;
     };
 
-    const createMobileAction = (title, detail, handler) => {
+    const createMobileAction = (title, detail, handler, { disabled = false } = {}) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "mobile-model-sheet-action";
+      button.disabled = disabled;
       const copy = document.createElement("span");
       copy.className = "mobile-model-sheet-action-copy";
       const titleNode = document.createElement("span");
@@ -549,6 +552,70 @@ export function createUIShellController({
       button.append(copy, chevron);
       button.addEventListener("click", handler);
       return button;
+    };
+
+    const contextActionSpec = () => {
+      const status = getContextStatus?.() || {};
+      const prunedPercent = Math.max(0, Math.min(100, Number(status.prunedPercent) || 0));
+      const canCompact = Boolean(status.canCompact) && String(state?.agent?.status || "") !== "running";
+      return {
+        disabled: !canCompact,
+        detail: canCompact
+          ? (status.hasSummary ? translate("chat.contextCompactedDetail", { percent: prunedPercent }) : translate("chat.contextCompactReady"))
+          : translate("chat.contextCompactUnavailable"),
+      };
+    };
+
+    const createDesktopAction = (title, detail, handler, { disabled = false } = {}) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "composer-model-menu-action";
+      button.disabled = disabled;
+      const copy = document.createElement("span");
+      copy.className = "composer-model-menu-action-copy";
+      const titleNode = document.createElement("span");
+      titleNode.className = "composer-model-menu-action-title";
+      titleNode.textContent = title;
+      copy.appendChild(titleNode);
+      if (detail) {
+        const detailNode = document.createElement("span");
+        detailNode.className = "composer-model-menu-action-detail";
+        detailNode.textContent = detail;
+        copy.appendChild(detailNode);
+      }
+      const chevron = document.createElement("span");
+      chevron.className = "composer-model-menu-action-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.textContent = "›";
+      button.append(copy, chevron);
+      button.addEventListener("click", handler);
+      return button;
+    };
+
+    const appendDesktopModelActions = (binding) => {
+      const divider = document.createElement("div");
+      divider.className = "composer-model-menu-divider";
+      divider.setAttribute("aria-hidden", "true");
+      menu.appendChild(divider);
+      const reasoningBinding = bindings.find(({ select }) => select.id === "reasoningEffort");
+      if (reasoningBinding) {
+        const currentReasoning = reasoningBinding.select.selectedOptions?.[0]
+          || reasoningBinding.select.options?.[reasoningBinding.select.selectedIndex];
+        const reasoningText = currentReasoning?.textContent?.trim() || currentReasoning?.value || "";
+        menu.appendChild(createDesktopAction(translate("chat.reasoningEffort"), reasoningText, () => {
+          close();
+          open(reasoningBinding);
+        }));
+      }
+      const compactSpec = contextActionSpec();
+      menu.appendChild(createDesktopAction(translate("chat.compactContext"), compactSpec.detail, () => {
+        close({ focus: true });
+        Promise.resolve(compactContext()).catch(showError);
+      }, compactSpec));
+      menu.appendChild(createDesktopAction(translate("chat.manageModels"), "", () => {
+        close({ focus: true });
+        openModelSettings();
+      }));
     };
 
     const openMobile = (binding, { returnFocus = binding.trigger } = {}) => {
@@ -580,6 +647,11 @@ export function createUIShellController({
             openMobile(reasoningBinding, { returnFocus: focusTarget });
           }));
         }
+        const compactSpec = contextActionSpec();
+        actions.appendChild(createMobileAction(translate("chat.compactContext"), compactSpec.detail, () => {
+          close({ focus: true });
+          Promise.resolve(compactContext()).catch(showError);
+        }, compactSpec));
         actions.appendChild(createMobileAction(translate("chat.manageModels"), "", () => {
           close({ focus: true });
           openModelSettings();
@@ -609,7 +681,9 @@ export function createUIShellController({
       }
       active = { binding, mobile: false, returnFocus: binding.trigger };
       const isPermissionMenu = binding.select.id === "permissionMode";
+      const isModelMenu = binding.select.id === "modelSelect";
       menu.classList.toggle("composer-permission-popover", isPermissionMenu);
+      menu.classList.toggle("composer-model-popover", isModelMenu);
       const heading = document.createElement("div");
       heading.className = "composer-select-popover-title";
       heading.textContent = binding.label?.textContent?.trim() || binding.select.title || "";
@@ -620,6 +694,7 @@ export function createUIShellController({
         [...binding.select.options]
           .filter((option) => !option.hidden)
           .forEach((option) => menu.appendChild(createOptionButton(binding, option)));
+        if (isModelMenu) appendDesktopModelActions(binding);
       }
       menu.classList.remove("hidden");
       positionMenu(binding.trigger);
@@ -760,10 +835,41 @@ export function createUIShellController({
       apply(nextWidth, { save: true });
       event.preventDefault();
     };
+    const wheelTargetCanScroll = (node, event) => {
+      if (!node || node.classList?.contains?.("hidden")) return false;
+      const lineScale = event.deltaMode === 1 ? 16 : 1;
+      const pageScale = event.deltaMode === 2 ? Math.max(1, Number(node.clientHeight) || 1) : 1;
+      const deltaX = (Number(event.deltaX) || 0) * lineScale * pageScale;
+      const deltaY = (Number(event.deltaY) || 0) * lineScale * pageScale;
+      const maxLeft = Math.max(0, (Number(node.scrollWidth) || 0) - (Number(node.clientWidth) || 0));
+      const maxTop = Math.max(0, (Number(node.scrollHeight) || 0) - (Number(node.clientHeight) || 0));
+      const currentLeft = Number(node.scrollLeft) || 0;
+      const currentTop = Number(node.scrollTop) || 0;
+      const canScrollX = deltaX < 0 ? currentLeft > 0 : deltaX > 0 && currentLeft < maxLeft;
+      const canScrollY = deltaY < 0 ? currentTop > 0 : deltaY > 0 && currentTop < maxTop;
+      if (!canScrollX && !canScrollY) return false;
+      if (canScrollX) node.scrollLeft = Math.min(maxLeft, Math.max(0, currentLeft + deltaX));
+      if (canScrollY) node.scrollTop = Math.min(maxTop, Math.max(0, currentTop + deltaY));
+      return true;
+    };
+    const handleWheel = (event) => {
+      if (!desktopLayout() || dragging) return;
+      const bounds = separator.getBoundingClientRect?.();
+      const separatorCenter = (Number(bounds?.left) || 0) + (Number(bounds?.width) || 0) / 2;
+      const sidebarSide = Number(event.clientX) < separatorCenter;
+      const candidates = sidebarSide
+        ? [$("projects"), document.querySelector?.(".agent-list-section")]
+        : document.body.classList.contains("workbench-mode")
+          ? [$("taskWorkspaceOverview"), $("projectKanbanBody")]
+          : [$("messages")];
+      if (!candidates.some((node) => wheelTargetCanScroll(node, event))) return;
+      event.preventDefault();
+    };
     const resetWidth = () => apply(defaultSidebarWidth, { save: true });
 
     separator.addEventListener("pointerdown", handlePointerDown);
     separator.addEventListener("keydown", handleKeyDown);
+    separator.addEventListener("wheel", handleWheel, { passive: false });
     separator.addEventListener("dblclick", resetWidth);
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", finishDrag);
@@ -773,6 +879,7 @@ export function createUIShellController({
       finishDrag();
       separator.removeEventListener("pointerdown", handlePointerDown);
       separator.removeEventListener("keydown", handleKeyDown);
+      separator.removeEventListener("wheel", handleWheel);
       separator.removeEventListener("dblclick", resetWidth);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", finishDrag);

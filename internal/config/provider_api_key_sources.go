@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -89,6 +90,97 @@ func InspectProviderAPIKeyInputs(path string, cfg Config) (map[string]ProviderAP
 		inputs[name] = ProviderAPIKeyInput{Source: ProviderAPIKeySourceLegacyConfig, APIKey: key, LegacyConfigPresent: true}
 	}
 	return inputs, nil
+}
+
+// ProviderTransportSecretInput contains legacy plaintext transport values found
+// in raw config.json. Callers must move these values into ProviderVault before
+// rewriting the config; this type is runtime-only and is never serialized.
+type ProviderTransportSecretInput struct {
+	ProxyUsername               string
+	ProxyPassword               string
+	RequestHeaders              []ProviderRequestHeader
+	LegacyProxyAuthPresent      bool
+	LegacyRequestHeadersPresent bool
+}
+
+func (input ProviderTransportSecretInput) LegacyPresent() bool {
+	return input.LegacyProxyAuthPresent || input.LegacyRequestHeadersPresent
+}
+
+// InspectProviderTransportSecretInputs recovers legacy proxy userinfo and
+// request-header values directly from raw config.json so startup can migrate
+// them into the encrypted Provider vault before the config is scrubbed.
+func InspectProviderTransportSecretInputs(path string) (map[string]ProviderTransportSecretInput, error) {
+	resolved, err := ResolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if len(data) == 0 {
+		data = []byte(`{}`)
+	}
+	var raw struct {
+		Providers struct {
+			Instances        []rawProviderTransport `json:"instances"`
+			OpenAICompatible *rawProviderTransport  `json:"openaiCompatible"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("inspect provider transport secret sources: %w", err)
+	}
+	inputs := make(map[string]ProviderTransportSecretInput)
+	for _, provider := range raw.Providers.Instances {
+		if name, input := rawProviderTransportValue(provider); name != "" && input.LegacyPresent() {
+			inputs[name] = input
+		}
+	}
+	if legacy := raw.Providers.OpenAICompatible; legacy != nil {
+		name, input := rawProviderTransportValue(*legacy)
+		if name == "" {
+			name = "openai-compatible"
+		}
+		if input.LegacyPresent() {
+			inputs[name] = input
+		}
+	}
+	return inputs, nil
+}
+
+type rawProviderTransport struct {
+	Name           string                     `json:"name"`
+	ProxyURL       string                     `json:"proxyUrl"`
+	RequestHeaders []rawProviderRequestHeader `json:"requestHeaders"`
+}
+
+type rawProviderRequestHeader struct {
+	Name  string          `json:"name"`
+	Value json.RawMessage `json:"value"`
+}
+
+func rawProviderTransportValue(provider rawProviderTransport) (string, ProviderTransportSecretInput) {
+	name := strings.TrimSpace(provider.Name)
+	input := ProviderTransportSecretInput{}
+	if parsed, err := url.Parse(strings.TrimSpace(provider.ProxyURL)); err == nil && parsed.User != nil {
+		input.ProxyUsername = parsed.User.Username()
+		input.ProxyPassword, _ = parsed.User.Password()
+		input.LegacyProxyAuthPresent = input.ProxyUsername != "" || input.ProxyPassword != ""
+	}
+	for _, header := range provider.RequestHeaders {
+		headerName := strings.TrimSpace(header.Name)
+		if headerName == "" || len(header.Value) == 0 || string(header.Value) == "null" {
+			continue
+		}
+		var value string
+		if json.Unmarshal(header.Value, &value) != nil || value == "" {
+			continue
+		}
+		input.RequestHeaders = append(input.RequestHeaders, ProviderRequestHeader{Name: headerName, Value: value})
+	}
+	input.LegacyRequestHeadersPresent = len(input.RequestHeaders) > 0
+	return name, input
 }
 
 type rawProviderAPIKey struct {

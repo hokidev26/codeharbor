@@ -371,3 +371,52 @@ func TestStoreImportDeduplicatesAndUpdatesSameAccount(t *testing.T) {
 		t.Fatalf("credential was not updated in place: %+v", items)
 	}
 }
+
+func TestStoreBatchMetadataAndDeleteReturnPerIDResults(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "codex"))
+	_, err := store.Import([]ImportDocument{
+		{Filename: "one.json", Content: []byte(`{"type":"codex","access_token":"batch-secret-one","account_id":"batch-account-one"}`)},
+		{Filename: "two.json", Content: []byte(`{"type":"codex","access_token":"batch-secret-two","account_id":"batch-account-two"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Load()
+	if err != nil || len(items) != 2 {
+		t.Fatalf("load failed: items=%+v err=%v", items, err)
+	}
+	missingID := "codex_MDEyMzQ1Njc4OWFiY2RlZg"
+	priority := 23
+	disabled := true
+	updates, err := store.BatchUpdateMetadata(
+		[]string{items[0].Credential.ID, missingID, items[1].Credential.ID},
+		MetadataUpdate{Priority: &priority, Disabled: &disabled},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 3 || updates[0].Err != nil || !os.IsNotExist(updates[1].Err) || updates[2].Err != nil {
+		t.Fatalf("unexpected metadata results: %+v", updates)
+	}
+	for _, index := range []int{0, 2} {
+		if updates[index].Item.Credential.Priority != priority || !updates[index].Item.Credential.Disabled {
+			t.Fatalf("metadata not returned for result %d: %+v", index, updates[index])
+		}
+		stored, err := store.GetByID(updates[index].ID)
+		if err != nil || stored.Credential.Priority != priority || !stored.Credential.Disabled {
+			t.Fatalf("metadata not persisted for %s: %+v err=%v", updates[index].ID, stored, err)
+		}
+	}
+
+	deletes, err := store.BatchDelete([]string{items[0].Credential.ID, missingID, items[1].Credential.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deletes) != 3 || !deletes[0].Deleted || deletes[0].Err != nil || !os.IsNotExist(deletes[1].Err) || !deletes[2].Deleted || deletes[2].Err != nil {
+		t.Fatalf("unexpected delete results: %+v", deletes)
+	}
+	remaining, err := store.Load()
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("batch delete retained credentials: %+v err=%v", remaining, err)
+	}
+}

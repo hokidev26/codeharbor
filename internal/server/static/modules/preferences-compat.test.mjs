@@ -11,8 +11,10 @@ import {
   defaultRegionalPrefs,
   defaultSearchPrefs,
   legacyLocalPreferenceBackupKind,
+  localPreferenceBackupKeys,
   localPreferenceBackupKind,
   localPreferenceBackupVersion,
+  localPreferenceKeys,
   modelVisibilityPrefsKey,
   normalizeImportedRegionalPreferences,
   normalizePrimaryModePreference,
@@ -101,9 +103,13 @@ function createController(state = {}, options = {}) {
     normalizePromptHistory: (value) => value,
     normalizeRecentDirectories: (value) => value,
     normalizeTerminalPreferences: (value) => value,
-    relayProtocolSpec: (key) => ({ key: key || "completions" }),
   });
 }
+
+test("legacy relay protocol preference stays outside writable migration and backup sets", () => {
+  assert.equal(localPreferenceKeys.includes("autoto.relayProtocol"), false);
+  assert.equal(localPreferenceBackupKeys.some((entry) => entry.key === "autoto.relayProtocol"), false);
+});
 
 test("settings lazily migrates legacy CodeHarbor preferences without deleting them", () => {
   const legacyKey = "codeharbor.profile";
@@ -293,8 +299,11 @@ test("primary mode rejects invalid values as conversation", () => {
     const controller = createController({}, { applyPrimaryMode: (mode) => appliedModes.push(mode) });
 
     assert.equal(normalizePrimaryModePreference("workbench"), "workbench");
+    assert.equal(normalizePrimaryModePreference("schedules"), "schedules");
     assert.equal(normalizePrimaryModePreference("CONVERSATION"), defaultPrimaryModePreference);
     assert.equal(controller.loadPrimaryModePreference(), defaultPrimaryModePreference);
+    assert.equal(controller.setPrimaryModePreference("schedules"), "schedules");
+    assert.equal(storage.getItem(primaryModePrefsKey), "schedules");
     assert.equal(controller.setPrimaryModePreference("invalid"), defaultPrimaryModePreference);
     assert.equal(storage.getItem(primaryModePrefsKey), defaultPrimaryModePreference);
     assert.equal(appliedModes.at(-1), defaultPrimaryModePreference);

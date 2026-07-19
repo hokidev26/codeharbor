@@ -39,28 +39,36 @@
       root.lang = locale === "zh-TW" ? "zh-Hant-TW" : locale === "zh-CN" ? "zh-Hans-CN" : "en";
       root.dataset.uiLocale = locale;
     }
-    const messages = {
-      "zh-CN": {
-        title: "正在加载项目",
-        description: "Autoto 正在准备工作线和 AI 代理。",
-      },
-      "zh-TW": {
-        title: "正在載入專案",
-        description: "Autoto 正在準備工作線和 AI 代理。",
-      },
-      en: {
-        title: "Loading project",
-        description: "Autoto is preparing worklines and AI agents.",
-      },
+    const title = {
+      "zh-CN": "正在加载项目",
+      "zh-TW": "正在載入專案",
+      en: "Loading project",
     }[locale];
-    const title = globalThis.document?.querySelector?.('[data-i18n="workspace.main.loadingProjectTitle"]');
-    const description = globalThis.document?.querySelector?.('[data-i18n="workspace.main.loadingProjectDescription"]');
-    if (title) title.textContent = messages.title;
-    if (description) description.textContent = messages.description;
+    const labels = globalThis.document?.querySelectorAll?.('[data-i18n="workspace.main.loadingProjectTitle"]') || [];
+    labels.forEach((label) => { label.textContent = title; });
     return locale;
   };
 
   const activeBootLocale = applyBootLocale();
+  const appReadyEventName = "autoto:app-ready";
+
+  const waitForAppReady = ({ timeout = 12000 } = {}) => {
+    if (globalThis.document?.documentElement?.dataset?.autotoAppReady === "true") return Promise.resolve();
+    if (typeof globalThis.addEventListener !== "function") return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = 0;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        globalThis.removeEventListener?.(appReadyEventName, finish);
+        if (timer) globalThis.clearTimeout?.(timer);
+        resolve();
+      };
+      globalThis.addEventListener(appReadyEventName, finish, { once: true });
+      timer = globalThis.setTimeout?.(finish, timeout) || 0;
+    });
+  };
 
   const showBootError = (error) => {
     console.error("Failed to load Autoto frontend", error);
@@ -84,5 +92,24 @@
     }
   };
 
-  import("./modules/app-main.mjs?v=legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-static-2-conversation-fig2-1-scroll-skills-1-market-layout-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-2-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-1-codex-import-open-1-terminal-actions-compact-1-users-panel-removed-1-remote-control-full-2-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-provider-secrets-1-model-picker-1-navigation-state-2-agent-admin-removed-1-archive-1-switch-fix-3-hide-run-loading-1-provider-full-page-2-provider-placeholders-1-settings-icons-1-mobile-viewport-1-i18n-shared-1-root-shortcut-removed-1-hidden-toggle-removed-1-project-context-1").catch(showBootError);
+  const revealLocalizedUI = () => {
+    globalThis.document?.documentElement?.removeAttribute("data-ui-locale-pending");
+  };
+
+  const bootstrap = async () => {
+    try {
+      const { setUILocale } = await import("./modules/i18n.mjs");
+      setUILocale(activeBootLocale);
+      const appReady = waitForAppReady();
+      await import("./modules/app-main.mjs?v=legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-static-2-conversation-fig2-1-scroll-skills-1-market-layout-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-2-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-1-codex-import-open-1-terminal-actions-compact-2-users-panel-removed-1-remote-control-full-2-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-provider-secrets-1-model-picker-1-navigation-state-2-agent-admin-removed-1-archive-1-switch-fix-3-hide-run-loading-1-provider-full-page-2-provider-placeholders-1-settings-icons-1-mobile-viewport-1-i18n-shared-1-root-shortcut-removed-1-hidden-toggle-removed-1-project-context-1-mobile-settings-compact-1-boot-ready-transition-1-contextual-create-1-navigation-split-1-sidebar-wheel-1-subagent-cards-1-settings-nav-flat-1-codex-usage-clean-1-shared-api-compact-1-model-sections-hidden-1-nav-schedules-1-settings-cleanup-1-mobile-no-home-1-mobile-title-1-schedule-workspace-1");
+      await appReady;
+      // Reveal only after data and persisted layout values are ready behind the loading layer.
+      revealLocalizedUI();
+    } catch (error) {
+      revealLocalizedUI();
+      showBootError(error);
+    }
+  };
+
+  bootstrap();
 })();

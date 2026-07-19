@@ -6,9 +6,13 @@ import {
   chatMessagePresentation,
   createChatRenderingController,
   formatTurnUsagePerformance,
+  isAgentToolActivity,
   normalizeAgentPlan,
+  normalizeAgentTaskActivity,
   normalizeToolActivity,
   normalizeTurnUsage,
+  renderAgentTaskActivityCardHTML,
+  renderToolActivityCardHTML,
   renderToolActivityStackHTML,
   renderToolDiffHTML,
 } from "./chat-rendering.mjs";
@@ -30,7 +34,7 @@ function fakeMessagesElement() {
   };
 }
 
-function renderSnapshot(messages, stateOverrides = {}, applyOptions = {}) {
+function renderSnapshot(messages, stateOverrides = {}, applyOptions = {}, controllerOptions = {}) {
   const messagesElement = fakeMessagesElement();
   const previousDocument = globalThis.document;
   globalThis.document = {
@@ -68,6 +72,7 @@ function renderSnapshot(messages, stateOverrides = {}, applyOptions = {}) {
       shortPath: (value) => value,
       showError: () => {},
       showToast: () => {},
+      ...controllerOptions,
     });
     assert.equal(controller.applyMessageSnapshot(messages, "agent-1", applyOptions), true);
     return { html: messagesElement.innerHTML, state };
@@ -549,6 +554,39 @@ test("tool activity renders every supported tool as an auditable process without
   assert.doesNotMatch(html, /思维链已加密|chain of thought encrypted/i);
 });
 
+test("completed tool activity collapses while active or attention-needed work stays expanded", () => {
+  const completedTools = [
+    { toolUseId: "grep-done", toolName: "Grep", status: "completed", inputJson: { pattern: "TODO" } },
+    { toolUseId: "read-done", toolName: "Read", status: "completed", inputJson: { file_path: "src/main.mjs" } },
+  ];
+  const completed = renderToolActivityStackHTML(completedTools);
+  assert.match(completed, /data-tool-activity-default="collapsed"/);
+  assert.match(completed, /<details class="tool-activity-group">/);
+  assert.doesNotMatch(completed, /<details class="tool-activity-group" open>/);
+
+  const running = renderToolActivityStackHTML([
+    ...completedTools,
+    { toolUseId: "bash-running", toolName: "Bash", status: "running", inputJson: { command: "node --test" } },
+  ]);
+  assert.match(running, /data-tool-activity-default="expanded"/);
+  assert.match(running, /<details class="tool-activity-group" open>/);
+
+  const liveActive = renderToolActivityStackHTML(completedTools, { live: true, runActive: true });
+  assert.match(liveActive, /<details class="tool-activity-group" open>/);
+  const liveFinished = renderToolActivityStackHTML(completedTools, { live: true, runActive: false });
+  assert.doesNotMatch(liveFinished, /<details class="tool-activity-group" open>/);
+
+  const agentTool = { toolUseId: "agent-task", toolName: "Agent", status: "completed", inputJson: { description: "Inspect auth" } };
+  const activeSubagent = renderToolActivityStackHTML([agentTool], {
+    resolveBackgroundTask: () => ({ id: "task-running", status: "running" }),
+  });
+  assert.match(activeSubagent, /<details class="tool-activity-group" open>/);
+  const completedSubagent = renderToolActivityStackHTML([agentTool], {
+    resolveBackgroundTask: () => ({ id: "task-done", status: "succeeded" }),
+  });
+  assert.doesNotMatch(completedSubagent, /<details class="tool-activity-group" open>/);
+});
+
 test("tool activity escapes dangerous data and bounds command and output rendering", () => {
   const hostile = `<img src=x onerror="boom">`;
   const html = renderToolActivityStackHTML([{
@@ -952,4 +990,230 @@ test("run review uses complete tool calls and falls back to summary calls when d
   } finally {
     globalThis.document = previousDocument;
   }
+});
+
+test("Agent tool activity recognition is exact after case and whitespace normalization", () => {
+  for (const value of [
+    { toolName: "Agent" },
+    { tool_name: "agent" },
+    { name: "  AGENT  " },
+    { data: { toolName: "AgEnT" } },
+  ]) assert.equal(isAgentToolActivity(value), true);
+
+  for (const value of [
+    { toolName: "Subagent" },
+    { toolName: "AgentTask" },
+    { toolName: "my-agent" },
+    { name: "DynamicAgentHelper" },
+    { toolName: "" },
+  ]) assert.equal(isAgentToolActivity(value), false);
+});
+
+test("Agent task normalization keeps dispatch separate from child completion and exposes only safe compact fields", () => {
+  const prompt = "secret full prompt that belongs only in audit details";
+  const tool = {
+    toolUseId: "agent-dispatch",
+    runId: "parent-run-dispatch",
+    toolName: "Agent",
+    status: "completed",
+    inputJson: {
+      prompt,
+      description: "Review the auth boundary",
+      subagent_type: "reviewer",
+      model: "requested-model",
+      acceptance_criteria: ["one", "two"],
+    },
+  };
+  const normalized = normalizeAgentTaskActivity(tool);
+  assert.equal(normalized.status, "dispatched");
+  assert.equal(normalized.toolDispatched, true);
+  assert.equal(normalized.description, "Review the auth boundary");
+  assert.equal(normalized.role, "reviewer");
+  assert.equal(normalized.requestedModel, "requested-model");
+  assert.equal(normalized.acceptanceCount, 2);
+
+  const html = renderAgentTaskActivityCardHTML(tool);
+  const compact = html.slice(0, html.indexOf("subagent-task-audit"));
+  assert.match(html, /data-subagent-card/);
+  assert.match(html, /data-subagent-status="dispatched"/);
+  assert.match(html, /data-run-id="parent-run-dispatch"/);
+  assert.match(html, /role="status" aria-live="polite"/);
+  assert.match(html, /status-running/);
+  assert.doesNotMatch(html, /status-completed/);
+  assert.doesNotMatch(compact, new RegExp(prompt));
+  assert.match(html.slice(html.indexOf("subagent-task-audit")), new RegExp(prompt));
+
+  const automaticModel = renderAgentTaskActivityCardHTML({
+    toolUseId: "agent-auto-model",
+    toolName: "Agent",
+    status: "completed",
+    inputJson: { prompt: "audit", description: "Auto model" },
+  }, { id: "task-auto-model", status: "succeeded", durationMs: 1500 });
+  assert.match(automaticModel, /1\.5 s/);
+  assert.match(automaticModel, /自动|自動|Auto|subagent\.modelAuto/i);
+});
+
+test("Agent task card expansion follows the background task status only", () => {
+  const tool = { toolUseId: "agent-status", toolName: "Agent", status: "completed", inputJson: { prompt: "audit" } };
+  for (const status of ["queued", "running", "succeeded"]) {
+    const html = renderAgentTaskActivityCardHTML(tool, { id: `task-${status}`, status });
+    assert.match(html, /<details class="subagent-task-summary">/);
+    assert.doesNotMatch(html, /<details class="subagent-task-summary" open>/);
+  }
+  for (const status of ["waiting_approval", "failed", "canceled", "interrupted"]) {
+    const html = renderAgentTaskActivityCardHTML(tool, { id: `task-${status}`, status });
+    assert.match(html, /<details class="subagent-task-summary" open>/);
+  }
+  const waiting = renderAgentTaskActivityCardHTML(tool, { id: "task-waiting", status: "waiting_approval" });
+  assert.doesNotMatch(waiting, /子 Agent 内部审批|子代理内部审批/);
+});
+
+test("Agent compact failure notice hides prompt and raw errors while audit details retain tool evidence", () => {
+  const prompt = "PROMPT_SECRET_DO_NOT_SHOW_COMPACT";
+  const toolError = "RAW_TOOL_ERROR_DO_NOT_SHOW_COMPACT";
+  const taskError = "RAW_TASK_ERROR_DO_NOT_SHOW_ANYWHERE";
+  const html = renderAgentTaskActivityCardHTML({
+    toolUseId: "agent-failed",
+    toolName: "Agent",
+    status: "completed",
+    inputJson: { prompt, description: "Safe description" },
+    errorMessage: toolError,
+  }, {
+    id: "task-failed",
+    status: "failed",
+    errorCode: "child_run_unavailable",
+    errorMessage: taskError,
+  });
+  const auditIndex = html.indexOf("subagent-task-audit");
+  const compact = html.slice(0, auditIndex);
+  const audit = html.slice(auditIndex);
+  assert.doesNotMatch(compact, new RegExp(prompt));
+  assert.doesNotMatch(compact, new RegExp(toolError));
+  assert.doesNotMatch(compact, new RegExp(taskError));
+  assert.match(compact, /subagent-task-notice/);
+  assert.match(audit, new RegExp(prompt));
+  assert.match(audit, new RegExp(toolError));
+  assert.doesNotMatch(html, new RegExp(taskError));
+});
+
+test("Agent task card escapes and bounds every compact text and action identifier", () => {
+  const hostile = `<img src=x onerror="boom">`;
+  const html = renderAgentTaskActivityCardHTML({
+    toolUseId: `tool\" onmouseover=\"boom`,
+    toolName: "Agent",
+    status: "completed",
+    inputJson: { prompt: hostile.repeat(800), description: hostile.repeat(100), model: hostile.repeat(100), subagent_type: hostile.repeat(100) },
+  }, {
+    id: `task\" data-evil=\"boom`,
+    status: "running",
+    childAgentId: `<child-agent>`,
+    childRunId: `<child-run>`,
+  });
+  assert.match(html, /&lt;img src=x onerror=&quot;boom&quot;&gt;/);
+  assert.match(html, /data-task-id="task&quot; data-evil=&quot;boom"/);
+  assert.match(html, /data-child-agent-id="&lt;child-agent&gt;"/);
+  assert.doesNotMatch(html, /<img|onmouseover="boom"|data-evil="boom"|<child-agent>|<child-run>/);
+  assert.ok(html.length < 30_000, "Agent task rendering must remain bounded");
+});
+
+test("Agent task actions use explicit identifiers and omit unavailable navigation", () => {
+  const tool = { toolUseId: "agent-actions", toolName: "Agent", status: "completed", agentId: "parent-agent", inputJson: { prompt: "audit" } };
+  const running = renderAgentTaskActivityCardHTML(tool, {
+    id: "task-1",
+    status: "running",
+    childAgentId: "child-agent-1",
+    childRunId: "child-run-1",
+  });
+  assert.match(running, /data-subagent-action="view-task" data-task-id="task-1"/);
+  assert.match(running, /data-subagent-action="cancel" data-task-id="task-1"/);
+  assert.match(running, /data-subagent-action="open-agent" data-child-agent-id="child-agent-1"/);
+  assert.match(running, /data-subagent-action="open-run" data-child-run-id="child-run-1" data-child-agent-id="child-agent-1"/);
+
+  const runWithoutAgent = renderAgentTaskActivityCardHTML(tool, { id: "task-run-only", status: "succeeded", childRunId: "child-run-only" });
+  assert.doesNotMatch(runWithoutAgent, /data-subagent-action="open-run"/);
+
+  const missing = renderAgentTaskActivityCardHTML(tool, null);
+  assert.doesNotMatch(missing, /data-subagent-action=/);
+  assert.doesNotMatch(missing, /data-task-id=/);
+});
+
+test("Agent task resolution supports waiting, safe fallback, exact generic compatibility, and callbacks", () => {
+  const agentTool = { toolUseId: "agent-resolve", toolName: "Agent", runId: "parent-run", status: "completed", inputJson: { prompt: "audit", description: "Delegate" } };
+  const waiting = renderToolActivityCardHTML(agentTool, { resolveBackgroundTask: () => null });
+  assert.match(waiting, /data-chat-report="subagent-task"/);
+  assert.match(waiting, /subagent-task-notice/);
+  const idOnly = renderToolActivityCardHTML(agentTool, { backgroundTask: { id: "task-id-only" } });
+  assert.match(idOnly, /data-task-id="task-id-only"/);
+  assert.match(idOnly, /subagent-task-notice/);
+
+  const embedded = renderToolActivityCardHTML({
+    ...agentTool,
+    output: JSON.stringify({ taskId: "task-from-tool-result", status: "queued" }),
+  }, { resolveBackgroundTask: () => null });
+  assert.match(embedded, /data-task-id="task-from-tool-result"/);
+  assert.match(embedded, /data-subagent-status="dispatched"/);
+  assert.match(embedded, /subagent-task-notice/);
+  assert.doesNotMatch(embedded, /data-subagent-action="cancel"/);
+
+  const malformed = renderToolActivityCardHTML(agentTool, { resolveBackgroundTask: () => "invalid" });
+  assert.match(malformed, /data-chat-report="tool-activity"/);
+  assert.doesNotMatch(malformed, /data-subagent-card/);
+  const thrown = renderToolActivityCardHTML(agentTool, { resolveBackgroundTask: () => { throw new Error("resolver failed"); } });
+  assert.match(thrown, /data-chat-report="tool-activity"/);
+
+  const readTool = { toolUseId: "read-generic", toolName: "Read", status: "completed", inputJson: { file_path: "a.txt" } };
+  assert.equal(
+    renderToolActivityCardHTML(readTool),
+    renderToolActivityCardHTML(readTool, { backgroundTask: { id: "must-not-apply", status: "succeeded" } }),
+  );
+
+  let resolvedTool;
+  const stack = renderToolActivityStackHTML([agentTool], {
+    resolveBackgroundTask(tool) {
+      resolvedTool = tool;
+      return { id: "task-resolved", status: "succeeded", publicSummary: { description: "Resolved", acceptanceCount: 3 } };
+    },
+  });
+  assert.equal(resolvedTool.toolUseId, "agent-resolve");
+  assert.equal(resolvedTool.runId, "parent-run");
+  assert.match(stack, /data-subagent-card/);
+  assert.match(stack, /data-task-id="task-resolved"/);
+  assert.match(stack, /status-completed/);
+});
+
+test("chat rendering controller forwards resolveBackgroundTask to live Agent stacks", () => {
+  let resolvedTool;
+  const { html } = renderSnapshot([], {
+    liveToolOutputs: {
+      "agent-live": { agentId: "agent-1", runId: "parent-run", toolUseId: "agent-live", toolName: "Agent", status: "completed", inputJson: { prompt: "audit", description: "Live delegate" } },
+    },
+  }, {}, {
+    resolveBackgroundTask(tool) {
+      resolvedTool = tool;
+      return { id: "task-live", status: "running", childAgentId: "child-live" };
+    },
+  });
+  assert.equal(resolvedTool.toolUseId, "agent-live");
+  assert.match(html, /data-live-tool-output-stack/);
+  assert.match(html, /data-subagent-card/);
+  assert.match(html, /data-task-id="task-live"/);
+});
+
+test("live tool activity follows the Agent lifecycle and collapses after completion", () => {
+  const liveToolOutputs = {
+    "read-live": { agentId: "agent-1", runId: "run-live", toolUseId: "read-live", toolName: "Read", status: "completed", inputJson: { file_path: "src/main.mjs" } },
+  };
+  const active = renderSnapshot([], {
+    agent: { id: "agent-1", cwd: "/work/project", status: "running" },
+    liveToolOutputs,
+  });
+  assert.match(active.html, /data-tool-activity-default="expanded"/);
+  assert.match(active.html, /<details class="tool-activity-group" open>/);
+
+  const finished = renderSnapshot([], {
+    agent: { id: "agent-1", cwd: "/work/project", status: "idle" },
+    liveToolOutputs,
+  });
+  assert.match(finished.html, /data-tool-activity-default="collapsed"/);
+  assert.doesNotMatch(finished.html, /<details class="tool-activity-group" open>/);
 });

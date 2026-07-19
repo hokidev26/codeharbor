@@ -242,38 +242,12 @@ func (s *Server) refreshCodexOAuthAccount(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), codexOAuthSyncTimeout)
 	defer cancel()
-	account, quota, err := provider.SyncAccount(ctx, chi.URLParam(r, "id"))
+	response, status, err := s.syncCodexOAuthAccount(ctx, provider, chi.URLParam(r, "id"))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusNotFound, "Codex 账号不存在")
-		} else {
-			writeError(w, http.StatusBadGateway, err.Error())
-		}
+		writeError(w, status, err.Error())
 		return
-	}
-	if s.store != nil {
-		fetchedAt := s.now()
-		if parsed, parseErr := time.Parse(time.RFC3339Nano, quota.FetchedAt); parseErr == nil {
-			fetchedAt = parsed
-		}
-		if err := s.store.UpdateProviderAccountQuota(r.Context(), codexauth.DefaultProviderName, account.ID, quota, fetchedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "Codex 额度快照保存失败")
-			return
-		}
-	}
-	response := codexOAuthAccountResponse{AccountSummary: account, Quota: &quota}
-	if s.store != nil {
-		if stats, statsErr := s.store.GetProviderAccountStats(r.Context(), codexauth.DefaultProviderName, account.ID); statsErr == nil {
-			response.Stats = &stats
-		}
-		usageByID, usageErr := s.store.ListProviderAccountUsage(r.Context(), codexauth.DefaultProviderName, []string{account.ID}, s.now())
-		if usageErr != nil {
-			writeError(w, http.StatusInternalServerError, "Codex 账号用量统计失败")
-			return
-		}
-		response.Usage = normalizeCodexAccountUsage(usageByID[account.ID])
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -284,38 +258,23 @@ func (s *Server) deleteCodexOAuthAccount(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := chi.URLParam(r, "id")
-	credentialDeleted := true
-	if err := store.Delete(id); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			credentialDeleted = false
-		} else {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	statsDeleted := true
-	if s.store != nil {
-		if err := s.store.DeleteProviderAccountStats(r.Context(), codexauth.DefaultProviderName, id); err != nil {
-			statsDeleted = false
-		}
+	outcome, err := s.deleteCodexOAuthAccountCore(r.Context(), store, chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	response := map[string]any{
 		"status":             "ok",
-		"id":                 id,
-		"credential_deleted": credentialDeleted,
-		"stats_deleted":      statsDeleted,
-		"already_missing":    !credentialDeleted,
-		"cleanup_pending":    !statsDeleted,
-		"retryable":          !statsDeleted,
+		"id":                 outcome.ID,
+		"credential_deleted": outcome.CredentialDeleted,
+		"stats_deleted":      outcome.StatsDeleted,
+		"already_missing":    outcome.AlreadyMissing,
+		"cleanup_pending":    outcome.CleanupPending,
+		"retryable":          outcome.Retryable,
 	}
-	if !statsDeleted {
+	if outcome.Warning != "" {
 		response["status"] = "partial"
-		if credentialDeleted {
-			response["warning"] = "凭据已删除，但账号统计清理失败；可安全重试 DELETE 完成清理"
-		} else {
-			response["warning"] = "凭据已不存在，但账号统计清理仍失败；可安全重试 DELETE 完成清理"
-		}
+		response["warning"] = outcome.Warning
 		writeJSON(w, http.StatusMultiStatus, response)
 		return
 	}

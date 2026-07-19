@@ -410,14 +410,14 @@ func (s *Server) filesystemPathAllowedForRequest(r *http.Request, path string) b
 }
 
 func (s *Server) filterAgentsForRequest(r *http.Request, agents []db.Agent) []db.Agent {
-	if s.capabilitiesForRequest(r).FilesystemScope != "project" {
-		return agents
-	}
+	projectScoped := s.capabilitiesForRequest(r).FilesystemScope == "project"
 	filtered := make([]db.Agent, 0, len(agents))
 	for _, agent := range agents {
-		if s.filesystemPathWithinProjectRoot(agent.CWD) {
-			filtered = append(filtered, agent)
+		if projectScoped && !s.filesystemPathWithinProjectRoot(agent.CWD) {
+			continue
 		}
+		agent.ContextSummary = ""
+		filtered = append(filtered, agent)
 	}
 	return filtered
 }

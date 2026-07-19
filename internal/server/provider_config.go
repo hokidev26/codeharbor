@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,17 +21,35 @@ import (
 	"autoto/internal/secrets"
 )
 
+type providerRequestHeaderInput struct {
+	Name         string `json:"name"`
+	Value        string `json:"value"`
+	KeepExisting bool   `json:"keepExisting,omitempty"`
+}
+
+type providerProxyAuthPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type providerConfigUpdateRequest struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	Profile        string `json:"profile"`
-	BaseURL        string `json:"baseUrl"`
-	APIKey         string `json:"apiKey"`
-	ClearAPIKey    bool   `json:"clearApiKey"`
-	Model          string `json:"model"`
-	MaxTokens      int64  `json:"maxTokens"`
-	APIKeyOptional bool   `json:"apiKeyOptional"`
-	GatewayEnabled *bool  `json:"gatewayEnabled"`
+	Name                  string                        `json:"name"`
+	Type                  string                        `json:"type"`
+	Profile               string                        `json:"profile"`
+	BaseURL               string                        `json:"baseUrl"`
+	APIKey                string                        `json:"apiKey"`
+	ClearAPIKey           bool                          `json:"clearApiKey"`
+	CreateOnly            bool                          `json:"createOnly,omitempty"`
+	OriginalName          string                        `json:"originalName,omitempty"`
+	Model                 string                        `json:"model"`
+	MaxTokens             int64                         `json:"maxTokens"`
+	APIKeyOptional        bool                          `json:"apiKeyOptional"`
+	GatewayEnabled        *bool                         `json:"gatewayEnabled"`
+	ProxyURL              *string                       `json:"proxyUrl,omitempty"`
+	ClearProxyAuth        bool                          `json:"clearProxyAuth,omitempty"`
+	UserAgent             *string                       `json:"userAgent,omitempty"`
+	RequestHeaders        *[]providerRequestHeaderInput `json:"requestHeaders,omitempty"`
+	InsecureSkipTLSVerify *bool                         `json:"insecureSkipTLSVerify,omitempty"`
 }
 
 type providerConfigUpdateResponse struct {
@@ -62,16 +81,23 @@ type providerTestResponse struct {
 }
 
 type providerMessageTestRequest struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	Profile        string `json:"profile"`
-	BaseURL        string `json:"baseUrl"`
-	APIKey         string `json:"apiKey"`
-	ClearAPIKey    bool   `json:"clearApiKey"`
-	Model          string `json:"model"`
-	MaxTokens      int64  `json:"maxTokens"`
-	APIKeyOptional bool   `json:"apiKeyOptional"`
-	Prompt         string `json:"prompt"`
+	Name                  string                        `json:"name"`
+	Type                  string                        `json:"type"`
+	Profile               string                        `json:"profile"`
+	BaseURL               string                        `json:"baseUrl"`
+	APIKey                string                        `json:"apiKey"`
+	ClearAPIKey           bool                          `json:"clearApiKey"`
+	CreateOnly            bool                          `json:"createOnly,omitempty"`
+	OriginalName          string                        `json:"originalName,omitempty"`
+	Model                 string                        `json:"model"`
+	MaxTokens             int64                         `json:"maxTokens"`
+	APIKeyOptional        bool                          `json:"apiKeyOptional"`
+	ProxyURL              *string                       `json:"proxyUrl,omitempty"`
+	ClearProxyAuth        bool                          `json:"clearProxyAuth,omitempty"`
+	UserAgent             *string                       `json:"userAgent,omitempty"`
+	RequestHeaders        *[]providerRequestHeaderInput `json:"requestHeaders,omitempty"`
+	InsecureSkipTLSVerify *bool                         `json:"insecureSkipTLSVerify,omitempty"`
+	Prompt                string                        `json:"prompt"`
 }
 
 type providerMessageTestResponse struct {
@@ -86,29 +112,42 @@ type providerMessageTestResponse struct {
 
 func (r providerMessageTestRequest) configUpdateRequest() providerConfigUpdateRequest {
 	return providerConfigUpdateRequest{
-		Name:           r.Name,
-		Type:           r.Type,
-		Profile:        r.Profile,
-		BaseURL:        r.BaseURL,
-		APIKey:         r.APIKey,
-		ClearAPIKey:    r.ClearAPIKey,
-		Model:          r.Model,
-		MaxTokens:      r.MaxTokens,
-		APIKeyOptional: r.APIKeyOptional,
+		Name:                  r.Name,
+		Type:                  r.Type,
+		Profile:               r.Profile,
+		BaseURL:               r.BaseURL,
+		APIKey:                r.APIKey,
+		ClearAPIKey:           r.ClearAPIKey,
+		CreateOnly:            r.CreateOnly,
+		OriginalName:          r.OriginalName,
+		Model:                 r.Model,
+		MaxTokens:             r.MaxTokens,
+		APIKeyOptional:        r.APIKeyOptional,
+		ProxyURL:              r.ProxyURL,
+		ClearProxyAuth:        r.ClearProxyAuth,
+		UserAgent:             r.UserAgent,
+		RequestHeaders:        r.RequestHeaders,
+		InsecureSkipTLSVerify: r.InsecureSkipTLSVerify,
 	}
 }
 
 const (
-	providerTestTimeout               = 3 * time.Second
-	providerMessageTestTimeout        = 30 * time.Second
-	providerMessageTestMaxOutputBytes = 64 << 10
-	providerMessageTestMaxPromptBytes = 8 << 10
-	providerMessageTestMaxTokens      = 512
-	maxProviderConfigRequestSize      = 32 << 10
-	maxProviderBaseURLBytes           = 2048
-	maxProviderAPIKeyBytes            = 16 << 10
-	maxProviderModelBytes             = 512
-	maxProviderProfileBytes           = 64
+	providerTestTimeout                = 3 * time.Second
+	providerMessageTestTimeout         = 30 * time.Second
+	providerMessageTestMaxOutputBytes  = 64 << 10
+	providerMessageTestMaxPromptBytes  = 8 << 10
+	providerMessageTestMaxTokens       = 512
+	maxProviderConfigRequestSize       = 128 << 10
+	maxProviderBaseURLBytes            = 2048
+	maxProviderAPIKeyBytes             = 16 << 10
+	maxProviderModelBytes              = 512
+	maxProviderProfileBytes            = 64
+	maxProviderProxyURLBytes           = 2048
+	maxProviderUserAgentBytes          = 512
+	maxProviderRequestHeaders          = 32
+	maxProviderRequestHeaderNameBytes  = 128
+	maxProviderRequestHeaderValueBytes = 8 << 10
+	maxProviderRequestHeaderTotalBytes = 64 << 10
 )
 
 func providerGatewaySharingForbidden(providerType, profile string) bool {
@@ -139,6 +178,10 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	existing, existed := s.providerConfig(providerName)
+	if req.CreateOnly && existed {
+		writeError(w, http.StatusConflict, "Provider 名称已存在")
+		return
+	}
 	updated, err := providerConfigFromUpdateRequest(providerName, existing, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -158,11 +201,15 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "Provider 名称已存在")
 			return
 		}
+		if existing.ProxyAuthSource == secrets.ProviderSecretSourceStoredUnavailable || existing.RequestHeadersSource == secrets.ProviderSecretSourceStoredUnavailable {
+			writeError(w, http.StatusBadRequest, "无法读取原 Provider 网络凭据；请恢复凭据仓库或重新输入网络凭据后再重命名")
+			return
+		}
 	}
 
 	incomingAPIKey := strings.TrimSpace(req.APIKey)
 	storedSecretRenamed := renamed && storedProviderSecretSource(existing.APIKeySource)
-	storedSecretCanMigrate := storedSecretRenamed && existing.Type == updated.Type && existing.Profile == updated.Profile && existing.BaseURL == updated.BaseURL
+	storedSecretCanMigrate := storedSecretRenamed && !providerTransportScopeChanged(existing, updated)
 	if storedSecretCanMigrate && incomingAPIKey == "" && !req.ClearAPIKey {
 		if s.providerVault == nil {
 			writeError(w, http.StatusBadRequest, "重命名已保存凭据的 Provider 前请重新输入 API Key")
@@ -191,14 +238,37 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		updated.APIKey = ""
 		updated.APIKeySource = secrets.ProviderSecretSourceNone
 		secretMutation = "clear"
-	case existed && providerSecretBindingChanged(existing, updated) && storedProviderSecretSource(existing.APIKeySource):
-		// A stored key is scoped to the endpoint where it was entered. Changing
-		// protocol/profile/Base URL without a replacement key clears it instead
-		// of silently forwarding the old credential to a new endpoint.
+	case existed && providerSecretBindingChanged(existing, updated):
+		// Any inherited key is scoped to the endpoint and transport where it was
+		// entered. Never silently forward stored, runtime, or environment values
+		// across a changed security boundary.
 		updated.SecretRevision = nextProviderSecretRevision(existing.SecretRevision)
 		updated.APIKey = ""
 		updated.APIKeySource = secrets.ProviderSecretSourceNone
 		secretMutation = "clear"
+	}
+
+	transportSecretMutation := providerTransportSecretMutationRequired(existing, updated)
+	if transportSecretMutation {
+		updated.TransportSecretRevision = nextProviderSecretRevision(existing.TransportSecretRevision)
+		if providerProxyAuthConfigured(updated) {
+			if s.providerVault != nil {
+				updated.ProxyAuthSource = secrets.ProviderSecretSourceStored
+			} else {
+				updated.ProxyAuthSource = secrets.ProviderSecretSourceRuntime
+			}
+		} else {
+			updated.ProxyAuthSource = secrets.ProviderSecretSourceNone
+		}
+		if providerHeadersConfigured(updated) {
+			if s.providerVault != nil {
+				updated.RequestHeadersSource = secrets.ProviderSecretSourceStored
+			} else {
+				updated.RequestHeadersSource = secrets.ProviderSecretSourceRuntime
+			}
+		} else {
+			updated.RequestHeadersSource = secrets.ProviderSecretSourceNone
+		}
 	}
 
 	adapter, err := s.newRuntimeProvider(updated)
@@ -221,8 +291,22 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	publishTargetConfig := func() {
+		if renamed {
+			s.unregisterProvider(existing.Name)
+		}
+		if updated.Disabled {
+			s.unregisterProvider(updated.Name)
+		} else {
+			s.registerProviderAdapter(adapter)
+		}
+		s.refreshProviderDefault(cfg)
+		s.cfgMu.Lock()
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+	}
 
-	secretPrepared := false
+	preparedSecretKinds := make([]string, 0, 3)
 	if s.providerVault != nil && secretMutation != "" {
 		switch secretMutation {
 		case "set":
@@ -234,55 +318,55 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "无法安全保存 Provider 凭据。")
 			return
 		}
-		secretPrepared = true
+		preparedSecretKinds = append(preparedSecretKinds, secrets.ProviderAPIKeyKind)
+	}
+	if s.providerVault != nil && transportSecretMutation {
+		transportKinds, prepareErr := s.prepareProviderTransportSecrets(r.Context(), updated)
+		preparedSecretKinds = append(preparedSecretKinds, transportKinds...)
+		if prepareErr != nil {
+			s.rollbackProviderSecretKinds(r.Context(), updated.Name, preparedSecretKinds)
+			writeError(w, http.StatusInternalServerError, "无法安全保存 Provider 网络凭据。")
+			return
+		}
 	}
 
 	s.runProviderMutationHook()
 	persisted, err := s.persistProviderConfig(configPath, cfg)
 	if err != nil {
-		if secretPrepared {
-			_ = s.providerVault.RollbackPending(r.Context(), updated.Name)
-		}
+		s.rollbackProviderSecretKinds(r.Context(), updated.Name, preparedSecretKinds)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存配置失败：%v", err))
 		return
 	}
-	if secretPrepared && !persisted {
-		_ = s.providerVault.RollbackPending(r.Context(), updated.Name)
+	if len(preparedSecretKinds) > 0 && !persisted {
+		s.rollbackProviderSecretKinds(r.Context(), updated.Name, preparedSecretKinds)
 		writeError(w, http.StatusInternalServerError, "配置路径不可用，Provider 凭据未保存。")
 		return
 	}
-	if secretPrepared {
-		if err := s.providerVault.CommitPending(r.Context(), updated.Name); err != nil {
-			// config.json already contains the target revision. Keep the pending
-			// record so startup recovery can finish without crossing bindings.
-			writeError(w, http.StatusInternalServerError, "Provider 凭据提交未完成；重启后将自动恢复。")
-			return
-		}
+	if err := s.commitProviderSecretKinds(r.Context(), updated.Name, preparedSecretKinds); err != nil {
+		// config.json already contains the target revisions. Publish that same
+		// target in memory so a later unrelated save cannot overwrite the durable
+		// transaction while startup recovery finishes pending secret commits.
+		publishTargetConfig()
+		writeError(w, http.StatusInternalServerError, "Provider 凭据提交未完成；重启后将自动恢复。")
+		return
 	}
 	oldSecretCleanupFailed := false
-	if storedSecretRenamed && s.providerVault != nil {
-		oldSecretCleanupFailed = s.providerVault.Delete(r.Context(), existing.Name) != nil
+	if renamed && s.providerVault != nil {
+		for _, kind := range []string{secrets.ProviderAPIKeyKind, secrets.ProviderProxyAuthKind, secrets.ProviderRequestHeadersKind} {
+			if s.providerVault.DeleteKind(r.Context(), existing.Name, kind) != nil {
+				oldSecretCleanupFailed = true
+			}
+		}
 	}
-	if renamed {
-		s.unregisterProvider(existing.Name)
-	}
-	if updated.Disabled {
-		s.unregisterProvider(updated.Name)
-	} else {
-		s.registerProviderAdapter(adapter)
-	}
-	s.refreshProviderDefault(cfg)
-	s.cfgMu.Lock()
-	s.cfg = cfg
-	s.cfgMu.Unlock()
+	publishTargetConfig()
 
 	status := s.providerAPIKeyStatus(r.Context(), updated)
 	message := "Provider 配置已持久化并在当前运行时生效。"
 	if renamed {
 		message = "Provider 配置已保存，名称已更新并在当前运行时生效。"
 	}
-	if incomingAPIKey != "" && s.providerVault == nil {
-		message = "Provider 配置已生效；当前测试实例未启用持久凭据仓库。"
+	if s.providerVault == nil && (incomingAPIKey != "" || providerProxyAuthConfigured(updated) || providerHeadersConfigured(updated)) {
+		message = "Provider 配置已在当前运行时生效；当前实例未启用持久凭据仓库，敏感网络设置不会跨重启保存。"
 	}
 	if oldSecretCleanupFailed {
 		message += "旧凭据记录未能立即清理，将在后续恢复流程中处理。"
@@ -419,40 +503,39 @@ func (s *Server) deleteProviderConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secretPrepared := false
+	preparedSecretKinds := make([]string, 0, 3)
 	if s.providerVault != nil {
-		if err := s.providerVault.PrepareDelete(r.Context(), providerName); err != nil {
-			writeError(w, http.StatusInternalServerError, "无法安全删除 Provider 凭据。")
-			return
+		for _, kind := range []string{secrets.ProviderAPIKeyKind, secrets.ProviderProxyAuthKind, secrets.ProviderRequestHeadersKind} {
+			if err := s.providerVault.PrepareDeleteKind(r.Context(), providerName, kind); err != nil {
+				s.rollbackProviderSecretKinds(r.Context(), providerName, preparedSecretKinds)
+				writeError(w, http.StatusInternalServerError, "无法安全删除 Provider 凭据。")
+				return
+			}
+			preparedSecretKinds = append(preparedSecretKinds, kind)
 		}
-		secretPrepared = true
 	}
 	s.runProviderMutationHook()
 	persisted, err := s.persistProviderConfig(configPath, cfg)
 	if err != nil {
-		if secretPrepared {
-			_ = s.providerVault.RollbackPending(r.Context(), providerName)
-		}
+		s.rollbackProviderSecretKinds(r.Context(), providerName, preparedSecretKinds)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存配置失败：%v", err))
 		return
 	}
-	if secretPrepared && !persisted {
-		_ = s.providerVault.RollbackPending(r.Context(), providerName)
+	if len(preparedSecretKinds) > 0 && !persisted {
+		s.rollbackProviderSecretKinds(r.Context(), providerName, preparedSecretKinds)
 		writeError(w, http.StatusInternalServerError, "配置路径不可用，Provider 未删除。")
 		return
 	}
-	if secretPrepared {
-		if err := s.providerVault.CommitPending(r.Context(), providerName); err != nil {
-			// The config no longer references this Provider. Remove it from the
-			// current registry as well; startup recovery will finish DB cleanup.
-			s.unregisterProvider(providerName)
-			s.refreshProviderDefault(cfg)
-			s.cfgMu.Lock()
-			s.cfg = cfg
-			s.cfgMu.Unlock()
-			writeError(w, http.StatusInternalServerError, "Provider 已移除，凭据清理将在重启后自动完成。")
-			return
-		}
+	if err := s.commitProviderSecretKinds(r.Context(), providerName, preparedSecretKinds); err != nil {
+		// The config no longer references this Provider. Remove it from the
+		// current registry as well; startup recovery will finish DB cleanup.
+		s.unregisterProvider(providerName)
+		s.refreshProviderDefault(cfg)
+		s.cfgMu.Lock()
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+		writeError(w, http.StatusInternalServerError, "Provider 已移除，凭据清理将在重启后自动完成。")
+		return
 	}
 	s.unregisterProvider(providerName)
 	s.refreshProviderDefault(cfg)
@@ -481,9 +564,43 @@ func (s *Server) testProviderConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // testProviderConfigDraft validates and tests a full configuration draft without
-// writing it to disk or changing the runtime registry. A blank draft API key may
-// reuse the same named provider's in-memory key so users can test non-secret
-// fields without re-entering credentials.
+// writing it to disk or changing the runtime registry. Blank keys may reuse only
+// the explicitly identified original provider and never cross endpoint bindings.
+var errProviderDraftNameConflict = errors.New("Provider 名称已存在")
+
+func (s *Server) providerConfigForDraftTest(providerName string, req providerConfigUpdateRequest) (config.ProviderConfig, error) {
+	providerName = strings.TrimSpace(providerName)
+	if req.CreateOnly {
+		if _, occupied := s.providerConfig(providerName); occupied {
+			return config.ProviderConfig{}, errProviderDraftNameConflict
+		}
+		provider, err := providerConfigFromUpdateRequest(providerName, config.ProviderConfig{}, req)
+		return provider, err
+	}
+	originalName := strings.TrimSpace(req.OriginalName)
+	if originalName == "" {
+		originalName = providerName
+	}
+	if err := validateProviderName(originalName); err != nil {
+		return config.ProviderConfig{}, err
+	}
+	if originalName != providerName {
+		if _, occupied := s.providerConfig(providerName); occupied {
+			return config.ProviderConfig{}, errProviderDraftNameConflict
+		}
+	}
+	existing, _ := s.providerConfig(originalName)
+	provider, err := providerConfigFromUpdateRequest(providerName, existing, req)
+	if err != nil {
+		return config.ProviderConfig{}, err
+	}
+	if strings.TrimSpace(req.APIKey) == "" && strings.TrimSpace(existing.Name) != "" && providerSecretBindingChanged(existing, provider) {
+		provider.APIKey = ""
+		provider.APIKeySource = secrets.ProviderSecretSourceNone
+	}
+	return provider, nil
+}
+
 func (s *Server) testProviderConfigDraft(w http.ResponseWriter, r *http.Request) {
 	var req providerConfigUpdateRequest
 	if err := decodeProviderConfigUpdateRequest(r, &req); err != nil {
@@ -500,11 +617,14 @@ func (s *Server) testProviderConfigDraft(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.providerMutationMu.Lock()
-	existing, _ := s.providerConfig(providerName)
-	provider, err := providerConfigFromUpdateRequest(providerName, existing, req)
+	provider, err := s.providerConfigForDraftTest(providerName, req)
 	s.providerMutationMu.Unlock()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errProviderDraftNameConflict) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	if _, err := s.newRuntimeProvider(provider); err != nil {
@@ -546,11 +666,14 @@ func (s *Server) testProviderMessageDraft(w http.ResponseWriter, r *http.Request
 	}
 
 	s.providerMutationMu.Lock()
-	existing, _ := s.providerConfig(providerName)
-	provider, err := providerConfigFromUpdateRequest(providerName, existing, req.configUpdateRequest())
+	provider, err := s.providerConfigForDraftTest(providerName, req.configUpdateRequest())
 	s.providerMutationMu.Unlock()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errProviderDraftNameConflict) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	adapter, err := s.newRuntimeProvider(provider)
@@ -724,16 +847,177 @@ func validateProviderConfigRequest(req providerConfigUpdateRequest) error {
 			return fmt.Errorf("%s contains invalid control characters", field.name)
 		}
 	}
+	if req.ProxyURL != nil {
+		if len(*req.ProxyURL) > maxProviderProxyURLBytes || strings.ContainsAny(*req.ProxyURL, "\x00\r\n") {
+			return errors.New("proxyUrl is invalid")
+		}
+	}
+	if req.UserAgent != nil {
+		if len(*req.UserAgent) > maxProviderUserAgentBytes || strings.ContainsAny(*req.UserAgent, "\x00\r\n") {
+			return errors.New("userAgent is invalid")
+		}
+	}
+	if req.RequestHeaders != nil {
+		if len(*req.RequestHeaders) > maxProviderRequestHeaders {
+			return fmt.Errorf("requestHeaders exceeds %d entries", maxProviderRequestHeaders)
+		}
+		seen := make(map[string]struct{}, len(*req.RequestHeaders))
+		total := 0
+		for _, header := range *req.RequestHeaders {
+			name := strings.TrimSpace(header.Name)
+			value := header.Value
+			if len(name) == 0 || len(name) > maxProviderRequestHeaderNameBytes || !validProviderHeaderName(name) {
+				return errors.New("request header name is invalid")
+			}
+			canonical := http.CanonicalHeaderKey(name)
+			key := strings.ToLower(canonical)
+			if providerHeaderForbidden(key) {
+				return fmt.Errorf("request header %q is reserved", canonical)
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("request header %q is duplicated", canonical)
+			}
+			seen[key] = struct{}{}
+			if len(value) > maxProviderRequestHeaderValueBytes || strings.ContainsAny(value, "\x00\r\n") {
+				return fmt.Errorf("request header %q value is invalid", canonical)
+			}
+			if value == "" && !header.KeepExisting {
+				return fmt.Errorf("request header %q value is required", canonical)
+			}
+			total += len(name) + len(value)
+		}
+		if total > maxProviderRequestHeaderTotalBytes {
+			return errors.New("requestHeaders exceeds total size limit")
+		}
+	}
 	if req.MaxTokens < 0 || req.MaxTokens > 10_000_000 {
 		return errors.New("maxTokens must be between 0 and 10000000")
 	}
 	return nil
 }
 
+func validProviderHeaderName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func providerHeaderForbidden(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "host", "content-length", "transfer-encoding", "connection", "proxy-authorization", "user-agent", "te", "trailer", "upgrade", "keep-alive", "x-autoto-client", "x-autoto-installation-id":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) runProviderMutationHook() {
 	if s.providerMutationHook != nil {
 		s.providerMutationHook()
 	}
+}
+
+func providerTransportScopeChanged(current, next config.ProviderConfig) bool {
+	return !strings.EqualFold(strings.TrimSpace(current.Type), strings.TrimSpace(next.Type)) ||
+		!strings.EqualFold(strings.TrimSpace(current.Profile), strings.TrimSpace(next.Profile)) ||
+		strings.TrimSpace(current.BaseURL) != strings.TrimSpace(next.BaseURL) ||
+		strings.TrimSpace(current.ProxyURL) != strings.TrimSpace(next.ProxyURL) ||
+		current.InsecureSkipTLSVerify != next.InsecureSkipTLSVerify
+}
+
+func providerProxySettings(existing config.ProviderConfig, req providerConfigUpdateRequest) (string, string, string, string, bool, error) {
+	proxyURL := existing.ProxyURL
+	username := existing.ProxyUsername
+	password := existing.ProxyPassword
+	source := existing.ProxyAuthSource
+	authSupplied := false
+	if req.ProxyURL != nil {
+		raw := strings.TrimSpace(*req.ProxyURL)
+		if raw == "" {
+			return "", "", "", secrets.ProviderSecretSourceNone, false, nil
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
+			return "", "", "", "", false, errors.New("代理地址无效")
+		}
+		if parsed.Fragment != "" || parsed.RawFragment != "" || parsed.RawQuery != "" || parsed.ForceQuery || (parsed.Path != "" && parsed.Path != "/") {
+			return "", "", "", "", false, errors.New("代理地址不能包含路径、查询参数或片段")
+		}
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return "", "", "", "", false, errors.New("代理协议仅支持 http、https、socks5 或 socks5h")
+		}
+		if parsed.User != nil {
+			username = parsed.User.Username()
+			password, _ = parsed.User.Password()
+			authSupplied = username != "" || password != ""
+			if authSupplied {
+				source = secrets.ProviderSecretSourceRuntime
+			}
+		}
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		parsed.User = nil
+		parsed.Path = ""
+		proxyURL = parsed.String()
+		if !authSupplied && strings.TrimSpace(proxyURL) != strings.TrimSpace(existing.ProxyURL) {
+			username = ""
+			password = ""
+			source = secrets.ProviderSecretSourceNone
+		}
+	}
+	if req.ClearProxyAuth {
+		username = ""
+		password = ""
+		source = secrets.ProviderSecretSourceNone
+	}
+	return proxyURL, username, password, source, authSupplied, nil
+}
+
+func providerHeadersFromRequest(existing config.ProviderConfig, inputs *[]providerRequestHeaderInput, allowKeepExisting bool) ([]config.ProviderRequestHeader, string, error) {
+	if inputs == nil {
+		return append([]config.ProviderRequestHeader(nil), existing.RequestHeaders...), existing.RequestHeadersSource, nil
+	}
+	existingValues := make(map[string]string, len(existing.RequestHeaders))
+	for _, header := range existing.RequestHeaders {
+		existingValues[strings.ToLower(http.CanonicalHeaderKey(strings.TrimSpace(header.Name)))] = header.Value
+	}
+	result := make([]config.ProviderRequestHeader, 0, len(*inputs))
+	usedNewValue := false
+	for _, input := range *inputs {
+		name := http.CanonicalHeaderKey(strings.TrimSpace(input.Name))
+		value := input.Value
+		if value == "" && input.KeepExisting {
+			if !allowKeepExisting {
+				return nil, "", fmt.Errorf("安全边界已变化，请重新输入请求头 %q 的值", name)
+			}
+			value = existingValues[strings.ToLower(name)]
+			if value == "" {
+				return nil, "", fmt.Errorf("无法保留请求头 %q，请重新输入值", name)
+			}
+		} else if value != "" {
+			usedNewValue = true
+		}
+		result = append(result, config.ProviderRequestHeader{Name: name, Value: value})
+	}
+	if len(result) == 0 {
+		return nil, secrets.ProviderSecretSourceNone, nil
+	}
+	if usedNewValue {
+		return result, secrets.ProviderSecretSourceRuntime, nil
+	}
+	return result, existing.RequestHeadersSource, nil
 }
 
 func providerConfigFromUpdateRequest(providerName string, existing config.ProviderConfig, req providerConfigUpdateRequest) (config.ProviderConfig, error) {
@@ -808,20 +1092,189 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 	if gatewayEnabled && providerGatewaySharingForbidden(providerType, profile) {
 		return config.ProviderConfig{}, errors.New("OAuth-backed providers cannot be enabled for the shared API gateway")
 	}
-	return config.ProviderConfig{
-		Name:           name,
-		Type:           providerType,
-		Profile:        profile,
-		BaseURL:        baseURL,
-		APIKey:         apiKey,
-		Model:          model,
-		MaxTokens:      maxTokens,
-		APIKeyOptional: apiKeyOptional,
-		GatewayEnabled: gatewayEnabled,
-		Disabled:       existing.Disabled,
-		SecretRevision: existing.SecretRevision,
-		APIKeySource:   existing.APIKeySource,
-	}, nil
+	proxyURL, proxyUsername, proxyPassword, proxyAuthSource, proxyAuthSupplied, err := providerProxySettings(existing, req)
+	if err != nil {
+		return config.ProviderConfig{}, err
+	}
+	userAgent := existing.UserAgent
+	if req.UserAgent != nil {
+		userAgent = strings.TrimSpace(*req.UserAgent)
+	}
+	insecureSkipTLSVerify := existing.InsecureSkipTLSVerify
+	if req.InsecureSkipTLSVerify != nil {
+		insecureSkipTLSVerify = *req.InsecureSkipTLSVerify
+	}
+	updated := config.ProviderConfig{
+		Name:                    name,
+		Type:                    providerType,
+		Profile:                 profile,
+		BaseURL:                 baseURL,
+		APIKey:                  apiKey,
+		Model:                   model,
+		MaxTokens:               maxTokens,
+		APIKeyOptional:          apiKeyOptional,
+		GatewayEnabled:          gatewayEnabled,
+		ProxyURL:                proxyURL,
+		ProxyUsername:           proxyUsername,
+		ProxyPassword:           proxyPassword,
+		ProxyAuthSource:         proxyAuthSource,
+		UserAgent:               userAgent,
+		InsecureSkipTLSVerify:   insecureSkipTLSVerify,
+		Disabled:                existing.Disabled,
+		SecretRevision:          existing.SecretRevision,
+		TransportSecretRevision: existing.TransportSecretRevision,
+		APIKeySource:            existing.APIKeySource,
+	}
+	scopeChanged := existing.Name != "" && providerTransportScopeChanged(existing, updated)
+	if scopeChanged && !proxyAuthSupplied {
+		updated.ProxyUsername = ""
+		updated.ProxyPassword = ""
+		updated.ProxyAuthSource = secrets.ProviderSecretSourceNone
+	}
+	requestHeaders, requestHeadersSource, err := providerHeadersFromRequest(existing, req.RequestHeaders, !scopeChanged)
+	if err != nil {
+		return config.ProviderConfig{}, err
+	}
+	if scopeChanged && req.RequestHeaders == nil {
+		requestHeaders = nil
+		requestHeadersSource = secrets.ProviderSecretSourceNone
+	}
+	updated.RequestHeaders = requestHeaders
+	updated.RequestHeadersSource = requestHeadersSource
+	return updated, nil
+}
+
+func providerProxyAuthConfigured(provider config.ProviderConfig) bool {
+	return strings.TrimSpace(provider.ProxyUsername) != "" || provider.ProxyPassword != ""
+}
+
+func providerHeadersConfigured(provider config.ProviderConfig) bool {
+	if len(provider.RequestHeaders) == 0 {
+		return false
+	}
+	for _, header := range provider.RequestHeaders {
+		if strings.TrimSpace(header.Name) == "" || header.Value == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func providerRequestHeadersEqual(left, right []config.ProviderRequestHeader) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftValues := make(map[string]string, len(left))
+	for _, header := range left {
+		leftValues[strings.ToLower(http.CanonicalHeaderKey(strings.TrimSpace(header.Name)))] = header.Value
+	}
+	for _, header := range right {
+		if leftValues[strings.ToLower(http.CanonicalHeaderKey(strings.TrimSpace(header.Name)))] != header.Value {
+			return false
+		}
+	}
+	return true
+}
+
+func providerTransportSecretMutationRequired(current, next config.ProviderConfig) bool {
+	currentProxy := providerProxyAuthConfigured(current)
+	nextProxy := providerProxyAuthConfigured(next)
+	currentHeaders := providerHeadersConfigured(current) || len(current.RequestHeaders) > 0
+	nextHeaders := providerHeadersConfigured(next) || len(next.RequestHeaders) > 0
+	bindingChanged := providerSecretBindingChanged(current, next)
+	if bindingChanged && (currentProxy || nextProxy || currentHeaders || nextHeaders || storedProviderSecretSource(current.ProxyAuthSource) || storedProviderSecretSource(current.RequestHeadersSource)) {
+		return true
+	}
+	return current.ProxyUsername != next.ProxyUsername ||
+		current.ProxyPassword != next.ProxyPassword ||
+		currentProxy != nextProxy ||
+		!providerRequestHeadersEqual(current.RequestHeaders, next.RequestHeaders)
+}
+
+func providerProxyAuthSecret(provider config.ProviderConfig) (string, bool, error) {
+	if !providerProxyAuthConfigured(provider) {
+		return "", false, nil
+	}
+	encoded, err := json.Marshal(providerProxyAuthPayload{Username: provider.ProxyUsername, Password: provider.ProxyPassword})
+	if err != nil {
+		return "", false, err
+	}
+	return string(encoded), true, nil
+}
+
+func providerRequestHeadersSecret(provider config.ProviderConfig) (string, bool, error) {
+	if len(provider.RequestHeaders) == 0 {
+		return "", false, nil
+	}
+	values := make(map[string]string, len(provider.RequestHeaders))
+	for _, header := range provider.RequestHeaders {
+		name := http.CanonicalHeaderKey(strings.TrimSpace(header.Name))
+		if name == "" || header.Value == "" {
+			return "", false, fmt.Errorf("request header %q is unavailable", name)
+		}
+		values[name] = header.Value
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", false, err
+	}
+	return string(encoded), true, nil
+}
+
+func (s *Server) prepareProviderTransportSecrets(ctx context.Context, provider config.ProviderConfig) ([]string, error) {
+	if s.providerVault == nil {
+		return nil, nil
+	}
+	binding := serverProviderSecretBinding(provider)
+	prepared := make([]string, 0, 2)
+	prepare := func(kind, value string, configured bool) error {
+		var err error
+		if configured {
+			_, err = s.providerVault.PrepareSetKind(ctx, binding, kind, value, "")
+		} else {
+			err = s.providerVault.PrepareClearKind(ctx, binding, kind)
+		}
+		if err == nil {
+			prepared = append(prepared, kind)
+		}
+		return err
+	}
+	proxySecret, proxyConfigured, err := providerProxyAuthSecret(provider)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepare(secrets.ProviderProxyAuthKind, proxySecret, proxyConfigured); err != nil {
+		return prepared, err
+	}
+	headerSecret, headersConfigured, err := providerRequestHeadersSecret(provider)
+	if err != nil {
+		return prepared, err
+	}
+	if err := prepare(secrets.ProviderRequestHeadersKind, headerSecret, headersConfigured); err != nil {
+		return prepared, err
+	}
+	return prepared, nil
+}
+
+func (s *Server) rollbackProviderSecretKinds(ctx context.Context, providerName string, kinds []string) {
+	if s.providerVault == nil {
+		return
+	}
+	for _, kind := range kinds {
+		_ = s.providerVault.RollbackPendingKind(ctx, providerName, kind)
+	}
+}
+
+func (s *Server) commitProviderSecretKinds(ctx context.Context, providerName string, kinds []string) error {
+	if s.providerVault == nil {
+		return nil
+	}
+	for _, kind := range kinds {
+		if err := s.providerVault.CommitPendingKind(ctx, providerName, kind); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateProviderName(name string) error {

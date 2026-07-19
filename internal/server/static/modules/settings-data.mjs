@@ -1,11 +1,10 @@
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-settings-cleanup-1";
 
 const settingsIconPaths = Object.freeze({
   profile: `<circle cx="12" cy="8" r="3.25"/><path d="M5.5 20c.7-3.8 3-5.8 6.5-5.8s5.8 2 6.5 5.8"/>`,
   archive: `<path d="M4 7.5h16V20H4z"/><path d="M3 4h18v3.5H3z"/><path d="M9 11h6"/>`,
   memory: `<path d="M9 5.5A3.2 3.2 0 0 0 4.8 9a3 3 0 0 0 .7 5.5A3.4 3.4 0 0 0 9 19M15 5.5A3.2 3.2 0 0 1 19.2 9a3 3 0 0 1-.7 5.5A3.4 3.4 0 0 1 15 19M9 5.5V19M15 5.5V19M9 9h2M13 12h2M9 15h2"/>`,
   models: `<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9.5 1.5v3M14.5 1.5v3M9.5 19.5v3M14.5 19.5v3M1.5 9.5h3M1.5 14.5h3M19.5 9.5h3M19.5 14.5h3"/><circle cx="12" cy="12" r="2.25"/>`,
-  agents: `<rect x="4.5" y="7" width="15" height="11" rx="3"/><path d="M12 3v4M2.5 11v3M21.5 11v3M9 15.5h6"/><circle cx="8.5" cy="12" r=".75" fill="currentColor" stroke="none"/><circle cx="15.5" cy="12" r=".75" fill="currentColor" stroke="none"/>`,
   skills: `<path d="m4 20 10.8-10.8M13.2 4.8l6 6M18 3v3M16.5 4.5h3M6 5v4M4 7h4M17 16v4M15 18h4"/>`,
   notifications: `<path d="M6.5 10a5.5 5.5 0 0 1 11 0c0 6 2.5 6 2.5 6H4s2.5 0 2.5-6M10 20h4"/>`,
   appearance: `<circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>`,
@@ -13,7 +12,6 @@ const settingsIconPaths = Object.freeze({
   providers: `<path d="M7 18h10a4 4 0 0 0 .6-8A6 6 0 0 0 6.2 8.6 4.7 4.7 0 0 0 7 18Z"/>`,
   "shared-api": `<path d="M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4"/>`,
   "network-search": `<circle cx="10.5" cy="10.5" r="6.5"/><path d="M4 10.5h13M10.5 4a10 10 0 0 1 0 13M10.5 4a10 10 0 0 0 0 13M15.5 15.5 20 20"/>`,
-  "worklines-containers": `<rect x="3" y="4" width="8" height="7" rx="1.5"/><rect x="13" y="4" width="8" height="7" rx="1.5"/><rect x="8" y="13" width="8" height="7" rx="1.5"/>`,
   "servers-system": `<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/>`,
   terminals: `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/>`,
   storage: `<path d="M5 5h14l2 5v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-8l2-5ZM3 10h18M8 15h.01M12 15h4"/>`,
@@ -47,7 +45,6 @@ export const settingsSections = [
       settingItem("archive", "archive"),
       settingItem("memory", "memory"),
       settingItem("models", "models"),
-      settingItem("agents", "agents"),
       settingItem("skills", "skills"),
       settingItem("notifications", "notifications"),
       settingItem("appearance", "appearance"),
@@ -60,7 +57,6 @@ export const settingsSections = [
       settingItem("providers", "providers"),
       settingItem("shared-api", "sharedAPI"),
       settingItem("network-search", "networkSearch"),
-      settingItem("worklines-containers", "worklines"),
       settingItem("servers-system", "serversSystem"),
       settingItem("terminals", "terminals"),
       settingItem("storage", "storage"),

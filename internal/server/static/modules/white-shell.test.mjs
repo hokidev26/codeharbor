@@ -30,9 +30,11 @@ const staticRoot = new URL("../", import.meta.url);
 const indexURL = new URL("index.html", staticRoot);
 const appURL = new URL("app.js", staticRoot);
 const appMainURL = new URL("modules/app-main.mjs", staticRoot);
+const overviewDashboardURL = new URL("modules/overview-dashboard.mjs", staticRoot);
 const i18nURL = new URL("modules/i18n.mjs", staticRoot);
 const backgroundTasksURL = new URL("modules/background-tasks.mjs", staticRoot);
 const chatRenderingURL = new URL("modules/chat-rendering.mjs", staticRoot);
+const chatRenderingMessagesURL = new URL("modules/messages-chat-rendering-extra.mjs", staticRoot);
 const directoryBrowserURL = new URL("modules/directory-browser.mjs", staticRoot);
 const settingsPreferencesURL = new URL("modules/settings-preferences.mjs", staticRoot);
 const stylesURL = new URL("styles.css", staticRoot);
@@ -92,7 +94,6 @@ function createController(state = {}) {
     normalizePromptHistory: (value) => value,
     normalizeRecentDirectories: (value) => value,
     normalizeTerminalPreferences: (value) => value,
-    relayProtocolSpec: (key) => ({ key: key || "completions" }),
   });
 }
 
@@ -121,19 +122,72 @@ test("white shell adds the global rail before the conversation sidebar with the 
       markup: match[0],
     }));
   assert.deepEqual(buttons.map(({ target, label }) => ({ target, label })), [
+    { target: "home", label: "首页" },
     { target: "conversation", label: "对话" },
-    { target: "tasks", label: "任务" },
+    { target: "schedules", label: "排程" },
     { target: "profile", label: "设置" },
   ]);
+  assert.ok(html.indexOf('data-global-rail-target="home"') < html.indexOf('data-global-rail-target="conversation"'));
   assert.ok(html.indexOf('data-global-rail-target="profile"') < html.indexOf('id="globalThemeToggleBtn"'));
-  assert.doesNotMatch(html, /data-global-rail-target="(?:skills|runtime|im-gateway|agents)"/);
+  assert.doesNotMatch(html, /data-global-rail-target="(?:tasks|skills|runtime|im-gateway|agents)"/);
   assert.match(buttons[0].markup, /class="global-rail-button active"/);
   assert.match(buttons[0].markup, /aria-pressed="true"/);
+  assert.match(buttons[0].markup, /data-i18n-title="shell\.nav\.home"/);
+  assert.match(buttons[0].markup, /m3\.5 10\.5 8\.5-7 8\.5 7/);
+  const scheduleButton = buttons.find(({ target }) => target === "schedules");
+  assert.match(scheduleButton?.markup || "", /<rect x="4" y="5" width="16" height="15" rx="2\.5"><\/rect>/);
+  assert.match(scheduleButton?.markup || "", /M8 3v4M16 3v4M4 9h16/);
   assert.match(appMain, /querySelectorAll\("\[data-global-rail-target\]"\)/);
   assert.match(appMain, /activateGlobalRailTarget\(node\.dataset\.globalRailTarget\)/);
 
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(ids).size, ids.length, "white shell must not introduce duplicate IDs");
+});
+
+test("desktop home overview stays available while mobile starts in conversation", async () => {
+  const [html, appMain, overviewDashboard, styles, messagesCN, messagesTW, messagesEN] = await Promise.all([
+    readFile(indexURL, "utf8"), readFile(appMainURL, "utf8"), readFile(overviewDashboardURL, "utf8"), readFile(stylesURL, "utf8"),
+    readFile(new URL("./messages-zh-CN.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./messages-zh-TW.mjs", import.meta.url), "utf8"),
+    readFile(new URL("./messages-en.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /<main id="appShell"[^>]*>[\s\S]*?<section id="overviewDashboard" class="overview-dashboard-page"/);
+  assert.doesNotMatch(html, /<main id="overviewDashboard"/);
+  assert.doesNotMatch(overviewDashboard, /<main\b/);
+  assert.match(overviewDashboard, /role="status" aria-live="polite" aria-atomic="true"/);
+  assert.ok(html.indexOf('id="overviewDashboard"') < html.indexOf('id="schedulePanel"'));
+  assert.ok(html.indexOf('id="schedulePanel"') < html.indexOf('id="conversationPanel"'));
+  assert.doesNotMatch(html, /employeeOverviewModal|employeeOverviewBody/);
+  assert.match(appMain, /createOverviewDashboardController\(\{[\s\S]*?request: api,[\s\S]*?host: "#overviewDashboard",[\s\S]*?translate: t,[\s\S]*?formatDateTime,[\s\S]*?onNavigate: handleOverviewNavigation/);
+  assert.match(appMain, /key === "home"[\s\S]*?openOverviewDashboard\(\)\.catch\(showError\)/);
+  assert.match(appMain, /overviewDashboard\.load\(\)/);
+  assert.match(appMain, /function openOverviewTask\(id = ""\)[\s\S]*?taskWorkspace\.selectTask/);
+  assert.match(appMain, /action === "runs" \|\| action === "open-run"/);
+  assert.match(appMain, /action === "schedules" \|\| action === "open-schedule"/);
+  assert.match(appMain, /action === "approvals"[\s\S]*?openOverviewApprovals/);
+  assert.match(appMain, /tool-calls\/pending/);
+  assert.match(appMain, /loadRunSummary\(run\.id, \{ agentId: run\.agentId \}\)/);
+  assert.match(appMain, /setGlobalRailActive\(currentShellRailTarget\(\)\)/);
+  assert.equal((appMain.match(/state\.overviewActive && options\.preserveOverview !== true\) switchPrimaryWorkbench\("conversation"\)/g) || []).length, 2);
+  assert.match(appMain, /preserveOverview: startup\.overviewActive/);
+  assert.match(appMain, /mobile:\s*isMobileAppViewport\(\)/);
+  assert.match(appMain, /function leaveOverviewForMobile\(\)[\s\S]*?state\.overviewActive = false;[\s\S]*?applyPrimaryWorkbench\("conversation"\)/);
+  assert.match(appMain, /async function openOverviewDashboard\(\)[\s\S]*?if \(isMobileAppViewport\(\)\)[\s\S]*?state\.overviewActive = false;[\s\S]*?return;/);
+  assert.match(html, /id="schedulePanel" class="schedule-workspace-panel hidden"/);
+  assert.match(appMain, /function openOverviewSchedules\(id = ""\)[\s\S]*?scheduleWorkspace\.load[\s\S]*?switchPrimaryWorkbench\("schedules"\)[\s\S]*?scheduleWorkspace\.select/);
+  assert.doesNotMatch(appMain, /function openOverviewSchedules\(id = ""\)[\s\S]*?openSettingsModal\("im-gateway"\)/);
+  assert.match(styles, /Desktop home overview dashboard: a first-class white-shell surface, never a modal/);
+  assert.match(styles, /\.overview-dashboard-page\s*\{[\s\S]*?overflow:\s*auto/);
+  assert.match(styles, /overview-mode :is\(#conversationPanel, #workbenchPanel, #schedulePanel\)[\s\S]*?display:\s*none !important/);
+  assert.match(styles, /not\(\.overview-mode\) #overviewDashboard[\s\S]*?display:\s*none !important/);
+  assert.match(styles, /@media \(max-width:\s*767px\)\s*\{\s*body\.white-shell\.theme-light \.overview-dashboard-page\s*\{\s*display:\s*none !important;/);
+  assert.match(styles, /theme-dark \.overview-dashboard-page/);
+  for (const messages of [messagesCN, messagesTW, messagesEN]) {
+    assert.match(messages, /nav:\s*\{\s*home:/);
+    assert.match(messages, /overview:\s*\{/);
+    assert.match(messages, /runningAgents:/);
+    assert.match(messages, /pendingApprovalsCount:/);
+  }
 });
 
 test("dual workbench shell keeps conversation and Kanban views in one runtime", async () => {
@@ -143,7 +197,7 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
     readFile(stylesURL, "utf8"),
   ]);
 
-  assert.match(html, /id="conversationPanel" class="chat-panel"/);
+  assert.match(html, /id="conversationPanel" class="chat-panel hidden"/);
   assert.match(html, /id="workbenchPanel" class="workbench-panel hidden"/);
   assert.match(html, /id="projectKanbanBody"/);
   const workbenchHeaderStart = html.indexOf('<header class="workbench-header">');
@@ -167,12 +221,21 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
   assert.match(styles, /@media \(max-width:\s*767px\)\s*\{[\s\S]*?\.workbench-header\s*\{[^}]*height:\s*54px[^}]*flex:\s*0 0 54px[^}]*padding:\s*0 14px[\s\S]*?\.workbench-title\s*\{[^}]*font-size:\s*16px[^}]*font-weight:\s*500/);
   assert.match(styles, /\.workbench-header:has\(\.workbench-title-input:not\(\.hidden\)\) \.workbench-header-actions\s*\{[^}]*display:\s*none/);
   assert.match(html, /id="mobileWorkbenchBtn"[^>]*aria-pressed="false"/);
+  const taskGlyph = /<rect x="4" y="3\.5" width="16" height="17" rx="3"><\/rect>[\s\S]*?m7\.5 8 1\.4 1\.4 2\.6-2\.6/;
+  const mobileWorkbenchMarkup = html.match(/<button id="mobileWorkbenchBtn"[\s\S]*?<\/button>/)?.[0] || "";
+  const workbenchBoardMarkup = workbenchHeader.match(/<button id="workbenchBoardBtn"[\s\S]*?<\/button>/)?.[0] || "";
+  assert.match(mobileWorkbenchMarkup, taskGlyph);
+  assert.match(workbenchBoardMarkup, taskGlyph);
   assert.match(appMain, /function applyPrimaryWorkbench\(value\)/);
-  assert.match(appMain, /setPrimaryModePreference\(normalizedPrimaryWorkbench\(value\)\)/);
-  assert.match(appMain, /normalizedPrimaryWorkbench\(value\) === "workbench" \? "tasks" : "conversation"/);
-  assert.match(appMain, /key === "conversation" \|\| key === "tasks"/);
-  assert.match(appMain, /conversationPanel"\)\?\.classList\.toggle\("hidden", workbench\)/);
+  assert.match(appMain, /const mode = normalizedPrimaryWorkbench\(value\)[\s\S]*?setPrimaryModePreference\(mode\)/);
+  assert.doesNotMatch(appMain, /function primaryWorkbenchRailTarget/);
+  assert.match(appMain, /key === "conversation"[\s\S]*?switchPrimaryWorkbench\("conversation"\)/);
+  assert.match(appMain, /key === "schedules"[\s\S]*?switchPrimaryWorkbench\("schedules"\)/);
+  assert.doesNotMatch(appMain, /key === "tasks"/);
+  assert.match(appMain, /overviewDashboard"\)\?\.classList\.toggle\("hidden", !overview\)/);
+  assert.match(appMain, /conversationPanel"\)\?\.classList\.toggle\("hidden", overview \|\| workbench \|\| schedules\)/);
   assert.match(appMain, /workbenchPanel"\)\?\.classList\.toggle\("hidden", !workbench\)/);
+  assert.match(appMain, /schedulePanel"\)\?\.classList\.toggle\("hidden", !schedules\)/);
   const applyStart = appMain.indexOf("function applyPrimaryWorkbench");
   const applyEnd = appMain.indexOf("function switchPrimaryWorkbench", applyStart);
   const applyBody = appMain.slice(applyStart, applyEnd);
@@ -200,20 +263,44 @@ test("project switching preserves the current view until the next Agent is ready
   assert.match(styles, /\.messages\[data-context-switching="true"\]::after/);
 });
 
-test("boot locale localizes the initial project loader before app hydration", async () => {
-  const [html, app] = await Promise.all([
+test("boot transition waits for app readiness and cross-fades the localized shell", async () => {
+  const [html, app, appMain, styles] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(stylesURL, "utf8"),
   ]);
 
   assert.match(app, /function normalizeBootLocale|const normalizeBootLocale/);
   assert.match(app, /navigator\?\.languages/);
   assert.match(app, /new Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.locale/);
   assert.match(app, /const activeBootLocale = applyBootLocale\(\)/);
-  assert.match(app, /workspace\.main\.loadingProjectTitle/);
-  assert.match(app, /workspace\.main\.loadingProjectDescription/);
+  assert.match(app, /querySelectorAll\?\.\('\[data-i18n="workspace\.main\.loadingProjectTitle"\]'/);
   assert.match(app, /正在載入專案/);
-  assert.match(html, /app\.js\?v=[^"\n]*boot-locale-1/);
+  assert.doesNotMatch(app, /loadingProjectDescription|Autoto 正在準備工作線和 AI 代理/);
+  assert.match(html, /<html[^>]*data-ui-locale-pending="true"/);
+  assert.match(html, /id="bootTransition" class="boot-transition"[^>]*role="status"[^>]*aria-labelledby="bootTransitionLabel"/);
+  assert.equal((html.match(/class="boot-transition-dot"/g) || []).length, 3);
+  assert.match(html, /id="bootTransitionLabel" class="sr-only"[^>]*data-i18n="workspace\.main\.loadingProjectTitle"/);
+  assert.doesNotMatch(html, /boot-transition-(?:card|title|description|progress)|bootTransition(?:Title|Description)/);
+  assert.match(styles, /#appShell\s*\{[^}]*opacity:\s*1;[^}]*transition:\s*opacity 280ms ease/);
+  assert.match(styles, /html\[data-ui-locale-pending="true"\] #appShell\s*\{[^}]*visibility:\s*hidden;[^}]*opacity:\s*0;[^}]*transform:\s*translateY\(6px\)/);
+  assert.match(styles, /\.boot-transition\s*\{[^}]*position:\s*fixed;[^}]*opacity:\s*0;[^}]*visibility:\s*hidden/);
+  assert.match(styles, /html\[data-ui-locale-pending="true"\] \.boot-transition\s*\{[^}]*opacity:\s*1;[^}]*visibility:\s*visible/);
+  assert.match(styles, /\.boot-transition\s*\{[^}]*background:\s*#f6f7fb/);
+  assert.match(styles, /\.boot-transition-mark\s*\{[^}]*width:\s*auto;[^}]*margin:\s*0;[^}]*border:\s*0;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none/);
+  assert.doesNotMatch(styles, /\.boot-transition-(?:card|title|description|progress)/);
+  assert.doesNotMatch(styles, /@keyframes boot-transition-(?:card-enter|mark-float|progress)/);
+  assert.match(styles, /@keyframes boot-transition-dot-jump/);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.boot-transition-dot/);
+  assert.match(app, /const appReadyEventName = "autoto:app-ready"/);
+  assert.match(app, /const waitForAppReady = \(\{ timeout = 12000 \} = \{\}\) =>/);
+  assert.match(app, /const appReady = waitForAppReady\(\);[\s\S]*?await import\("\.\/modules\/app-main\.mjs[\s\S]*?await appReady;[\s\S]*?revealLocalizedUI\(\)/);
+  assert.match(appMain, /function signalAppReady\(\)[\s\S]*?new EventConstructor\("autoto:app-ready"\)/);
+  assert.match(appMain, /init\(\)\.then\(openRequestedInitialView\)\.catch\(showError\)\.finally\(signalAppReady\)/);
+  assert.match(html, /app\.js\?v=[^"\n]*boot-dots-only-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*boot-dots-only-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*boot-ready-transition-1/);
 });
 
 test("static entry points share throughput and usage-history cache stamps", async () => {
@@ -263,17 +350,6 @@ test("storage settings cards keep visible vertical spacing", async () => {
 
   assert.match(styles, /body\.white-shell\.theme-light \.legacy-settings-content-body \.storage-entry-list\s*\{[\s\S]*?gap:\s*12px/);
   assert.match(html, /styles\.css\?v=[^"\n]*storage-card-gap-1/);
-});
-
-test("agent settings keep long model names inside their metric cards", async () => {
-  const [html, styles] = await Promise.all([
-    readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
-  ]);
-
-  assert.match(styles, /#settingsContentBody \.agent-settings-page \.usage-summary-grid \.usage-metric-value\s*\{[\s\S]*?overflow-wrap:\s*anywhere[\s\S]*?word-break:\s*break-word/);
-  assert.match(styles, /\.usage-metric-card:nth-child\(-n \+ 2\) \.usage-metric-value\s*\{[\s\S]*?font-size:\s*clamp\(16px, 1\.4vw, 20px\)/);
-  assert.match(html, /styles\.css\?v=[^"\n]*agent-model-wrap-1/);
 });
 
 test("network proxy settings remove duplicate agent management while keeping the backend modal", async () => {
@@ -333,34 +409,56 @@ test("folder picker uses stable SVG actions and directory icons instead of font 
   assert.equal((html.match(/folder-picker-remote-2/g) || []).length, 2);
 });
 
-test("conversation sidebar keeps navigation content and moves its existing actions into the title bar", async () => {
-  const html = await readFile(indexURL, "utf8");
+test("conversation sidebar separates projects and standalone conversations without a redundant list heading", async () => {
+  const [html, app, appMain, styles] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+  ]);
   const header = html.slice(html.indexOf('<header class="session-sidebar-header">'), html.indexOf("</header>", html.indexOf('<header class="session-sidebar-header">')));
+  const filters = html.slice(html.indexOf('id="navigationFilters"'), html.indexOf("</div>", html.indexOf('id="navigationFilters"')));
 
   assert.match(header, /class="session-sidebar-title"[^>]*>会话</);
   for (const id of ["projectSearchToggleBtn", "newProjectBtn", "refreshBtn"]) {
     assert.match(header, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /class="nav-stack"/);
-  for (const value of ["all", "projects", "conversations"]) {
-    assert.match(html, new RegExp(`data-navigation-mode="${value}"`));
-  }
-  assert.match(html, /id="navigationListHeading"/);
+  assert.equal((filters.match(/data-navigation-mode=/g) || []).length, 2);
+  assert.match(filters, /class="navigation-filter active"[^>]*data-navigation-mode="projects"[^>]*aria-pressed="true"/);
+  assert.match(filters, /data-navigation-mode="conversations"[^>]*aria-pressed="false"/);
+  assert.doesNotMatch(filters, /data-navigation-mode="all"|shell\.filters\.all|>全部</);
+  assert.doesNotMatch(html, /navigationListHeading|navigation-list-heading/);
+  assert.doesNotMatch(styles, /\.navigation-list-heading/);
+  assert.doesNotMatch(appMain, /navigationListHeading/);
+  assert.match(appMain, /navigationMode:\s*"projects"/);
+  assert.match(appMain, /node\.dataset\.navigationMode \|\| "projects"/);
   assert.match(html, /id="recentSidebarConversations"/);
   assert.match(html, /id="recentSidebarDirectories"/);
   assert.match(html, /id="globalThemeToggleBtn"/);
   assert.match(html, /id="globalHealthText"/);
+  assert.match(html, /styles\.css\?v=[^"\n]*navigation-split-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*navigation-split-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*navigation-split-1/);
 });
 
-test("standalone conversation entry uses its dedicated API and keeps folder actions separate", async () => {
-  const [html, appMain] = await Promise.all([readFile(indexURL, "utf8"), readFile(appMainURL, "utf8")]);
+test("conversation creation routes project contexts through folder selection and keeps standalone API", async () => {
+  const [html, app, appMain] = await Promise.all([readFile(indexURL, "utf8"), readFile(appURL, "utf8"), readFile(appMainURL, "utf8")]);
   const desktop = html.match(/<button id="newProjectBtn"[^>]*>/)?.[0] || "";
   const mobile = html.match(/<button id="mobileNewConversationBtn"[^>]*>/)?.[0] || "";
   const folder = html.match(/<button id="mobileChooseDirectoryBtn"[^>]*>/)?.[0] || "";
-  assert.match(desktop, /data-create-conversation/);
+  assert.match(desktop, /data-create-navigation-item/);
+  assert.doesNotMatch(desktop, /data-create-conversation/);
   assert.match(mobile, /data-create-conversation/);
   assert.doesNotMatch(`${desktop}${mobile}`, /data-open-directory-shortcut/);
   assert.match(folder, /data-open-directory-shortcut="current"/);
+  assert.match(appMain, /function navigationCreateTarget\(\)/);
+  assert.match(appMain, /if \(state\.activeWorkbench === "schedules"\) return "schedule"[\s\S]*?return state\.navigationMode === "conversations" \? "conversation" : "project"/);
+  assert.match(appMain, /const labelKey = target === "schedule"[\s\S]*?"shell\.newSchedule"[\s\S]*?target === "project" \? "shell\.chooseFolder" : "shell\.newConversation"/);
+  assert.match(appMain, /async function createNavigationItem\(trigger = null\)/);
+  assert.match(appMain, /const target = navigationCreateTarget\(\)[\s\S]*?if \(target === "schedule"\) return startScheduleCreation\(\)[\s\S]*?if \(target === "conversation"\) return createStandaloneConversation\(\)/);
+  assert.match(appMain, /openDirectoryChooser\(state\.project\?\.gitPath \|\| state\.agent\?\.cwd \|\| "", \{ trigger \}\)/);
+  assert.match(appMain, /\[data-create-navigation-item\][\s\S]*?createNavigationItem\(button\)/);
   assert.match(appMain, /async function createStandaloneConversation/);
   assert.match(appMain, /if \(state\.standaloneConversationCreating\) return null/);
   assert.match(appMain, /api\("\/api\/conversations", \{[\s\S]*?method: "POST"/);
@@ -370,7 +468,8 @@ test("standalone conversation entry uses its dedicated API and keeps folder acti
   assert.match(appMain, /api\(`\/api\/agents\/\$\{encodeURIComponent\(agentId\)\}`\)/);
   assert.match(appMain, /modelPatchInFlight = true[\s\S]*?applyAgentPatch\("model", \{ model \}\)[\s\S]*?modelPatchInFlight = false/);
   assert.match(appMain, /if \(modelPatchInFlight && previousAgent[\s\S]*?state\.agent = previousAgent[\s\S]*?renderModelOptions\(\)[\s\S]*?refreshReasoningEffortControl\(\)/);
-  assert.match(html, /app\.js\?v=[^"\n]*standalone-conversation-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*standalone-conversation-1[^"\n]*contextual-create-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*contextual-create-1/);
 });
 
 test("conversation navigation exposes archive, pin, and accessible context-menu controls", async () => {
@@ -396,7 +495,7 @@ test("conversation navigation exposes archive, pin, and accessible context-menu 
   assert.match(styles, /\.navigation-row-actions\s*\{[\s\S]*?opacity:\s*0/);
 });
 
-test("conversation and task modes expose separate creation boundaries", async () => {
+test("conversation, task, and schedule modes expose separate creation boundaries", async () => {
   const [html, appMain, styles] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(appMainURL, "utf8"),
@@ -405,17 +504,25 @@ test("conversation and task modes expose separate creation boundaries", async ()
 
   assert.match(html, /id="sessionSidebar" class="sidebar"/);
   assert.match(html, /id="sessionSidebarTitle" class="session-sidebar-title"/);
-  assert.match(html, /id="newProjectBtn" class="[^"]*conversation-mode-only/);
+  assert.match(html, /id="newProjectBtn" class="icon-btn session-sidebar-action"[^>]*data-create-navigation-item/);
+  assert.match(html, /id="mobileNewScheduleBtn" class="mobile-drawer-primary-action hidden"/);
+  assert.match(html, /id="mobileScheduleModeBtn" class="mobile-drawer-secondary-action"/);
+  assert.match(html, /id="schedulePanel" class="schedule-workspace-panel hidden"/);
   assert.match(html, /id="newTaskBtn" class="[^"]*task-mode-action hidden"[^>]*disabled/);
-  assert.match(html, /id="specBoardBtn" class="[^"]*hidden/);
+  assert.match(html, /id="specBoardBtn" class="icon-btn header-tool-btn"[^>]*data-project-context-only/);
+  assert.doesNotMatch(html, /id="specBoardBtn" class="[^"]*\bhidden\b/);
   assert.match(html, /id="navigationFilters" class="[^"]*conversation-mode-only/);
   assert.match(html, /recent-directories-sidebar conversation-mode-only/);
+  assert.match(appMain, /const scheduleContext = state\.activeWorkbench === "schedules"/);
   assert.match(appMain, /const effectiveNavigationMode = taskContext \? "projects" : state\.navigationMode/);
+  assert.match(appMain, /if \(scheduleContext\)[\s\S]*?scheduleWorkspace\.renderNavigation/);
   assert.match(appMain, /renderNavigationHTML\(view, \{[\s\S]*?taskContext,/);
   assert.match(appMain, /newTaskBtn"\)\?\.addEventListener\("click", \(\) => focusTaskCreation\(\)\.catch\(showError\)\)/);
   assert.match(appMain, /projectKanban\.focusCreate\(\)/);
   assert.match(appMain, /data-primary-workbench-target/);
   assert.match(styles, /body\.white-shell\.theme-light\.workbench-mode \.conversation-mode-only\s*\{[\s\S]*?display:\s*none !important/);
+  assert.match(styles, /body\.white-shell\.theme-light\.schedule-mode \.conversation-mode-only\s*\{[\s\S]*?display:\s*none !important/);
+  assert.match(styles, /First-class schedule workspace/);
   assert.match(styles, /body\.white-shell\.theme-light\.workbench-mode #newTaskBtn\s*\{[\s\S]*?background:\s*var\(--task-accent-soft\)/);
   assert.match(styles, /\.navigation-boundary-empty\s*\{/);
 });
@@ -445,6 +552,8 @@ test("composer operation controls are exposed only in project context", async ()
   assert.match(composer, /class="permission-safety-indicator hidden"[^>]*aria-hidden="true"/);
   assert.match(composer, /id="permissionRiskBadge" class="permission-risk-badge hidden" aria-hidden="true"/);
   assert.match(composer, /class="composer-actions" data-project-context-only aria-hidden="true"/);
+  assert.match(composer, /id="composerFolderBtn"/);
+  assert.doesNotMatch(composer, /id="composerTerminalBtn"/);
   assert.match(styles, /body\.white-shell\.theme-light:not\(\.project-operation-context\) \[data-project-context-only\]\s*\{[^}]*display:\s*none !important/);
   assert.match(styles, /body\.white-shell\.theme-light:not\(\.project-operation-context\) :is\(\.composer-actions, \.composer-message-mode-field, \.composer-permission-field\) \{ display: none !important; \}/);
   assert.doesNotMatch(styles, /\.composer-field-label,\s*\.composer-actions,[\s\S]{0,180}\.composer-permission-field\s*\{ display: none !important; \}/);
@@ -551,7 +660,8 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(styles, /body\.white-shell\.theme-light \.sidebar-resize-handle\s*\{[\s\S]*?position:\s*fixed[\s\S]*?left:\s*calc\(68px \+ var\(--session-sidebar-width\) - 3px\)/);
   assert.match(styles, /body\.white-shell\.theme-light \.chat-panel\s*\{[\s\S]*?grid-column:\s*3/);
   assert.match(styles, /body\.white-shell\.theme-light \.terminal-panel\s*\{[\s\S]*?grid-column:\s*4/);
-  assert.match(styles, /\.session-sidebar-header\s*\{[\s\S]*?height:\s*62px/);
+  assert.match(styles, /body\.white-shell\.theme-light \.session-sidebar-header\s*\{[^}]*flex:\s*0 0 64px[^}]*height:\s*64px[^}]*min-height:\s*64px/);
+  assert.match(html, /styles\.css\?v=[^"\n]*header-divider-align-1/);
   assert.match(styles, /body\.white-shell\.theme-light \.composer-wrap\s*\{[\s\S]*?padding:\s*6px 12px 8px/);
   assert.match(styles, /body\.white-shell\.theme-light \.message-input\s*\{[\s\S]*?min-height:\s*40px/);
   assert.match(styles, /body\.white-shell\.theme-light \.composer-send-btn\s*\{[\s\S]*?width:\s*34px/);
@@ -599,7 +709,7 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(chatRendering, /function clearRunSummary\(\{ preserveView = false \} = \{\}\)/);
   assert.match(chatRendering, /if \(html\) existing\.outerHTML = html/);
   assert.match(chatRendering, /if \(state\.runSummaryLoading\) return;/);
-  assert.match(chatRendering, /if \(!run && state\.runSummaryLoading && !state\.runSummaryError\) return ""/);
+  assert.match(chatRendering, /if \(!state\.runSummaryError \|\| state\.runSummaryLoading\) return ""/);
   assert.doesNotMatch(chatRendering, /runStatusLabel\(status\)\}\)\}\$\{state\.runSummaryLoading/);
   assert.match(chatRendering, /function renderLiveAssistantCard\(\{ preserveView = false \} = \{\}\)/);
   assert.match(styles, /\.messages\[data-context-switching="true"\]::before[\s\S]*?background: color-mix\(in srgb, var\(--bg\) 34%, transparent\)/);
@@ -676,20 +786,123 @@ test("composer task activity is borderless, left aligned, and spins blue while a
   assert.match(backgroundTasks, /headerQueue\.classList\.toggle\("hidden", summary\.queuedCount <= 0\)/);
 });
 
+test("Subagent compact cards integrate background tasks without polling child tool calls", async () => {
+  const [html, app, appMain, chatRendering, messages, styles, backgroundTasks] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(chatRenderingURL, "utf8"),
+    readFile(chatRenderingMessagesURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(backgroundTasksURL, "utf8"),
+  ]);
+
+  assert.match(html, /styles\.css\?v=[^"\n]*subagent-cards-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*subagent-cards-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*subagent-cards-1/);
+  assert.match(appMain, /background-tasks\.mjs\?v=subagent-cards-1/);
+  assert.match(appMain, /chat-rendering\.mjs\?v=[^"\n]*subagent-cards-1/);
+  assert.match(chatRendering, /messages-chat-rendering-extra\.mjs\?v=[^"\n]*subagent-cards-1/);
+
+  assert.match(appMain, /resolveBackgroundTask:\s*\(tool\)\s*=>\s*backgroundTasks\?\.getTaskByParentTool\?\.\(tool\?\.runId, tool\?\.toolUseId\)/);
+  assert.match(chatRendering, /options\.resolveBackgroundTask\(tool\)/);
+  assert.match(chatRendering, /task === null \|\| task === undefined\) return \{ ok: true, task: embeddedAgentBackgroundTaskHandle\(item, tool\) \}/);
+  assert.match(backgroundTasks, /function associationKey\(parentRunId, parentToolUseId\)[\s\S]*?return runId && toolUseId \? JSON\.stringify\(\[runId, toolUseId\]\)/);
+  assert.match(backgroundTasks, /function getTaskByParentTool\(parentRunId, parentToolUseId\)/);
+
+  const enterAgent = appMain.slice(appMain.indexOf("async function enterAgent"), appMain.indexOf("function showModelSetupNotice"));
+  assert.match(enterAgent, /state\.chatHydrating = true;[\s\S]*?backgroundTasks\.setAgent\(agentId\)/);
+  assert.match(enterAgent, /loadBackgroundTasksForAgent\(agentId\)/);
+  assert.match(appMain, /backgroundTaskAgentLoadGeneration[\s\S]*?backgroundTaskAgentLoadInFlight\?\.agentId === normalizedAgentId/);
+  assert.match(backgroundTasks, /background-tasks\?limit=100/);
+  assert.match(backgroundTasks, /if \(!alreadyLoaded\) await loadTask\(normalized\)/);
+  assert.match(backgroundTasks, /lifecycleRefresh[\s\S]*?hydrateTask\(current\.id, \{ force: lifecycleRefresh \}\)/);
+  assert.match(appMain, /backgroundTasks\.subscribe\?\.\(scheduleSubagentCardRefresh\)/);
+
+  const refreshStart = appMain.indexOf("function refreshSubagentCardsPreservingUI");
+  const refreshEnd = appMain.indexOf("function loadBackgroundTasksForAgent", refreshStart);
+  const refreshBody = appMain.slice(refreshStart, refreshEnd);
+  assert.match(refreshBody, /captureSubagentCardViewState/);
+  assert.match(refreshBody, /applyMessageSnapshot\(state\.currentMessages, agentId, \{ forceRender: true, preserveScroll: true \}\)/);
+  assert.match(refreshBody, /restoreSubagentCardViewState/);
+  assert.doesNotMatch(refreshBody, /loadRunSummary|tool-calls|loadTask/);
+  assert.match(appMain, /details\.map\(\(detail\) => Boolean\(detail\.open\)\)/);
+  assert.match(appMain, /status:\s*String\(card\.dataset\?\.subagentStatus/);
+  assert.match(appMain, /statusChanged[\s\S]*?detailIndex === 0 && statusChanged[\s\S]*?detail\.open = Boolean\(saved\.open\?\.\[detailIndex\]\)/);
+  assert.match(appMain, /button\.focus\?\.\(\{ preventScroll: true \}\)[\s\S]*?querySelector\?\.\("summary"\)\?\.focus/);
+  assert.match(appMain, /JSON\.stringify\(\[runId, toolUseId\]\)/);
+  assert.match(appMain, /subagentCardRefreshReasons[\s\S]*?if \(!subagentCardRefreshReasons\.has\(reason\)\) return/);
+  assert.doesNotMatch(appMain.slice(appMain.indexOf("const subagentCardRefreshReasons"), appMain.indexOf("]);", appMain.indexOf("const subagentCardRefreshReasons"))), /task\.output|output-loaded/);
+
+  const actionStart = appMain.indexOf("async function performSubagentCardAction");
+  const actionEnd = appMain.indexOf("function bindSubagentCardActions", actionStart);
+  const actionBody = appMain.slice(actionStart, actionEnd);
+  assert.match(actionBody, /action === "view-task"\) await backgroundTasks\.selectTask\(taskId\)/);
+  assert.match(actionBody, /action === "cancel"\) await backgroundTasks\.cancel\(taskId\)/);
+  assert.match(actionBody, /action === "open-agent"\) await navigateToSubagentAgent\(childAgentId\)/);
+  assert.match(actionBody, /action === "open-run"\) await navigateToSubagentRun\(childAgentId, childRunId\)/);
+  assert.match(appMain, /Promise\.resolve\(performSubagentCardAction\(button\)\)\.catch\(showError\)/);
+  assert.match(appMain, /async function navigateToSubagentAgent[\s\S]*?selectNavigationConversation\(conversation\.targetId\)/);
+  assert.match(appMain, /async function navigateToSubagentRun[\s\S]*?loadRunSummary\(runId, \{ agentId: state\.agent\?\.id \}\)/);
+  for (const action of ["view-task", "cancel", "open-agent", "open-run"]) {
+    assert.match(chatRendering, new RegExp(`data-subagent-action="${action}"`));
+  }
+  assert.match(chatRendering, /activity\.childAgentId && activity\.childRunId/);
+  assert.match(chatRendering, /data-subagent-status=/);
+  assert.match(chatRendering, /role="status" aria-live="polite"/);
+
+  assert.equal((messages.match(/subagent:\s*Object\.freeze/g) || []).length, 3);
+  for (const key of ["title", "roleAuto", "modelAuto", "requestedModel", "waitingTaskInfo", "auditDetails", "failure", "action", "status"]) {
+    assert.match(messages, new RegExp(`${key}:`));
+  }
+  assert.match(messages, /dispatched:\s*"已派发"/);
+  assert.match(messages, /succeeded:\s*"子任务已完成"/);
+  assert.match(messages, /requestedModel:\s*"请求模型：\{model\}"/);
+  assert.match(messages, /modelAuto:\s*"自动选择"/);
+  assert.match(messages, /queued:\s*"子任务已排队"/);
+  assert.match(messages, /waiting_approval:\s*"后台任务等待审批"/);
+  assert.match(messages, /waiting_approval:\s*"背景任務等待核准"/);
+  assert.match(messages, /waiting_approval:\s*"Background task awaiting approval"/);
+
+  const marker = "/* Compact Subagent task cards: semantic, responsive, and isolated from generic tools. */";
+  const cardStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Background tasks and auto-continuation */", styles.indexOf(marker)));
+  assert.ok(cardStyles.startsWith(marker));
+  assert.match(chatRendering, /class="[^"]*subagent-task-card/);
+  assert.match(cardStyles, /\.subagent-task-card\.status-completed \.tool-activity-icon::before \{ content: "✓"; \}/);
+  assert.match(cardStyles, /\.subagent-task-card\.status-warn \.tool-activity-icon::before,[\s\S]*?content: "!"/);
+  assert.match(cardStyles, /\.subagent-task-card :is\(summary, button\):focus-visible/);
+  assert.match(cardStyles, /@media \(max-width: 760px\)[\s\S]*?\.subagent-task-actions \.ghost-btn\.mini/);
+  assert.doesNotMatch(cardStyles, /(?:^|\n)\s*\.tool-activity-card\s*\{/);
+});
+
 test("composer responds to its actual width before the mobile breakpoint", async () => {
   const [html, styles] = await Promise.all([readFile(indexURL, "utf8"), readFile(stylesURL, "utf8")]);
   assert.match(html, /styles\.css\?v=[^"]*composer-responsive-2/);
+  assert.match(html, /styles\.css\?v=[^"]*composer-effort-compact-2/);
   const marker = "/* Responsive composer tiers follow the editor's real width, not the full viewport. */";
   const responsiveStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Flat, single-pass settings layout", styles.indexOf(marker)));
   assert.ok(responsiveStyles.startsWith(marker));
   assert.match(responsiveStyles, /\.composer-wrap\s*\{[^}]*container-name:\s*composer-shell[^}]*container-type:\s*inline-size/);
+  assert.match(responsiveStyles, /\.composer-controls\s*\{[^}]*align-items:\s*center/);
   assert.match(responsiveStyles, /\.composer-select-value\s*\{[^}]*flex:\s*1 1 auto/);
-  assert.match(responsiveStyles, /\.permission-toolbar-pill\s*\{[^}]*width:\s*124px[^}]*min-width:\s*124px/);
+  assert.match(responsiveStyles, /\.composer-effort-field\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*max-width:\s*none[^}]*flex:\s*0 0 auto/);
+  assert.match(responsiveStyles, /\.effort-pill\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*max-width:\s*none[^}]*padding:\s*0/);
+  assert.match(responsiveStyles, /\.composer-effort-field \.composer-select-trigger\s*\{[^}]*width:\s*auto[^}]*justify-content:\s*center[^}]*gap:\s*4px[^}]*padding:\s*0 4px/);
+  assert.match(responsiveStyles, /\.composer-effort-field \.composer-select-value\s*\{[^}]*flex:\s*0 1 auto/);
+  assert.match(responsiveStyles, /\.toolbar-lightning-btn:not\(\.hidden\)\s*\{[^}]*align-self:\s*center[^}]*align-items:\s*center[^}]*justify-content:\s*center/);
+  assert.match(responsiveStyles, /\.composer-permission-field\s*\{[^}]*flex:\s*0 0 96px/);
+  assert.match(responsiveStyles, /\.permission-toolbar-pill\s*\{[^}]*width:\s*96px[^}]*min-width:\s*96px/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*1320px\)[\s\S]*?\.composer-task-summary\s*\{[^}]*width:\s*180px[^}]*max-width:\s*180px[^}]*flex:\s*0 1 180px/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.composer-task-summary\s*\{[^}]*width:\s*30px[^}]*flex:\s*0 0 30px/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.composer-model-field\s*\{[^}]*min-width:\s*140px[^}]*max-width:\s*200px[^}]*flex:\s*1 1 160px/);
-  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.effort-pill\s*\{[^}]*width:\s*92px[^}]*min-width:\s*92px/);
-  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.permission-toolbar-pill\s*\{[^}]*width:\s*112px[^}]*min-width:\s*112px/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.composer-effort-field\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*max-width:\s*none[^}]*flex:\s*0 0 auto/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.effort-pill\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*max-width:\s*none/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*620px\)[\s\S]*?\.composer-effort-field\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*max-width:\s*none[^}]*flex:\s*0 0 auto/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*620px\)[\s\S]*?\.composer-effort-field \.effort-pill\s*\{[^}]*width:\s*auto/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*620px\)[\s\S]*?\.composer-effort-field \.composer-select-value\s*\{[^}]*font-size:\s*11px[^}]*text-overflow:\s*clip/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*620px\)[\s\S]*?\.composer-effort-field \.composer-select-value::before\s*\{[^}]*content:\s*none/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.composer-permission-field\s*\{[^}]*flex:\s*0 0 92px/);
+  assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.permission-toolbar-pill\s*\{[^}]*width:\s*92px[^}]*min-width:\s*92px/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.message-mode-option::after\s*\{[^}]*content:\s*attr\(data-mobile-label\)/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*900px\)[\s\S]*?\.permission-safety-indicator\s*\{[^}]*display:\s*none/);
   assert.match(responsiveStyles, /@container composer-shell \(max-width:\s*620px\)[\s\S]*?\.composer-model-field\s*\{[^}]*max-width:\s*88px[^}]*flex:\s*1 1 62px/);
@@ -707,7 +920,7 @@ test("mobile header and composer use compact icon-first layouts", async () => {
   assert.match(html, /id="mobileTerminalBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
   assert.match(html, /id="mobileSearchBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
   assert.match(html, /id="composerFolderBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
-  assert.match(html, /id="composerTerminalBtn"[\s\S]*?<svg viewBox="0 0 24 24"/);
+  assert.doesNotMatch(html, /id="composerTerminalBtn"/);
   assert.match(html, /data-composer-select="modelSelect"[\s\S]*?class="composer-select-icon"[\s\S]*?id="modelSelectDisplay"[^>]*data-mobile-label="模型"/);
   assert.match(html, /data-composer-select="reasoningEffort"[\s\S]*?class="composer-select-icon"[\s\S]*?id="reasoningEffortDisplay"[^>]*data-mobile-label="Auto"/);
   assert.match(html, /data-composer-select="permissionMode"[\s\S]*?class="composer-select-icon"[\s\S]*?data-mobile-label="RW"/);
@@ -818,6 +1031,19 @@ test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
   const styleValues = new Map();
   const attributes = new Map();
   const storage = new MemoryStorage([[sidebarWidthPreferenceKey, "340"]]);
+  const scrollNode = ({ hidden = false } = {}) => ({
+    classList: { contains(name) { return hidden && name === "hidden"; } },
+    clientHeight: 200,
+    clientWidth: 240,
+    scrollHeight: 800,
+    scrollWidth: 240,
+    scrollLeft: 0,
+    scrollTop: 0,
+  });
+  const projects = scrollNode();
+  const taskWorkspaceOverview = scrollNode();
+  const projectKanbanBody = scrollNode({ hidden: true });
+  const messages = scrollNode();
   const separator = {
     classList: {
       add(name) { classes.add(name); },
@@ -825,6 +1051,7 @@ test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
     },
     addEventListener(name, handler) { elementListeners.set(name, handler); },
     removeEventListener(name) { elementListeners.delete(name); },
+    getBoundingClientRect() { return { left: 397, width: 6 }; },
     setAttribute(name, value) { attributes.set(name, value); },
     setPointerCapture() {},
     releasePointerCapture() {},
@@ -832,8 +1059,23 @@ test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
   const shell = { style: { setProperty(name, value) { styleValues.set(name, value); } } };
   const sidebar = { getBoundingClientRect() { return { left: 100 }; } };
   const fakeDocument = {
-    body: { classList: { add(name) { bodyClasses.add(name); }, remove(name) { bodyClasses.delete(name); } } },
-    getElementById(id) { return { appShell: shell, sidebarResizeHandle: separator }[id] || null; },
+    body: {
+      classList: {
+        add(name) { bodyClasses.add(name); },
+        remove(name) { bodyClasses.delete(name); },
+        contains(name) { return bodyClasses.has(name); },
+      },
+    },
+    getElementById(id) {
+      return {
+        appShell: shell,
+        messages,
+        projectKanbanBody,
+        projects,
+        sidebarResizeHandle: separator,
+        taskWorkspaceOverview,
+      }[id] || null;
+    },
     querySelector(selector) { return selector === ".sidebar" ? sidebar : null; },
   };
   const fakeWindow = {
@@ -855,6 +1097,29 @@ test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
     assert.equal(prevented, true);
     assert.equal(styleValues.get("--session-sidebar-width"), "348px");
     assert.equal(storage.getItem(sidebarWidthPreferenceKey), "348");
+
+    bodyClasses.add("workbench-mode");
+    let mainWheelPrevented = false;
+    elementListeners.get("wheel")({
+      clientX: 402,
+      deltaMode: 0,
+      deltaX: 0,
+      deltaY: 120,
+      preventDefault() { mainWheelPrevented = true; },
+    });
+    assert.equal(mainWheelPrevented, true);
+    assert.equal(taskWorkspaceOverview.scrollTop, 120);
+
+    let sidebarWheelPrevented = false;
+    elementListeners.get("wheel")({
+      clientX: 398,
+      deltaMode: 0,
+      deltaX: 0,
+      deltaY: 90,
+      preventDefault() { sidebarWheelPrevented = true; },
+    });
+    assert.equal(sidebarWheelPrevented, true);
+    assert.equal(projects.scrollTop, 90);
 
     elementListeners.get("pointerdown")({ button: 0, pointerId: 1, clientX: 450, preventDefault() {} });
     assert.equal(classes.has("is-dragging"), true);
@@ -920,8 +1185,6 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
     "settingsIdentityAvatar",
     "settingsIdentityName",
     "settingsIdentityMeta",
-    "employeeOverviewModal",
-    "employeeOverviewBody",
     "conversationDetailsPanel",
     "conversationDetailsBody",
     "workspacePreviewNavigateForm",
@@ -964,12 +1227,20 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
   assert.match(uiShell, /settingsDialogHasNestedModal/);
   assert.match(uiShell, /restoreSettingsDialogFocus/);
   assert.match(uiShell, /event\.defaultPrevented/);
-  assert.match(appMain, /openEmployeeOverview\(\)/);
+  assert.doesNotMatch(appMain, /openEmployeeOverview|employeeOverview/);
+  assert.doesNotMatch(appMain, /\["(?:agents|worklines-containers)",\s*\{\s*render:/);
   assert.match(appMain, /renderConversationDetails\(\)/);
   assert.match(appMain, /settingsCategoryForItem/);
   assert.match(appMain, /classList\.toggle\("about-panel-active", isAboutPanel\)/);
   assert.match(appMain, /bindSkillTabs\(state\.activeSkillTab \|\| "commands"\)/);
   assert.doesNotMatch(appMain, /\["users",\s*\{\s*render:/);
+});
+
+test("settings navigation uses a filled selection rail without a full outline", async () => {
+  const styles = await readFile(stylesURL, "utf8");
+  assert.match(styles, /#settingsModal :is\(\.settings-nav-item, \.settings-nav-group button\)\.active,[\s\S]*?\[aria-current="page"\]\s*\{[\s\S]*?border-color:\s*transparent;[\s\S]*?background:\s*var\(--settings-primary-soft\)/);
+  assert.match(styles, /#settingsModal :is\(\.settings-nav-item, \.settings-nav-group button\)\.active::before,[\s\S]*?width:\s*3px;[\s\S]*?background:\s*var\(--settings-primary\)/);
+  assert.match(styles, /:focus-visible\s*\{[\s\S]*?box-shadow:\s*0 0 0 3px var\(--settings-ring\)/);
 });
 
 test("settings shell docks beside the global rail and keeps complete mobile navigation", async () => {
@@ -1004,7 +1275,7 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   const enterBody = appMain.slice(enterStart, enterEnd);
   assert.ok(enterStart > 0 && enterEnd > enterStart);
   assert.match(enterBody, /saveCurrentChatDraft\(\);[\s\S]*?appShell\.appendChild\(modal\)/);
-  for (const id of ["sessionSidebar", "sidebarResizeHandle", "conversationPanel", "workbenchPanel", "terminalPanel"]) {
+  for (const id of ["sessionSidebar", "sidebarResizeHandle", "conversationPanel", "workbenchPanel", "schedulePanel", "terminalPanel"]) {
     assert.match(enterBody, new RegExp(`"${id}"`));
   }
   assert.match(enterBody, /modal\.setAttribute\("role", "region"\);[\s\S]*?modal\.removeAttribute\("aria-modal"\)/);
@@ -1032,10 +1303,11 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.match(mobile, /\.settings-help-panel\s*\{\s*width:\s*100%;\s*border-left:\s*0;/);
 });
 
-test("mobile shell refresh keeps the new home, drawer, settings index, and model sheet wired", async () => {
-  const [html, styles, appMain, uiShell, settingsPreferences, messagesCN, messagesTW, messagesEN] = await Promise.all([
+test("mobile shell skips home and keeps the drawer, settings index, and model sheet wired", async () => {
+  const [html, styles, app, appMain, uiShell, settingsPreferences, messagesCN, messagesTW, messagesEN] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(stylesURL, "utf8"),
+    readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(uiShellURL, "utf8"),
     readFile(new URL("./settings-preferences.mjs", import.meta.url), "utf8"),
@@ -1046,6 +1318,7 @@ test("mobile shell refresh keeps the new home, drawer, settings index, and model
 
   for (const id of [
     "mobilePageTitle",
+    "overviewDashboard",
     "mobileNewConversationBtn",
     "mobileChooseDirectoryBtn",
     "mobileConversationWelcome",
@@ -1056,22 +1329,37 @@ test("mobile shell refresh keeps the new home, drawer, settings index, and model
     "mobileSidebarSettingsBtn",
     "mobileSidebarLogoutBtn",
   ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /id="mobilePageTitle"[^>]*data-i18n="shell\.nav\.conversation">对话<\/div>/);
+  assert.doesNotMatch(html, /id="mobilePageTitle"[^>]*data-i18n="shell\.nav\.home"/);
   assert.match(html, /class="[^"]*mobile-drawer-header/);
+  assert.match(html, /class="mobile-drawer-brand-mark"[^>]*>[\s\S]*?<svg viewBox="0 0 32 32">/);
   assert.match(html, /class="[^"]*mobile-drawer-footer/);
+  assert.match(html, /class="settings-sidebar-header settings-modal-header"/);
   assert.doesNotMatch(html, /id="mobileSettingsIndex"/);
   assert.doesNotMatch(html, /id="mobileModelPanel"/);
   assert.match(html, /id="attachFileBtn"[^>]*data-i18n-aria-label="chat\.attachFile"/);
+  assert.match(html, /styles\.css\?v=[^"\n]*mobile-sidebar-list-compact-1/);
 
-  const marker = "/* Mobile shell refresh: home, drawer, settings, and composer selection sheets. */";
+  const marker = "/* Mobile shell refresh: conversation, drawer, settings, and composer selection sheets. */";
   const refreshedStyles = styles.slice(styles.indexOf(marker));
   assert.ok(refreshedStyles.startsWith(marker));
   assert.match(styles, /\.mobile-topbar,\s*\.mobile-backdrop,\s*\.mobile-drawer-header,\s*\.mobile-drawer-primary-actions,\s*\.mobile-sidebar-account-summary,\s*\.mobile-sidebar-quick-actions,\s*\.mobile-drawer-footer,\s*\.mobile-conversation-welcome,\s*\.composer-status\s*\{\s*display:\s*none;/);
   assert.match(refreshedStyles, /\.mobile-select-sheet-backdrop\s*\{[\s\S]*?align-items:\s*flex-end/);
   assert.match(refreshedStyles, /@media \(max-width:\s*767px\)[\s\S]*?\.mobile-page-title\s*\{[\s\S]*?text-align:\s*center/);
+  assert.match(refreshedStyles, /body\.white-shell\.theme-light \.mobile-backdrop\s*\{[^}]*z-index:\s*78[^}]*backdrop-filter:\s*blur\(2px\)/);
+  assert.match(refreshedStyles, /body\.white-shell\.theme-light \.sidebar\s*\{[^}]*z-index:\s*80/);
+  assert.match(refreshedStyles, /body\.white-shell\.theme-light \.overview-dashboard-page\s*\{\s*display:\s*none !important/);
+  assert.match(refreshedStyles, /\.mobile-drawer-brand-mark svg\s*\{[^}]*fill:\s*none;[^}]*stroke:\s*currentColor;[^}]*stroke-linecap:\s*round/);
+  assert.match(refreshedStyles, /body\.white-shell\.theme-light\.mobile-sidebar-open \.sidebar\s*\{[^}]*transform:\s*translateX\(0\)/);
   assert.match(refreshedStyles, /\.chat-panel:has\(\.messages\.empty:not\(\[data-initial-chat-state="loading"\]\)\) \.mobile-conversation-welcome\s*\{\s*display:\s*flex/);
   assert.match(refreshedStyles, /#settingsModal\.mobile-settings-index \.settings-main\s*\{\s*display:\s*none/);
   assert.match(refreshedStyles, /#settingsModal\.mobile-settings-detail \.settings-sidebar\s*\{[\s\S]*?flex:\s*0 0 auto/);
-  assert.match(refreshedStyles, /\.mobile-sidebar-account-summary\s*\{[\s\S]*?grid-template-columns:\s*42px minmax\(0, 1fr\)/);
+  assert.match(refreshedStyles, /#settingsModal \.settings-modal-header \.settings-title\s*\{[\s\S]*?grid-column:\s*2;[\s\S]*?text-align:\s*center/);
+  assert.match(refreshedStyles, /#settingsModal\.mobile-settings-detail \.settings-close-btn\s*\{[^}]*grid-column:\s*1/);
+  assert.match(refreshedStyles, /\.mobile-sidebar-account-summary\s*\{[^}]*display:\s*none/);
+  assert.match(refreshedStyles, /#settingsModal \.settings-identity-card\s*\{[^}]*display:\s*none/);
+  assert.match(refreshedStyles, /\.sidebar \.project-list\s*\{[^}]*flex:\s*0 1 auto;[^}]*align-content:\s*start;[^}]*overflow-y:\s*auto/);
+  assert.doesNotMatch(refreshedStyles, /\.sidebar \.project-list\s*\{[^}]*flex:\s*1 1 auto/);
   assert.match(refreshedStyles, /\.mobile-sidebar-quick-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   const guardMarker = "/* Mobile shell final cascade guard: keep the redesigned composer above legacy responsive tiers. */";
   const guardIndex = styles.lastIndexOf(guardMarker);
@@ -1081,10 +1369,21 @@ test("mobile shell refresh keeps the new home, drawer, settings index, and model
   assert.match(cascadeGuard, /\.composer-select-value,[\s\S]*?position:\s*static;[\s\S]*?clip-path:\s*none/);
   assert.match(cascadeGuard, /\.composer-model-field \.composer-select-trigger\s*\{\s*max-width:\s*min\(58vw, 246px\)/);
 
+  assert.match(html, /styles\.css\?v=[^"\n]*mobile-settings-compact-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*mobile-logo-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*mobile-no-home-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*mobile-settings-compact-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*mobile-no-home-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*mobile-title-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*mobile-settings-compact-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*mobile-no-home-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*mobile-title-1/);
   assert.match(appMain, /mobileSettingsView:\s*"detail"/);
   assert.match(appMain, /function showMobileSettingsIndex[\s\S]*?settings\.mobile\.indexTitle/);
+  assert.match(appMain, /showMobileSettingsIndex[\s\S]*?querySelector\?\.\("\.settings-mobile-index-row"\)\?\.focus/);
   assert.match(appMain, /function requestCloseSettingsModal[\s\S]*?mobileSettingsView === "detail"/);
-  assert.match(appMain, /function syncMobilePageTitle/);
+  assert.match(appMain, /function syncMobilePageTitle[\s\S]*?\(!state\.project && !state\.agent\) \? t\("shell\.nav\.conversation"\)/);
+  assert.doesNotMatch(appMain, /\(!state\.project && !state\.agent\) \? t\("shell\.home"\)/);
   assert.match(uiShell, /mobile-select-sheet-backdrop hidden/);
   assert.match(uiShell, /mobileSidebarBackdrop/);
   assert.match(uiShell, /mobileSidebarCloseBtn/);
@@ -1196,7 +1495,6 @@ test("static shell controls localize without marking runtime-owned content", asy
     ["specBoardBtn", 'data-i18n-aria-label="chat.taskList"'],
     ["runtimeStatusBtn", 'data-i18n-aria-label="chat.conversationDetails"'],
     ["composerFolderBtn", 'data-i18n-title="chat.switchDirectory"'],
-    ["composerTerminalBtn", 'data-i18n-aria-label="chat.toggleTerminal"'],
     ["reconnectTerminalBtn", 'data-i18n="common.reconnect"'],
     ["conversationDetailsPanel", 'data-i18n-aria-label="staticExtra.workspace.main.conversationDetails"'],
     ["backendsModalTitle", 'data-i18n="staticExtra.backend.modalTitle"'],
@@ -1206,7 +1504,7 @@ test("static shell controls localize without marking runtime-owned content", asy
     ["closeSpecBoardBtn", 'data-i18n-aria-label="staticExtra.workspace.spec.close"'],
   ]) assert.match(tag(id), new RegExp(marker));
 
-  assert.match(html, /class="legacy-workbench-title" data-i18n="staticExtra\.workspace\.main\.employeeOverviewTitle"/);
+  assert.doesNotMatch(html, /employeeOverview|staticExtra\.workspace\.main\.employeeOverview/);
   assert.match(html, /<span data-i18n="backend\.nameLabel">名称<\/span>/);
   assert.match(html, /<span data-i18n="staticExtra\.workspace\.explorer\.optionalPort">端口（可选）<\/span>/);
   assert.doesNotMatch(tag("terminalCommandInput"), /data-i18n-placeholder/, "terminal input placeholder is runtime-owned");
@@ -1317,23 +1615,22 @@ test("Codex and Anthropic account consoles use the available desktop width for a
   const styles = await readFile(stylesURL, "utf8");
 
   assert.match(styles, /#settingsModal \.settings-page-frame:has\(\.codex-account-console\)\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
-  assert.match(styles, /#settingsContentBody \.codex-account-table th:nth-child\(8\)\s*\{\s*width:\s*22%;\s*\}/);
+  assert.match(styles, /#settingsContentBody \.codex-oauth-account-table th:nth-child\(7\)\s*\{\s*width:\s*22%;\s*\}/);
+  assert.match(styles, /#settingsContentBody \.codex-oauth-account-table th:nth-child\(9\)\s*\{\s*width:\s*19%;\s*\}/);
   assert.match(styles, /#settingsContentBody \.codex-account-actions\s*\{[\s\S]*?border-radius:\s*9px;[\s\S]*?background:\s*var\(--settings-muted\)/);
-  assert.match(styles, /#settingsContentBody \.anthropic-account-table th:nth-child\(8\)\s*\{\s*width:\s*19%;\s*\}/);
+  assert.match(styles, /#settingsContentBody \.anthropic-account-table th:nth-child\(8\)\s*\{\s*width:\s*22%;\s*\}/);
   assert.match(styles, /#settingsContentBody \.codex-browser-login-body\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
   assert.match(styles, /#settingsContentBody \.codex-browser-login-actions\s*\{[\s\S]*?justify-content:\s*flex-end;/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*?#settingsContentBody \.codex-browser-login-body \{ grid-template-columns:\s*minmax\(0, 1fr\);/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*?#settingsContentBody \.codex-accounts-panel \.codex-account-table-wrap \{ overflow:\s*visible;/);
 });
 
-test("agent model pools collapse and the current-model catalog stays compact", async () => {
+test("agent model pools stay compact after redundant lower model sections are removed", async () => {
   const styles = await readFile(stylesURL, "utf8");
 
   assert.match(styles, /#settingsContentBody \.agent-model-pool-details\s*\{[\s\S]*?overflow:\s*hidden;/);
   assert.match(styles, /#settingsContentBody \.agent-model-pool-summary\s*\{[\s\S]*?min-height:\s*40px;/);
   assert.match(styles, /#settingsContentBody \.agent-model-pool-options\s*\{[\s\S]*?max-height:\s*150px;/);
-  assert.match(styles, /#settingsContentBody \.agent-model-catalog \.settings-model-list\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit, minmax\(420px, 1fr\)\)/);
-  assert.match(styles, /#settingsContentBody \.agent-model-catalog-item\s*\{[\s\S]*?min-height:\s*40px;[\s\S]*?padding:\s*0 4px 0 0;/);
 });
 
 test("model provider settings styles remain scoped, responsive, and independent from legacy cards", async () => {

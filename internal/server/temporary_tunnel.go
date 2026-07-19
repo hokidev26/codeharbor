@@ -215,7 +215,7 @@ func (m *TemporaryTunnelManager) StartTunnel(ctx context.Context) (TemporaryTunn
 	m.mu.Unlock()
 
 	processContext, cancel := context.WithCancel(context.Background())
-	process := command(processContext, binaryPath, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:"+strconv.Itoa(port))
+	process := command(processContext, binaryPath, "--config", os.DevNull, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:"+strconv.Itoa(port))
 	stdout, err := process.StdoutPipe()
 	if err != nil {
 		cancel()

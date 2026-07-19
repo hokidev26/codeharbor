@@ -17,6 +17,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"autoto/internal/anthropicauth"
+	"autoto/internal/config"
 )
 
 type anthropicAccountCandidate struct {
@@ -76,10 +77,14 @@ func (p *AnthropicProvider) accountCandidates(scenario CallScenario) ([]anthropi
 		return candidates[i].id < candidates[j].id
 	})
 	if strings.TrimSpace(p.cfg.APIKey) != "" && !managedAnthropicAPIKeyExists(items, p.cfg.APIKey) {
+		client, err := p.newAnthropicClient(option.WithAPIKey(p.cfg.APIKey))
+		if err != nil {
+			return nil, err
+		}
 		candidates = append(candidates, anthropicAccountCandidate{
 			id:       configuredCredentialID,
 			priority: int(^uint(0) >> 1),
-			client:   p.newAnthropicClient(option.WithAPIKey(p.cfg.APIKey)),
+			client:   client,
 		})
 	}
 	if len(candidates) > 0 {
@@ -111,28 +116,36 @@ func (p *AnthropicProvider) clientForCredential(credential anthropicauth.Credent
 		if strings.TrimSpace(credential.Profile) == "" {
 			return anthropic.Client{}, errors.New("Anthropic profile is empty")
 		}
-		return p.newAnthropicClient(option.WithProfile(credential.Profile)), nil
+		return p.newAnthropicClient(option.WithProfile(credential.Profile))
 	case anthropicauth.AuthTypeAPIKey:
 		if strings.TrimSpace(credential.APIKey) == "" {
 			return anthropic.Client{}, errors.New("Anthropic API key is empty")
 		}
-		return p.newAnthropicClient(option.WithAPIKey(credential.APIKey)), nil
+		return p.newAnthropicClient(option.WithAPIKey(credential.APIKey))
 	default:
 		return anthropic.Client{}, errors.New("Anthropic auth type is invalid")
 	}
 }
 
-func (p *AnthropicProvider) newAnthropicClient(auth option.RequestOption) anthropic.Client {
+func (p *AnthropicProvider) newAnthropicClient(auth option.RequestOption) (anthropic.Client, error) {
+	cfg := config.ProviderConfig{}
+	if p != nil {
+		cfg = p.cfg
+	}
+	httpClient, err := providerHTTPClient(cfg, 90*time.Second)
+	if err != nil {
+		return anthropic.Client{}, err
+	}
 	opts := []option.RequestOption{
 		option.WithoutEnvironmentDefaults(),
-		option.WithHTTPClient(providerHTTPClient(90 * time.Second)),
+		option.WithHTTPClient(httpClient),
 		option.WithMaxRetries(0),
 		auth,
 	}
-	if p != nil && strings.TrimSpace(p.cfg.BaseURL) != "" {
-		opts = append(opts, option.WithBaseURL(p.cfg.BaseURL))
+	if strings.TrimSpace(cfg.BaseURL) != "" {
+		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return anthropic.NewClient(opts...)
+	return anthropic.NewClient(opts...), nil
 }
 
 func (p *AnthropicProvider) SyncAccount(ctx context.Context, id string) (anthropicauth.AccountSummary, []string, ProviderAccountQuotaSnapshot, error) {

@@ -36,11 +36,10 @@ import {
   readLocalPreference,
   recentDirectoriesKey,
   regionalPrefsKey,
-  relayProtocolPrefsKey,
   searchPrefsKey,
   skillsPrefsKey,
   terminalPrefsKey,
-} from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1";
+} from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1-schedule-workspace-1";
 import { preferencesMessage } from "./messages-preferences.mjs";
 
 export function createSettingsPreferencesController({
@@ -58,7 +57,6 @@ export function createSettingsPreferencesController({
   normalizeRecentDirectories,
   normalizeTerminalPreferences,
   refreshActiveSettingsPanel,
-  relayProtocolSpec,
   renderModelOptions,
   renderRecentModalDirectories,
   renderRecentSidebarDirectories,
@@ -747,7 +745,6 @@ export function createSettingsPreferencesController({
     }
     const text = String(value ?? "").trim();
     if (entry.key === primaryModePrefsKey) return normalizePrimaryModePreference(text);
-    if (entry.key === relayProtocolPrefsKey) return relayProtocolSpec(text).key;
     if (entry.key === preferredModelKey) return text.slice(0, 240);
     return text.slice(0, 1000);
   }
@@ -803,7 +800,7 @@ export function createSettingsPreferencesController({
     if (!updates.length && !accountCount) throw new Error(pt("backup.noImportablePreferences"));
     try {
       updates.forEach(({ entry, raw }) => {
-        if (!raw && entry.key !== relayProtocolPrefsKey) localStorage.removeItem(entry.key);
+        if (!raw) localStorage.removeItem(entry.key);
         else localStorage.setItem(entry.key, raw);
       });
     } catch {

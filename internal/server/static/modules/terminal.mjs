@@ -428,8 +428,6 @@ export function createTerminalController({
       if (!locked) button.title = collapsed ? t("chat.expandTerminal") : t("terminal.collapse");
       button.setAttribute("aria-label", locked ? t("workspace.terminal.remoteLocked") : collapsed ? t("chat.expandTerminal") : t("terminal.collapse"));
     }
-    const composerButton = $("composerTerminalBtn");
-    composerButton?.classList.toggle("active", !collapsed && !locked);
     $("expandTerminalBtn")?.classList.toggle("hidden", !collapsed || locked);
   }
 

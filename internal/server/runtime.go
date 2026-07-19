@@ -239,7 +239,7 @@ func runtimeServerHost(cfg config.Config) string {
 
 func runtimeServerPort(cfg config.Config) int {
 	if cfg.Server.Port == 0 {
-		return 7788
+		return 16888
 	}
 	return cfg.Server.Port
 }

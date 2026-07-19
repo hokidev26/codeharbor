@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,8 @@ func TestNativeCodexCredentialRoutesRequireCanonicalToken(t *testing.T) {
 		validCodes []int
 	}{
 		{name: "accounts list", method: http.MethodGet, target: "/api/providers/oauth/codex/accounts", validCodes: []int{http.StatusOK}},
+		{name: "accounts batch", method: http.MethodPost, target: "/api/providers/oauth/codex/accounts/batch", body: `{"ids":[],"operation":"enable"}`, validCodes: []int{http.StatusBadRequest}},
+		{name: "import batch", method: http.MethodPost, target: "/api/providers/oauth/codex/import/batch", body: `{"files":[]}`, validCodes: []int{http.StatusBadRequest}},
 		{name: "account export", method: http.MethodGet, target: "/api/providers/oauth/codex/accounts/codex_fixture/export", validCodes: []int{http.StatusBadRequest}},
 		{name: "account patch", method: http.MethodPatch, target: "/api/providers/oauth/codex/accounts/codex_fixture", body: `{}`, validCodes: []int{http.StatusBadRequest}},
 		{name: "account refresh", method: http.MethodPost, target: "/api/providers/oauth/codex/accounts/codex_fixture/refresh", validCodes: []int{http.StatusNotFound}},
@@ -361,6 +364,274 @@ func TestNativeCodexAccountManagementEndpointsAndSecretSafety(t *testing.T) {
 	}
 }
 
+func TestNativeCodexBatchImportReturnsPerFileResults(t *testing.T) {
+	home := t.TempDir()
+	registry := providers.NewRegistry()
+	app := New(config.Config{Paths: config.PathsConfig{HomeDir: home}}, nil, nil, nil, registry)
+	credential := `{"type":"codex","access_token":"batch-import-secret","refresh_token":"batch-import-refresh","account_id":"batch-import-account"}`
+	body, err := json.Marshal(codexOAuthImportBatchRequest{Files: []importAuthFileRequest{
+		{Filename: "one.json", Content: credential},
+		{Filename: "duplicate.json", Content: credential},
+		{Filename: "broken.json", Content: `{"access_token":`},
+		{Filename: "wrong.txt", Content: `{}`},
+		{Filename: "platform.json", Content: `{"access_token":"batch-import-platform-token","platform":"batch-import-platform-secret"}`},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/import/batch", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	assertCodexResponseHasNoSecrets(t, recorder.Body.Bytes())
+	var response codexOAuthImportBatchResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "partial" || response.Total != 5 || response.Success != 1 || response.Skipped != 1 || response.Failed != 3 || len(response.Results) != 5 {
+		t.Fatalf("unexpected batch import response: %+v", response)
+	}
+	if first := response.Results[0]; first.Filename != "one.json" || first.Status != "success" || first.Imported != 1 || first.Format != "codex" || len(first.Files) != 1 || first.Error != "" {
+		t.Fatalf("unexpected successful file result: %+v", first)
+	}
+	if duplicate := response.Results[1]; duplicate.Filename != "duplicate.json" || duplicate.Status != "skipped" || duplicate.Imported != 0 || duplicate.Skipped != 1 || duplicate.Error != "" {
+		t.Fatalf("unexpected skipped file result: %+v", duplicate)
+	}
+	if broken := response.Results[2]; broken.Status != "failed" || broken.Error == "" {
+		t.Fatalf("unexpected malformed file result: %+v", broken)
+	}
+	if wrong := response.Results[3]; wrong.Status != "failed" || wrong.Error != "仅支持 .json 文件" {
+		t.Fatalf("unexpected wrong-type result: %+v", wrong)
+	}
+	if platform := response.Results[4]; platform.Status != "failed" || platform.Error != "账号 platform 不是 OpenAI/Codex" {
+		t.Fatalf("unexpected platform result: %+v", platform)
+	}
+	accounts, err := codexauth.NewStore(codexauth.DefaultStoreDir(home)).ListAccounts()
+	if err != nil || len(accounts) != 1 || accounts[0].AccountID != "batch-import-account" {
+		t.Fatalf("unexpected imported accounts: %+v err=%v", accounts, err)
+	}
+	if _, ok := registry.Get(codexauth.DefaultProviderName); !ok {
+		t.Fatal("batch import did not register the native Codex provider")
+	}
+
+	invalidRecorder := httptest.NewRecorder()
+	invalidRequest := authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/import/batch", strings.NewReader(`{"files":[{"filename":"one.json","content":"{}","unknown":true}]}`))
+	invalidRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(invalidRecorder, invalidRequest)
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected strict batch import validation, got %d: %s", invalidRecorder.Code, invalidRecorder.Body.String())
+	}
+}
+
+func TestNativeCodexBatchMetadataDeleteValidationAndSecretSafety(t *testing.T) {
+	home := t.TempDir()
+	database, err := db.Open(context.Background(), filepath.Join(home, "autoto.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	app := New(config.Config{Paths: config.PathsConfig{HomeDir: home}}, database, nil, nil, providers.NewRegistry())
+	payload, _ := json.Marshal(importAuthFileRequest{Filename: "batch.json", Content: `{"format":"sub2api","accounts":[{"name":"one","credentials":{"access_token":"batch-secret-one","refresh_token":"batch-refresh-one","chatgpt_account_id":"batch-account-one"}},{"name":"two","credentials":{"access_token":"batch-secret-two","refresh_token":"batch-refresh-two","chatgpt_account_id":"batch-account-two"}}]}`})
+	importRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(importRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/import", bytes.NewReader(payload)))
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import failed: %d %s", importRecorder.Code, importRecorder.Body.String())
+	}
+	accountsRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(accountsRecorder, authenticatedCodexRequest(app, http.MethodGet, "/api/providers/oauth/codex/accounts", nil))
+	var accounts codexOAuthAccountsResponse
+	if err := json.Unmarshal(accountsRecorder.Body.Bytes(), &accounts); err != nil || len(accounts.Accounts) != 2 {
+		t.Fatalf("unexpected accounts: %+v err=%v", accounts, err)
+	}
+	idOne := accounts.Accounts[0].ID
+	idTwo := accounts.Accounts[1].ID
+
+	tooManyIDs := make([]string, maxCodexOAuthBatchAccounts+1)
+	for index := range tooManyIDs {
+		tooManyIDs[index] = idOne
+	}
+	tooManyBody, _ := json.Marshal(codexOAuthAccountsBatchRequest{IDs: tooManyIDs, Operation: "enable"})
+	invalidRequests := []string{
+		`{"ids":["` + idOne + `"],"operation":"enable","unknown":true}`,
+		`{"ids":["` + idOne + `"],"operation":"enable"} {}`,
+		`{"ids":["codex_invalid"],"operation":"enable"}`,
+		`{"ids":["` + idOne + `"],"operation":"unknown"}`,
+		`{"ids":["` + idOne + `"],"operation":"set_priority"}`,
+		`{"ids":["` + idOne + `"],"operation":"enable","priority":7}`,
+		string(tooManyBody),
+		strings.Repeat(" ", maxCodexOAuthBatchBytes+1),
+	}
+	for index, body := range invalidRequests {
+		recorder := httptest.NewRecorder()
+		request := authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		app.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("invalid request %d returned %d: %s", index, recorder.Code, recorder.Body.String())
+		}
+		assertCodexResponseHasNoSecrets(t, recorder.Body.Bytes())
+	}
+
+	priorityBody := `{"ids":["` + idOne + `","` + idOne + `","` + idTwo + `"],"operation":"set_priority","priority":17}`
+	priorityRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(priorityRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", strings.NewReader(priorityBody)))
+	if priorityRecorder.Code != http.StatusOK {
+		t.Fatalf("batch priority failed: %d %s", priorityRecorder.Code, priorityRecorder.Body.String())
+	}
+	assertCodexResponseHasNoSecrets(t, priorityRecorder.Body.Bytes())
+	var priorityResponse codexOAuthAccountsBatchResponse
+	if err := json.Unmarshal(priorityRecorder.Body.Bytes(), &priorityResponse); err != nil || priorityResponse.Status != "ok" || priorityResponse.Total != 2 || priorityResponse.Success != 2 || priorityResponse.Failed != 0 {
+		t.Fatalf("unexpected priority response: %+v err=%v", priorityResponse, err)
+	}
+	for _, result := range priorityResponse.Results {
+		if !result.Success || result.Error != "" || result.Warning != "" || result.Retryable {
+			t.Fatalf("unexpected priority item: %+v", result)
+		}
+	}
+	credentialStore := codexauth.NewStore(codexauth.DefaultStoreDir(home))
+	for _, id := range []string{idOne, idTwo} {
+		item, err := credentialStore.GetByID(id)
+		if err != nil || item.Credential.Priority != 17 {
+			t.Fatalf("priority not persisted for %s: %+v err=%v", id, item, err)
+		}
+	}
+
+	missingID := "codex_MDEyMzQ1Njc4OWFiY2RlZg"
+	partialRecorder := httptest.NewRecorder()
+	partialBody := `{"ids":["` + idOne + `","` + missingID + `"],"operation":"disable"}`
+	app.Routes().ServeHTTP(partialRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", strings.NewReader(partialBody)))
+	if partialRecorder.Code != http.StatusMultiStatus {
+		t.Fatalf("expected metadata 207, got %d: %s", partialRecorder.Code, partialRecorder.Body.String())
+	}
+	var partialResponse codexOAuthAccountsBatchResponse
+	if err := json.Unmarshal(partialRecorder.Body.Bytes(), &partialResponse); err != nil || partialResponse.Status != "partial" || partialResponse.Success != 1 || partialResponse.Failed != 1 || partialResponse.Results[1].Retryable {
+		t.Fatalf("unexpected partial metadata response: %+v err=%v", partialResponse, err)
+	}
+	if item, err := credentialStore.GetByID(idOne); err != nil || !item.Credential.Disabled {
+		t.Fatalf("disable not persisted: %+v err=%v", item, err)
+	}
+	enableRecorder := httptest.NewRecorder()
+	enableBody := `{"ids":["` + idOne + `","` + idTwo + `"],"operation":"enable"}`
+	app.Routes().ServeHTTP(enableRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", strings.NewReader(enableBody)))
+	if enableRecorder.Code != http.StatusOK {
+		t.Fatalf("batch enable failed: %d %s", enableRecorder.Code, enableRecorder.Body.String())
+	}
+	for _, id := range []string{idOne, idTwo} {
+		item, err := credentialStore.GetByID(id)
+		if err != nil || item.Credential.Disabled {
+			t.Fatalf("enable not persisted for %s: %+v err=%v", id, item, err)
+		}
+	}
+
+	for _, id := range []string{idOne, idTwo} {
+		if _, err := database.DB().Exec(`INSERT INTO provider_account_stats (provider, account_id, success_count) VALUES ('codex', ?, 1)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.DB().Exec(`INSERT INTO api_requests (id, provider, credential_id, created_at) VALUES ('batch-history', 'codex', ?, ?)`, idOne, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB().Exec(`CREATE TRIGGER fail_second_codex_stats_delete BEFORE DELETE ON provider_account_stats WHEN OLD.account_id = '` + idTwo + `' BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	deleteRecorder := httptest.NewRecorder()
+	deleteBody := `{"ids":["` + idOne + `","` + idTwo + `"],"operation":"delete"}`
+	app.Routes().ServeHTTP(deleteRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", strings.NewReader(deleteBody)))
+	if deleteRecorder.Code != http.StatusMultiStatus {
+		t.Fatalf("expected delete 207, got %d: %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	assertCodexResponseHasNoSecrets(t, deleteRecorder.Body.Bytes())
+	var deleteResponse codexOAuthAccountsBatchResponse
+	if err := json.Unmarshal(deleteRecorder.Body.Bytes(), &deleteResponse); err != nil || deleteResponse.Status != "partial" || deleteResponse.Total != 2 || deleteResponse.Success != 1 || deleteResponse.Failed != 1 {
+		t.Fatalf("unexpected delete response: %+v err=%v", deleteResponse, err)
+	}
+	byID := map[string]codexOAuthAccountsBatchResult{}
+	for _, result := range deleteResponse.Results {
+		byID[result.ID] = result
+	}
+	if !byID[idOne].Success || byID[idOne].Retryable || byID[idOne].Warning != "" {
+		t.Fatalf("unexpected successful delete result: %+v", byID[idOne])
+	}
+	if byID[idTwo].Success || !byID[idTwo].Retryable || byID[idTwo].Warning == "" || byID[idTwo].Error != "" {
+		t.Fatalf("unexpected cleanup warning result: %+v", byID[idTwo])
+	}
+	stored, err := codexauth.NewStore(codexauth.DefaultStoreDir(home)).Load()
+	if err != nil || len(stored) != 0 {
+		t.Fatalf("batch delete retained credentials: %+v err=%v", stored, err)
+	}
+	stats, err := database.ListProviderAccountStats(context.Background(), codexauth.DefaultProviderName)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("unexpected remaining stats: %+v err=%v", stats, err)
+	}
+	var historyCount int
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM api_requests WHERE id = 'batch-history'`).Scan(&historyCount); err != nil || historyCount != 1 {
+		t.Fatalf("api_requests history was removed: count=%d err=%v", historyCount, err)
+	}
+}
+
+func TestNativeCodexBatchSyncIsSequentialAndPerAccountBounded(t *testing.T) {
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		active++
+		calls++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		time.Sleep(15 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":5}}}`))
+	}))
+	defer upstream.Close()
+
+	home := t.TempDir()
+	app := New(config.Config{
+		Paths: config.PathsConfig{HomeDir: home},
+		Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
+			Name: "codex", Type: config.ProviderTypeCodex, BaseURL: upstream.URL + "/backend-api/codex", Model: "gpt-test", CodexAllowInsecureTestEndpoint: true,
+		}}},
+	}, nil, nil, nil, providers.NewRegistry())
+	payload, _ := json.Marshal(importAuthFileRequest{Filename: "sync.json", Content: `{"format":"sub2api","accounts":[{"name":"one","credentials":{"access_token":"sync-secret-one","chatgpt_account_id":"sync-account-one"}},{"name":"two","credentials":{"access_token":"sync-secret-two","chatgpt_account_id":"sync-account-two"}}]}`})
+	importRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(importRecorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/import", bytes.NewReader(payload)))
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import failed: %d %s", importRecorder.Code, importRecorder.Body.String())
+	}
+	accounts, err := codexauth.NewStore(codexauth.DefaultStoreDir(home)).ListAccounts()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("list failed: %+v err=%v", accounts, err)
+	}
+	body, _ := json.Marshal(codexOAuthAccountsBatchRequest{IDs: []string{accounts[0].ID, accounts[1].ID}, Operation: "sync"})
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, authenticatedCodexRequest(app, http.MethodPost, "/api/providers/oauth/codex/accounts/batch", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("batch sync failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	assertCodexResponseHasNoSecrets(t, recorder.Body.Bytes())
+	var response codexOAuthAccountsBatchResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Status != "ok" || response.Success != 2 || response.Failed != 0 {
+		t.Fatalf("unexpected sync response: %+v err=%v", response, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 || maxActive != 1 {
+		t.Fatalf("batch sync was not sequential: calls=%d maxActive=%d", calls, maxActive)
+	}
+}
+
 func assertCodexResponseHasNoSecrets(t *testing.T, body []byte) {
 	t.Helper()
 	var value any
@@ -385,7 +656,12 @@ func assertCodexResponseHasNoSecrets(t *testing.T, body []byte) {
 				visit(child)
 			}
 		case string:
-			for _, secret := range []string{"fixture-management-access", "rt_management_fixture"} {
+			for _, secret := range []string{
+				"fixture-management-access", "rt_management_fixture",
+				"batch-secret-one", "batch-refresh-one", "batch-secret-two", "batch-refresh-two",
+				"batch-import-secret", "batch-import-refresh", "batch-import-platform-token", "batch-import-platform-secret",
+				"sync-secret-one", "sync-secret-two",
+			} {
 				if strings.Contains(typed, secret) {
 					t.Fatalf("secret value leaked in response: %s", body)
 				}

@@ -43,7 +43,7 @@ export function createSystemSettingsController({
     const server = summary?.server || {};
     const process = summary?.process || {};
     const go = summary?.go || {};
-    const address = server.address || `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "7788"}`;
+    const address = server.address || `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "16888"}`;
     return `
     <div class="settings-live-page runtime-page">
       <section class="settings-hero-card settings-page-section settings-card">
@@ -92,7 +92,7 @@ export function createSystemSettingsController({
         <div class="settings-info-title">${escapeHtml(t("systemSettings.serverSystem.serviceConfig"))}</div>
         <div class="runtime-kv-list settings-data-list">
           ${renderRuntimeKeyValue(t("systemSettings.serverSystem.host"), server.host || "localhost")}
-          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.port"), server.port || 7788)}
+          ${renderRuntimeKeyValue(t("systemSettings.serverSystem.port"), server.port || 16888)}
           ${renderRuntimeKeyValue(t("systemSettings.serverSystem.config"), server.configPath || t("systemSettings.serverSystem.notConfigured"))}
           ${renderRuntimeKeyValue(t("systemSettings.serverSystem.executable"), process.executable || t("systemSettings.serverSystem.unknown"))}
         </div>

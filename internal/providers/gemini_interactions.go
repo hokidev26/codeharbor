@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +36,8 @@ func NewGeminiInteractions(cfg config.ProviderConfig) *GeminiInteractions {
 	if cfg.Model == "" {
 		cfg.Model = "gemini-2.5-pro"
 	}
-	return &GeminiInteractions{cfg: cfg, client: providerHTTPClient(90 * time.Second), configErr: validateProviderRuntimeConfig(cfg)}
+	client, clientErr := providerHTTPClient(cfg, 90*time.Second)
+	return &GeminiInteractions{cfg: cfg, client: client, configErr: errors.Join(validateProviderRuntimeConfig(cfg), clientErr)}
 }
 
 func (p *GeminiInteractions) Name() string { return p.cfg.Name }

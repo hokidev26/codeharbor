@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -49,6 +50,31 @@ func TestRuntimeRegistrationClosesHTTPAndGatewayBeforeWorkers(t *testing.T) {
 	want := []string{"http", "gateway", "background", "automation", "channels", "preview"}
 	if !reflect.DeepEqual(closed, want) {
 		t.Fatalf("unexpected close order: got %v want %v", closed, want)
+	}
+}
+
+func TestBindConfiguredHTTPListenersRejectsDuplicateMainProcess(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+
+	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(config.Config{
+		Server: config.ServerConfig{Host: "127.0.0.1", Port: port},
+	})
+	if err == nil {
+		if httpListener != nil {
+			_ = httpListener.Close()
+		}
+		if gatewayListener != nil {
+			_ = gatewayListener.Close()
+		}
+		t.Fatal("expected duplicate main listener to be rejected")
+	}
+	if httpListener != nil || gatewayListener != nil {
+		t.Fatalf("failed bind leaked listeners: main=%v gateway=%v", httpListener, gatewayListener)
 	}
 }
 

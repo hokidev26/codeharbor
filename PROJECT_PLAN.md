@@ -140,7 +140,7 @@ go run ./cmd/autoto
 默认监听：
 
 ```txt
-http://localhost:7788
+http://localhost:16888
 ```
 
 默认配置路径：
@@ -188,7 +188,7 @@ internal/config/defaults.go
 
 ```txt
 server.host = localhost
-server.port = 7788
+server.port = 16888
 agent.defaultPermissionMode = acceptEdits
 agent.defaultModel = openai:gpt-4.1-mini
 ```
@@ -664,7 +664,6 @@ internal/server/static/modules/mcp-registry-ui.mjs # backend MCP registry UI/act
 internal/server/static/modules/model-provider-settings.mjs # Settings Models/Providers UI and model helpers
 internal/server/static/modules/local-preferences-settings.mjs # Settings local preference panels UI/actions controller
 internal/server/static/modules/system-settings.mjs # Settings system/storage/usage/users/about panels controller
-internal/server/static/modules/workspace-settings.mjs # Settings AI Agents/Worklines workspace panels controller
 internal/server/static/modules/skills-workbench.mjs # Settings Skills workbench UI/actions controller
 internal/server/static/modules/ui-shell.mjs     # global shortcuts/sidebar/mobile shell/project search
 internal/server/static/modules/settings-preferences.mjs # browser-local settings preferences/backup/import
@@ -673,7 +672,7 @@ internal/server/static/modules/settings-data.mjs # settings/skills static naviga
 internal/server/static/modules/preferences-data.mjs # localStorage keys/default preference data
 ```
 
-当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。前端已开始无构建 ES module 拆分：`app.js` 只负责 bootstrap，业务主模块在 `modules/app-main.mjs`，Agent Server backend registry/弹窗/Agent Admin controller 在 `modules/backend-registry.mjs`，Chat 发送/草稿/历史/附件/slash command controller 在 `modules/chat-composer.mjs`，Chat 消息渲染/审批/Markdown controller 在 `modules/chat-rendering.mjs`，目录选择/浏览/最近目录/路径格式化 controller 在 `modules/directory-browser.mjs`，通用格式化函数在 `modules/formatters.mjs`，Git status/diff/log/commit modal controller 在 `modules/git-workflow.mjs`，终端偏好/设置页/WebSocket controller 在 `modules/terminal.mjs`，API/token/WebSocket helper 在 `modules/runtime.mjs`，后端 MCP registry UI/action controller 在 `modules/mcp-registry-ui.mjs`，Settings Models/Providers UI 与模型选择 helper 在 `modules/model-provider-settings.mjs`，Settings 本地偏好面板（Profile/Network Search/IM Gateway/Notifications/Appearance）UI/action controller 在 `modules/local-preferences-settings.mjs`，Settings 系统/存储/使用/用户/About 面板 controller 在 `modules/system-settings.mjs`，Settings AI Agents/Worklines 工作区面板 controller 在 `modules/workspace-settings.mjs`，Settings Skills 工作台 UI/action controller 在 `modules/skills-workbench.mjs`，全局快捷键/侧栏/移动端 shell/项目搜索 controller 在 `modules/ui-shell.mjs`，浏览器本地 Settings 偏好/备份/导入 controller 在 `modules/settings-preferences.mjs`。
+当前 UI 是 **shadcn-inspired**，参考 shadcn/ui 的简洁 card、button、input、badge、border、radius 风格，但没有直接引入 React、Tailwind、Radix 或 shadcn 组件源码。前端已开始无构建 ES module 拆分：`app.js` 只负责 bootstrap，业务主模块在 `modules/app-main.mjs`，Agent Server backend registry/弹窗/Agent Admin controller 在 `modules/backend-registry.mjs`，Chat 发送/草稿/历史/附件/slash command controller 在 `modules/chat-composer.mjs`，Chat 消息渲染/审批/Markdown controller 在 `modules/chat-rendering.mjs`，目录选择/浏览/最近目录/路径格式化 controller 在 `modules/directory-browser.mjs`，通用格式化函数在 `modules/formatters.mjs`，Git status/diff/log/commit modal controller 在 `modules/git-workflow.mjs`，终端偏好/设置页/WebSocket controller 在 `modules/terminal.mjs`，API/token/WebSocket helper 在 `modules/runtime.mjs`，后端 MCP registry UI/action controller 在 `modules/mcp-registry-ui.mjs`，Settings Models/Providers UI 与模型选择 helper 在 `modules/model-provider-settings.mjs`，Settings 本地偏好面板（Profile/Network Search/IM Gateway/Notifications/Appearance）UI/action controller 在 `modules/local-preferences-settings.mjs`，Settings 系统/存储/使用/用户/About 面板 controller 在 `modules/system-settings.mjs`，Settings Skills 工作台 UI/action controller 在 `modules/skills-workbench.mjs`，全局快捷键/侧栏/移动端 shell/项目搜索 controller 在 `modules/ui-shell.mjs`，浏览器本地 Settings 偏好/备份/导入 controller 在 `modules/settings-preferences.mjs`。
 
 当前路由：
 

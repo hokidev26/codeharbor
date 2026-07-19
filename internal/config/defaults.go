@@ -102,19 +102,31 @@ const (
 	ProviderOriginCustom  = "custom"
 )
 
+type ProviderRequestHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"-"`
+}
+
 type ProviderConfig struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	Profile        string `json:"profile,omitempty"`
-	BaseURL        string `json:"baseUrl,omitempty"`
-	APIKey         string `json:"apiKey,omitempty"`
-	Model          string `json:"model"`
-	MaxTokens      int64  `json:"maxTokens,omitempty"`
-	APIKeyOptional bool   `json:"apiKeyOptional,omitempty"`
-	GatewayEnabled bool   `json:"gatewayEnabled,omitempty"`
+	Name                  string                  `json:"name"`
+	Type                  string                  `json:"type"`
+	Profile               string                  `json:"profile,omitempty"`
+	BaseURL               string                  `json:"baseUrl,omitempty"`
+	APIKey                string                  `json:"apiKey,omitempty"`
+	Model                 string                  `json:"model"`
+	MaxTokens             int64                   `json:"maxTokens,omitempty"`
+	APIKeyOptional        bool                    `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled        bool                    `json:"gatewayEnabled,omitempty"`
+	ProxyURL              string                  `json:"proxyUrl,omitempty"`
+	UserAgent             string                  `json:"userAgent,omitempty"`
+	RequestHeaders        []ProviderRequestHeader `json:"requestHeaders,omitempty"`
+	InsecureSkipTLSVerify bool                    `json:"insecureSkipTLSVerify,omitempty"`
 	// SecretRevision coordinates crash-safe Provider API key updates between
 	// config.json and the encrypted SQLite secret vault. It contains no secret.
 	SecretRevision int64 `json:"secretRevision,omitempty"`
+	// TransportSecretRevision independently coordinates encrypted proxy
+	// credentials and request-header values.
+	TransportSecretRevision int64 `json:"transportSecretRevision,omitempty"`
 	// Disabled is persisted instead of Enabled so configs written before this
 	// field existed remain enabled after an upgrade.
 	Disabled bool `json:"disabled,omitempty"`
@@ -127,7 +139,11 @@ type ProviderConfig struct {
 	CodexUsageURL                  string `json:"-"`
 	// APIKeySource is runtime-only provenance used to keep environment values
 	// ahead of the encrypted database vault without exposing either value.
-	APIKeySource string `json:"-"`
+	APIKeySource         string `json:"-"`
+	ProxyUsername        string `json:"-"`
+	ProxyPassword        string `json:"-"`
+	ProxyAuthSource      string `json:"-"`
+	RequestHeadersSource string `json:"-"`
 }
 
 type OpenAICompatibleConfig = ProviderConfig
@@ -186,7 +202,7 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 	}
 	return Config{
 		SchemaVersion: CurrentConfigVersion,
-		Server:        ServerConfig{Host: "localhost", Port: 7788},
+		Server:        ServerConfig{Host: "localhost", Port: 16888},
 		Gateway: GatewayConfig{
 			Enabled:              false,
 			Host:                 "127.0.0.1",
@@ -220,7 +236,7 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 			RegistrationOpen: true,
 			OAuthApp: OAuthAppConfig{
 				ClientSecretEnv: "AUTOTO_OIDC_CLIENT_SECRET",
-				RedirectURL:     "http://localhost:7788/app/auth/callback",
+				RedirectURL:     "http://localhost:16888/app/auth/callback",
 				AutoProvision:   true,
 				SessionTTLHours: 8,
 			},
@@ -739,6 +755,40 @@ func (p ProvidersConfig) Summaries() []ProviderSummary {
 	return out
 }
 
+func providerProxyURLWithoutCredentials(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(raw); err == nil {
+		if parsed.User != nil {
+			parsed.User = nil
+			return parsed.String()
+		}
+		if parsed.Host != "" || !strings.Contains(raw, "@") {
+			return parsed.String()
+		}
+	}
+	// Fail closed even for malformed legacy values: never let a userinfo segment
+	// survive an ordinary config save.
+	if scheme := strings.Index(raw, "://"); scheme >= 0 {
+		authorityStart := scheme + 3
+		authorityEnd := len(raw)
+		for _, separator := range []string{"/", "?", "#"} {
+			if index := strings.Index(raw[authorityStart:], separator); index >= 0 && authorityStart+index < authorityEnd {
+				authorityEnd = authorityStart + index
+			}
+		}
+		if at := strings.LastIndex(raw[authorityStart:authorityEnd], "@"); at >= 0 {
+			return raw[:authorityStart] + raw[authorityStart+at+1:]
+		}
+	}
+	if strings.Contains(raw, "@") {
+		return ""
+	}
+	return raw
+}
+
 func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 	if p.OpenAICompatible != nil {
 		legacy := *p.OpenAICompatible
@@ -756,6 +806,14 @@ func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 		provider.Name = strings.TrimSpace(provider.Name)
 		provider.Type = strings.TrimSpace(provider.Type)
 		provider.Profile = strings.TrimSpace(provider.Profile)
+		provider.ProxyURL = providerProxyURLWithoutCredentials(provider.ProxyURL)
+		provider.UserAgent = strings.TrimSpace(provider.UserAgent)
+		if len(provider.RequestHeaders) > 0 {
+			provider.RequestHeaders = append([]ProviderRequestHeader(nil), provider.RequestHeaders...)
+			for headerIndex := range provider.RequestHeaders {
+				provider.RequestHeaders[headerIndex].Name = strings.TrimSpace(provider.RequestHeaders[headerIndex].Name)
+			}
+		}
 		if provider.Type == "" {
 			provider.Type = provider.Name
 		}

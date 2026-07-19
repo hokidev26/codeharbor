@@ -1,5 +1,4 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
-import { relayProtocolPrefsKey } from "./preferences-data.mjs";
 import { api, apiDownload } from "./runtime.mjs";
 import { formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs";
@@ -20,6 +19,22 @@ const providerConsoleInteractiveSelector = "button, input, select, textarea, a, 
 const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
 const codexBrowserLoginBasePath = "/api/providers/oauth/codex/login";
 const codexBrowserLoginActiveStatuses = new Set(["starting", "pending", "exchanging"]);
+const maxCodexImportFiles = 50;
+const maxCodexImportFileBytes = 2 << 20;
+const maxCodexImportBatchBytes = 8 << 20;
+
+export function validateProviderNameValue(value, { existingNames = [], mode = "create", originalName = "" } = {}) {
+  const name = String(value || "").trim();
+  if (!name) return { valid: false, code: "required", name };
+  if (name.length > 64) return { valid: false, code: "too_long", name };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return { valid: false, code: "invalid", name };
+  const original = String(originalName || "").trim();
+  if (mode === "create" || name !== original) {
+    const occupied = new Set((Array.isArray(existingNames) ? existingNames : []).map((item) => String(item || "").trim()).filter(Boolean));
+    if (occupied.has(name)) return { valid: false, code: "conflict", name };
+  }
+  return { valid: true, code: "", name };
+}
 
 export function codexBrowserLoginRequest(action, loginId = "") {
   const id = encodeURIComponent(String(loginId || "").trim());
@@ -58,9 +73,36 @@ export function normalizeCodexBrowserLoginStatus(value = {}) {
   };
 }
 
+export function redactedProviderProxyURL(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/\/[^/@\s]+@/, "//");
+  }
+}
+
 export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackType = "openai-compatible") {
   const fields = form?.elements || {};
   const value = (name, fallback = "") => String(fields[name]?.value ?? fallback ?? "");
+  const requestHeaders = [...(form?.querySelectorAll?.("[data-mp-request-header-row]") || [])].map((row) => {
+    const name = String(row.querySelector?.("[data-mp-request-header-name]")?.value || "");
+    const headerValue = String(row.querySelector?.("[data-mp-request-header-value]")?.value || "");
+    const originalName = String(row.dataset?.originalName || "").trim().toLowerCase();
+    const keepExisting = row.dataset?.keepExisting === "true"
+      && !headerValue
+      && String(name).trim().toLowerCase() === originalName;
+    return {
+      name,
+      value: headerValue,
+      keepExisting,
+      configured: row.dataset?.configured === "true",
+    };
+  });
   return {
     ...currentDraft,
     name: value("name", currentDraft.name),
@@ -70,6 +112,14 @@ export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackTy
     apiKey: value("apiKey", currentDraft.apiKey),
     apiKeyDraft: true,
     clearApiKey: Boolean(fields.clearApiKey?.checked),
+    proxyUrl: value("proxyUrl", currentDraft.proxyUrl),
+    proxyUrlDraft: true,
+    clearProxyAuth: Boolean(fields.clearProxyAuth?.checked),
+    userAgent: value("userAgent", currentDraft.userAgent),
+    userAgentDraft: true,
+    requestHeaders,
+    requestHeadersDraft: true,
+    insecureSkipTLSVerify: Boolean(fields.insecureSkipTLSVerify?.checked),
     model: value("model", currentDraft.model),
     maxTokens: Number(fields.maxTokens?.value || 0),
     apiKeyOptional: Boolean(fields.apiKeyOptional?.checked),
@@ -310,6 +360,99 @@ export function codexAccountActionRequest(action, id, values = {}) {
   }
 }
 
+export function codexAccountBatchRequest(operation, ids, values = {}) {
+  const normalizedIds = [...new Set((Array.isArray(ids) ? ids : [])
+    .map((id) => String(id || "").trim())
+    .filter(Boolean))];
+  const body = { ids: normalizedIds, operation: String(operation || "").trim() };
+  if (body.operation === "set_priority") body.priority = Number(values.priority);
+  return {
+    path: "/api/providers/oauth/codex/accounts/batch",
+    options: { method: "POST", body: JSON.stringify(body) },
+  };
+}
+
+export function codexImportBatchRequest(files) {
+  const normalizedFiles = (Array.isArray(files) ? files : []).map((file) => ({
+    filename: String(file?.filename || file?.name || "").trim(),
+    content: String(file?.content || ""),
+  }));
+  return {
+    path: "/api/providers/oauth/codex/import/batch",
+    options: { method: "POST", body: JSON.stringify({ files: normalizedFiles }) },
+  };
+}
+
+export function normalizeCodexBatchResult(value = {}, requestedIds = []) {
+  const requested = normalizeCodexSelectedIds(requestedIds);
+  const items = Array.isArray(value?.results) ? value.results : [];
+  const normalizedItems = items.map((item) => {
+    const id = String(item?.id || item?.account_id || item?.accountId || "").trim();
+    const success = item?.success === true || String(item?.status || "").toLowerCase() === "ok";
+    return {
+      id,
+      success,
+      error: String(item?.error || "").trim(),
+      warning: String(item?.warning || "").trim(),
+      retryable: Boolean(item?.retryable),
+    };
+  }).filter((item) => item.id);
+  const byID = new Map(normalizedItems.map((item) => [item.id, item]));
+  const failedIds = requested.filter((id) => !byID.get(id)?.success);
+  const warnings = normalizedItems.map((item) => item.warning).filter(Boolean);
+  const success = Math.max(0, Number(value?.success ?? requested.length - failedIds.length) || 0);
+  const failed = Math.max(0, Number(value?.failed ?? failedIds.length) || 0);
+  return { total: Math.max(0, Number(value?.total ?? requested.length) || 0), success, failed, failedIds, warnings, results: normalizedItems };
+}
+
+export function normalizeCodexSelectedIds(ids, accounts = null) {
+  const restrictToAccounts = Array.isArray(accounts);
+  const allowed = new Set((restrictToAccounts ? accounts : []).map((account) => String(account?.id || account?.auth_index || account?.authIndex || account?.name || "").trim()).filter(Boolean));
+  return [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter((id) => id && (!restrictToAccounts || allowed.has(id))))];
+}
+
+export function validateCodexImportJSON(filename, content) {
+  const name = String(filename || "").trim() || "codex-auth.json";
+  const text = String(content || "");
+  if (!name.toLowerCase().endsWith(".json")) return { valid: false, filename: name, code: "type" };
+  if (!text.trim()) return { valid: false, filename: name, code: "empty" };
+  try {
+    const value = JSON.parse(text);
+    const objectLike = value && typeof value === "object";
+    return objectLike ? { valid: true, filename: name, value } : { valid: false, filename: name, code: "shape" };
+  } catch {
+    return { valid: false, filename: name, code: "parse" };
+  }
+}
+
+export function normalizeCodexImportBatchResult(value = {}) {
+  const results = (Array.isArray(value?.results) ? value.results : []).map((item) => {
+    const rawStatus = String(item?.status || "failed").toLowerCase();
+    const status = rawStatus === "success" || rawStatus === "skipped" ? rawStatus : "failed";
+    return {
+      filename: String(item?.filename || "").trim(),
+      status,
+      format: String(item?.format || "").trim(),
+      imported: Math.max(0, Number(item?.imported || 0) || 0),
+      skipped: Math.max(0, Number(item?.skipped || 0) || 0),
+      files: Array.isArray(item?.files) ? item.files.map((name) => String(name || "").trim()).filter(Boolean) : [],
+      error: String(item?.error || "").trim(),
+    };
+  });
+  const imported = results.reduce((sum, item) => sum + item.imported, 0);
+  const skipped = results.reduce((sum, item) => sum + item.skipped, 0);
+  return {
+    status: String(value?.status || "").trim(),
+    total: Math.max(0, Number(value?.total ?? results.length) || 0),
+    successFiles: Math.max(0, Number(value?.success ?? results.filter((item) => item.status === "success").length) || 0),
+    skippedFiles: Math.max(0, Number(value?.skipped ?? results.filter((item) => item.status === "skipped").length) || 0),
+    failedFiles: Math.max(0, Number(value?.failed ?? results.filter((item) => item.status === "failed").length) || 0),
+    imported,
+    skipped,
+    results,
+  };
+}
+
 export function anthropicProfileLoginCommand(profile) {
   const value = String(profile || "").trim();
   if (!value) return "ant auth login --profile <name>";
@@ -408,25 +551,61 @@ export function anthropicAccountOverview(accounts) {
   return overview;
 }
 
+function codexAccountStableID(account) {
+  return String(account?.id || account?.auth_index || account?.authIndex || account?.name || "").trim();
+}
+
+function renderCodexBatchToolbar(items, selectedIds, mt, { batchBusy = false, batchPriority = 100 } = {}) {
+  const selected = normalizeCodexSelectedIds(selectedIds, items);
+  const selectedCount = selected.length;
+  const disabled = batchBusy || selectedCount === 0;
+  const disabledAttributes = disabled ? " disabled" : "";
+  return `<div class="codex-batch-toolbar" aria-busy="${batchBusy ? "true" : "false"}">
+    <div class="codex-batch-selection">
+      <strong>${escapeHtml(mt("selectedAccounts", { count: selectedCount }))}</strong>
+      <button type="button" class="codex-batch-link" data-codex-select-all-accounts${batchBusy ? " disabled" : ""}>${escapeHtml(mt("selectAllAccounts"))}</button>
+      <span aria-hidden="true">·</span>
+      <button type="button" class="codex-batch-link" data-codex-clear-selection${disabledAttributes}>${escapeHtml(mt("clearSelection"))}</button>
+    </div>
+    <div class="codex-batch-actions" role="group" aria-label="${escapeAttr(mt("batchActions"))}">
+      <button class="settings-action-btn" type="button" data-codex-batch-sync${disabledAttributes}>${escapeHtml(mt("batchSync"))}</button>
+      <button class="settings-action-btn" type="button" data-codex-batch-enable${disabledAttributes}>${escapeHtml(mt("batchEnable"))}</button>
+      <button class="settings-action-btn" type="button" data-codex-batch-disable${disabledAttributes}>${escapeHtml(mt("batchDisable"))}</button>
+      <label class="codex-batch-priority"><span>${escapeHtml(mt("batchPriority"))}</span><input class="settings-text-input" type="number" min="1" max="1000000" step="1" value="${escapeAttr(batchPriority)}" data-codex-batch-priority${disabledAttributes}></label>
+      <button class="settings-action-btn" type="button" data-codex-batch-priority-apply${disabledAttributes}>${escapeHtml(mt("apply"))}</button>
+      <button class="settings-action-btn danger" type="button" data-codex-batch-delete${disabledAttributes}>${escapeHtml(mt("batchDelete"))}</button>
+    </div>
+  </div>`;
+}
+
 export function renderCodexAccountManagementTable(accounts, {
   translate = (key, params) => t(`modelProvider.${key}`, params),
   now = Date.now(),
   editing = null,
   busy = {},
+  selectedIds = [],
+  batchBusy = false,
+  batchPriority = 100,
 } = {}) {
   const mt = translate;
   const items = Array.isArray(accounts) ? accounts : [];
   if (!items.length) return `<div class="settings-empty-card settings-card settings-alert compact" role="status">${escapeHtml(mt("noCodexCredentials"))}</div>`;
-  return `
+  const selected = normalizeCodexSelectedIds(selectedIds, items);
+  const selectedSet = new Set(selected);
+  const allSelected = items.every((account) => selectedSet.has(codexAccountStableID(account)));
+  return `<div class="codex-account-management">
+    ${renderCodexBatchToolbar(items, selected, mt, { batchBusy, batchPriority })}
     <div class="codex-account-table-wrap settings-card-content">
-      <table class="codex-account-table" aria-label="${escapeAttr(mt("importedCredentials"))}">
+      <table class="codex-account-table codex-oauth-account-table" aria-label="${escapeAttr(mt("importedCredentials"))}">
         <thead><tr>
+          <th scope="col" class="codex-account-select-heading"><input type="checkbox" data-codex-select-all aria-label="${escapeAttr(mt("selectAllAccounts"))}" ${allSelected ? "checked" : ""}${batchBusy ? " disabled" : ""}></th>
           <th scope="col">${escapeHtml(mt("accountName"))}</th><th scope="col">${escapeHtml(mt("accountId"))}</th><th scope="col">${escapeHtml(mt("priority"))}</th><th scope="col">${escapeHtml(mt("status"))}</th>
           <th scope="col">${escapeHtml(mt("successFailure"))}</th><th scope="col">${escapeHtml(mt("usage"))}</th><th scope="col">${escapeHtml(mt("lastUsed"))}</th><th scope="col">${escapeHtml(mt("actions"))}</th>
         </tr></thead>
-        <tbody>${items.map((account) => renderCodexAccountRow(account, mt, now, editing, busy)).join("")}</tbody>
+        <tbody>${items.map((account) => renderCodexAccountRow(account, mt, now, editing, busy, { selected: selectedSet.has(codexAccountStableID(account)), batchBusy })).join("")}</tbody>
       </table>
-    </div>`;
+    </div>
+  </div>`;
 }
 
 export function renderAnthropicAccountManagementTable(accounts, {
@@ -489,13 +668,13 @@ function renderAnthropicAccountRow(account, mt, editing, busy) {
   </tr>`;
 }
 
-function renderCodexAccountRow(account, mt, now, editing, busy) {
-  const id = String(account?.id || account?.auth_index || account?.authIndex || account?.name || "");
+function renderCodexAccountRow(account, mt, now, editing, busy, { selected = false, batchBusy = false } = {}) {
+  const id = codexAccountStableID(account);
   const alias = String(account?.alias || "");
   const priority = finiteNumber(account?.priority, 100);
   const disabled = Boolean(account?.disabled);
   const isEditing = editing?.id === id;
-  const isBusy = Boolean(busy?.[id]);
+  const isBusy = batchBusy || Boolean(busy?.[id]);
   const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
   const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
   const plan = String(quota?.plan_type || quota?.planType || account?.plan_type || account?.planType || "").trim();
@@ -510,7 +689,8 @@ function renderCodexAccountRow(account, mt, now, editing, busy) {
   const secondaryName = alias && fallbackName !== alias ? fallbackName : "";
   const editAlias = String(isEditing ? editing.alias ?? alias : alias);
   const editPriority = finiteNumber(isEditing ? editing.priority : priority, priority);
-  return `<tr data-codex-account-row="${escapeAttr(id)}" class="${isEditing ? "is-editing" : ""}" aria-busy="${isBusy ? "true" : "false"}">
+  return `<tr data-codex-account-row="${escapeAttr(id)}" class="${[isEditing ? "is-editing" : "", selected ? "is-selected" : ""].filter(Boolean).join(" ")}" aria-busy="${isBusy ? "true" : "false"}">
+    <td class="codex-account-select-cell" data-label="${escapeAttr(mt("selectAccount"))}"><input type="checkbox" data-codex-select="${escapeAttr(id)}" aria-label="${escapeAttr(mt("selectAccountNamed", { account: displayName }))}" ${selected ? "checked" : ""}${isBusy ? " disabled" : ""}></td>
     <td data-label="${escapeAttr(mt("accountName"))}">
       ${isEditing
         ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("accountName"))}</span><input class="codex-account-alias settings-text-input settings-form-field" value="${escapeAttr(editAlias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-codex-edit-alias="${escapeAttr(id)}" data-select-on-focus="true"${disabledAttributes}></label>`
@@ -523,7 +703,7 @@ function renderCodexAccountRow(account, mt, now, editing, busy) {
       : `<span class="codex-priority-value">${escapeHtml(String(priority))}</span>`}</td>
     <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill settings-badge ${escapeAttr(status.tone)}">${escapeHtml(mt(status.key))}</span></td>
     <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
-    <td data-label="${escapeAttr(mt("usage"))}">${renderCodexLocalUsage(account?.usage, mt)}${renderCodexQuota(quota, mt, now)}</td>
+    <td data-label="${escapeAttr(mt("usage"))}">${renderCodexUsage(account, mt, now)}</td>
     <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
     <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions settings-inline-actions" role="group" aria-label="${escapeAttr(mt("accountActions", { account: displayName }))}">
       ${isEditing ? `
@@ -596,58 +776,84 @@ function anthropicRateLimitReached(value) {
   return value.limited === true || value.rate_limited === true || value.rateLimited === true || value.reached === true;
 }
 
-function renderCodexLocalUsage(usage, mt) {
-  const source = usage && typeof usage === "object" ? usage : {};
-  const windows = [
-    [mt("usageTotal"), source.total],
-    [mt("usageLast5Hours"), source.last5Hours],
-    [mt("usageLast7Days"), source.last7Days],
-  ];
-  const hasRequests = windows.some(([, value]) => Math.max(0, finiteNumber(value?.requestCount, 0)) > 0);
-  if (!hasRequests) return `<div class="codex-local-usage codex-quota-meta" title="${escapeAttr(mt("recordedCostHint"))}">${escapeHtml(mt("usageNoLocalData"))}</div>`;
-  return `<div class="codex-local-usage" title="${escapeAttr(mt("recordedCostHint"))}">${windows.map(([label, value]) => {
-    const requestCount = Math.max(0, finiteNumber(value?.requestCount, 0));
-    if (!requestCount) return `<div class="codex-local-usage-row"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(mt("usageNoLocalData"))}</span></div>`;
-    const inputTokens = Math.max(0, finiteNumber(value?.inputTokens, 0));
-    const outputTokens = Math.max(0, finiteNumber(value?.outputTokens, 0));
-    const totalTokens = Math.max(0, finiteNumber(value?.totalTokens, inputTokens + outputTokens));
-    const cost = Math.max(0, finiteNumber(value?.costUsd, 0));
-    return `<div class="codex-local-usage-row"><div class="codex-local-usage-label"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(formatNumber(requestCount))} ${escapeHtml(mt("usageRequests"))} · ${escapeHtml(formatNumber(totalTokens, { notation: "compact", maximumFractionDigits: 1 }))} ${escapeHtml(mt("usageTokens"))}</span></div><div class="codex-local-usage-cost">${escapeHtml(mt("recordedCost"))} ${escapeHtml(formatMoney(cost))}</div></div>`;
-  }).join("")}</div>`;
+function normalizeCodexLocalUsageWindow(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const inputTokens = Math.max(0, finiteNumber(source.inputTokens ?? source.input_tokens, 0));
+  const outputTokens = Math.max(0, finiteNumber(source.outputTokens ?? source.output_tokens, 0));
+  return {
+    requestCount: Math.max(0, finiteNumber(source.requestCount ?? source.request_count, 0)),
+    inputTokens,
+    outputTokens,
+    totalTokens: Math.max(0, finiteNumber(source.totalTokens ?? source.total_tokens, inputTokens + outputTokens)),
+    costUsd: Math.max(0, finiteNumber(source.costUsd ?? source.cost_usd, 0)),
+  };
 }
 
-function renderCodexCredits(quota, mt) {
-  const credits = quota?.credits && typeof quota.credits === "object" ? quota.credits : null;
-  if (!credits) return "";
-  if (credits.unlimited === true) return `<div class="codex-credits-summary"><span>${escapeHtml(mt("credits"))}</span><strong>${escapeHtml(mt("creditsUnlimited"))}</strong></div>`;
-  const balance = credits.balance ?? credits.amount ?? credits.remaining;
-  if (credits.has_credits === true || credits.hasCredits === true || (balance !== undefined && balance !== null && balance !== "")) {
-    return `<div class="codex-credits-summary"><span>${escapeHtml(mt("credits"))}</span><strong>${escapeHtml(mt("creditsBalance", { balance: formatMoney(Math.max(0, finiteNumber(balance, 0))) }))}</strong></div>`;
+function codexLocalUsageHasData(value) {
+  return Boolean(value.requestCount || value.totalTokens || value.costUsd);
+}
+
+function codexQuotaWindowKey(window, fallback) {
+  const seconds = finiteNumber(window?.limit_window_seconds ?? window?.limitWindowSeconds ?? window?.windowSeconds, 0);
+  if (seconds === 18000) return "5h";
+  if (seconds === 604800) return "7d";
+  return fallback;
+}
+
+export function codexAccountUsageWindows(account = {}) {
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : {};
+  const usage = account?.usage && typeof account.usage === "object" ? account.usage : {};
+  const upstream = { "5h": null, "7d": null };
+  for (const [window, fallback] of [
+    [quota.primary_window || quota.primaryWindow, "5h"],
+    [quota.secondary_window || quota.secondaryWindow, "7d"],
+  ]) {
+    if (!window || typeof window !== "object") continue;
+    const key = codexQuotaWindowKey(window, fallback);
+    if (!upstream[key]) upstream[key] = window;
   }
-  return `<div class="codex-credits-summary"><span>${escapeHtml(mt("credits"))}</span><strong>${escapeHtml(mt("creditsUnavailable"))}</strong></div>`;
+  const local = {
+    "5h": normalizeCodexLocalUsageWindow(usage.last5Hours || usage.last_5_hours),
+    "7d": normalizeCodexLocalUsageWindow(usage.last7Days || usage.last_7_days),
+  };
+  return ["5h", "7d"].map((key) => ({
+    key,
+    quota: upstream[key],
+    usage: local[key],
+    hasQuota: Boolean(upstream[key]),
+    hasUsage: codexLocalUsageHasData(local[key]),
+  })).filter((item) => item.hasQuota || item.hasUsage);
 }
 
-function renderCodexQuota(quota, mt, now) {
-  if (!quota) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
-  const windows = [
-    [mt("primaryQuota"), quota.primary_window || quota.primaryWindow],
-    [mt("secondaryQuota"), quota.secondary_window || quota.secondaryWindow],
-  ].filter(([, window]) => window && typeof window === "object");
-  const credits = renderCodexCredits(quota, mt);
-  if (!windows.length && !credits) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
-  return `<div class="codex-quota-stack">${windows.map(([label, window]) => renderCodexQuotaWindow(label, window, mt, now)).join("")}${credits}</div>`;
-}
-
-function renderCodexQuotaWindow(label, window, mt, now) {
-  const used = Math.max(0, Math.min(100, finiteNumber(window.used_percent ?? window.usedPercent, 0)));
-  const remaining = Math.max(0, 100 - used);
-  const reset = quotaResetText(window, mt, now);
-  const duration = formatWindowSeconds(finiteNumber(window.limit_window_seconds ?? window.limitWindowSeconds ?? window.windowSeconds, 0));
-  return `<div class="codex-quota-window">
-    <div class="codex-quota-label"><span>${escapeHtml(label)}</span><strong>${escapeHtml(mt("remainingPercent", { percent: formatPercent(remaining) }))}</strong></div>
-    <div class="codex-quota-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeAttr(remaining)}"><span style="width:${escapeAttr(remaining)}%"></span></div>
-    <div class="codex-quota-meta">${escapeHtml([duration, reset].filter(Boolean).join(" · "))}</div>
+function renderCodexUsageStats(stats, mt) {
+  if (!codexLocalUsageHasData(stats)) return "";
+  return `<div class="codex-usage-window-stats" title="${escapeAttr(mt("recordedCostHint"))}">
+    <span>${escapeHtml(formatNumber(stats.requestCount))} ${escapeHtml(mt("usageRequests"))}</span>
+    <span>${escapeHtml(formatNumber(stats.totalTokens, { notation: "compact", maximumFractionDigits: 1 }))} ${escapeHtml(mt("usageTokens"))}</span>
+    <span>${escapeHtml(formatMoney(stats.costUsd))}</span>
   </div>`;
+}
+
+function renderCodexUsageWindow(item, mt, now) {
+  const window = item.quota;
+  const used = window ? Math.max(0, Math.min(100, finiteNumber(window.used_percent ?? window.usedPercent, 0))) : 0;
+  const reset = window ? quotaResetText(window, mt, now) : "";
+  const tone = used >= 100 ? "danger" : used >= 80 ? "warning" : "healthy";
+  const meter = window
+    ? `<div class="codex-usage-window-meter">
+        <span class="codex-usage-window-badge is-${escapeAttr(item.key)}">${escapeHtml(item.key)}</span>
+        <div class="codex-quota-progress ${tone}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeAttr(used)}"><span style="width:${escapeAttr(used)}%"></span></div>
+        <strong class="codex-usage-window-percent ${tone}">${escapeHtml(`${formatPercent(used)}%`)}</strong>
+        ${reset ? `<span class="codex-quota-meta">${escapeHtml(reset)}</span>` : ""}
+      </div>`
+    : `<div class="codex-usage-window-meter is-local-only"><span class="codex-usage-window-badge is-${escapeAttr(item.key)}">${escapeHtml(item.key)}</span><span class="codex-quota-meta">${escapeHtml(mt("usageLocalOnly"))}</span></div>`;
+  return `<div class="codex-quota-window">${renderCodexUsageStats(item.usage, mt)}${meter}</div>`;
+}
+
+function renderCodexUsage(account, mt, now) {
+  const windows = codexAccountUsageWindows(account);
+  if (!windows.length) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
+  return `<div class="codex-quota-stack">${windows.map((item) => renderCodexUsageWindow(item, mt, now)).join("")}</div>`;
 }
 
 function codexActionIcon(name) {
@@ -728,7 +934,7 @@ export function createModelProviderSettingsController({
   const ct = (key, params) => t(`modelProvider.console.${key}`, params);
 
   function setModelRefreshButtonsBusy(busy) {
-    ["refreshModelsBtn", "settingsRefreshModelsBtn", "providerRefreshModelsBtn", "relayFetchModelsBtn"].forEach((id) => {
+    ["refreshModelsBtn", "settingsRefreshModelsBtn", "providerRefreshModelsBtn"].forEach((id) => {
       setButtonBusy($(id), busy, mt("refreshing"));
     });
   }
@@ -793,6 +999,7 @@ export function createModelProviderSettingsController({
       const files = await api("/api/providers/oauth/codex/accounts");
       if (seq !== state.providerAuthSeq) return;
       state.providerAuthFiles = files;
+      providerConsoleState().codexSelectedIds = normalizeCodexSelectedIds(providerConsoleState().codexSelectedIds, extractAuthFiles(files));
       state.providerAuthError = "";
       state.providerAuthMutationWarning = "";
       loaded = true;
@@ -836,39 +1043,160 @@ export function createModelProviderSettingsController({
     return loaded && seq === state.anthropicAccountSeq;
   }
 
+  function codexImportFileAccepted(file) {
+    return String(file?.name || "").toLowerCase().endsWith(".json");
+  }
+
+  function setCodexImportFiles(files) {
+    const incoming = Array.from(files || []);
+    if (!incoming.length) {
+      providerConsoleState().codexImportFiles = [];
+      providerConsoleState().codexImportResult = null;
+      return true;
+    }
+    if (incoming.length > maxCodexImportFiles) {
+      setProviderConsoleResult(mt("importTooManyFiles", { count: maxCodexImportFiles }), "attention");
+      return false;
+    }
+    const totalBytes = incoming.reduce((sum, file) => {
+      const size = Math.max(0, Number(file?.size || 0));
+      return sum + (codexImportFileAccepted(file) && size <= maxCodexImportFileBytes ? size : 0);
+    }, 0);
+    if (totalBytes > maxCodexImportBatchBytes) {
+      setProviderConsoleResult(mt("importBatchTooLarge"), "attention");
+      return false;
+    }
+    providerConsoleState().codexImportFiles = incoming;
+    providerConsoleState().codexImportResult = null;
+    setProviderConsoleResult("");
+    return true;
+  }
+
+  async function readCodexImportFile(file) {
+    if (typeof file?.text === "function") return String(await file.text());
+    if (typeof file?.arrayBuffer === "function") return new TextDecoder().decode(await file.arrayBuffer());
+    return await new Promise((resolve, reject) => {
+      const Reader = globalThis.FileReader;
+      if (typeof Reader !== "function") {
+        reject(new Error(mt("importFileReadFailed", { name: String(file?.name || mt("unknown")) })));
+        return;
+      }
+      const reader = new Reader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error(mt("importFileReadFailed", { name: String(file?.name || mt("unknown")) })));
+      reader.readAsText(file);
+    });
+  }
+
   async function importCodexAuthFile() {
     const button = $("codexImportAuthBtn");
     if (button?.disabled) return;
     const textarea = $("codexAuthImportText");
+    const fileInput = $("codexAuthImportFiles");
     const consoleState = providerConsoleState();
-    const content = (textarea?.value || consoleState.codexImportDraft || "").trim();
-    if (!content) throw new Error(mt("importContentRequired"));
-    consoleState.codexImportDraft = content;
+    const selectedFiles = Array.isArray(consoleState.codexImportFiles) ? consoleState.codexImportFiles : [];
+    const draft = (textarea?.value || consoleState.codexImportDraft || "").trim();
+    if (!selectedFiles.length && !draft) throw new Error(mt("importContentRequired"));
+
     setProviderConsoleResult("");
+    consoleState.codexImportResult = null;
     setButtonBusy(button, true, mt("importing"));
     if (textarea) textarea.disabled = true;
+    if (fileInput) fileInput.disabled = true;
+    let imported = 0;
+    let skipped = 0;
+    let results = [];
     try {
-      const result = await api("/api/providers/oauth/codex/import", {
-        method: "POST",
-        body: JSON.stringify({ filename: "autoto-codex-auth.json", content }),
-      });
-      const imported = Math.max(0, Number(result?.imported || 0));
-      const skipped = Math.max(0, Number(result?.skipped || 0));
-      const failed = Array.isArray(result?.errors) ? result.errors.length : 0;
-      const successMessage = mt("importedCredentialsCount", { count: imported, skipped });
-      notifyTerminal?.(`[info] ${successMessage}\n`);
-      if (!failed) {
-        consoleState.codexImportDraft = "";
-        setProviderConsoleResult(successMessage, "success");
+      if (selectedFiles.length) {
+        const prepared = [];
+        const resultByFile = new Map();
+        for (const file of selectedFiles) {
+          const filename = String(file?.name || mt("unknown"));
+          if (!codexImportFileAccepted(file)) {
+            resultByFile.set(file, { filename, status: "failed", imported: 0, skipped: 0, error: mt("importInvalidFileType", { name: filename }) });
+            continue;
+          }
+          if (Math.max(0, Number(file?.size || 0)) > maxCodexImportFileBytes) {
+            resultByFile.set(file, { filename, status: "failed", imported: 0, skipped: 0, error: mt("importFileTooLarge", { name: filename }) });
+            continue;
+          }
+          try {
+            prepared.push({ filename, content: await readCodexImportFile(file), file });
+          } catch (error) {
+            resultByFile.set(file, { filename, status: "failed", imported: 0, skipped: 0, error: error?.message || mt("unknown") });
+          }
+        }
+        if (prepared.length) {
+          try {
+            const request = codexImportBatchRequest(prepared);
+            const response = normalizeCodexImportBatchResult(await api(request.path, request.options));
+            imported = response.imported;
+            skipped = response.skipped;
+            prepared.forEach((item, index) => {
+              const serverResult = response.results[index] || { filename: item.filename, status: "failed", imported: 0, skipped: 0, error: mt("unknown") };
+              resultByFile.set(item.file, { ...serverResult, filename: serverResult.filename || item.filename });
+            });
+          } catch (error) {
+            prepared.forEach((item) => resultByFile.set(item.file, {
+              filename: item.filename,
+              status: "failed",
+              imported: 0,
+              skipped: 0,
+              error: error?.message || mt("unknown"),
+            }));
+          }
+        }
+        results = selectedFiles.map((file) => resultByFile.get(file) || {
+          filename: String(file?.name || mt("unknown")),
+          status: "failed",
+          imported: 0,
+          skipped: 0,
+          error: mt("unknown"),
+        });
+        consoleState.codexImportFiles = selectedFiles.filter((file, index) => results[index]?.status === "failed");
       } else {
-        setProviderConsoleResult(mt("importedCredentialsPartial", { count: imported, failed }), "attention");
+        consoleState.codexImportDraft = draft;
+        try {
+          const response = await api("/api/providers/oauth/codex/import", {
+            method: "POST",
+            body: JSON.stringify({ filename: "autoto-codex-auth.json", content: draft }),
+          });
+          imported = Math.max(0, Number(response?.imported || 0));
+          skipped = Math.max(0, Number(response?.skipped || 0));
+          const errors = Array.isArray(response?.errors) ? response.errors.map((error) => String(error || "")).filter(Boolean) : [];
+          results = [{
+            filename: "autoto-codex-auth.json",
+            status: errors.length ? "failed" : imported > 0 ? "success" : "skipped",
+            imported,
+            skipped,
+            error: errors.join("; "),
+          }];
+        } catch (error) {
+          results = [{ filename: "autoto-codex-auth.json", status: "failed", imported: 0, skipped: 0, error: error?.message || mt("unknown") }];
+        }
       }
-      await loadProviderAuthFiles({ silent: true });
-      await loadModelCatalog();
-      if (failed) throw new Error(mt("importedCredentialsPartial", { count: imported, failed }));
+
+      const failures = results.filter((item) => item.status === "failed");
+      consoleState.codexImportResult = {
+        imported,
+        skipped,
+        failed: failures.length,
+        results,
+        errors: failures.map((item) => ({ filename: item.filename, message: item.error })),
+      };
+      if (!selectedFiles.length && !failures.length) consoleState.codexImportDraft = "";
+      const message = failures.length
+        ? mt("importedCredentialsPartial", { count: imported, failed: failures.length })
+        : mt("importedCredentialsCount", { count: imported, skipped });
+      setProviderConsoleResult(message, failures.length ? "attention" : "success");
+      notifyTerminal?.(`[${failures.length ? "warn" : "info"}] ${message}\n`);
+      if (imported || skipped) await loadProviderAuthFiles({ silent: true });
+      if (imported) await loadModelCatalog();
     } finally {
       setButtonBusy(button, false, mt("importing"));
       if (textarea?.isConnected) textarea.disabled = false;
+      if (fileInput?.isConnected) fileInput.disabled = false;
+      refreshProviderConsole();
     }
   }
 
@@ -1175,6 +1503,41 @@ export function createModelProviderSettingsController({
     });
   }
 
+  async function runCodexBatchOperation(operation) {
+    const consoleState = providerConsoleState();
+    const accounts = extractAuthFiles(state.providerAuthFiles);
+    const ids = normalizeCodexSelectedIds(consoleState.codexSelectedIds, accounts);
+    if (!ids.length || consoleState.codexBatchBusy) return;
+    const priority = Number(consoleState.codexBatchPriority);
+    if (operation === "set_priority" && (!Number.isInteger(priority) || priority < 1 || priority > 1000000)) throw new Error(mt("invalidPriority"));
+    if (operation === "sync" && !globalThis.confirm?.(mt("batchSyncConfirm", { count: ids.length }))) return;
+    if (operation === "delete" && !globalThis.confirm?.(mt("batchDeleteConfirm", { count: ids.length }))) return;
+    consoleState.codexBatchBusy = true;
+    consoleState.codexEdit = null;
+    state.providerAuthMutationWarning = "";
+    state.codexAccountBusy ||= {};
+    ids.forEach((id) => { state.codexAccountBusy[id] = true; });
+    setProviderConsoleResult("");
+    refreshProviderConsole();
+    try {
+      const request = codexAccountBatchRequest(operation, ids, { priority });
+      const response = await api(request.path, request.options);
+      const result = normalizeCodexBatchResult(response, ids);
+      const message = result.failed
+        ? mt("batchPartial", { success: result.success, failed: result.failed })
+        : mt("batchSuccess", { count: result.success });
+      setProviderConsoleResult(message, result.failed ? "attention" : "success");
+      notifyTerminal?.(`[${result.failed ? "warn" : "info"}] ${message}\n`);
+      state.providerAuthMutationWarning = [...new Set(result.warnings)].join(" ");
+      await loadProviderAuthFiles({ silent: true });
+      consoleState.codexSelectedIds = normalizeCodexSelectedIds(result.failedIds, extractAuthFiles(state.providerAuthFiles));
+    } finally {
+      ids.forEach((id) => { delete state.codexAccountBusy[id]; });
+      consoleState.codexBatchBusy = false;
+      refreshProviderConsole();
+    }
+  }
+
   function anthropicAccountById(id) {
     return normalizeAnthropicAccountList(state.anthropicAccounts).find((account) => String(account?.id || "") === String(id || "")) || null;
   }
@@ -1270,52 +1633,6 @@ export function createModelProviderSettingsController({
     });
   }
 
-  async function saveRelayProviderConfig() {
-    const button = $("relaySaveConfigBtn");
-    if (button?.disabled) return;
-    const spec = relayProtocolSpec(getRelayProtocol());
-    const baseUrl = $("relayBaseUrl")?.value.trim() || "";
-    const apiKey = $("relayApiKey")?.value.trim() || "";
-    const customModel = $("relayCustomModel")?.value.trim() || "";
-    const existing = providerByName(spec.providerName);
-    const model = customModel || existing?.defaultModel || existing?.model || defaultModelForProtocol(spec.key);
-    const payload = {
-      name: spec.providerName,
-      type: spec.providerType,
-      baseUrl,
-      apiKey,
-      model,
-      maxTokens: spec.providerType === "anthropic" ? 4096 : 0,
-      profile: spec.providerProfile || existing?.profile || "",
-      apiKeyOptional: Boolean(existing?.apiKeyOptional),
-    };
-    setButtonBusy(button, true, mt("saving"));
-    try {
-      const result = await api(`/api/providers/${encodeURIComponent(spec.providerName)}/config`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      state.providerConfigStatus = result.message || mt("relayConfigSaved");
-      notifyTerminal?.(`[info] ${mt("relayConfigSavedRefreshing", { provider: spec.label })}\n`);
-      await loadSettings();
-      await loadModelCatalog();
-      refreshActiveSettingsPanel?.();
-    } finally {
-      setButtonBusy(button, false, mt("saving"));
-    }
-  }
-
-  function selectRelayProtocol(protocol) {
-    globalThis.localStorage?.setItem?.(relayProtocolPrefsKey, protocol);
-    state.providerConfigStatus = "";
-    refreshActiveSettingsPanel?.();
-  }
-
-  function getRelayProtocol() {
-    const saved = globalThis.localStorage?.getItem?.(relayProtocolPrefsKey) || "completions";
-    return relayProtocolSpec(saved).key;
-  }
-
   function relayProtocolSpec(key) {
     return relayProtocolSpecs().find((item) => item.key === key) || relayProtocolSpecs().find((item) => item.key === "completions");
   }
@@ -1329,13 +1646,6 @@ export function createModelProviderSettingsController({
       { key: "claude-code", label: mt("relayProtocols.claudeCode.label"), providerName: "anthropic", providerType: "anthropic", help: mt("relayProtocols.claudeCode.help") },
       { key: "completions", label: mt("relayProtocols.completions.label"), providerName: "openai-compatible", providerType: "openai-compatible", help: mt("relayProtocols.completions.help") },
     ];
-  }
-
-  function defaultModelForProtocol(protocol) {
-    if (protocol === "anthropic" || protocol === "claude-code") return "claude-sonnet-4-5";
-    if (protocol === "codex") return "gpt-5.5";
-    if (protocol === "gemini-interactions") return "gemini-2.5-pro";
-    return "gpt-4.1-mini";
   }
 
   function providerConfigExpanded(key) {
@@ -1491,19 +1801,15 @@ export function createModelProviderSettingsController({
   }
 
   function renderModelSettingsContent() {
-    const providers = modelProvidersForUI();
     const settingsState = agentModelSettingsState();
     const draft = settingsState.draft;
     const options = agentSettingsAvailableModels(draft);
-    const preferred = getPreferredModel();
-    const catalogModelCount = providers.reduce((total, provider) => total + providerModelList(provider).length, 0);
-    const catalogHasModels = catalogModelCount > 0;
     const runtimeRevision = Math.max(0, Math.trunc(Number(state.settings?.runtimeSettings?.revision) || 0));
     const result = settingsState.result && typeof settingsState.result === "object"
       ? `<div class="agent-model-settings-result settings-alert ${escapeAttr(settingsState.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(settingsState.result.message || "")}</div>`
       : "";
     return `<div class="settings-live-page compact-settings-page agent-model-settings-page" aria-labelledby="settings-model-page-title">
-      <header class="compact-settings-header"><div class="compact-settings-heading"><div class="settings-hero-kicker">${escapeHtml(mt("routing.kicker"))}</div><h1 id="settings-model-page-title">${escapeHtml(mt("routing.title"))}</h1><p data-settings-help-copy>${escapeHtml(mt("routing.description"))}</p></div><div class="compact-settings-header-actions settings-inline-actions"><button id="settingsRefreshModelsBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshModels"))}</button><button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("credentialsRelay"))}</button></div></header>
+      <header class="compact-settings-header"><div class="compact-settings-heading"><div class="settings-hero-kicker">${escapeHtml(mt("routing.kicker"))}</div><h1 id="settings-model-page-title">${escapeHtml(mt("routing.title"))}</h1><p data-settings-help-copy>${escapeHtml(mt("routing.description"))}</p></div><div class="compact-settings-header-actions settings-inline-actions"><button id="settingsRefreshModelsBtn" class="settings-action-btn" type="button">${escapeHtml(mt("refreshModels"))}</button><button id="settingsOpenLoginBtn" class="settings-action-btn" type="button">${escapeHtml(mt("providerSettings"))}</button></div></header>
       ${result}
       <form id="agentModelSettingsForm" class="compact-settings-form agent-model-settings-form" aria-busy="${settingsState.saving ? "true" : "false"}">
         <section class="compact-settings-section" aria-labelledby="agent-model-defaults-title"><div class="compact-settings-section-copy"><h2 id="agent-model-defaults-title">${escapeHtml(mt("routing.globalDefaults"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.globalDefaultsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column"><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.defaultModel"))}</span><select name="defaultModel" required>${renderAgentModelSelectOptions(draft.defaultModel, options)}</select><small data-settings-help-copy>${escapeHtml(mt("routing.defaultModelHelp"))}</small></label><label class="settings-form-field compact-settings-field"><span>${escapeHtml(mt("routing.summaryModel"))}</span><select name="summaryModel" required>${renderAgentModelSelectOptions(draft.summaryModel, options)}</select><small data-settings-help-copy>${escapeHtml(mt("routing.summaryModelHelp"))}</small></label><label class="settings-form-field compact-settings-field full-width"><span>${escapeHtml(mt("defaultReasoningEffort"))}</span><select name="defaultReasoningEffort" ${runtimeRevision > 0 ? "" : "disabled"}>${renderDefaultReasoningOptions(draft.defaultReasoningEffort)}</select><small${runtimeRevision > 0 ? " data-settings-help-copy" : ""}>${escapeHtml(runtimeRevision > 0 ? mt("routing.defaultReasoningHelp") : mt("routing.runtimeSettingsUnavailable"))}</small></label></div></div></section>
@@ -1511,8 +1817,6 @@ export function createModelProviderSettingsController({
         <section class="compact-settings-section" aria-labelledby="agent-model-pools-title"><div class="compact-settings-section-copy"><h2 id="agent-model-pools-title">${escapeHtml(mt("routing.subagentPools"))}</h2><p data-settings-help-copy>${escapeHtml(mt("routing.subagentPoolsDescription"))}</p></div><div class="compact-settings-section-controls"><div class="compact-settings-grid two-column">${agentModelRoles.map((role) => renderAgentModelPoolControl(role, draft, options)).join("")}</div></div></section>
         <footer class="compact-settings-footer agent-model-settings-footer"><div><span id="agentModelSettingsDirtyBadge" class="settings-badge ${settingsState.dirty ? "warn" : "ok"}">${escapeHtml(settingsState.dirty ? mt("routing.unsaved") : mt("routing.saved"))}</span><small data-settings-help-copy>${escapeHtml(mt("routing.persistenceDescription"))}</small></div><div class="settings-inline-actions"><button id="resetAgentModelSettingsBtn" class="settings-action-btn subtle" type="button" ${settingsState.saving ? "disabled" : ""}>${escapeHtml(mt("routing.reset"))}</button><button id="saveAgentModelSettingsBtn" class="settings-action-btn primary" type="submit" ${settingsState.saving ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(settingsState.saving ? mt("saving") : mt("routing.save"))}</button></div></footer>
       </form>
-      ${renderModelAggregateSection()}
-      <details class="compact-settings-disclosure agent-model-catalog-details"${catalogHasModels ? " open" : ""}><summary><span>${escapeHtml(mt("routing.modelListToggle"))}</span><small data-settings-help-copy>${escapeHtml(mt("routing.catalogDescription"))}</small></summary><section class="agent-model-catalog compact-settings-disclosure-panel" aria-labelledby="agent-model-catalog-title"><header class="compact-settings-section-toolbar"><div><h2 id="agent-model-catalog-title">${escapeHtml(mt("routing.catalogTitle"))}</h2><p${preferred ? "" : " data-settings-help-copy"}>${escapeHtml(preferred ? mt("preferredModel", { model: preferred }) : mt("routing.catalogDescription"))}</p><small class="settings-model-catalog-count" data-settings-help-copy>${escapeHtml(mt("routing.catalogModelCount", { count: catalogModelCount }))}</small></div><div class="settings-inline-actions"><button id="settingsShowConfiguredModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("showConfiguredModels"))}</button><button id="settingsClearPreferredModelBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("clearPreferred"))}</button></div></header><div class="settings-model-list">${providers.map(renderModelProviderSection).join("") || `<div class="settings-empty-card settings-card settings-alert" role="status">${escapeHtml(mt("noModelsLoaded"))}</div>`}</div></section></details>
     </div>`;
   }
 
@@ -1571,11 +1875,18 @@ export function createModelProviderSettingsController({
       providerName: "",
       draft: null,
       dirty: false,
+      nameTouched: false,
+      nameError: "",
       busy: {},
       result: null,
       testOpen: false,
       test: { prompt: "", result: null },
       codexImportDraft: "",
+      codexImportFiles: [],
+      codexImportResult: null,
+      codexSelectedIds: [],
+      codexBatchBusy: false,
+      codexBatchPriority: 100,
       codexEdit: null,
       codexBrowserLogin: {
         seq: 0,
@@ -1611,6 +1922,8 @@ export function createModelProviderSettingsController({
       Object.assign(consoleState, fallback, previous, {
         busy: previous.busy || {},
         test: testState,
+        codexImportFiles: Array.isArray(previous.codexImportFiles) ? previous.codexImportFiles : [],
+        codexSelectedIds: Array.isArray(previous.codexSelectedIds) ? previous.codexSelectedIds : [],
         codexBrowserLogin: browserLoginState,
       });
     }
@@ -1628,7 +1941,6 @@ export function createModelProviderSettingsController({
     return renderProviderConsolePage({
       providers: modelProvidersForUI(),
       consoleState,
-      relayDrawer: renderRelayConsoleDrawer(),
     });
   }
 
@@ -1682,13 +1994,39 @@ export function createModelProviderSettingsController({
           ${browserLogin.popupBlocked ? `<div class="settings-alert attention codex-browser-login-alert" role="alert">${escapeHtml(mt("browserLoginPopupBlocked"))}</div>` : ""}
         </div>
       </section>`;
+    const importFiles = Array.isArray(consoleState.codexImportFiles) ? consoleState.codexImportFiles : [];
+    const importResult = consoleState.codexImportResult && typeof consoleState.codexImportResult === "object" ? consoleState.codexImportResult : null;
+    const importFileList = importFiles.length
+      ? `<ul class="codex-import-file-list">${importFiles.map((file) => `<li class="codex-import-file-row"><span>${escapeHtml(String(file?.name || mt("unknown")))}</span><small>${escapeHtml(formatNumber(Math.max(0, Number(file?.size || 0))))} B</small></li>`).join("")}</ul>`
+      : "";
+    const importResultRows = Array.isArray(importResult?.results) ? importResult.results : [];
+    const importResultPanel = importResult
+      ? `<div class="codex-import-result ${importResult.failed ? "has-errors" : "is-success"}" role="status"><strong>${escapeHtml(mt("importResultSummary", importResult))}</strong>${importResultRows.length ? `<ul class="codex-import-file-list">${importResultRows.map((item) => {
+        const status = item?.status === "success" || item?.status === "skipped" ? item.status : "failed";
+        const tone = status === "success" ? "success" : status === "skipped" ? "warning" : "danger";
+        const detail = status === "success"
+          ? mt("importFileImported", { count: Math.max(0, Number(item?.imported || 0)), skipped: Math.max(0, Number(item?.skipped || 0)) })
+          : status === "skipped"
+            ? mt("importFileSkipped", { count: Math.max(0, Number(item?.skipped || 0)) })
+            : String(item?.error || mt("unknown"));
+        return `<li class="codex-import-file-row"><span>${escapeHtml(item?.filename || mt("unknown"))}</span><span class="codex-import-file-status ${tone}">${escapeHtml(mt(`importFileStatus${status[0].toUpperCase()}${status.slice(1)}`))}</span><div class="codex-import-file-detail">${escapeHtml(detail)}</div></li>`;
+      }).join("")}</ul>` : ""}</div>`
+      : "";
     const importPanel = `
       <section class="codex-import-panel settings-card" id="codexCredentialImportSection" aria-labelledby="codex-import-title">
         <div class="codex-console-section-head settings-card-header">
           <div><h2 id="codex-import-title" class="settings-card-title">${escapeHtml(mt("codexImportTitle"))}</h2><p class="settings-card-description" data-settings-help-copy>${escapeHtml(mt("codexImportDescription"))}</p></div>
         </div>
         <div class="codex-import-body settings-card-content">
+          <div class="codex-import-dropzone" data-codex-import-drop>
+            <input id="codexAuthImportFiles" class="hidden" type="file" accept=".json" multiple data-codex-import-files>
+            <div><strong>${escapeHtml(importFiles.length ? mt("selectedJsonFiles", { count: importFiles.length }) : mt("chooseJsonFiles"))}</strong><p>${escapeHtml(mt("chooseJsonFilesHint"))}</p></div>
+            <div class="settings-inline-actions"><button class="settings-action-btn" type="button" data-codex-choose-import-files>${escapeHtml(mt("chooseFile"))}</button>${importFiles.length ? `<button class="settings-action-btn subtle" type="button" data-codex-clear-import-files>${escapeHtml(mt("clearFiles"))}</button>` : ""}</div>
+          </div>
+          ${importFileList}
+          <div class="codex-import-divider"><span>${escapeHtml(mt("importOrPaste"))}</span></div>
           <label class="settings-form-field"><span class="mp-visually-hidden">${escapeHtml(mt("codexImportTitle"))}</span><textarea id="codexAuthImportText" class="codex-import-textarea settings-text-input" data-codex-import-draft placeholder="${escapeAttr(mt("codexImportPlaceholder"))}">${escapeHtml(consoleState.codexImportDraft || "")}</textarea></label>
+          ${importResultPanel}
           <div class="codex-import-footer"><p data-settings-help-copy>${escapeHtml(mt("codexImportSuccess"))}</p><button id="codexImportAuthBtn" class="settings-action-btn primary" type="button" data-mp-codex-import>${escapeHtml(mt("import"))}</button></div>
         </div>
       </section>`;
@@ -1698,6 +2036,9 @@ export function createModelProviderSettingsController({
         translate: mt,
         editing: consoleState.codexEdit,
         busy: state.codexAccountBusy || {},
+        selectedIds: consoleState.codexSelectedIds,
+        batchBusy: consoleState.codexBatchBusy,
+        batchPriority: consoleState.codexBatchPriority,
       });
     return `<div class="codex-account-console settings-page" tabindex="-1" aria-labelledby="codex-console-title">
       <button class="codex-console-back" type="button" data-mp-close-codex-page>← ${escapeHtml(mt("backToProviders"))}</button>
@@ -1795,26 +2136,6 @@ export function createModelProviderSettingsController({
     </div>`;
   }
 
-  function renderRelayConsoleDrawer() {
-    const consoleState = providerConsoleState();
-    if (consoleState.mode !== "relay") return "";
-    const spec = relayProtocolSpec(getRelayProtocol());
-    const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), baseUrl: "" };
-    const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
-    const busy = Object.values(consoleState.busy || {}).some(Boolean);
-    return `<header class="mp-drawer-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("compatibleAdvanced"))}</p><h2 id="mp-drawer-title" class="settings-card-title">${escapeHtml(ct("relay.title"))}</h2><p id="mp-drawer-description" class="settings-card-description" data-settings-help-copy>${escapeHtml(ct("relay.description"))}</p></div><button class="mp-icon-button" type="button" data-mp-close-drawer aria-label="${escapeAttr(ct("actions.closeDrawer"))}">×</button></header>
-      <div class="mp-drawer-body settings-card-content" aria-busy="${busy ? "true" : "false"}">
-        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("fields.protocol"))}</h3><div class="mp-relay-protocols settings-inline-actions">${relayProtocolSpecs().map((item) => `<button class="mp-action ${item.key === spec.key ? "primary" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">${escapeHtml(item.label)}</button>`).join("")}</div><p data-settings-help-copy>${escapeHtml(spec.help)}</p></section>
-        <section class="mp-config-section settings-page-section"><h3>${escapeHtml(ct("drawer.connection"))}</h3>
-          <label class="settings-form-field">${escapeHtml(ct("fields.providerName"))}<input id="relayProviderName" value="${escapeAttr(provider.name || spec.providerName)}" readonly></label>
-          <label class="settings-form-field">${escapeHtml(ct("fields.apiKey"))}<input id="relayApiKey" type="password" value="" autocomplete="off" placeholder="${escapeAttr(ct("fields.apiKeyBlankKeepsCurrent"))}"></label>
-          <label class="settings-form-field">${escapeHtml(ct("fields.baseUrl"))}<input id="relayBaseUrl" value="${escapeAttr(provider.baseUrl || "")}" autocomplete="url" placeholder="https://api.example.com/v1"></label>
-          <label class="settings-form-field">${escapeHtml(ct("fields.defaultModel"))}<input id="relayCustomModel" data-select-on-focus="true" value="${escapeAttr(modelValue)}" autocomplete="off"></label>
-        </section>
-      </div>
-      <footer class="mp-drawer-foot settings-card-footer settings-inline-actions"><button id="relayFetchModelsBtn" class="mp-action" type="button" data-mp-fetch-models>${escapeHtml(ct("actions.fetchModels"))}</button><div class="settings-inline-actions"><button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.cancel"))}</button><button id="relaySaveConfigBtn" class="mp-action primary" type="button" data-mp-relay-save>${escapeHtml(ct("relay.save"))}</button></div></footer>`;
-  }
-
   function renderCodexImportCard() {
     return `
     <section class="settings-provider-section" id="codexCredentialImportSection">
@@ -1845,89 +2166,6 @@ export function createModelProviderSettingsController({
       <div class="settings-auth-list">
         ${renderCodexAccountManagementTable(authFiles, { translate: mt })}
       </div>
-    </section>
-  `;
-  }
-
-  function renderRelayProviderConfigCard() {
-    const spec = relayProtocolSpec(getRelayProtocol());
-    const provider = providerByName(spec.providerName) || { name: spec.providerName, type: spec.providerType, defaultModel: defaultModelForProtocol(spec.key), model: defaultModelForProtocol(spec.key), baseUrl: spec.key === "codex" ? "http://127.0.0.1:8317/v1" : "" };
-    const modelValue = provider.defaultModel || provider.model || defaultModelForProtocol(spec.key);
-    const expanded = providerConfigExpanded("relay");
-    return `
-    <section class="settings-provider-section relay-config-section ${expanded ? "expanded" : "collapsed"}">
-      <div class="settings-provider-section-head">
-        <div>
-          <div class="settings-provider-title">${escapeHtml(mt("relayConfigTitle"))}</div>
-          <div class="settings-provider-meta">${escapeHtml(mt("relayCurrentProtocol", { help: spec.help, provider: spec.providerName, model: modelValue }))}</div>
-        </div>
-        <div class="settings-action-row compact-actions">
-          ${renderProviderConfigToggle("relay", expanded, mt("relayConfig"))}
-        </div>
-      </div>
-      ${state.providerConfigStatus ? `<div class="settings-inline-success">${escapeHtml(state.providerConfigStatus)}</div>` : ""}
-      ${expanded ? `
-        <div class="settings-collapsible-body">
-          <div class="settings-provider-actions compact-actions">
-            <button id="relayFetchModelsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(mt("fetchModels"))}</button>
-            <button id="relaySaveConfigBtn" class="settings-action-btn primary" type="button">${escapeHtml(mt("saveChanges"))}</button>
-          </div>
-          <div class="relay-form-grid">
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("providerName"))}</span>
-              <input id="relayProviderName" class="settings-text-input" value="${escapeAttr(provider.name || spec.providerName)}" disabled>
-              <small data-settings-help-copy>${escapeHtml(mt("relayProviderNameHelp", { provider: spec.providerName }))}</small>
-            </label>
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("providerPrefix"))}</span>
-              <input class="settings-text-input" value="${escapeAttr((provider.name || spec.providerName) + ":")}" disabled>
-              <small data-settings-help-copy>${escapeHtml(mt("relayProviderPrefixHelp", { provider: spec.providerName, model: modelValue }))}</small>
-            </label>
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("apiKey"))}</span>
-              <input id="relayApiKey" class="settings-text-input" type="password" autocomplete="off" placeholder="${escapeAttr(mt("apiKeyPlaceholder"))}">
-            </label>
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("baseUrl"))}</span>
-              <input id="relayBaseUrl" class="settings-text-input" value="${escapeAttr(provider.baseUrl || "")}" placeholder="${escapeAttr(mt("baseUrlPlaceholder"))}">
-            </label>
-          </div>
-          <div class="relay-field">
-            <span>${escapeHtml(mt("apiProtocol"))}</span>
-            <div class="relay-protocol-tabs">
-              ${relayProtocolSpecs().map((item) => `
-                <button class="relay-protocol-tab ${item.key === spec.key ? "active" : ""}" type="button" data-relay-protocol="${escapeAttr(item.key)}">
-                  ${escapeHtml(item.label)}
-                </button>
-              `).join("")}
-            </div>
-            <small data-settings-help-copy>${escapeHtml(spec.help)}</small>
-          </div>
-          <div class="relay-form-grid">
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("httpsProxy"))}</span>
-              <input class="settings-text-input" value="" placeholder="${escapeAttr(mt("httpsProxyPlaceholder"))}" disabled>
-            </label>
-            <label class="relay-field wide">
-              <span>${escapeHtml(mt("defaultReasoningEffort"))}</span>
-              <select class="settings-text-input" disabled>
-                <option>${escapeHtml(mt("automatic"))}</option>
-                <option>${escapeHtml(mt("low"))}</option>
-                <option>${escapeHtml(mt("medium"))}</option>
-                <option>${escapeHtml(mt("high"))}</option>
-              </select>
-            </label>
-          </div>
-          <div class="relay-field">
-            <span>${escapeHtml(mt("customModel"))}</span>
-            <div class="relay-model-row">
-              <input id="relayCustomModel" class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("modelId"))}">
-              <input class="settings-text-input" value="${escapeAttr(modelValue)}" placeholder="${escapeAttr(mt("displayName"))}" disabled>
-            </div>
-            <small data-settings-help-copy>${escapeHtml(mt("customModelDescription"))}</small>
-          </div>
-        </div>
-      ` : ""}
     </section>
   `;
   }
@@ -2494,7 +2732,6 @@ export function createModelProviderSettingsController({
       node: trigger || null,
       cardName: card?.dataset?.mpProviderCard || "",
       opensTypes: Boolean(trigger?.closest?.("[data-mp-open-types]")),
-      opensRelay: Boolean(trigger?.closest?.("[data-mp-open-relay]")),
     };
   }
 
@@ -2508,7 +2745,6 @@ export function createModelProviderSettingsController({
         .find((node) => node.dataset?.mpProviderCard === saved.cardName) || null;
     }
     if (saved.opensTypes) return providerConsoleEventRoot.querySelector("[data-mp-open-types]");
-    if (saved.opensRelay) return providerConsoleEventRoot.querySelector("[data-mp-open-relay]");
     return null;
   }
 
@@ -2581,6 +2817,7 @@ export function createModelProviderSettingsController({
       consoleState.type = "";
       consoleState.providerName = "";
       consoleState.codexEdit = null;
+      consoleState.codexSelectedIds = [];
       consoleState.anthropicEdit = null;
       setProviderConsoleResult("");
       refreshProviderConsole({ restoreFocus: true });
@@ -2601,6 +2838,7 @@ export function createModelProviderSettingsController({
     consoleState.draft = createProviderDraft("codex", normalized);
     consoleState.dirty = false;
     consoleState.codexEdit = null;
+    consoleState.codexSelectedIds = [];
     setProviderConsoleResult("");
     refreshProviderConsole({ focusCodex: true });
     if (!state.providerAuthLoading) loadProviderAuthFiles({ silent: true }).catch(showError);
@@ -2669,20 +2907,6 @@ export function createModelProviderSettingsController({
     refreshProviderConsole({ focusCreate: true });
   }
 
-  function openRelayConsoleDrawer() {
-    const consoleState = providerConsoleState();
-    consoleState.view = "providers";
-    consoleState.modal = "";
-    consoleState.drawer = "relay";
-    consoleState.mode = "relay";
-    consoleState.type = "relay";
-    consoleState.providerName = "";
-    consoleState.draft = null;
-    consoleState.dirty = false;
-    setProviderConsoleResult("");
-    refreshProviderConsole({ focusLayer: true });
-  }
-
   function providerConsoleBusy(key) {
     return Boolean(providerConsoleState().busy?.[key]);
   }
@@ -2732,11 +2956,67 @@ export function createModelProviderSettingsController({
     return providerConsoleDraftFromForm(current.draft || {}, form, current.type);
   }
 
+  function providerNameValidationMessage(code) {
+    if (code === "required") return mt("selectProviderName");
+    if (code === "too_long") return mt("providerNameTooLong");
+    if (code === "conflict") return mt("providerNameConflict");
+    return code ? mt("invalidProviderName") : "";
+  }
+
+  function currentProviderNameValidation(value) {
+    const consoleState = providerConsoleState();
+    return validateProviderNameValue(value, {
+      mode: consoleState.mode,
+      originalName: consoleState.providerName,
+      existingNames: selectableModelProviders().map((provider) => provider?.name),
+    });
+  }
+
+  function updateProviderNameValidation(form, { touched = true } = {}) {
+    const consoleState = providerConsoleState();
+    const input = form?.elements?.name;
+    if (!input) return { valid: true, code: "", name: "" };
+    if (touched) consoleState.nameTouched = true;
+    const validation = currentProviderNameValidation(input.value);
+    const message = consoleState.nameTouched ? providerNameValidationMessage(validation.code) : "";
+    consoleState.nameError = message;
+    input.setCustomValidity?.(message);
+    input.setAttribute?.("aria-invalid", message ? "true" : "false");
+    const errorNode = form.querySelector?.("[data-mp-name-error]");
+    if (errorNode) {
+      errorNode.textContent = message;
+      errorNode.hidden = !message;
+    }
+    return validation;
+  }
+
   function validateConsoleDraft(draft, { requireModel = true } = {}) {
-    if (!draft.name) throw new Error(mt("selectProviderName"));
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(draft.name)) throw new Error(mt("invalidProviderName"));
+    const nameValidation = currentProviderNameValidation(draft.name);
+    if (!nameValidation.valid) throw new Error(providerNameValidationMessage(nameValidation.code));
     if (requireModel && !draft.model) throw new Error(mt("selectDefaultModel"));
     if (draft.type === "openai-compatible" && !draft.baseUrl) throw new Error(mt("missingBaseUrl"));
+    const headerNames = new Set();
+    for (const header of Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []) {
+      const name = String(header?.name || "").trim();
+      const value = String(header?.value || "");
+      if (!name && !value) continue;
+      if (!name) throw new Error(ct("messages.requestHeaderNameRequired"));
+      if (!value && !header?.keepExisting) throw new Error(ct("messages.requestHeaderValueRequired", { name }));
+      const key = name.toLowerCase();
+      if (headerNames.has(key)) throw new Error(ct("messages.requestHeaderDuplicate", { name }));
+      headerNames.add(key);
+    }
+  }
+
+  function consoleDraftRequestValues(draft, extra = {}) {
+    const consoleState = providerConsoleState();
+    return {
+      ...draft,
+      ...extra,
+      ...(consoleState.mode === "create"
+        ? { createOnly: true }
+        : { originalName: String(consoleState.providerName || draft.name || "").trim() }),
+    };
   }
 
   function consoleDraftCanDiscoverModels(draft) {
@@ -2751,13 +3031,22 @@ export function createModelProviderSettingsController({
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    updateProviderNameValidation(form);
     validateConsoleDraft(draft, { requireModel: false });
-    if (!consoleDraftCanDiscoverModels(draft) || providerConsoleBusy(`models:${draft.name}`)) return false;
+    if (!consoleDraftCanDiscoverModels(draft)) {
+      if (!automatic) {
+        const message = ct("messages.currentDraftTestNeedsApiKey");
+        setProviderConsoleResult(message, "attention");
+        notifyTerminal?.(`[warn] ${message}\n`);
+      }
+      return false;
+    }
+    if (providerConsoleBusy(`models:${draft.name}`)) return false;
     consoleState.draft = draft;
     consoleState.dirty = true;
     await runProviderConsoleBusy(`models:${draft.name}`, async () => {
       try {
-        const request = providerConsoleRequest("test", null, draft);
+        const request = providerConsoleRequest("test", null, consoleDraftRequestValues(draft));
         const response = await api(request.path, request.options);
         const preflight = providerPreflightResult(response, ct);
         if (preflight.tone !== "success") {
@@ -2783,8 +3072,8 @@ export function createModelProviderSettingsController({
         });
         setProviderConsoleResult(message, "success");
         notifyTerminal?.(`[info] ${message}\n`);
-      } catch {
-        const message = ct("messages.currentDraftTestFailed", { message: ct("messages.requestFailed") });
+      } catch (error) {
+        const message = ct("messages.currentDraftTestFailed", { message: error?.message || ct("messages.requestFailed") });
         setProviderConsoleResult(message, "attention");
         notifyTerminal?.(`[warn] ${message}\n`);
       }
@@ -2796,7 +3085,7 @@ export function createModelProviderSettingsController({
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
-    validateConsoleDraft(draft);
+    updateProviderNameValidation(form);
     consoleState.draft = draft;
     consoleState.testOpen = true;
     consoleState.test = {
@@ -2812,14 +3101,25 @@ export function createModelProviderSettingsController({
     const rawDraft = providerForm ? consoleDraftFromForm(providerForm) : (consoleState.draft || {});
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
     const prompt = String(form?.elements?.prompt?.value || "").trim();
-    validateConsoleDraft(draft);
-    if (!prompt) throw new Error(ct("test.promptRequired"));
+    try {
+      if (providerForm) updateProviderNameValidation(providerForm);
+      validateConsoleDraft(draft);
+      if (!prompt) throw new Error(ct("test.promptRequired"));
+    } catch (error) {
+      consoleState.test = {
+        ...(consoleState.test || {}),
+        prompt,
+        result: { success: false, tone: "attention", message: error?.message || ct("test.failureMessage") },
+      };
+      refreshProviderConsole({ focusTest: true });
+      return;
+    }
     if (!draft.name || providerConsoleBusy(`message-test:${draft.name}`)) return;
     consoleState.draft = draft;
     consoleState.test = { ...(consoleState.test || {}), prompt, result: null };
     await runProviderConsoleBusy(`message-test:${draft.name}`, async () => {
       try {
-        const request = providerConsoleRequest("message-test", null, { ...draft, prompt });
+        const request = providerConsoleRequest("message-test", null, consoleDraftRequestValues(draft, { prompt }));
         const response = await api(request.path, request.options);
         const success = response?.success === true;
         const result = {
@@ -2848,18 +3148,19 @@ export function createModelProviderSettingsController({
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    updateProviderNameValidation(form);
     validateConsoleDraft(draft);
     if (!draft.name || providerConsoleBusy(`test:${draft.name}`)) return;
     consoleState.draft = draft;
     await runProviderConsoleBusy(`test:${draft.name}`, async () => {
       try {
-        const request = providerConsoleRequest("test", null, draft);
+        const request = providerConsoleRequest("test", null, consoleDraftRequestValues(draft));
         const response = await api(request.path, request.options);
         const preflight = providerPreflightResult(response, ct);
         setProviderConsoleResult(preflight.message, preflight.tone);
         notifyTerminal?.(`[${preflight.terminalLevel}] ${preflight.message}\n`);
-      } catch {
-        const message = ct("messages.currentDraftTestFailed", { message: ct("messages.requestFailed") });
+      } catch (error) {
+        const message = ct("messages.currentDraftTestFailed", { message: error?.message || ct("messages.requestFailed") });
         setProviderConsoleResult(message, "attention");
         notifyTerminal?.(`[warn] ${message}\n`);
       }
@@ -2870,6 +3171,7 @@ export function createModelProviderSettingsController({
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
+    updateProviderNameValidation(form);
     validateConsoleDraft(draft);
     if (providerConsoleBusy(`save:${draft.name}`)) return;
     consoleState.draft = draft;
@@ -2879,19 +3181,36 @@ export function createModelProviderSettingsController({
         const originalName = consoleState.mode === "edit"
           ? String(consoleState.providerName || draft.name).trim()
           : String(draft.name).trim();
-        const configRequest = providerConsoleRequest("config", { name: originalName }, { ...providerConfigPayload(draft), pathName: originalName });
+        const configRequest = providerConsoleRequest("config", { name: originalName }, consoleDraftRequestValues({ ...providerConfigPayload(draft), pathName: originalName }));
         await api(configRequest.path, configRequest.options);
         saved = true;
         consoleState.providerName = draft.name;
-        consoleState.draft = { ...draft, apiKey: "" };
+        consoleState.draft = {
+          ...draft,
+          apiKey: "",
+          proxyUrl: redactedProviderProxyURL(draft.proxyUrl),
+          proxyUrlDraft: false,
+          requestHeaders: (Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []).map((header) => ({
+            name: String(header?.name || "").trim(),
+            value: "",
+            keepExisting: true,
+            configured: true,
+          })).filter((header) => header.name),
+          requestHeadersDraft: false,
+          clearProxyAuth: false,
+        };
         consoleState.dirty = false;
         const enableRequest = providerConsoleRequest("toggle", { name: draft.name, defaultModel: draft.model }, { enabled: true, model: draft.model });
         await api(enableRequest.path, enableRequest.options);
         await refreshProviderDataAfterMutation(ct("messages.providerSavedAndEnabled", { provider: providerDisplayName(draft) }));
-      } catch {
+      } catch (error) {
         const message = saved
           ? ct("messages.providerSavedEnableFailed")
-          : ct("messages.providerSaveFailed");
+          : (error?.message || ct("messages.providerSaveFailed"));
+        if (!saved && error?.status === 409) {
+          consoleState.nameTouched = true;
+          consoleState.nameError = message;
+        }
         setProviderConsoleResult(message, "attention");
         notifyTerminal?.(`[warn] ${message}\n`);
         refreshProviderConsole();
@@ -2956,6 +3275,12 @@ export function createModelProviderSettingsController({
     selectProviderConsoleFieldOnFocus(event.target);
   }
 
+  function handleProviderConsoleFocusOut(event) {
+    if (event.target?.name !== "name") return;
+    const form = event.target.closest?.("[data-mp-provider-form]");
+    if (form) updateProviderNameValidation(form);
+  }
+
   function handleProviderConsoleInput(event) {
     const rawTarget = event.target;
     if (rawTarget?.matches?.("[data-mp-test-prompt]")) {
@@ -2998,6 +3323,10 @@ export function createModelProviderSettingsController({
       providerConsoleState().codexImportDraft = rawTarget.value || "";
       return;
     }
+    if (rawTarget?.matches?.("[data-codex-batch-priority]")) {
+      providerConsoleState().codexBatchPriority = rawTarget.value || "";
+      return;
+    }
     if (rawTarget?.dataset?.codexEditAlias) {
       const edit = providerConsoleState().codexEdit;
       if (edit?.id === rawTarget.dataset.codexEditAlias) edit.alias = rawTarget.value || "";
@@ -3008,7 +3337,20 @@ export function createModelProviderSettingsController({
       if (edit?.id === rawTarget.dataset.codexEditPriority) edit.priority = rawTarget.value || "";
       return;
     }
-    if (updateProviderConsoleDraftFromEvent(event)) return;
+    if (rawTarget?.matches?.("[data-mp-request-header-name], [data-mp-request-header-value]")) {
+      const row = rawTarget.closest?.("[data-mp-request-header-row]");
+      if (rawTarget.matches?.("[data-mp-request-header-value]") && rawTarget.value) row?.setAttribute?.("data-keep-existing", "false");
+      const form = rawTarget.closest?.("[data-mp-provider-form]");
+      if (form) syncProviderConsoleDraft(providerConsoleState(), form);
+      return;
+    }
+    if (updateProviderConsoleDraftFromEvent(event)) {
+      if (rawTarget?.name === "name") {
+        const form = rawTarget.closest?.("[data-mp-provider-form]");
+        if (form) updateProviderNameValidation(form);
+      }
+      return;
+    }
     const target = rawTarget?.closest?.("[data-mp-provider-search]");
     if (!target) return;
     providerConsoleState().search = target.value || "";
@@ -3017,6 +3359,32 @@ export function createModelProviderSettingsController({
 
   function handleProviderConsoleChange(event) {
     const target = event.target;
+    if (target?.matches?.("[data-codex-import-files]")) {
+      setCodexImportFiles(target.files);
+      target.value = "";
+      refreshProviderConsole();
+      return;
+    }
+    if (target?.matches?.("[data-codex-select]")) {
+      const consoleState = providerConsoleState();
+      if (consoleState.codexBatchBusy) return;
+      const id = String(target.dataset.codexSelect || "").trim();
+      const selected = new Set(normalizeCodexSelectedIds(consoleState.codexSelectedIds));
+      if (target.checked) selected.add(id);
+      else selected.delete(id);
+      consoleState.codexSelectedIds = normalizeCodexSelectedIds([...selected], extractAuthFiles(state.providerAuthFiles));
+      refreshProviderConsole();
+      return;
+    }
+    if (target?.matches?.("[data-codex-select-all]")) {
+      const consoleState = providerConsoleState();
+      if (consoleState.codexBatchBusy) return;
+      consoleState.codexSelectedIds = target.checked
+        ? extractAuthFiles(state.providerAuthFiles).map(codexAccountStableID).filter(Boolean)
+        : [];
+      refreshProviderConsole();
+      return;
+    }
     const form = target?.closest?.("[data-mp-provider-form]");
     if (target?.matches?.("[data-mp-model-choice]") && form?.elements?.model) {
       form.elements.model.value = target.value || "";
@@ -3029,13 +3397,45 @@ export function createModelProviderSettingsController({
         target.checked = false;
       }
     }
+    if (target?.matches?.("[data-mp-clear-proxy-auth]") && target.checked) {
+      if (!globalThis.confirm?.(ct("messages.clearProxyAuthConfirm"))) {
+        target.checked = false;
+      }
+    }
     const updated = updateProviderConsoleDraftFromEvent(event);
+    if (updated && target?.name === "insecureSkipTLSVerify") {
+      refreshProviderConsole();
+      return;
+    }
     if (!updated || !["baseUrl", "apiKey", "clearApiKey"].includes(target?.name)) return;
     if (!form) return;
     const draft = providerConsoleState().draft;
     if (consoleDraftCanDiscoverModels(draft)) {
       discoverConsoleProviderModels(form, { automatic: true }).catch(showError);
     }
+  }
+
+  function handleProviderConsoleDragOver(event) {
+    const zone = event.target?.closest?.("[data-codex-import-drop]");
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.add("is-dragging");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleProviderConsoleDragLeave(event) {
+    const zone = event.target?.closest?.("[data-codex-import-drop]");
+    if (!zone || zone.contains?.(event.relatedTarget)) return;
+    zone.classList.remove("is-dragging");
+  }
+
+  function handleProviderConsoleDrop(event) {
+    const zone = event.target?.closest?.("[data-codex-import-drop]");
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.remove("is-dragging");
+    setCodexImportFiles(event.dataTransfer?.files);
+    refreshProviderConsole();
   }
 
   function handleProviderConsoleKeydown(event) {
@@ -3045,12 +3445,11 @@ export function createModelProviderSettingsController({
       event.preventDefault();
       return;
     }
-    const card = event.target?.closest?.("[data-mp-provider-card], [data-mp-open-relay]");
+    const card = event.target?.closest?.("[data-mp-provider-card]");
     if (shouldOpenProviderCardFromKeyboard(event, card)) {
       event.preventDefault();
       rememberProviderConsoleFocus(card);
-      if (card.dataset.mpOpenRelay !== undefined) openRelayConsoleDrawer();
-      else openProviderConsoleDrawer(providerByName(card.dataset.mpProviderCard));
+      openProviderConsoleDrawer(providerByName(card.dataset.mpProviderCard));
     }
   }
 
@@ -3074,7 +3473,7 @@ export function createModelProviderSettingsController({
   }
 
   function handleProviderConsoleClick(event) {
-    const target = event.target?.closest?.("button, [data-mp-provider-card], [data-mp-open-relay], [data-mp-backdrop]");
+    const target = event.target?.closest?.("button, [data-mp-provider-card], [data-mp-backdrop]");
     if (!target) return;
     const consoleState = providerConsoleState();
     if (target.dataset.mpBackdrop && event.target === target) {
@@ -3083,6 +3482,45 @@ export function createModelProviderSettingsController({
     }
     if (target.dataset.mpCloseCodexPage !== undefined || target.dataset.mpCloseAnthropicPage !== undefined) {
       closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.codexChooseImportFiles !== undefined) {
+      $("codexAuthImportFiles")?.click?.();
+      return;
+    }
+    if (target.dataset.codexClearImportFiles !== undefined) {
+      setCodexImportFiles([]);
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.codexSelectAllAccounts !== undefined) {
+      consoleState.codexSelectedIds = extractAuthFiles(state.providerAuthFiles).map(codexAccountStableID).filter(Boolean);
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.codexClearSelection !== undefined) {
+      consoleState.codexSelectedIds = [];
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.codexBatchSync !== undefined) {
+      runCodexBatchOperation("sync").catch(showError);
+      return;
+    }
+    if (target.dataset.codexBatchEnable !== undefined) {
+      runCodexBatchOperation("enable").catch(showError);
+      return;
+    }
+    if (target.dataset.codexBatchDisable !== undefined) {
+      runCodexBatchOperation("disable").catch(showError);
+      return;
+    }
+    if (target.dataset.codexBatchPriorityApply !== undefined) {
+      runCodexBatchOperation("set_priority").catch(showError);
+      return;
+    }
+    if (target.dataset.codexBatchDelete !== undefined) {
+      runCodexBatchOperation("delete").catch(showError);
       return;
     }
     if (target.dataset.anthropicAddMode) {
@@ -3148,6 +3586,31 @@ export function createModelProviderSettingsController({
       closeProviderConsoleLayer();
       return;
     }
+    if (target.dataset.mpAddRequestHeader !== undefined) {
+      const form = target.closest?.("[data-mp-provider-form]");
+      const draft = form ? providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type) : { ...(consoleState.draft || {}) };
+      draft.requestHeaders = [...(Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []), { name: "", value: "", keepExisting: false, configured: false }];
+      draft.requestHeadersDraft = true;
+      consoleState.draft = draft;
+      consoleState.dirty = true;
+      refreshProviderConsole();
+      scheduleProviderConsoleFocus(() => {
+        const fields = providerConsoleEventRoot?.querySelectorAll?.("[data-mp-request-header-name]") || [];
+        fields[fields.length - 1]?.focus?.();
+      });
+      return;
+    }
+    if (target.dataset.mpRemoveRequestHeader !== undefined) {
+      const form = target.closest?.("[data-mp-provider-form]");
+      const draft = form ? providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type) : { ...(consoleState.draft || {}) };
+      const index = Number(target.dataset.mpRemoveRequestHeader);
+      draft.requestHeaders = (Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []).filter((_, itemIndex) => itemIndex !== index);
+      draft.requestHeadersDraft = true;
+      consoleState.draft = draft;
+      consoleState.dirty = true;
+      refreshProviderConsole();
+      return;
+    }
     if (target.dataset.codexEdit) {
       const id = target.dataset.codexEdit;
       const account = extractAuthFiles(state.providerAuthFiles).find((item) => String(item?.id || item?.auth_index || item?.authIndex || item?.name || "") === id);
@@ -3199,11 +3662,6 @@ export function createModelProviderSettingsController({
       openProviderConsoleDrawer(providerByName(target.dataset.mpProviderCard));
       return;
     }
-    if (target.dataset.mpOpenRelay !== undefined) {
-      rememberProviderConsoleFocus(target);
-      openRelayConsoleDrawer();
-      return;
-    }
     if (target.dataset.mpFetchModels !== undefined) {
       const form = target.closest?.("[data-mp-provider-form]");
       if (form) discoverConsoleProviderModels(form).catch(showError);
@@ -3232,10 +3690,6 @@ export function createModelProviderSettingsController({
     }
     if (target.dataset.mpDeleteProvider) {
       deleteConsoleProvider(target.dataset.mpDeleteProvider).catch(showError);
-      return;
-    }
-    if (target.dataset.mpRelaySave !== undefined) {
-      saveRelayProviderConfig().catch(showError);
       return;
     }
     if (target.dataset.mpCodexBrowserLogin !== undefined) {
@@ -3278,9 +3732,6 @@ export function createModelProviderSettingsController({
       deleteCodexAccount(target.dataset.codexDelete, target).catch(showError);
       return;
     }
-    if (target.dataset.relayProtocol) {
-      selectRelayProtocol(target.dataset.relayProtocol);
-    }
   }
 
   function bindProviderSettingsActions() {
@@ -3290,16 +3741,24 @@ export function createModelProviderSettingsController({
       if (providerConsoleEventRoot) {
         providerConsoleEventRoot.removeEventListener("click", handleProviderConsoleClick);
         providerConsoleEventRoot.removeEventListener("focusin", handleProviderConsoleFocus);
+        providerConsoleEventRoot.removeEventListener("focusout", handleProviderConsoleFocusOut);
         providerConsoleEventRoot.removeEventListener("input", handleProviderConsoleInput);
         providerConsoleEventRoot.removeEventListener("change", handleProviderConsoleChange);
+        providerConsoleEventRoot.removeEventListener("dragover", handleProviderConsoleDragOver);
+        providerConsoleEventRoot.removeEventListener("dragleave", handleProviderConsoleDragLeave);
+        providerConsoleEventRoot.removeEventListener("drop", handleProviderConsoleDrop);
         providerConsoleEventRoot.removeEventListener("keydown", handleProviderConsoleKeydown);
         providerConsoleEventRoot.removeEventListener("submit", handleProviderConsoleSubmit);
       }
       providerConsoleEventRoot = root;
       root.addEventListener("click", handleProviderConsoleClick);
       root.addEventListener("focusin", handleProviderConsoleFocus);
+      root.addEventListener("focusout", handleProviderConsoleFocusOut);
       root.addEventListener("input", handleProviderConsoleInput);
       root.addEventListener("change", handleProviderConsoleChange);
+      root.addEventListener("dragover", handleProviderConsoleDragOver);
+      root.addEventListener("dragleave", handleProviderConsoleDragLeave);
+      root.addEventListener("drop", handleProviderConsoleDrop);
       root.addEventListener("keydown", handleProviderConsoleKeydown);
       root.addEventListener("submit", handleProviderConsoleSubmit);
     }
@@ -3405,12 +3864,13 @@ export function createModelProviderSettingsController({
     return Boolean(modelVisibilityPreferences().hiddenModels?.[value]);
   }
 
-  function providerRuntimeSelectable(provider = {}) {
-    const signals = [provider.runtimeAvailable, provider.registered]
+  function providerRuntimeSelectable(provider) {
+    const runtimeProvider = provider && typeof provider === "object" ? provider : {};
+    const signals = [runtimeProvider.runtimeAvailable, runtimeProvider.registered]
       .filter((value) => value !== undefined && value !== null)
       .map(Boolean);
     if (signals.length) return signals.every(Boolean);
-    return Boolean(provider.enabled && provider.configured);
+    return Boolean(runtimeProvider.enabled && runtimeProvider.configured);
   }
 
   function isModelSelectable(provider, model) {
@@ -3594,7 +4054,11 @@ export function createModelProviderSettingsController({
     const provider = currentProviderConfig(select.value);
     const configured = Boolean(provider?.configured && providerRuntimeSelectable(provider));
     select.classList.toggle("model-unconfigured", !configured);
-    select.title = provider?.error || (configured ? mt("modelConfigured") : !providerRuntimeSelectable(provider) ? mt("runtimeUnavailable") : modelSetupMessage(select.value));
+    select.title = provider?.error || (configured
+      ? mt("modelConfigured")
+      : provider && !providerRuntimeSelectable(provider)
+        ? mt("runtimeUnavailable")
+        : modelSetupMessage(select.value));
   }
 
   function modelSetupMessage(modelValue = $("modelSelect")?.value || state.agent?.model || "") {

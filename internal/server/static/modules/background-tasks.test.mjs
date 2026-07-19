@@ -25,6 +25,23 @@ test("background task normalization accepts API aliases and derives duration", (
   assert.equal(task.childRunId, "run-1");
 });
 
+test("Agent task list requests the maximum supported history window", async () => {
+  const requests = [];
+  const controller = createBackgroundTasksController({
+    request: async (path, options) => {
+      requests.push({ path, method: options.method });
+      return { tasks: [
+        { id: "task-newest", status: "running", createdAt: "2026-07-19T10:00:02Z" },
+        { id: "task-older", status: "queued", createdAt: "2026-07-19T10:00:01Z" },
+      ] };
+    },
+  });
+  controller.setAgent("agent-history");
+  await controller.loadAgent("agent-history");
+  assert.deepEqual(requests, [{ path: "/api/agents/agent-history/background-tasks?limit=100", method: "GET" }]);
+  assert.deepEqual(controller.state().order, ["task-newest", "task-older"]);
+});
+
 test("task summary derives readable titles and separates running from queued work", () => {
   const shell = normalizeBackgroundTask({ id: "shell-1", kind: "shell", status: "running", publicSummary: { program: "go", subcommand: "test" } });
   const child = normalizeBackgroundTask({ id: "agent-1", kind: "agent", status: "queued", publicSummary: { description: "Inspect auth flow", model: "codex:gpt" } });
@@ -63,6 +80,37 @@ test("task panel reports open and close transitions for the shared chat utility 
   assert.equal(controller.state().trayOpen, false);
   assert.deepEqual(transitions[1], { open: false, reason: "details-open" });
   assert.equal(controller.closeTray(), false);
+});
+
+test("selecting a historical task hydrates its exact task before opening details", async () => {
+  const requests = [];
+  const controller = createBackgroundTasksController({
+    request: async (path, options) => {
+      requests.push({ path, method: options.method });
+      if (path.endsWith("/output?afterSequence=0")) return { chunks: [] };
+      return {
+        id: "task-history",
+        agentId: "agent-1",
+        parentRunId: "run-history",
+        parentToolUseId: "tool-history",
+        kind: "agent",
+        status: "succeeded",
+        revision: 4,
+        publicSummary: { description: "Historical task" },
+      };
+    },
+  });
+  controller.setAgent("agent-1");
+
+  const task = await controller.selectTask("task-history");
+
+  assert.equal(task.id, "task-history");
+  assert.equal(controller.state().trayOpen, true);
+  assert.equal(controller.state().selected, "task-history");
+  assert.deepEqual(requests, [
+    { path: "/api/background-tasks/task-history", method: "GET" },
+    { path: "/api/background-tasks/task-history/output?afterSequence=0", method: "GET" },
+  ]);
 });
 
 test("controller reconciles snapshots and live task events without duplicating order", () => {
@@ -193,4 +241,241 @@ test("continuation events retain budgets while updating lifecycle status", () =>
   assert.equal(continuation.reason, "token budget");
   assert.equal(continuation.tokenBudget, 8000);
   assert.equal(continuation.tokensUsed, 8000);
+});
+
+test("normalization explicitly preserves task ownership, association, revision, public fields, and timestamps", () => {
+  const task = normalizeBackgroundTask({
+    taskId: "task-explicit",
+    owner_agent_id: "agent-owner",
+    parent_run_id: "run-parent",
+    parent_tool_use_id: "tool-parent",
+    task_revision: "12",
+    taskKind: "agent",
+    state: "failed",
+    public_summary: JSON.stringify({ description: "Inspect safely" }),
+    child_agent_id: "agent-child",
+    child_run_id: "run-child",
+    error_code: "child_failed",
+    error_message: "Child failed",
+    created_at: "2026-07-19T10:00:00Z",
+    started_at: "2026-07-19T10:00:01Z",
+    cancel_requested_at: "2026-07-19T10:00:02Z",
+    completed_at: "2026-07-19T10:00:03Z",
+    updated_at: "2026-07-19T10:00:04Z",
+  });
+
+  assert.equal(task.ownerAgentId, "agent-owner");
+  assert.equal(task.agentId, "agent-owner");
+  assert.equal(task.parentRunId, "run-parent");
+  assert.equal(task.parentToolUseId, "tool-parent");
+  assert.equal(task.revision, 12);
+  assert.deepEqual(task.publicSummary, { description: "Inspect safely" });
+  assert.deepEqual(task.summary, { description: "Inspect safely" });
+  assert.equal(task.childAgentId, "agent-child");
+  assert.equal(task.childRunId, "run-child");
+  assert.equal(task.errorCode, "child_failed");
+  assert.equal(task.createdAt, "2026-07-19T10:00:00Z");
+  assert.equal(task.startedAt, "2026-07-19T10:00:01Z");
+  assert.equal(task.cancelRequestedAt, "2026-07-19T10:00:02Z");
+  assert.equal(task.completedAt, "2026-07-19T10:00:03Z");
+  assert.equal(task.updatedAt, "2026-07-19T10:00:04Z");
+});
+
+test("parent tool lookup is isolated by the parent run composite key", () => {
+  const controller = createBackgroundTasksController({ request: async () => ({}) });
+  controller.setAgent("agent-1");
+  controller.applySnapshot({ backgroundTasks: [
+    { id: "task-run-a", parentRunId: "run-a", parentToolUseId: "tool-shared", status: "running", publicSummary: { description: "A" } },
+    { id: "task-run-b", parentRunId: "run-b", parentToolUseId: "tool-shared", status: "queued", publicSummary: { description: "B" } },
+  ] }, { agentId: "agent-1" });
+
+  assert.equal(controller.getTaskByParentTool("run-a", "tool-shared").id, "task-run-a");
+  assert.equal(controller.getTaskByParentTool("run-b", "tool-shared").id, "task-run-b");
+  assert.equal(controller.getTaskByParentTool("", "tool-shared"), null);
+  assert.equal(controller.getTaskByParentTool("run-c", "tool-shared"), null);
+});
+
+test("revision guards discard stale events and protect hydrated fields on equal revisions", () => {
+  const controller = createBackgroundTasksController({ request: async () => ({}) });
+  controller.setAgent("agent-1");
+  controller.applySnapshot({ backgroundTasks: [{
+    id: "task-revision",
+    ownerAgentId: "agent-1",
+    parentRunId: "run-1",
+    parentToolUseId: "tool-1",
+    kind: "agent",
+    status: "running",
+    revision: 8,
+    title: "Hydrated title",
+    publicSummary: { description: "Hydrated summary" },
+    childAgentId: "child-1",
+    childRunId: "child-run-1",
+    createdAt: "2026-07-19T10:00:00Z",
+    updatedAt: "2026-07-19T10:00:01Z",
+  }] }, { agentId: "agent-1" });
+
+  controller.handleEvent({ type: "task.status", agentId: "agent-1", data: { taskId: "task-revision", kind: "agent", status: "failed", revision: 7 } });
+  assert.equal(controller.getTask("task-revision").status, "running");
+  assert.equal(controller.getTask("task-revision").revision, 8);
+
+  controller.handleEvent({ type: "task.status", agentId: "agent-1", data: { taskId: "task-revision", kind: "agent", status: "waiting", revision: 8, outputBytes: 42 } });
+  const task = controller.getTask("task-revision");
+  assert.equal(task.status, "waiting");
+  assert.equal(task.title, "Hydrated title");
+  assert.deepEqual(task.publicSummary, { description: "Hydrated summary" });
+  assert.equal(task.parentRunId, "run-1");
+  assert.equal(task.parentToolUseId, "tool-1");
+  assert.equal(task.childAgentId, "child-1");
+  assert.equal(task.childRunId, "child-run-1");
+  assert.equal(task.outputBytes, 42);
+
+  controller.applySnapshot({ backgroundTasks: [{ id: "task-revision", status: "queued", title: "Unversioned stale title", childRunId: "newly-known-run" }] });
+  assert.equal(controller.getTask("task-revision").status, "waiting");
+  assert.equal(controller.getTask("task-revision").title, "Hydrated title");
+});
+
+test("unknown task.created events trigger exact asynchronous task hydration", async () => {
+  const requests = [];
+  const controller = createBackgroundTasksController({
+    request: async (path, options) => {
+      requests.push({ path, method: options.method });
+      return {
+        id: "task-created",
+        ownerAgentId: "agent-1",
+        parentRunId: "run-parent",
+        parentToolUseId: "tool-parent",
+        kind: "agent",
+        status: "running",
+        revision: 3,
+        publicSummary: { description: "Hydrated child task" },
+        createdAt: "2026-07-19T10:00:00Z",
+        updatedAt: "2026-07-19T10:00:01Z",
+      };
+    },
+  });
+  controller.setAgent("agent-1");
+
+  const handled = controller.handleEvent({ type: "task.created", agentId: "agent-1", data: { taskId: "task-created", kind: "agent", status: "running", revision: 3 } });
+  assert.equal(handled, true);
+  assert.equal(typeof handled?.then, "undefined");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(requests, [{ path: "/api/background-tasks/task-created", method: "GET" }]);
+  assert.equal(controller.getTask("task-created").title, "Hydrated child task");
+  assert.equal(controller.getTaskByParentTool("run-parent", "tool-parent").id, "task-created");
+});
+
+test("newer lifecycle events force exact hydration while an older request is in flight", async () => {
+  const requests = [];
+  const resolvers = [];
+  const controller = createBackgroundTasksController({
+    request: (path, options) => {
+      requests.push({ path, method: options.method });
+      return new Promise((resolve) => resolvers.push(resolve));
+    },
+  });
+  controller.setAgent("agent-1");
+
+  controller.handleEvent({ type: "task.created", agentId: "agent-1", data: { taskId: "task-racing", kind: "agent", status: "queued", revision: 1 } });
+  controller.handleEvent({ type: "task.status", agentId: "agent-1", data: { taskId: "task-racing", kind: "agent", status: "running", revision: 2 } });
+  assert.deepEqual(requests, [
+    { path: "/api/background-tasks/task-racing", method: "GET" },
+    { path: "/api/background-tasks/task-racing", method: "GET" },
+  ]);
+
+  resolvers[0]({
+    id: "task-racing",
+    ownerAgentId: "agent-1",
+    parentRunId: "run-parent",
+    parentToolUseId: "tool-parent",
+    kind: "agent",
+    status: "queued",
+    revision: 1,
+    publicSummary: { description: "Queued snapshot" },
+    createdAt: "2026-07-19T10:00:00Z",
+    updatedAt: "2026-07-19T10:00:00Z",
+  });
+  resolvers[1]({
+    id: "task-racing",
+    ownerAgentId: "agent-1",
+    parentRunId: "run-parent",
+    parentToolUseId: "tool-parent",
+    kind: "agent",
+    status: "running",
+    revision: 2,
+    publicSummary: { description: "Running snapshot" },
+    childAgentId: "child-agent",
+    childRunId: "child-run",
+    createdAt: "2026-07-19T10:00:00Z",
+    startedAt: "2026-07-19T10:00:01Z",
+    updatedAt: "2026-07-19T10:00:01Z",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const task = controller.getTask("task-racing");
+  assert.equal(task.status, "running");
+  assert.equal(task.revision, 2);
+  assert.equal(task.childAgentId, "child-agent");
+  assert.equal(task.childRunId, "child-run");
+});
+
+test("automatic hydration responses are discarded after an Agent switch", async () => {
+  let resolveHydration;
+  const controller = createBackgroundTasksController({
+    request: () => new Promise((resolve) => { resolveHydration = resolve; }),
+  });
+  controller.setAgent("agent-1");
+  controller.handleEvent({ type: "task.created", agentId: "agent-1", data: { taskId: "task-stale", kind: "agent", status: "queued", revision: 1 } });
+  controller.setAgent("agent-2");
+  resolveHydration({
+    id: "task-stale",
+    ownerAgentId: "agent-1",
+    parentRunId: "run-old",
+    parentToolUseId: "tool-old",
+    kind: "agent",
+    status: "running",
+    revision: 2,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(controller.getTask("task-stale"), null);
+  assert.equal(controller.getTaskByParentTool("run-old", "tool-old"), null);
+  assert.deepEqual(controller.state().tasksById, {});
+});
+
+test("subscriptions receive read-only public snapshots and unsubscribe cleanly", () => {
+  const onChangeSnapshots = [];
+  const subscribedSnapshots = [];
+  const controller = createBackgroundTasksController({
+    request: async () => ({}),
+    onChange: (snapshot) => onChangeSnapshots.push(snapshot),
+  });
+  controller.setAgent("agent-1");
+  const unsubscribe = controller.subscribe((snapshot) => subscribedSnapshots.push(snapshot));
+
+  controller.applySnapshot({ recentBackgroundTasks: [{
+    id: "task-public",
+    parentRunId: "run-public",
+    parentToolUseId: "tool-public",
+    kind: "agent",
+    status: "running",
+    revision: 1,
+    publicSummary: { description: "Safe", prompt: "TOP SECRET" },
+  }] }, { agentId: "agent-1" });
+
+  assert.equal(subscribedSnapshots.length, 1);
+  assert.equal(onChangeSnapshots.length, 2);
+  assert.equal(Object.isFrozen(subscribedSnapshots[0]), true);
+  assert.equal(Object.isFrozen(subscribedSnapshots[0].tasks), true);
+  assert.deepEqual(subscribedSnapshots[0].tasks[0].publicSummary, { description: "Safe" });
+  assert.equal(controller.getTaskByParentTool("run-public", "tool-public").publicSummary.prompt, undefined);
+  assert.equal(unsubscribe(), true);
+
+  controller.applySnapshot({ continuation: { mode: "safe" } }, { agentId: "agent-1" });
+  assert.equal(subscribedSnapshots.length, 1);
+  assert.equal(onChangeSnapshots.length, 3);
+  assert.equal(typeof controller.selectTask, "function");
+  assert.equal(typeof controller.getTask, "function");
+  assert.equal(typeof controller.getTaskByParentTool, "function");
+  assert.equal(typeof controller.subscribe, "function");
 });

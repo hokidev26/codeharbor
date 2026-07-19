@@ -1,12 +1,12 @@
 import { createAccountPreferencesController } from "./account-preferences.mjs";
 import { createAgentStreamController } from "./agent-stream.mjs";
-import { createAutomationControlController } from "./automation-control.mjs";
+import { createAutomationControlController } from "./automation-control.mjs?v=nav-schedules-1";
 import { createArchiveSettingsController } from "./archive-settings.mjs?v=archive-settings-1";
-import { createBackgroundTasksController } from "./background-tasks.mjs";
+import { createBackgroundTasksController } from "./background-tasks.mjs?v=subagent-cards-1";
 import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1-project-context-1";
-import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1";
+import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1-subagent-cards-1";
 import {
   addRecentConversation,
   buildNavigationView,
@@ -28,28 +28,34 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1";
-import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1";
+import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1-settings-cleanup-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1-autoto-themes-1";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1";
+import {
+  createOverviewDashboardController,
+  overviewRailTarget,
+  resolveOverviewStartup,
+} from "./overview-dashboard.mjs?v=overview-home-3-nav-schedules-1-mobile-no-home-1-schedule-workspace-1";
 import { createPageLifecycleController } from "./page-lifecycle.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
+import { createScheduleWorkspaceController } from "./schedule-workspace.mjs?v=schedule-workspace-1";
 import { createTaskWorkspaceController } from "./task-workspace.mjs?v=task-workspace-1";
 import { createThemeManager, setThemePageContext } from "./theme-manager.mjs?v=autoto-themes-1";
 import { createThemeSettingsController } from "./theme-settings.mjs?v=autoto-themes-1";
-import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=autoto-themes-1";
+import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=autoto-themes-1-schedule-workspace-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-2";
-import { createSharedAPISettingsController } from "./shared-api-settings.mjs?v=shared-api-1";
+import { createSharedAPISettingsController } from "./shared-api-settings.mjs?v=shared-api-1-compact-layout-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
-import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1";
-import { settingsIconSVG, settingsItemByKey, settingsItems, settingsSections } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1-settings-icons-1";
+import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legacySettingsCategories, settingsCategoryByKey, settingsCategoryForItem } from "./settings-categories.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1-settings-cleanup-1";
+import { settingsIconSVG, settingsItemByKey, settingsItems, settingsSections } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1-settings-icons-1-settings-cleanup-1";
 import { createSettingsHelpController } from "./settings-help.mjs?v=settings-help-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1";
@@ -57,10 +63,9 @@ import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
-import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-1";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1";
+import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-2";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1";
 import { createUsageHistoryController } from "./usage-history.mjs";
-import { createWorkspaceSettingsController } from "./workspace-settings.mjs?v=plan-mode-1";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
 
@@ -92,7 +97,7 @@ const state = {
   projects: [],
   navigationConversations: [],
   navigationLoadSeq: 0,
-  navigationMode: "all",
+  navigationMode: "projects",
   navigationMenuTarget: null,
   navigationSelectionKind: "conversation",
   navigationTransitionTitle: "",
@@ -100,6 +105,7 @@ const state = {
   project: null,
   workline: null,
   agent: null,
+  agentContext: {},
   workState: null,
   healthSeq: 0,
   healthOK: null,
@@ -170,6 +176,7 @@ const state = {
   appearance: null,
   primaryModePreference: "conversation",
   activeWorkbench: "conversation",
+  overviewActive: true,
   terminalPrefs: null,
   chatDrafts: null,
   pendingAttachments: [],
@@ -180,7 +187,6 @@ const state = {
   slashCommandIndex: 0,
   slashCommandQuery: "",
   terminalStatus: "idle",
-  agentRefreshing: false,
   agentSaving: false,
   agentSavePending: false,
   titleEditing: false,
@@ -263,8 +269,6 @@ const state = {
   mcpRegistryEditingId: "",
   projectWorklines: [],
   worklineAgents: [],
-  worklinesError: "",
-  worklinesSeq: 0,
   directoryPath: "",
   directoryParent: "",
   directoryShortcuts: [],
@@ -311,6 +315,22 @@ function getSelectedModelValue() {
   return selectedModelValue();
 }
 
+let backgroundTasks = null;
+let backgroundTaskAgentLoadGeneration = 0;
+let backgroundTaskAgentLoadInFlight = null;
+let subagentCardRefreshHandle = 0;
+let subagentCardRefreshAgentId = "";
+const subagentCardRefreshReasons = new Set([
+  "loaded",
+  "task-loaded",
+  "snapshot",
+  "wait-finished",
+  "cancel-finished",
+  "task.created",
+  "task.status",
+  "task.completed",
+]);
+
 const chatRendering = createChatRenderingController({
   state,
   attachmentIcon,
@@ -319,6 +339,7 @@ const chatRendering = createChatRenderingController({
   notifyTerminal,
   openGitModal: () => gitWorkflow.openGitModal?.(),
   refreshGitWorkflow: (options) => gitWorkflow.refreshGitWorkflow?.(options),
+  resolveBackgroundTask: (tool) => backgroundTasks?.getTaskByParentTool?.(tool?.runId, tool?.toolUseId) || null,
   selectedModelValue: getSelectedModelValue,
   shortPath,
   showError,
@@ -437,9 +458,152 @@ const executionNotifications = createExecutionNotifications({
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
 });
 
-const backgroundTasks = createBackgroundTasksController({
+function subagentCardIdentity(card, index = 0) {
+  const dataset = card?.dataset || {};
+  const runId = String(dataset.runId || "");
+  const toolUseId = String(dataset.toolUseId || "");
+  if (runId || toolUseId) return JSON.stringify([runId, toolUseId]);
+  const taskId = String(dataset.taskId || "");
+  return taskId || String(index);
+}
+
+function captureSubagentCardViewState(root = $("messages")) {
+  if (!root) return { cards: [], focus: null, scrollTop: 0 };
+  const active = globalThis.document?.activeElement;
+  const cards = [...root.querySelectorAll("[data-subagent-card]")].map((card, cardIndex) => {
+    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
+    return {
+      key: subagentCardIdentity(card, cardIndex),
+      status: String(card.dataset?.subagentStatus || ""),
+      open: details.map((detail) => Boolean(detail.open)),
+    };
+  });
+  const focusButton = active?.closest?.("[data-subagent-action]");
+  const focusCard = focusButton?.closest?.("[data-subagent-card]");
+  return {
+    cards,
+    focus: focusButton && focusCard ? {
+      key: subagentCardIdentity(focusCard, [...root.querySelectorAll("[data-subagent-card]")].indexOf(focusCard)),
+      action: focusButton.dataset.subagentAction || "",
+      taskId: focusButton.dataset.taskId || "",
+      childAgentId: focusButton.dataset.childAgentId || "",
+      childRunId: focusButton.dataset.childRunId || "",
+    } : null,
+    scrollTop: root.scrollTop || 0,
+  };
+}
+
+function restoreSubagentCardViewState(snapshot, root = $("messages")) {
+  if (!root || !snapshot) return;
+  const cards = [...root.querySelectorAll("[data-subagent-card]")];
+  for (const [cardIndex, card] of cards.entries()) {
+    const saved = snapshot.cards?.find((item) => item.key === subagentCardIdentity(card, cardIndex));
+    if (!saved) continue;
+    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
+    const statusChanged = saved.status !== String(card.dataset?.subagentStatus || "");
+    details.forEach((detail, detailIndex) => {
+      if (detailIndex === 0 && statusChanged) return;
+      detail.open = Boolean(saved.open?.[detailIndex]);
+    });
+  }
+  if (snapshot.focus) {
+    const card = cards.find((item, index) => subagentCardIdentity(item, index) === snapshot.focus.key);
+    const button = [...(card?.querySelectorAll?.("[data-subagent-action]") || [])].find((candidate) => (
+      (candidate.dataset.subagentAction || "") === snapshot.focus.action
+      && (candidate.dataset.taskId || "") === snapshot.focus.taskId
+      && (candidate.dataset.childAgentId || "") === snapshot.focus.childAgentId
+      && (candidate.dataset.childRunId || "") === snapshot.focus.childRunId
+    ));
+    if (button) button.focus?.({ preventScroll: true });
+    else card?.querySelector?.("summary")?.focus?.({ preventScroll: true });
+  }
+  root.scrollTop = snapshot.scrollTop || 0;
+}
+
+function refreshSubagentCardsPreservingUI(agentId = state.agent?.id) {
+  if (!agentId || state.agent?.id !== agentId || state.chatHydrating) return false;
+  const root = $("messages");
+  const snapshot = captureSubagentCardViewState(root);
+  const rendered = applyMessageSnapshot(state.currentMessages, agentId, { forceRender: true, preserveScroll: true });
+  if (rendered) restoreSubagentCardViewState(snapshot, root);
+  return rendered;
+}
+
+function scheduleSubagentCardRefresh(change = {}) {
+  const agentId = state.agent?.id || "";
+  const reason = String(change.reason || "");
+  if (!subagentCardRefreshReasons.has(reason)) return;
+  if (!agentId || state.chatHydrating || (change.agentId && change.agentId !== agentId)) return;
+  subagentCardRefreshAgentId = agentId;
+  if (subagentCardRefreshHandle) return;
+  const schedule = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
+  subagentCardRefreshHandle = schedule(() => {
+    subagentCardRefreshHandle = 0;
+    const expectedAgentId = subagentCardRefreshAgentId;
+    subagentCardRefreshAgentId = "";
+    refreshSubagentCardsPreservingUI(expectedAgentId);
+  });
+}
+
+function loadBackgroundTasksForAgent(agentId) {
+  const normalizedAgentId = String(agentId || "").trim();
+  if (!normalizedAgentId || !backgroundTasks) return Promise.resolve([]);
+  if (backgroundTaskAgentLoadInFlight?.agentId === normalizedAgentId) return backgroundTaskAgentLoadInFlight.promise;
+  const generation = ++backgroundTaskAgentLoadGeneration;
+  const promise = Promise.resolve(backgroundTasks.loadAgent(normalizedAgentId)).then((tasks) => {
+    if (generation !== backgroundTaskAgentLoadGeneration || state.agent?.id !== normalizedAgentId) return [];
+    return tasks;
+  }).finally(() => {
+    if (backgroundTaskAgentLoadInFlight?.generation === generation) backgroundTaskAgentLoadInFlight = null;
+  });
+  backgroundTaskAgentLoadInFlight = { agentId: normalizedAgentId, generation, promise };
+  return promise;
+}
+
+async function navigateToSubagentAgent(childAgentId) {
+  const agentId = String(childAgentId || "").trim();
+  if (!agentId) return;
+  let conversation = state.navigationConversations.find((item) => item.agentId === agentId);
+  if (!conversation?.targetId) {
+    await loadProjects({ autoEnter: false, reason: "subagent-card-navigation" });
+    conversation = state.navigationConversations.find((item) => item.agentId === agentId);
+  }
+  if (!conversation?.targetId) throw new Error(am("conversationUnavailable"));
+  await selectNavigationConversation(conversation.targetId);
+}
+
+async function navigateToSubagentRun(childAgentId, childRunId) {
+  const agentId = String(childAgentId || "").trim();
+  const runId = String(childRunId || "").trim();
+  if (agentId && agentId !== state.agent?.id) await navigateToSubagentAgent(agentId);
+  if (runId && (!agentId || agentId === state.agent?.id)) await loadRunSummary(runId, { agentId: state.agent?.id });
+}
+
+async function performSubagentCardAction(button) {
+  const action = button?.dataset?.subagentAction || "";
+  const card = button?.closest?.("[data-subagent-card]");
+  const taskId = button?.dataset?.taskId || card?.dataset?.taskId || "";
+  const childAgentId = button?.dataset?.childAgentId || card?.dataset?.childAgentId || "";
+  const childRunId = button?.dataset?.childRunId || card?.dataset?.childRunId || "";
+  if (action === "view-task") await backgroundTasks.selectTask(taskId);
+  else if (action === "cancel") await backgroundTasks.cancel(taskId);
+  else if (action === "open-agent") await navigateToSubagentAgent(childAgentId);
+  else if (action === "open-run") await navigateToSubagentRun(childAgentId, childRunId);
+}
+
+function bindSubagentCardActions() {
+  $("messages")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-subagent-action]");
+    if (!button) return;
+    event.preventDefault();
+    Promise.resolve(performSubagentCardAction(button)).catch(showError);
+  });
+}
+
+backgroundTasks = createBackgroundTasksController({
   request: api,
-  onChange: () => {
+  onChange: (change) => {
+    scheduleSubagentCardRefresh(change);
     if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
   },
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
@@ -452,19 +616,15 @@ const backgroundTasks = createBackgroundTasksController({
     toggleTerminal(true);
   },
   onNavigateAgent: (childAgentId) => {
-    const conversation = state.navigationConversations.find((item) => item.agentId === childAgentId);
-    if (conversation?.targetId) selectNavigationConversation(conversation.targetId).catch(showError);
-    else showToast(t("backgroundTasks.openChildAgent"), "warn");
+    navigateToSubagentAgent(childAgentId).catch(showError);
   },
-  onNavigateRun: async (childAgentId, childRunId) => {
-    if (childAgentId && childAgentId !== state.agent?.id) {
-      const conversation = state.navigationConversations.find((item) => item.agentId === childAgentId);
-      if (conversation?.targetId) await selectNavigationConversation(conversation.targetId);
-    }
-    if (childRunId && (!childAgentId || childAgentId === state.agent?.id)) await loadRunSummary(childRunId, { agentId: state.agent?.id });
+  onNavigateRun: (childAgentId, childRunId) => {
+    navigateToSubagentRun(childAgentId, childRunId).catch(showError);
   },
 });
 backgroundTasks.bind();
+backgroundTasks.subscribe?.(scheduleSubagentCardRefresh);
+bindSubagentCardActions();
 
 const agentStream = createAgentStreamController({
   api,
@@ -543,6 +703,8 @@ const uiShell = createUIShellController({
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
   openModelSettings: () => openSettingsModal("models"),
+  compactContext: compactCurrentAgentContext,
+  getContextStatus: () => state.agentContext,
   renderProjects,
   resizeTerminal,
   showError,
@@ -620,7 +782,6 @@ const {
   providerLabel,
   providerStatusText,
   refreshModelCatalog,
-  relayProtocolSpec,
   renderAgentModelOptions,
   renderModelOptions,
   renderModelSettingsContent,
@@ -716,7 +877,6 @@ settingsPreferences = createSettingsPreferencesController({
   normalizeRecentDirectories,
   normalizeTerminalPreferences,
   refreshActiveSettingsPanel,
-  relayProtocolSpec,
   renderModelOptions,
   renderRecentModalDirectories,
   renderRecentSidebarDirectories,
@@ -882,38 +1042,6 @@ const {
   renderUsageMetricCard,
 } = systemSettings;
 
-const workspaceSettings = createWorkspaceSettingsController({
-  state,
-  api,
-  copyText,
-  currentProviderConfig,
-  disconnectAgentTransports,
-  enterAgent,
-  getPreferredModel,
-  hideSlashCommandPalette,
-  loadWorklineContainerData,
-  notifyTerminal,
-  openDirectoryChooser,
-  providerLabel,
-  providerStatusText,
-  refreshActiveSettingsPanel,
-  renderAgentModelOptions,
-  renderUsageMetricCard,
-  saveCurrentChatDraft,
-  selectSettingsPanel,
-  setPreferredModel,
-  showError,
-  showToast,
-  syncMessageComposerBusy,
-});
-
-const {
-  bindAgentSettingsActions,
-  bindWorklinesSettingsActions,
-  renderAgentSettingsContent,
-  renderWorklinesSettingsContent,
-} = workspaceSettings;
-
 function getSkillContext() {
   return normalizeSkillContext({
     scope: state.skillContextScope,
@@ -1054,6 +1182,19 @@ const automationControl = createAutomationControlController({
   showToast,
 });
 
+const scheduleWorkspace = createScheduleWorkspaceController({
+  request: api,
+  onChange: () => {
+    if (state.activeWorkbench !== "schedules") return;
+    renderScheduleSurface();
+    renderProjects();
+  },
+  showError,
+  showToast,
+  confirmAction: async (message) => window.confirm(message),
+  formatTimestamp: formatDateTime,
+});
+
 function terminalSocketUsable(socket = state.terminalWS) {
   if (!socket) return false;
   const readyState = Number(socket.readyState);
@@ -1108,14 +1249,12 @@ const settingsPanelRegistry = createSettingsPanelRegistry();
   ["memory", { render: memorySettings.render, bind: memorySettings.bind }],
   ["skills", { render: () => renderSkillSettingsContent(state.activeSkillTab || "commands"), bind: () => bindSkillTabs(state.activeSkillTab || "commands") }],
   ["models", { render: renderModelSettingsContent, bind: bindModelSettingsActions }],
-  ["agents", { render: renderAgentSettingsContent, bind: bindAgentSettingsActions }],
   ["providers", { render: renderProviderSettingsContent, bind: bindProviderSettingsActions }],
   ["shared-api", { render: sharedAPISettings.render, bind: sharedAPISettings.bind }],
   ["network-search", { render: renderNetworkSearchSettingsContent, bind: bindNetworkSearchSettingsActions }],
   ["im-gateway", { render: automationControl.render, bind: automationControl.bind }],
   ["notifications", { render: renderNotificationSettingsContent, bind: bindNotificationSettingsActions }],
   ["appearance", { render: renderAppearanceSettingsContent, bind: bindAppearanceSettingsActions }],
-  ["worklines-containers", { render: renderWorklinesSettingsContent, bind: bindWorklinesSettingsActions }],
   ["storage", { render: renderStorageSettingsContent, bind: bindStorageSettingsActions }],
   ["usage", { render: usageHistory.render, bind: usageHistory.bind }],
   ["servers-system", { render: renderServerSystemSettingsContent, bind: bindRuntimeSettingsActions }],
@@ -1144,6 +1283,19 @@ const taskWorkspace = createTaskWorkspaceController({
 taskWorkspace.bind();
 $("taskWorkspaceScopes")?.querySelector('[data-task-workspace-scope="agent"]')?.addEventListener("click", () => {
   if (state.agent?.id) specBoard.load().catch(showError);
+});
+
+function formatDateTime(value) {
+  return formatTimestamp(value);
+}
+
+const overviewDashboard = createOverviewDashboardController({
+  request: api,
+  host: "#overviewDashboard",
+  translate: t,
+  formatDateTime,
+  onNavigate: handleOverviewNavigation,
+  onError: showError,
 });
 
 const settingsHelp = createSettingsHelpController({
@@ -1686,47 +1838,6 @@ async function loadUpdateStatus({ notify = false } = {}) {
   if (seq === state.updateSeq && state.activeSettingsPanel === "about") refreshActiveSettingsPanel();
 }
 
-async function loadWorklineContainerData({ notify = false } = {}) {
-  const seq = ++state.worklinesSeq;
-  const button = $("refreshWorklinesBtn");
-  setButtonBusy(button, true, am("refreshing"));
-  const projectId = state.project?.id || "";
-  try {
-    if (!projectId) {
-      state.projectWorklines = [];
-      state.worklineAgents = [];
-      state.worklinesError = "";
-      return;
-    }
-    const worklines = await api(`/api/projects/${projectId}/worklines`);
-    if (seq !== state.worklinesSeq || state.project?.id !== projectId) return;
-    state.projectWorklines = Array.isArray(worklines) ? worklines : [];
-    if (!state.workline && state.projectWorklines.length) state.workline = state.projectWorklines[0];
-    const currentWorkline = state.projectWorklines.find((workline) => workline.id === state.workline?.id) || state.projectWorklines[0] || null;
-    if (currentWorkline) state.workline = currentWorkline;
-    if (currentWorkline?.id) {
-      const worklineId = currentWorkline.id;
-      const agents = await api(`/api/worklines/${worklineId}/agents`);
-      if (seq !== state.worklinesSeq || state.workline?.id !== worklineId) return;
-      state.worklineAgents = Array.isArray(agents) ? agents : [];
-
-    } else {
-      state.worklineAgents = [];
-    }
-    state.worklinesError = "";
-    if (notify) notifyTerminal(`[info] ${am("worklinesAgentsRefreshed")}\n`);
-  } catch (err) {
-    if (seq !== state.worklinesSeq || state.project?.id !== projectId) return;
-    state.projectWorklines = [];
-    state.worklineAgents = [];
-    state.worklinesError = err.message || String(err);
-    if (notify) notifyTerminal(`[warn] ${am("worklinesAgentsRefreshFailed", { message: state.worklinesError })}\n`);
-  } finally {
-    if (seq === state.worklinesSeq) setButtonBusy(button, false, am("refreshing"));
-  }
-  if (seq === state.worklinesSeq && state.activeSettingsPanel === "worklines-containers") refreshActiveSettingsPanel();
-}
-
 async function loadRuntimeSummary({ notify = false } = {}) {
   const seq = ++state.runtimeSeq;
   const button = $("refreshRuntimeSummaryBtn");
@@ -1773,11 +1884,11 @@ function projectKanbanTranslation(key, params = {}, fallback = "") {
 }
 
 function normalizedPrimaryWorkbench(value) {
-  return value === "workbench" ? "workbench" : "conversation";
+  return ["workbench", "schedules"].includes(value) ? value : "conversation";
 }
 
-function primaryWorkbenchRailTarget(value = state.activeWorkbench) {
-  return normalizedPrimaryWorkbench(value) === "workbench" ? "tasks" : "conversation";
+function currentShellRailTarget() {
+  return overviewRailTarget(state);
 }
 
 function setTranslatedText(element, key) {
@@ -1792,8 +1903,25 @@ function setTranslatedAttribute(element, attribute, key) {
   element.setAttribute(attribute, t(key));
 }
 
+function navigationCreateTarget() {
+  if (state.activeWorkbench === "schedules") return "schedule";
+  return state.navigationMode === "conversations" ? "conversation" : "project";
+}
+
+function syncNavigationCreateButton(button) {
+  if (!button) return;
+  const target = navigationCreateTarget();
+  const labelKey = target === "schedule"
+    ? "shell.newSchedule"
+    : target === "project" ? "shell.chooseFolder" : "shell.newConversation";
+  button.dataset.createTarget = target;
+  setTranslatedAttribute(button, "title", labelKey);
+  setTranslatedAttribute(button, "aria-label", labelKey);
+}
+
 function renderPrimaryModeSidebar() {
   const taskMode = state.activeWorkbench === "workbench";
+  const scheduleMode = state.activeWorkbench === "schedules";
   const sidebar = $("sessionSidebar");
   const title = $("sessionSidebarTitle");
   const actions = $("sessionSidebarActions");
@@ -1804,17 +1932,21 @@ function renderPrimaryModeSidebar() {
   const refreshButton = $("refreshBtn");
   const newProjectButton = $("newProjectBtn");
   const newTaskButton = $("newTaskBtn");
-  const sidebarLabelKey = taskMode ? "workbench.sidebarLabel" : "shell.sessionSidebar";
-  const sidebarTitleKey = taskMode ? "workbench.sidebarTitle" : "shell.sessionTitle";
-  const sidebarActionsKey = taskMode ? "workbench.sidebarActions" : "shell.sessionActions";
-  const searchLabelKey = taskMode ? "workbench.searchContextLabel" : "shell.searchProjectsLabel";
-  const searchPlaceholderKey = taskMode ? "workbench.searchContext" : "shell.searchProjects";
-  const refreshKey = taskMode ? "workbench.refreshTasks" : "shell.refreshSessions";
+  const mobileNewConversationButton = $("mobileNewConversationBtn");
+  const mobileNewScheduleButton = $("mobileNewScheduleBtn");
+  const mobileChooseDirectoryButton = $("mobileChooseDirectoryBtn");
+  const mobileScheduleModeButton = $("mobileScheduleModeBtn");
+  const sidebarLabelKey = scheduleMode ? "shell.scheduleSidebar" : taskMode ? "workbench.sidebarLabel" : "shell.sessionSidebar";
+  const sidebarTitleKey = scheduleMode ? "shell.nav.schedules" : taskMode ? "workbench.sidebarTitle" : "shell.sessionTitle";
+  const sidebarActionsKey = scheduleMode ? "shell.scheduleActions" : taskMode ? "workbench.sidebarActions" : "shell.sessionActions";
+  const searchLabelKey = scheduleMode ? "shell.searchSchedulesLabel" : taskMode ? "workbench.searchContextLabel" : "shell.searchProjectsLabel";
+  const searchPlaceholderKey = scheduleMode ? "shell.searchSchedules" : taskMode ? "workbench.searchContext" : "shell.searchProjects";
+  const refreshKey = scheduleMode ? "shell.refreshSchedules" : taskMode ? "workbench.refreshTasks" : "shell.refreshSessions";
 
   setTranslatedAttribute(sidebar, "aria-label", sidebarLabelKey);
   setTranslatedText(title, sidebarTitleKey);
   setTranslatedAttribute(actions, "aria-label", sidebarActionsKey);
-  setTranslatedAttribute(resizeHandle, "aria-label", taskMode ? "workbench.resizeSidebar" : "shell.resizeSidebar");
+  setTranslatedAttribute(resizeHandle, "aria-label", scheduleMode ? "shell.resizeScheduleSidebar" : taskMode ? "workbench.resizeSidebar" : "shell.resizeSidebar");
   [searchToggle, mobileSearch].forEach((button) => {
     setTranslatedAttribute(button, "title", searchLabelKey);
     setTranslatedAttribute(button, "aria-label", searchLabelKey);
@@ -1826,7 +1958,22 @@ function renderPrimaryModeSidebar() {
     setTranslatedAttribute(refreshButton, "aria-label", refreshKey);
   }
   newProjectButton?.classList.toggle("hidden", taskMode);
+  if (!taskMode) syncNavigationCreateButton(newProjectButton);
   newTaskButton?.classList.toggle("hidden", !taskMode);
+  mobileNewConversationButton?.classList.toggle("hidden", scheduleMode);
+  mobileChooseDirectoryButton?.classList.toggle("hidden", scheduleMode);
+  mobileNewScheduleButton?.classList.toggle("hidden", !scheduleMode);
+  if (mobileNewScheduleButton) {
+    setTranslatedText(mobileNewScheduleButton, "shell.newSchedule");
+    setTranslatedAttribute(mobileNewScheduleButton, "title", "shell.newSchedule");
+    setTranslatedAttribute(mobileNewScheduleButton, "aria-label", "shell.newSchedule");
+  }
+  if (mobileScheduleModeButton) {
+    const mobileModeKey = scheduleMode ? "shell.nav.conversation" : "shell.nav.schedules";
+    setTranslatedText(mobileScheduleModeButton, mobileModeKey);
+    setTranslatedAttribute(mobileScheduleModeButton, "title", mobileModeKey);
+    setTranslatedAttribute(mobileScheduleModeButton, "aria-label", mobileModeKey);
+  }
   if (newTaskButton) {
     const workspaceState = taskWorkspace.getState();
     const enabled = workspaceState.scope === "agent"
@@ -1907,36 +2054,55 @@ function applyPrimaryWorkbench(value) {
   const previousMode = state.activeWorkbench;
   state.primaryModePreference = mode;
   state.activeWorkbench = mode;
-  const workbench = mode === "workbench";
+  const overview = state.overviewActive === true;
+  const workbench = mode === "workbench" && !overview;
+  const schedules = mode === "schedules" && !overview;
   if (previousMode !== mode) {
     state.projectQuery = "";
     if ($("projectSearch")) $("projectSearch").value = "";
     $("projectSearchWrap")?.classList.add("hidden");
     $("projectSearchToggleBtn")?.classList.remove("active");
+    if (mode === "schedules" && scheduleWorkspace.getState().query) scheduleWorkspace.setQuery("");
   }
-  $("conversationPanel")?.classList.toggle("hidden", workbench);
+  $("overviewDashboard")?.classList.toggle("hidden", !overview);
+  $("conversationPanel")?.classList.toggle("hidden", overview || workbench || schedules);
   $("workbenchPanel")?.classList.toggle("hidden", !workbench);
+  $("schedulePanel")?.classList.toggle("hidden", !schedules);
+  document.body.classList.toggle("overview-mode", overview);
   document.body.classList.toggle("workbench-mode", workbench);
-  const modalOpen = elementVisible("settingsModal") || elementVisible("employeeOverviewModal");
-  if (!modalOpen) setGlobalRailActive(primaryWorkbenchRailTarget(mode));
+  document.body.classList.toggle("schedule-mode", schedules);
+  const modalOpen = elementVisible("settingsModal");
+  if (!modalOpen) setGlobalRailActive(overviewRailTarget({ overviewActive: overview, activeWorkbench: mode }));
   if (workbench) {
     taskWorkspace.setContext({ projectId: state.project?.id || "", agentId: state.agent?.id || "" });
     if (previousMode !== mode) taskWorkspace.setScope("dispatch");
     taskWorkspace.load({ silent: taskWorkspace.getState().loaded }).catch(showError);
   }
+  if (schedules) {
+    renderScheduleSurface();
+    const scheduleState = scheduleWorkspace.getState();
+    if (!scheduleState.loaded && !scheduleState.loading) scheduleWorkspace.load().catch(showError);
+  }
   renderWorkbenchShell();
   renderProjects();
+  syncMobilePageTitle();
   syncThemePageContext();
   if (workbench && taskWorkspace.getState().scope === "agent" && state.agent?.id) specBoard.load().catch(showError);
   return mode;
 }
 
 function switchPrimaryWorkbench(value) {
+  const mode = normalizedPrimaryWorkbench(value);
+  state.overviewActive = false;
   backgroundTasks.closeTray("workbench-switch");
   closeConversationDetails();
   closeSettingsModal({ restoreWorkbench: false, restoreFocus: false });
-  closeEmployeeOverview({ restoreWorkbench: false });
-  return setPrimaryModePreference(normalizedPrimaryWorkbench(value));
+  if (mode === "schedules") {
+    closeWorkspace();
+    closeGitModal();
+    toggleTerminal(true);
+  }
+  return setPrimaryModePreference(mode);
 }
 
 async function focusTaskCreation() {
@@ -1961,6 +2127,16 @@ async function focusTaskCreation() {
 }
 
 async function refreshPrimaryMode() {
+  if (state.overviewActive) {
+    await overviewDashboard.load({ force: true });
+    return;
+  }
+  if (state.activeWorkbench === "schedules") {
+    await scheduleWorkspace.load();
+    renderScheduleSurface();
+    renderProjects();
+    return;
+  }
   await init();
   if (state.activeWorkbench === "workbench") {
     await taskWorkspace.load();
@@ -2031,19 +2207,35 @@ const mobileSettingsSectionSpecs = Object.freeze([
   {
     key: "ai-capabilities",
     labelKey: "settings.mobile.section.aiCapabilities",
-    items: ["models", "providers", "agents", "skills", "memory", "network-search", "im-gateway", "shared-api", "worklines-containers"],
+    items: ["models", "providers", "skills", "memory", "im-gateway", "shared-api"],
+  },
+  {
+    key: "network",
+    labelKey: "settings.category.network",
+    items: ["network-search", "remote-access"],
   },
   {
     key: "system-security",
     labelKey: "settings.mobile.section.systemSecurity",
-    items: ["servers-system", "terminals", "storage", "runtime", "remote-access", "usage", "about"],
+    items: ["servers-system", "terminals", "storage", "runtime", "usage", "about"],
   },
 ]);
 
-function isMobileSettingsViewport() {
+function isMobileAppViewport() {
   const mediaMatch = globalThis.matchMedia?.(MOBILE_SETTINGS_MEDIA_QUERY)?.matches;
   if (typeof mediaMatch === "boolean") return mediaMatch;
   return Number(globalThis.innerWidth || 0) <= 767;
+}
+
+function isMobileSettingsViewport() {
+  return isMobileAppViewport();
+}
+
+function leaveOverviewForMobile() {
+  if (!isMobileAppViewport() || !state.overviewActive) return false;
+  state.overviewActive = false;
+  applyPrimaryWorkbench("conversation");
+  return true;
 }
 
 function settingsModalOpen() {
@@ -2135,7 +2327,7 @@ function showMobileSettingsIndex({ focus = false } = {}) {
   syncSettingsSearchInput();
   applyMobileSettingsViewClasses();
   renderMobileSettingsIndex();
-  if (focus) globalThis.queueMicrotask?.(() => $("settingsIdentityBtn")?.focus?.());
+  if (focus) globalThis.queueMicrotask?.(() => $("settingsNav")?.querySelector?.(".settings-mobile-index-row")?.focus?.());
   return true;
 }
 
@@ -2209,8 +2401,10 @@ function enterSettingsShell() {
   const hiddenNodes = [
     "sessionSidebar",
     "sidebarResizeHandle",
+    "overviewDashboard",
     "conversationPanel",
     "workbenchPanel",
+    "schedulePanel",
     "terminalPanel",
     "conversationDetailsPanel",
     "backgroundTaskTray",
@@ -2291,7 +2485,6 @@ function exitSettingsShell() {
 
 function openSettingsModal(key = "providers", { trigger = document.activeElement, showMobileIndex = false } = {}) {
   backgroundTasks.closeTray("settings-open");
-  closeEmployeeOverview({ restoreWorkbench: false });
   closeConversationDetails();
   if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
   const itemKey = settingsItemByKey(key)?.key || "providers";
@@ -2330,106 +2523,185 @@ function closeSettingsModal({ restoreWorkbench = true, restoreFocus = true } = {
   exitSettingsShell();
   syncThemePageContext();
   if (wasOpen && restoreFocus) restoreSettingsDialogFocus();
-  if (restoreWorkbench) setGlobalRailActive(primaryWorkbenchRailTarget());
+  if (restoreWorkbench) setGlobalRailActive(currentShellRailTarget());
 }
 
-function employeeAgentRecords() {
-  const records = new Map();
-  (state.navigationConversations || []).forEach((item) => {
-    if (item?.agentId && !records.has(item.agentId)) records.set(item.agentId, item);
-  });
-  if (state.agent?.id && !records.has(state.agent.id)) {
-    records.set(state.agent.id, {
-      agentId: state.agent.id,
-      agentTitle: state.agent.title || state.agent.id,
-      agentStatus: state.agent.status || "idle",
-      model: state.agent.model || "",
-      permissionMode: state.agent.permissionMode || "",
-      cwd: state.agent.cwd || "",
-      projectId: state.project?.id || "",
-      projectName: state.project?.name || "",
-      worklineId: state.workline?.id || "",
-      worklineTitle: state.workline?.title || "",
-    });
+function overviewEntity(collection, id) {
+  return (overviewDashboard.getState().payload?.[collection] || []).find((item) => item.id === id) || null;
+}
+
+function deferOverviewDOM(callback) {
+  const raf = globalThis.requestAnimationFrame;
+  if (typeof raf === "function") {
+    raf(() => callback());
+    return;
   }
-  return [...records.values()];
+  if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(callback, 0);
+  else callback();
 }
 
-function renderEmployeeOverview() {
-  const body = $("employeeOverviewBody");
-  if (!body) return;
-  const agents = employeeAgentRecords();
-  const schedules = automationControl.getState().schedules || [];
-  body.innerHTML = `
-    <section class="employee-section">
-      <div class="employee-section-head"><div><h2>${escapeHtml(am("employeeTeamTitle"))}</h2><p>${escapeHtml(am("employeeTeamDescription"))}</p></div><button class="legacy-primary-btn" type="button" data-employee-action="new">${escapeHtml(am("addEmployee"))}</button></div>
-      <div class="employee-card-grid">
-        ${agents.length ? agents.map((agent) => `
-          <button class="employee-card ${agent.agentId === state.agent?.id ? "active" : ""}" type="button" data-employee-target="${escapeAttr(agent.targetId || "")}" ${agent.targetId ? "" : "disabled"}>
-            <span class="employee-avatar">${escapeHtml(String(agent.agentTitle || "AI").slice(0, 2).toUpperCase())}</span>
-            <span class="employee-card-main"><strong>${escapeHtml(agent.agentTitle || agent.agentId)}</strong><small>${escapeHtml(agent.projectName || am("unlinkedProject"))} · ${escapeHtml(agent.worklineTitle || agent.agentStatus || "idle")}</small><em>${escapeHtml(agent.model || am("noModelSelected"))}</em></span>
-            <span class="employee-status ${escapeAttr(agent.agentStatus || "idle")}">${escapeHtml(agent.agentStatus || "idle")}</span>
-          </button>
-        `).join("") : `<div class="legacy-empty-panel">${escapeHtml(am("noEmployees"))}</div>`}
-      </div>
-    </section>
-    <section class="employee-section schedule-section">
-      <div class="employee-section-head"><div><h2>${escapeHtml(am("scheduledTasksTitle"))}</h2><p>${escapeHtml(am("scheduledTasksDescription"))}</p></div><div class="employee-actions"><button class="legacy-primary-btn" type="button" data-employee-action="schedule">${escapeHtml(am("addSchedule"))}</button><button class="legacy-secondary-btn" type="button" data-employee-action="history">${escapeHtml(am("executionHistory"))}</button></div></div>
-      <div class="employee-schedule-layout">
-        <div class="employee-schedule-list">
-          ${schedules.length ? schedules.map((schedule) => `<button type="button" class="employee-schedule-row" data-employee-action="schedule"><strong>${escapeHtml(schedule.name || schedule.id)}</strong><small>${escapeHtml(schedule.expression || am("cronUnconfigured"))} · ${escapeHtml(schedule.status || "ready")}</small></button>`).join("") : `<div class="legacy-empty-panel compact">${escapeHtml(am("noScheduledTasks"))}</div>`}
-        </div>
-        <div class="employee-schedule-detail">${schedules.length ? `<strong>${escapeHtml(schedules[0].name || schedules[0].id)}</strong><p>${escapeHtml(schedules[0].prompt || am("taskContentMissing"))}</p><dl><div><dt>Agent</dt><dd>${escapeHtml(schedules[0].agentId || "—")}</dd></div><div><dt>${escapeHtml(am("nextRun"))}</dt><dd>${escapeHtml(formatTimestamp(schedules[0].nextRunAt))}</dd></div></dl>` : escapeHtml(am("editOrAddTask"))}</div>
-      </div>
-    </section>
-  `;
-  body.querySelectorAll("[data-employee-target]").forEach((node) => {
-    node.addEventListener("click", () => {
-      const target = node.dataset.employeeTarget;
-      if (!target) return;
-      closeEmployeeOverview();
-      selectNavigationConversation(target).catch(showError);
-    });
-  });
-  body.querySelectorAll("[data-employee-action]").forEach((node) => {
-    node.addEventListener("click", () => {
-      const action = node.dataset.employeeAction;
-      closeEmployeeOverview();
-      openSettingsModal(action === "new" ? "agents" : "im-gateway");
-    });
+function focusOverviewDataElement(selector, datasetName, value, { focusSelector = "" } = {}) {
+  deferOverviewDOM(() => {
+    const node = [...document.querySelectorAll(selector)].find((item) => item.dataset?.[datasetName] === value) || null;
+    if (!node) return;
+    node.scrollIntoView?.({ block: "center" });
+    let focusTarget = focusSelector ? node.querySelector?.(focusSelector) : node;
+    if (!focusTarget || focusTarget.disabled || typeof focusTarget.focus !== "function") {
+      node.setAttribute?.("tabindex", "-1");
+      focusTarget = node;
+    }
+    try {
+      focusTarget.focus({ preventScroll: true });
+    } catch {
+      focusTarget.focus?.();
+    }
   });
 }
 
-async function openEmployeeOverview() {
-  backgroundTasks.closeTray("employee-overview-open");
+async function openOverviewConversation(id = "") {
+  const entity = overviewEntity("recentConversations", id) || overviewEntity("activeRuns", id) || overviewEntity("activeTasks", id);
+  const agentId = entity?.agentId || id;
+  let target = state.navigationConversations.find((item) => item.targetId === id || item.agentId === agentId || item.id === id) || null;
+  if (!target && id) {
+    await loadProjects();
+    target = state.navigationConversations.find((item) => item.targetId === id || item.agentId === agentId || item.id === id) || null;
+  }
+  switchPrimaryWorkbench("conversation");
+  if (!id) return;
+  if (!target) throw new Error(t("overview.conversationUnavailable"));
+  await selectNavigationConversation(target.targetId || target);
+}
+
+async function openOverviewTask(id = "") {
+  switchPrimaryWorkbench("workbench");
+  taskWorkspace.setScope("dispatch");
+  await taskWorkspace.load({ silent: taskWorkspace.getState().loaded });
+  if (!id) return;
+  const entity = overviewEntity("activeTasks", id);
+  let agentId = entity?.agentId || "";
+  if (!agentId) {
+    for (const project of taskWorkspace.getState().workspace.projects) {
+      const agent = project.agents.find((item) => item.tasks.some((task) => task.id === id));
+      if (agent) { agentId = agent.id; break; }
+    }
+  }
+  if (!agentId || !taskWorkspace.selectTask(agentId, id)) throw new Error(t("overview.taskUnavailable"));
+  focusOverviewDataElement("[data-task-workspace-task]", "taskWorkspaceTask", `${agentId}::${id}`);
+}
+
+async function openOverviewRuns(id = "") {
+  const runs = overviewDashboard.getState().payload.activeRuns || [];
+  const run = id ? overviewEntity("activeRuns", id) : runs[0] || null;
+  if (!run) {
+    switchPrimaryWorkbench("conversation");
+    if (id) throw new Error(t("overview.runUnavailable"));
+    return;
+  }
+  await openOverviewConversation(run.agentId);
+  if (state.agent?.id !== run.agentId) throw new Error(t("overview.runUnavailable"));
+  const summary = await loadRunSummary(run.id, { agentId: run.agentId });
+  if (!summary) throw new Error(t("overview.runUnavailable"));
+  focusOverviewDataElement("[data-run-id]", "runId", run.id, { focusSelector: "button:not(:disabled)" });
+}
+
+async function openOverviewSchedules(id = "") {
+  if (!id) {
+    switchPrimaryWorkbench("schedules");
+    return;
+  }
+  const loaded = await scheduleWorkspace.load({ preferredId: id, autoHistory: false });
+  switchPrimaryWorkbench("schedules");
+  if (!loaded) throw new Error(t("overview.scheduleUnavailable"));
+  const selected = await scheduleWorkspace.select(id, { loadHistory: false });
+  if (!selected) throw new Error(t("overview.scheduleUnavailable"));
+  void scheduleWorkspace.loadHistory(id);
+  focusOverviewDataElement("[data-schedule-workspace]", "scheduleWorkspace", id, { focusSelector: "input, select, textarea, button:not(:disabled)" });
+}
+
+function overviewApprovalAgentIds() {
+  const payload = overviewDashboard.getState().payload || {};
+  return [...new Set([
+    state.agent?.id,
+    ...(payload.activeRuns || []).map((item) => item.agentId),
+    ...(payload.activeTasks || []).map((item) => item.agentId),
+    ...(payload.recentConversations || []).map((item) => item.id),
+    ...(state.navigationConversations || []).map((item) => item.agentId),
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+async function locateOverviewApprovals() {
+  const agentIds = overviewApprovalAgentIds();
+  const batchSize = 8;
+  for (let offset = 0; offset < agentIds.length; offset += batchSize) {
+    const batch = agentIds.slice(offset, offset + batchSize);
+    const results = await Promise.allSettled(batch.map(async (agentId) => ({
+      agentId,
+      approvals: await api(`/api/agents/${encodeURIComponent(agentId)}/tool-calls/pending`),
+    })));
+    for (const result of results) {
+      if (result.status === "fulfilled" && Array.isArray(result.value.approvals) && result.value.approvals.length) return result.value;
+    }
+  }
+  return null;
+}
+
+async function openOverviewApprovals() {
+  const located = await locateOverviewApprovals();
+  if (!located) {
+    switchPrimaryWorkbench("conversation");
+    showToast(t("overview.approvalsUnavailable"), "info", { force: true });
+    return;
+  }
+  await openOverviewConversation(located.agentId);
+  if (state.agent?.id !== located.agentId) throw new Error(t("overview.approvalsUnavailable"));
+  replacePendingApprovals(located.approvals, located.agentId);
+  const firstApprovalId = String(located.approvals[0]?.toolUseId || located.approvals[0]?.tool_use_id || "").trim();
+  if (firstApprovalId) focusOverviewDataElement("[data-approval-card]", "approvalCard", firstApprovalId, { focusSelector: "button:not(:disabled)" });
+}
+
+async function openOverviewDashboard() {
+  closeSidebarSettingsMenu();
+  closeMobileSidebar();
+  backgroundTasks.closeTray("overview-open");
   closeConversationDetails();
   closeSettingsModal({ restoreWorkbench: false, restoreFocus: false });
-  setGlobalRailActive("profile");
-  $("employeeOverviewModal")?.classList.remove("hidden");
-  setThemePageContext("");
-  renderEmployeeOverview();
-  await automationControl.load();
-  renderEmployeeOverview();
+  closeWorkspace();
+  closeGitModal();
+  toggleTerminal(true);
+  if (isMobileAppViewport()) {
+    state.overviewActive = false;
+    applyPrimaryWorkbench("conversation");
+    return;
+  }
+  state.overviewActive = true;
+  applyPrimaryWorkbench("conversation");
+  await overviewDashboard.load();
 }
 
-function closeEmployeeOverview({ restoreWorkbench = true } = {}) {
-  $("employeeOverviewModal")?.classList.add("hidden");
-  syncThemePageContext();
-  if (restoreWorkbench && (!$("settingsModal") || $("settingsModal").classList.contains("hidden"))) {
-    setGlobalRailActive(primaryWorkbenchRailTarget());
-  }
+function handleOverviewNavigation(action, id = "") {
+  if (action === "conversation") return activateGlobalRailTarget("conversation");
+  if (action === "tasks") return openOverviewTask();
+  if (action === "open-task") return openOverviewTask(id);
+  if (action === "schedules" || action === "open-schedule") return openOverviewSchedules(id);
+  if (action === "approvals") return openOverviewApprovals();
+  if (action === "runs" || action === "open-run") return openOverviewRuns(id);
+  if (action === "open-conversation") return openOverviewConversation(id);
 }
 
 function activateGlobalRailTarget(target) {
   const key = String(target || "conversation");
   closeSidebarSettingsMenu();
   closeMobileSidebar();
-  if (key === "conversation" || key === "tasks") {
-    switchPrimaryWorkbench(key === "tasks" ? "workbench" : "conversation");
+  if (key === "home") {
+    openOverviewDashboard().catch(showError);
     return;
   }
-  if (key === "agents") {
-    openEmployeeOverview().catch(showError);
+  if (key === "conversation") {
+    switchPrimaryWorkbench("conversation");
+    return;
+  }
+  if (key === "schedules") {
+    switchPrimaryWorkbench("schedules");
     return;
   }
   if (globalRailSettingsTargets.has(key)) openSettingsModal(key === "profile" ? "providers" : key);
@@ -2573,6 +2845,7 @@ function selectSettingsPanel(key) {
   if (state.activeSettingsPanel === "shared-api" && item.key !== "shared-api") sharedAPISettings.consumeOneTimeToken();
   state.activeSettingsCategory = categoryKey;
   state.activeSettingsPanel = item.key;
+  if (settingsModalOpen()) setGlobalRailActive(item.key === "im-gateway" ? "schedules" : "profile");
   renderSettingsNav(item.key);
   const isAboutPanel = item.key === "about";
   $("settingsContentTitle")?.closest(".settings-content-head")?.classList.remove("hidden");
@@ -2664,16 +2937,12 @@ function settingsPanelDetails(key) {
       { title: am("defaultModel"), text: state.settings?.agent?.defaultModel || am("defaultModelNotLoaded") },
       { title: am("configuredProviders"), text: am("providerProfiles", { count: state.settings?.providers?.length || 0 }) },
     ],
-    agents: [
-      { title: am("defaultPermission"), text: state.settings?.agent?.defaultPermissionMode || "acceptEdits" },
-      { title: am("executionPolicy"), text: am("executionPolicyDescription") },
-    ],
     providers: [
       { title: "Codex OAuth", text: codexProviderSummary() },
       { title: "Secret", text: am("secretDescription") },
     ],
     "servers-system": [
-      { title: am("serverPort"), text: `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "7788"}` },
+      { title: am("serverPort"), text: `${state.settings?.server?.host || "localhost"}:${state.settings?.server?.port || "16888"}` },
       { title: am("version"), text: state.settings?.version || "0.1.0-dev" },
     ],
     about: [
@@ -2700,8 +2969,9 @@ function renderEmptyWorkspaceCard({ title = t("chat.emptyTitle"), text = t("chat
 }
 
 function syncThemePageContext() {
-  const settingsOpen = elementVisible("settingsModal") || elementVisible("employeeOverviewModal");
+  const settingsOpen = elementVisible("settingsModal");
   const homeEmpty = !settingsOpen
+    && !state.overviewActive
     && state.activeWorkbench === "conversation"
     && !state.agent;
   setThemePageContext(homeEmpty ? "home-empty" : "");
@@ -2999,11 +3269,21 @@ function renderAgentTitleEditor(surface) {
 function syncMobilePageTitle() {
   const node = $("mobilePageTitle");
   if (!node) return;
+  if (state.overviewActive) {
+    node.textContent = t("shell.nav.home");
+    return;
+  }
   if (state.activeWorkbench === "workbench") {
     node.textContent = titleForSurface("workbench") || t("workbench.title");
     return;
   }
-  node.textContent = (!state.project && !state.agent) ? t("shell.home") : titleForSurface("conversation");
+  if (state.activeWorkbench === "schedules") {
+    const scheduleState = scheduleWorkspace.getState();
+    const selected = scheduleState.schedules.find((item) => item.id === scheduleState.selectedScheduleId);
+    node.textContent = selected?.name || t("shell.nav.schedules");
+    return;
+  }
+  node.textContent = (!state.project && !state.agent) ? t("shell.nav.conversation") : titleForSurface("conversation");
 }
 
 function renderConversationHeaderIdentity() {
@@ -3307,7 +3587,7 @@ async function loadProjects() {
 }
 
 function setStandaloneConversationCreationBusy(busy) {
-  document.querySelectorAll("[data-create-conversation]").forEach((button) => {
+  document.querySelectorAll("[data-create-conversation], [data-create-navigation-item]").forEach((button) => {
     button.disabled = Boolean(busy);
     button.classList.toggle("is-busy", Boolean(busy));
     if (busy) button.setAttribute("aria-busy", "true");
@@ -3340,6 +3620,25 @@ async function createStandaloneConversation() {
     state.standaloneConversationCreating = false;
     setStandaloneConversationCreationBusy(false);
   }
+}
+
+function startScheduleCreation() {
+  if (state.activeWorkbench !== "schedules") switchPrimaryWorkbench("schedules");
+  closeMobileSidebar();
+  scheduleWorkspace.startCreate();
+  renderScheduleSurface();
+  renderProjects();
+  deferOverviewDOM(() => $("scheduleWorkspaceBody")?.querySelector?.("[data-schedule-form] input")?.focus?.());
+  return true;
+}
+
+async function createNavigationItem(trigger = null) {
+  const target = navigationCreateTarget();
+  if (target === "schedule") return startScheduleCreation();
+  if (target === "conversation") return createStandaloneConversation();
+  closeMobileSidebar();
+  await openDirectoryChooser(state.project?.gitPath || state.agent?.cwd || "", { trigger });
+  return null;
 }
 
 function syncNavigationConversationFromAgent(agent, options = {}) {
@@ -3381,20 +3680,43 @@ function bindNavigationActivation(node, activate) {
   });
 }
 
+function scheduleWorkspaceViewOptions() {
+  return {
+    conversations: state.navigationConversations,
+    activeAgentId: state.agent?.id || "",
+    onOpenConversation: (agentId) => openOverviewConversation(agentId).catch(showError),
+  };
+}
+
+function renderScheduleSurface() {
+  const panel = $("schedulePanel");
+  const body = $("scheduleWorkspaceBody");
+  if (!panel || !body) return;
+  const snapshot = scheduleWorkspace.getState();
+  panel.setAttribute("aria-busy", snapshot.loading || Boolean(snapshot.busy?.save) ? "true" : "false");
+  body.innerHTML = scheduleWorkspace.render(scheduleWorkspaceViewOptions());
+  scheduleWorkspace.bind(body, scheduleWorkspaceViewOptions());
+  syncMobilePageTitle();
+}
+
 function renderProjects() {
   const el = $("projects");
   if (!el) return;
+  const scheduleContext = state.activeWorkbench === "schedules";
   const taskContext = state.activeWorkbench === "workbench";
   const effectiveNavigationMode = taskContext ? "projects" : state.navigationMode;
   renderPrimaryModeSidebar();
+  if (scheduleContext) {
+    el.innerHTML = scheduleWorkspace.renderNavigation(scheduleWorkspaceViewOptions());
+    scheduleWorkspace.bind(el, scheduleWorkspaceViewOptions());
+    renderRecentSidebarConversations();
+    renderRecentSidebarDirectories();
+    return;
+  }
   const view = buildNavigationView({ projects: state.projects, conversations: state.navigationConversations }, {
     mode: effectiveNavigationMode,
     query: state.projectQuery,
   });
-  const heading = $("navigationListHeading");
-  setTranslatedText(heading, taskContext
-    ? "workbench.contextHeading"
-    : (state.navigationMode === "conversations" ? "shell.filters.conversations" : "shell.filters.projects"));
   const taskCounts = Object.fromEntries(taskWorkspace.getState().workspace.projects.map((project) => [project.id, project.counts]));
   el.innerHTML = renderNavigationHTML(view, {
     activeProjectId: state.project?.id || "",
@@ -3528,6 +3850,7 @@ function beginNavigationSelection(project, options = {}) {
 }
 
 async function selectProject(id, options = {}) {
+  if (state.overviewActive && options.preserveOverview !== true) switchPrimaryWorkbench("conversation");
   const project = state.projects.find((item) => item.id === id) || null;
   const preserveConversationView = Boolean(
     state.project?.id
@@ -3598,6 +3921,7 @@ async function selectProject(id, options = {}) {
 }
 
 async function selectNavigationConversation(target, options = {}) {
+  if (state.overviewActive && options.preserveOverview !== true) switchPrimaryWorkbench("conversation");
   const supplied = target && typeof target === "object" ? target : null;
   const parsed = typeof target === "string" ? parseNavigationTargetId(target) : parseNavigationTargetId(target?.targetId || "");
   const navigationConversation = supplied?.agentId
@@ -3705,6 +4029,7 @@ async function enterAgent() {
   closeConversationDetails();
   const agentId = state.agent.id;
   state.navigationTransitionTitle = "";
+  state.chatHydrating = true;
   const projectContext = syncProjectOperationContext();
   backgroundTasks.setAgent(agentId);
   setWorkspaceExplorerAgent(projectContext ? state.agent : null);
@@ -3722,7 +4047,6 @@ async function enterAgent() {
   refreshMessageModeControl();
   await restoreCurrentChatDraft();
   syncMessageComposerBusy();
-  state.chatHydrating = true;
   clearRunSummary({ preserveView: true });
   clearPlanState(agentId);
   if (projectContext) {
@@ -3740,7 +4064,7 @@ async function enterAgent() {
     [messagesLoaded] = await Promise.all([
       loadMessages(agentId),
       loadLatestRunSummary(agentId),
-      backgroundTasks.loadAgent(agentId),
+      loadBackgroundTasksForAgent(agentId),
     ]);
     if (state.agent?.id !== agentId) return;
     state.chatHydrating = false;
@@ -3785,6 +4109,8 @@ function setComposerConnectionStatus(text, ok = false) {
 function disconnectAgentTransports() {
   clearMessageRefreshTimer(state.agent?.id);
   agentStream.disconnect();
+  backgroundTaskAgentLoadGeneration += 1;
+  backgroundTaskAgentLoadInFlight = null;
   backgroundTasks.setAgent("");
   state.ws = null;
   if (state.terminalWS) {
@@ -3837,12 +4163,39 @@ function updateAgentStreamStatus(detail = {}) {
   renderWorkbenchShell();
 }
 
+function normalizeAgentContextStatus(value = {}) {
+  const messageCount = Math.max(0, Number(value?.messageCount) || 0);
+  const prunedPercent = Math.max(0, Math.min(100, Number(value?.prunedPercent) || 0));
+  return {
+    hasSummary: Boolean(value?.hasSummary),
+    prunedPercent,
+    messageCount,
+    canCompact: Boolean(value?.canCompact),
+    summaryModelConfigured: Boolean(value?.summaryModelConfigured),
+  };
+}
+
+async function compactCurrentAgentContext() {
+  const current = state.agent;
+  if (!current?.id) return;
+  const agentId = current.id;
+  const response = await api(`/api/agents/${encodeURIComponent(agentId)}/context/compact`, {
+    method: "POST",
+    body: JSON.stringify({ entityGeneration: current.entityGeneration }),
+  });
+  if (state.agent?.id !== agentId) return;
+  state.agentContext = normalizeAgentContextStatus(response?.context);
+  state.agent = { ...state.agent, prunedPercent: state.agentContext.prunedPercent };
+  showToast(t(response?.compacted ? "chat.contextCompactSuccess" : "chat.contextCompactNoop"), response?.compacted ? "success" : "warn");
+}
+
 async function applyAgentLiveSnapshot(snapshot, detail = {}) {
   const agentId = snapshot?.agent?.id || "";
   if (!agentId || state.agent?.id !== agentId) return;
   const nextAgent = snapshot.agent;
   const nextWorkState = normalizeWorkStateSnapshot(snapshot);
   state.agent = nextAgent;
+  state.agentContext = normalizeAgentContextStatus(snapshot.context);
   state.workState = nextWorkState;
   backgroundTasks.applySnapshot(snapshot, { agentId });
   if (detail.source === "initial") await executionNotifications.initial(snapshot, { agentId });
@@ -4053,7 +4406,6 @@ bindWorkspaceExplorer();
 document.addEventListener("keydown", handleGlobalEscape);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!$("employeeOverviewModal")?.classList.contains("hidden")) closeEmployeeOverview();
   if ($("appShell")?.classList.contains("background-tasks-open")) backgroundTasks.closeTray("escape");
   if ($("appShell")?.classList.contains("details-open")) closeConversationDetails();
 });
@@ -4077,6 +4429,14 @@ $("globalThemeToggleBtn")?.addEventListener("click", () => {
 $("refreshBtn").addEventListener("click", () => refreshPrimaryMode().catch(showError));
 document.querySelectorAll("[data-create-conversation]").forEach((button) => {
   button.addEventListener("click", () => createStandaloneConversation().catch(showError));
+});
+document.querySelectorAll("[data-create-navigation-item]").forEach((button) => {
+  button.addEventListener("click", () => createNavigationItem(button).catch(showError));
+});
+$("mobileNewScheduleBtn")?.addEventListener("click", startScheduleCreation);
+$("mobileScheduleModeBtn")?.addEventListener("click", () => {
+  closeMobileSidebar();
+  switchPrimaryWorkbench(state.activeWorkbench === "schedules" ? "conversation" : "schedules");
 });
 $("newTaskBtn")?.addEventListener("click", () => focusTaskCreation().catch(showError));
 $("currentTitle")?.addEventListener("click", () => beginConversationTitleEdit("conversation"));
@@ -4118,8 +4478,6 @@ $("settingsModal").addEventListener("keydown", (event) => {
   if (!state.settingsShellOpen) handleSettingsDialogKeydown(event);
 });
 $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
-$("closeEmployeeOverviewBtn")?.addEventListener("click", closeEmployeeOverview);
-$("employeeOverviewModal")?.addEventListener("click", (event) => { if (event.target.id === "employeeOverviewModal") closeEmployeeOverview(); });
 $("closeConversationDetailsBtn")?.addEventListener("click", closeConversationDetails);
 $("settingsWizardBtn").addEventListener("click", () => {
   closeSettingsModal();
@@ -4153,7 +4511,7 @@ $("mobileSidebarLogoutBtn")?.addEventListener("click", () => {
 });
 $("navigationFilters")?.querySelectorAll("[data-navigation-mode]").forEach((node) => {
   node.addEventListener("click", () => {
-    state.navigationMode = node.dataset.navigationMode || "all";
+    state.navigationMode = node.dataset.navigationMode || "projects";
     renderProjects();
   });
 });
@@ -4182,15 +4540,20 @@ $("projectSearchToggleBtn")?.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleProjectSearch();
 });
-$("projectSearchClearBtn")?.addEventListener("click", () => closeProjectSearch({ clear: true }));
+$("projectSearchClearBtn")?.addEventListener("click", () => {
+  closeProjectSearch({ clear: true });
+  if (state.activeWorkbench === "schedules") scheduleWorkspace.setQuery("");
+});
 $("projectSearch").addEventListener("input", (event) => {
   state.projectQuery = event.target.value;
-  renderProjects();
+  if (state.activeWorkbench === "schedules") scheduleWorkspace.setQuery(event.target.value);
+  else renderProjects();
 });
 $("projectSearch").addEventListener("keydown", (event) => {
   if (isComposingInput(event)) return;
   if (event.key === "Escape") {
     closeProjectSearch({ clear: true });
+    if (state.activeWorkbench === "schedules") scheduleWorkspace.setQuery("");
     event.preventDefault();
   }
 });
@@ -4278,6 +4641,7 @@ $("terminalOutput").addEventListener("paste", (event) => {
 $("reconnectTerminalBtn").addEventListener("click", connectTerminal);
 window.addEventListener("resize", () => {
   closeMobileSidebar({ restoreFocus: false });
+  leaveOverviewForMobile();
   syncSettingsViewportState();
   layoutSettingsShell();
   resizeTerminal();
@@ -4344,7 +4708,6 @@ function toggleTerminalDock(collapsed) {
   toggleTerminal(collapsed);
 }
 $("toggleTerminalBtn").addEventListener("click", () => toggleTerminalDock());
-$("composerTerminalBtn")?.addEventListener("click", () => toggleTerminalDock());
 $("collapseTerminalBtn").addEventListener("click", () => toggleTerminalDock(true));
 $("expandTerminalBtn").addEventListener("click", () => toggleTerminalDock(false));
 $("terminalCommandForm")?.addEventListener("submit", (event) => {
@@ -4412,14 +4775,23 @@ async function init() {
     navigationRefresh.start();
     if (!state.agent) {
       const initialTarget = resolveInitialNavigationTarget(state.recentConversations, state.navigationConversations);
-      if (initialTarget) {
-        await selectNavigationConversation(initialTarget, { preserveMessageState: true });
-      } else if (state.projects.length) {
+      const requestedView = new URLSearchParams(globalThis.location?.search || "").get("view") || "";
+      const startup = resolveOverviewStartup({
+        requestedView,
+        hasConversation: Boolean(initialTarget),
+        hasProject: state.projects.length > 0,
+        mobile: isMobileAppViewport(),
+      });
+      state.overviewActive = startup.overviewActive;
+      applyPrimaryWorkbench(startup.workbench);
+      if (startup.restoreConversation && initialTarget) {
+        await selectNavigationConversation(initialTarget, { preserveMessageState: true, preserveOverview: startup.overviewActive });
+      } else if (startup.selectFallbackProject) {
         await selectProject(state.projects[0].id, { preserveMessageState: true });
       } else {
         state.chatHydrating = false;
-        showEmptyWorkspaceState();
       }
+      if (startup.overviewActive) await overviewDashboard.load();
     }
   } finally {
     if (seq === state.initSeq) {
@@ -4438,10 +4810,18 @@ function openRequestedInitialView() {
   const params = new URLSearchParams(globalThis.location?.search || "");
   const view = params.get("view") || "";
   if (view === "settings") openSettingsModal(params.get("panel") || "providers");
-  if (view === "employees") openEmployeeOverview().catch(showError);
   if (view === "details") openConversationDetails();
   if (view === "browser") openWorkspace("preview");
   if (view === "terminal") toggleTerminalDock(false);
 }
 
-init().then(openRequestedInitialView).catch(showError);
+function signalAppReady() {
+  const root = globalThis.document?.documentElement;
+  if (root) root.dataset.autotoAppReady = "true";
+  const EventConstructor = globalThis.Event;
+  if (typeof EventConstructor === "function") {
+    globalThis.dispatchEvent?.(new EventConstructor("autoto:app-ready"));
+  }
+}
+
+init().then(openRequestedInitialView).catch(showError).finally(signalAppReady);

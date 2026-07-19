@@ -629,7 +629,7 @@ export function renderAutomationControl(value = {}) {
       </section>
 
       <div class="automation-section-grid">
-        <section class="automation-section settings-card settings-page-section span-2">
+        <section class="automation-section settings-card settings-page-section span-2" data-automation-section="schedules">
           <div class="automation-section-head settings-card-header"><div><span>${escapeHtml(t("automation.schedule.kicker"))}</span><h3>${escapeHtml(t("automation.schedule.title"))}</h3><p data-settings-help-copy>${escapeHtml(t("automation.schedule.description"))}</p></div>${errors.monitoring ? `<small class="error">${escapeHtml(redactSensitiveText(errors.monitoring))}</small>` : ""}</div>
           ${scheduleViewMode === "history" ? renderScheduleHistoryMode(selectedScheduleHistoryId, selectedSchedule, scheduleRunHistory[selectedScheduleHistoryId]) : `
           <form id="createScheduleForm" class="automation-form settings-form-grid">

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -82,6 +83,16 @@ func Run(options Options) int {
 			"replacement", legacyReport.Replacements(),
 			"removalVersion", compat.RemovalVersion,
 		)
+	}
+
+	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(cfg)
+	if err != nil {
+		logger.Error("bind service listeners", "error", err)
+		return 1
+	}
+	defer httpListener.Close()
+	if gatewayListener != nil {
+		defer gatewayListener.Close()
 	}
 
 	store, err := db.Open(context.Background(), cfg.Paths.DatabasePath)
@@ -214,12 +225,12 @@ func Run(options Options) int {
 	supervisor := runtime.NewSupervisor()
 	services := []runtime.Service{previewManager, temporaryTunnelManager, channelManager, automationManager, backgroundManager}
 	if gatewayHTTPServer != nil {
-		services = append(services, runtime.NewHTTPService(gatewayHTTPServer, func(err error) {
+		services = append(services, runtime.NewHTTPServiceWithListener(gatewayHTTPServer, gatewayListener, func(err error) {
 			logger.Error("serve gateway", "error", err)
 			stop()
 		}))
 	}
-	services = append(services, runtime.NewHTTPService(httpServer, func(err error) {
+	services = append(services, runtime.NewHTTPServiceWithListener(httpServer, httpListener, func(err error) {
 		logger.Error("serve", "error", err)
 		stop()
 	}))
@@ -251,6 +262,22 @@ func Run(options Options) int {
 		return 1
 	}
 	return 0
+}
+
+func bindConfiguredHTTPListeners(cfg config.Config) (net.Listener, net.Listener, error) {
+	httpListener, err := net.Listen("tcp", cfg.Addr())
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on %s: %w", cfg.Addr(), err)
+	}
+	if !cfg.Gateway.Enabled {
+		return httpListener, nil, nil
+	}
+	gatewayListener, err := net.Listen("tcp", cfg.GatewayAddr())
+	if err != nil {
+		_ = httpListener.Close()
+		return nil, nil, fmt.Errorf("listen on gateway %s: %w", cfg.GatewayAddr(), err)
+	}
+	return httpListener, gatewayListener, nil
 }
 
 func newGatewayHTTPServer(cfg config.Config, store *db.Store, registry *providers.Registry, providerAllowed gateway.ProviderPolicy) (*http.Server, error) {

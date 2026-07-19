@@ -19,8 +19,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.SchemaVersion != CurrentConfigVersion {
 		t.Fatalf("expected config version %d, got %d", CurrentConfigVersion, cfg.SchemaVersion)
 	}
-	if cfg.Server.Port != 7788 {
-		t.Fatalf("expected default port 7788, got %d", cfg.Server.Port)
+	if cfg.Server.Port != 16888 {
+		t.Fatalf("expected default port 16888, got %d", cfg.Server.Port)
 	}
 	if cfg.Gateway.Enabled || cfg.Gateway.Host != "127.0.0.1" || cfg.Gateway.Port != 8788 || cfg.Gateway.MaxGlobalConcurrency != 16 || cfg.Gateway.MaxRequestBytes != 8<<20 {
 		t.Fatalf("unexpected gateway defaults: %+v", cfg.Gateway)
@@ -336,7 +336,7 @@ func TestLoadExplicitPathDoesNotMigrateLegacyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.Port != 7788 {
+	if cfg.Server.Port != 16888 {
 		t.Fatalf("expected explicit path to use new defaults, got port %d", cfg.Server.Port)
 	}
 	if _, err := os.Stat(explicitPath); err != nil {
@@ -471,6 +471,50 @@ func TestLoadWritesDefaultConfigWithoutEnvSecrets(t *testing.T) {
 	}
 	if persisted.Security.AccessPassword != "" {
 		t.Fatal("expected persisted remote access password to be empty")
+	}
+}
+
+func TestProviderProxyURLWithoutCredentialsFailsClosedForMalformedUserinfo(t *testing.T) {
+	if got := providerProxyURLWithoutCredentials("proxy-user:proxy-pass@proxy.internal:7890"); got != "" {
+		t.Fatalf("malformed proxy userinfo was retained: %q", got)
+	}
+}
+
+func TestProviderConfigSaveNeverPersistsProxyCredentialsOrHeaderValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Config{Providers: ProvidersConfig{Instances: []ProviderConfig{{
+		Name:     "relay",
+		Type:     "openai-compatible",
+		BaseURL:  "https://relay.example/v1",
+		Model:    "relay-model",
+		ProxyURL: "http://proxy-user:proxy-pass@127.0.0.1:7890",
+		RequestHeaders: []ProviderRequestHeader{{
+			Name:  "X-Tenant",
+			Value: "tenant-secret",
+		}},
+	}}}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"proxy-user", "proxy-pass", "tenant-secret"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("persisted provider config leaked %q: %s", secret, data)
+		}
+	}
+	if !strings.Contains(string(data), `"proxyUrl": "http://127.0.0.1:7890"`) || !strings.Contains(string(data), `"name": "X-Tenant"`) {
+		t.Fatalf("non-secret transport metadata was not preserved: %s", data)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := providerByName(loaded, "relay")
+	if provider == nil || provider.ProxyURL != "http://127.0.0.1:7890" || len(provider.RequestHeaders) != 1 || provider.RequestHeaders[0].Value != "" {
+		t.Fatalf("unexpected reloaded provider transport metadata: %+v", provider)
 	}
 }
 
@@ -694,7 +738,7 @@ func TestLoadWithReportTracksNewConfigCreatedAtExplicitLegacyPath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.Port != 7788 {
+	if cfg.Server.Port != 16888 {
 		t.Fatalf("expected default config at explicit legacy path, got port %d", cfg.Server.Port)
 	}
 	if !reportHasLegacy(report, "~/.codeharbor/config.json") {

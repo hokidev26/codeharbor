@@ -13,14 +13,13 @@ import {
 import { t } from "./i18n.mjs";
 import { settingsIconSVG, settingsItemByKey, settingsItems, skillTabs } from "./settings-data.mjs";
 
-test("legacy settings expose the nine category shortcuts in order", () => {
+test("legacy settings expose the eight category shortcuts in order", () => {
   assert.deepEqual(legacySettingsCategories.map((category) => category.label), [
     "API 设置",
     "聊天平台",
     "记忆",
     "诊断",
     "网络代理",
-    "权限",
     "市场",
     "日志",
     "关于",
@@ -37,7 +36,10 @@ test("every existing settings page remains reachable from a legacy category", ()
   assert.equal(settingsItemByKey("providers")?.key, "providers");
   assert.equal(settingsItemByKey("shared-api")?.key, "shared-api");
   assert.equal(settingsItemByKey("agent-admin"), null);
-  assert.deepEqual(legacySettingsCategories.find((category) => category.key === "network")?.items, ["network-search"]);
+  assert.equal(settingsItemByKey("agents"), null);
+  assert.equal(settingsItemByKey("worklines-containers"), null);
+  assert.deepEqual(legacySettingsCategories.find((category) => category.key === "network")?.items, ["network-search", "remote-access"]);
+  assert.equal(legacySettingsCategories.some((category) => category.key === "permissions"), false);
   assert.equal(settingsItemByKey("users"), null);
   assert.equal(legacySettingsCategories.some((category) => category.items.includes("users")), false);
   assert.equal(settingsItemByKey("missing"), null);

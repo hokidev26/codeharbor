@@ -2332,6 +2332,21 @@ func (p *blockingProvider) Generate(ctx context.Context, req providers.GenerateR
 	return make(chan providers.Event), nil
 }
 
+func TestContextPrunedProgressTracksAbsoluteBoundary(t *testing.T) {
+	messages := make([]db.Message, 12)
+	for i := range messages {
+		messages[i].ID = fmt.Sprintf("message-%02d", i+1)
+	}
+	count, percent := contextPrunedProgress(messages, "message-04")
+	if count != 4 || percent != 33 {
+		t.Fatalf("unexpected first compaction progress: count=%d percent=%d", count, percent)
+	}
+	count, percent = contextPrunedProgress(messages, "message-08")
+	if count != 8 || percent != 66 {
+		t.Fatalf("unexpected repeated compaction progress: count=%d percent=%d", count, percent)
+	}
+}
+
 func newCheckpointTestRepo(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
@@ -2682,6 +2697,15 @@ func TestToolEventMetaV1KeepsLegacyFieldsAndOmitsBashArguments(t *testing.T) {
 	facts, ok := data["commandFacts"].(tools.CommandFacts)
 	if !ok || !facts.ParseKnown || facts.Program != "git" || strings.Contains(fmt.Sprintf("%+v", facts), secret) {
 		t.Fatalf("expected argument-free command facts, got %+v", data["commandFacts"])
+	}
+}
+
+func TestRedactToolActivityTextCoversGenericTokenAssignments(t *testing.T) {
+	for _, input := range []string{"token=TOP_SECRET_TOKEN", `token: "TOP_SECRET_JSON_TOKEN"`} {
+		redacted := RedactToolActivityText(input)
+		if strings.Contains(redacted, "TOP_SECRET") || !strings.Contains(redacted, "[redacted]") {
+			t.Fatalf("generic token assignment was not redacted: %q", redacted)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,9 +30,10 @@ func NewOpenAIOfficial(cfg config.ProviderConfig) *OpenAIOfficial {
 	if cfg.Model == "" {
 		cfg.Model = "gpt-4.1-mini"
 	}
-	configErr := validateProviderRuntimeConfig(cfg)
+	httpClient, clientErr := providerHTTPClient(cfg, 90*time.Second)
+	configErr := errors.Join(validateProviderRuntimeConfig(cfg), clientErr)
 	opts := make([]option.RequestOption, 0, 5)
-	opts = append(opts, option.WithHTTPClient(providerHTTPClient(90*time.Second)))
+	opts = append(opts, option.WithHTTPClient(httpClient))
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}

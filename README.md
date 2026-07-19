@@ -19,7 +19,7 @@ go run ./cmd/autoto
 Then open:
 
 ```text
-http://localhost:7788
+http://localhost:16888
 ```
 
 Default local state:
@@ -104,7 +104,7 @@ go run ./cmd/autoto
 Then open:
 
 ```text
-http://localhost:7788
+http://localhost:16888
 ```
 
 Default paths:

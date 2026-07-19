@@ -108,8 +108,12 @@ test("disabled Gateway renders status and security guidance without calling Gate
   assert.match(html, /127\.0\.0\.1:7788/);
   assert.match(html, /HTTPS 反向代理/);
   assert.match(html, /data-gateway-key-add disabled/);
-  assert.match(html, /尚未创建模型别名/);
+  assert.match(html, /尚未创建访问密钥/);
   assert.match(html, /暂无用量数据/);
+  assert.match(html, /shared-api-keys-section/);
+  assert.match(html, /shared-api-usage-section/);
+  assert.match(html, /shared-api-compact-empty/);
+  assert.doesNotMatch(html, /模型别名|data-gateway-model/);
 });
 
 test("empty enabled Gateway loads all resources and renders empty states", async () => {
@@ -127,9 +131,10 @@ test("empty enabled Gateway loads all resources and renders empty states", async
   const html = controller.render();
 
   assert.deepEqual(requests.map((item) => item.path), ["/api/gateway/keys", "/api/gateway/models", "/api/gateway/usage"]);
-  assert.match(html, /尚未创建模型别名/);
-  assert.match(html, /尚未创建|0 把密钥/);
+  assert.match(html, /尚未创建访问密钥/);
+  assert.match(html, /0 把密钥/);
   assert.match(html, /暂无用量数据/);
+  assert.doesNotMatch(html, /模型别名|data-gateway-model/);
 });
 
 test("OAuth-backed providers are non-shareable while API providers expose a Gateway toggle", async () => {

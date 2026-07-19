@@ -3,7 +3,7 @@ import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./forma
 import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
-import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1-i18n-shared-1";
+import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1-i18n-shared-1-subagent-cards-1";
 
 const userMessageRoles = new Set(["user", "human"]);
 const maxTokenCount = 1_000_000_000;
@@ -554,7 +554,223 @@ export function renderToolDiffHTML(item = {}) {
   return `<div class="tool-diff" aria-label="${escapeAttr(cr("activity.diff"))}">${rendered}${note}</div>`;
 }
 
-export function renderToolActivityCardHTML(item = {}) {
+export function isAgentToolActivity(item = {}) {
+  const source = item?.data && typeof item.data === "object" ? { ...item, ...item.data } : item;
+  const name = firstToolValue(source, "toolName", "tool_name", "name");
+  return String(name || "").trim().toLowerCase() === "agent";
+}
+
+const agentTaskStatuses = new Set(["queued", "waiting_approval", "running", "cancel_requested", "succeeded", "failed", "canceled", "interrupted"]);
+const agentTaskExpandedStatuses = new Set(["waiting_approval", "failed", "canceled", "interrupted"]);
+const agentTaskCancellableStatuses = new Set(["queued", "waiting_approval", "running"]);
+const maxAgentTaskID = 160;
+const maxAgentTaskDescription = 240;
+const maxAgentTaskRole = 80;
+const maxAgentTaskModel = 256;
+const maxAgentTaskErrorCode = 96;
+const maxAgentTaskAcceptanceCount = 16;
+
+function safeAgentTaskObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.backgroundTask && typeof value.backgroundTask === "object" && !Array.isArray(value.backgroundTask)) return value.backgroundTask;
+  if (value.task && typeof value.task === "object" && !Array.isArray(value.task)) return value.task;
+  if (value.data?.backgroundTask && typeof value.data.backgroundTask === "object" && !Array.isArray(value.data.backgroundTask)) return value.data.backgroundTask;
+  if (value.data?.task && typeof value.data.task === "object" && !Array.isArray(value.data.task)) return value.data.task;
+  return value;
+}
+
+function safeAgentTaskJSON(value) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string" || value.length > maxToolActivityText) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function agentTaskStatus(value) {
+  const status = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["pending", "waiting"].includes(status)) return "queued";
+  if (["started", "in_progress"].includes(status)) return "running";
+  if (["completed", "complete", "success", "done"].includes(status)) return "succeeded";
+  if (["error", "failure"].includes(status)) return "failed";
+  if (status === "cancelled") return "canceled";
+  return agentTaskStatuses.has(status) ? status : "";
+}
+
+function agentTaskNumber(value, maximum) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 && number <= maximum ? number : null;
+}
+
+function agentTaskDuration(task) {
+  const explicit = Number(firstToolValue(task, "durationMs", "duration_ms"));
+  if (Number.isFinite(explicit) && explicit >= 0 && explicit <= maxDurationMs) return explicit;
+  const startedAt = firstToolValue(task, "startedAt", "started_at");
+  const completedAt = firstToolValue(task, "completedAt", "completed_at", "finishedAt", "finished_at");
+  if (!startedAt || !completedAt) return 0;
+  const elapsed = Date.parse(completedAt) - Date.parse(startedAt);
+  return Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= maxDurationMs ? elapsed : 0;
+}
+
+function formatAgentTaskDuration(durationMs) {
+  if (!(durationMs > 0)) return "";
+  if (durationMs < 1000) return `${formatNumber(Math.round(durationMs))} ms`;
+  if (durationMs < 60_000) return `${formatNumber(durationMs / 1000, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
+  return `${formatNumber(durationMs / 60_000, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} min`;
+}
+
+function embeddedAgentBackgroundTask(item, tool) {
+  const source = item?.data && typeof item.data === "object" ? { ...item, ...item.data } : item;
+  const output = safeAgentTaskJSON(tool.output || tool.resultPreview);
+  const outputJSON = safeAgentTaskObject(tool.outputJson) || {};
+  const candidate = safeAgentTaskObject(output) || safeAgentTaskObject(outputJSON);
+  const taskId = firstToolValue(source, "backgroundTaskId", "background_task_id", "taskId", "task_id")
+    || firstToolValue(output, "backgroundTaskId", "background_task_id", "taskId", "task_id", "id")
+    || firstToolValue(outputJSON, "backgroundTaskId", "background_task_id", "taskId", "task_id", "id");
+  if (candidate && Object.keys(candidate).length) return taskId ? { ...candidate, id: firstToolValue(candidate, "id", "taskId", "task_id") || taskId } : candidate;
+  return taskId ? { id: taskId } : null;
+}
+
+function embeddedAgentBackgroundTaskHandle(item, tool) {
+  const task = embeddedAgentBackgroundTask(item, tool);
+  const taskId = firstToolValue(task || {}, "id", "taskId", "task_id", "backgroundTaskId", "background_task_id");
+  return taskId ? { id: taskId } : null;
+}
+
+function resolveAgentBackgroundTask(item, tool, options) {
+  if (Object.prototype.hasOwnProperty.call(options, "backgroundTask")) {
+    const task = options.backgroundTask;
+    return task === null || task === undefined || safeAgentTaskObject(task) ? { ok: true, task: safeAgentTaskObject(task) } : { ok: false, task: null };
+  }
+  if (typeof options.resolveBackgroundTask === "function") {
+    try {
+      const task = options.resolveBackgroundTask(tool);
+      if (task === null || task === undefined) return { ok: true, task: embeddedAgentBackgroundTaskHandle(item, tool) };
+      return safeAgentTaskObject(task) ? { ok: true, task: safeAgentTaskObject(task) } : { ok: false, task: null };
+    } catch {
+      return { ok: false, task: null };
+    }
+  }
+  return { ok: true, task: embeddedAgentBackgroundTask(item, tool) };
+}
+
+export function normalizeAgentTaskActivity(item = {}, backgroundTask = null) {
+  const tool = normalizeToolActivity(item);
+  if (!isAgentToolActivity(tool)) return null;
+  const task = safeAgentTaskObject(backgroundTask) || {};
+  const input = tool.inputJson && typeof tool.inputJson === "object" ? tool.inputJson : {};
+  const summary = safeAgentTaskJSON(firstToolValue(task, "publicSummary", "public_summary", "summary"));
+  const result = safeAgentTaskJSON(firstToolValue(task, "result", "resultJson", "result_json"));
+  const taskId = compactToolText(firstToolValue(task, "id", "taskId", "task_id", "backgroundTaskId", "background_task_id"), maxAgentTaskID);
+  const backgroundStatus = agentTaskStatus(firstToolValue(task, "status", "state"));
+  const toolDispatched = tool.status === "completed";
+  const status = backgroundStatus || (tool.status === "error" ? "failed" : (toolDispatched ? "dispatched" : "dispatching"));
+  const acceptanceCriteria = firstToolValue(input, "acceptance_criteria", "acceptanceCriteria");
+  const acceptanceCount = agentTaskNumber(firstToolValue(summary, "acceptanceCount", "acceptance_count"), maxAgentTaskAcceptanceCount)
+    ?? agentTaskNumber(firstToolValue(result, "acceptanceCount", "acceptance_count"), maxAgentTaskAcceptanceCount)
+    ?? (Array.isArray(acceptanceCriteria) ? Math.min(acceptanceCriteria.length, maxAgentTaskAcceptanceCount) : 0);
+  return {
+    tool,
+    taskPresent: Boolean(backgroundStatus),
+    taskId,
+    description: compactToolText(firstToolValue(summary, "description") || firstToolValue(input, "description") || cr("subagent.descriptionFallback"), maxAgentTaskDescription),
+    role: compactToolText(firstToolValue(summary, "subagentType", "subagent_type", "role") || firstToolValue(result, "role", "subagentType", "subagent_type") || firstToolValue(input, "subagent_type", "subagentType", "role") || cr("subagent.roleAuto"), maxAgentTaskRole),
+    requestedModel: compactToolText(firstToolValue(summary, "model") || firstToolValue(input, "model"), maxAgentTaskModel),
+    acceptanceCount,
+    status,
+    toolDispatched,
+    durationMs: agentTaskDuration(task) || tool.durationMs,
+    childAgentId: compactToolText(firstToolValue(task, "childAgentId", "child_agent_id") || firstToolValue(result, "childAgentId", "child_agent_id"), maxAgentTaskID),
+    childRunId: compactToolText(firstToolValue(task, "childRunId", "child_run_id") || firstToolValue(result, "childRunId", "child_run_id"), maxAgentTaskID),
+    ownerAgentId: compactToolText(firstToolValue(task, "ownerAgentId", "owner_agent_id") || tool.agentId, maxAgentTaskID),
+    errorCode: compactToolText(firstToolValue(task, "errorCode", "error_code"), maxAgentTaskErrorCode),
+    expanded: agentTaskExpandedStatuses.has(status),
+    cancellable: Boolean(taskId && agentTaskCancellableStatuses.has(status)),
+  };
+}
+
+function agentTaskStatusLabel(activity) {
+  if (activity.status === "dispatched") return activity.taskId ? cr("subagent.status.dispatched") : cr("subagent.status.dispatchedWaiting");
+  if (activity.status === "dispatching") return cr("subagent.status.dispatching");
+  return cr(`subagent.status.${activity.status || "unknown"}`);
+}
+
+function agentTaskStatusClass(status) {
+  if (status === "succeeded") return "status-completed";
+  if (["queued", "running", "dispatching", "dispatched"].includes(status)) return "status-running";
+  if (["waiting_approval", "cancel_requested", "canceled", "interrupted"].includes(status)) return "status-warn";
+  return "status-error";
+}
+
+function agentTaskFailureNotice(activity) {
+  if (activity.status !== "failed") return "";
+  const code = activity.errorCode.toLowerCase();
+  if (code.includes("rejected") || code === "invalid_payload" || code === "scope_rejected") return cr("subagent.failure.requestRejected");
+  if (code.includes("unavailable")) return cr("subagent.failure.unavailable");
+  if (code.startsWith("child_") || code.includes("child_run")) return cr("subagent.failure.childRun");
+  return cr("subagent.failure.generic");
+}
+
+function renderAgentTaskActionsHTML(activity) {
+  const actions = [];
+  if (activity.taskId) actions.push(`<button class="ghost-btn mini" type="button" data-subagent-action="view-task" data-task-id="${escapeAttr(activity.taskId)}">${escapeHtml(cr("subagent.action.viewTask"))}</button>`);
+  if (activity.cancellable) actions.push(`<button class="ghost-btn mini danger" type="button" data-subagent-action="cancel" data-task-id="${escapeAttr(activity.taskId)}">${escapeHtml(cr("subagent.action.cancel"))}</button>`);
+  if (activity.childAgentId) actions.push(`<button class="ghost-btn mini" type="button" data-subagent-action="open-agent" data-child-agent-id="${escapeAttr(activity.childAgentId)}">${escapeHtml(cr("subagent.action.openAgent"))}</button>`);
+  if (activity.childAgentId && activity.childRunId) actions.push(`<button class="ghost-btn mini" type="button" data-subagent-action="open-run" data-child-run-id="${escapeAttr(activity.childRunId)}" data-child-agent-id="${escapeAttr(activity.childAgentId)}">${escapeHtml(cr("subagent.action.openRun"))}</button>`);
+  return actions.length ? `<div class="approval-actions subagent-task-actions">${actions.join("")}</div>` : "";
+}
+
+export function renderAgentTaskActivityCardHTML(item = {}, backgroundTask = null) {
+  const activity = normalizeAgentTaskActivity(item, backgroundTask);
+  if (!activity) return "";
+  const { tool } = activity;
+  const statusLabel = agentTaskStatusLabel(activity);
+  const duration = formatAgentTaskDuration(activity.durationMs);
+  const model = activity.requestedModel || cr("subagent.modelAuto");
+  const meta = [
+    cr("subagent.role", { role: activity.role }),
+    cr("subagent.requestedModel", { model }),
+    cr("subagent.acceptanceCount", { count: activity.acceptanceCount }),
+    duration ? cr("subagent.duration", { duration }) : "",
+  ].filter(Boolean);
+  const taskState = !activity.taskPresent && activity.toolDispatched ? cr("subagent.waitingTaskInfo") : "";
+  const failure = agentTaskFailureNotice(activity);
+  const input = toolActivityInputText(tool);
+  const output = toolActivityOutputText(tool);
+  const label = [cr("subagent.title"), activity.description, statusLabel].filter(Boolean).join(" · ");
+  return `
+    <article class="tool-activity-card live-tool-output-card subagent-task-card chat-flow-item chat-flow-left chat-report-card ${escapeAttr(agentTaskStatusClass(activity.status))}" aria-label="${escapeAttr(label)}" data-chat-alignment="left" data-chat-report="subagent-task" data-subagent-card data-subagent-status="${escapeAttr(activity.status)}" data-live-tool-output-card="${escapeAttr(tool.toolUseId)}" data-tool-use-id="${escapeAttr(tool.toolUseId)}" data-run-id="${escapeAttr(tool.runId)}"${activity.taskId ? ` data-task-id="${escapeAttr(activity.taskId)}"` : ""}>
+      <details class="subagent-task-summary"${activity.expanded ? " open" : ""}>
+        <summary class="tool-activity-head live-tool-output-head">
+          <span class="tool-activity-icon" aria-hidden="true">•</span>
+          <span class="tool-activity-main">
+            <span class="tool-activity-title live-tool-output-title">${escapeHtml(cr("subagent.title"))}</span>
+            <span class="tool-activity-target">${escapeHtml(activity.description)}</span>
+          </span>
+          <span class="tool-activity-status live-tool-output-dot" role="status" aria-live="polite">${escapeHtml(statusLabel)}</span>
+        </summary>
+        <div class="tool-activity-meta live-tool-output-meta">${escapeHtml(meta.join(" · "))}</div>
+        ${taskState ? `<div class="tool-activity-empty subagent-task-notice">${escapeHtml(taskState)}</div>` : ""}
+        ${failure ? `<div class="tool-activity-warning subagent-task-notice" role="alert">${escapeHtml(failure)}</div>` : ""}
+        ${renderAgentTaskActionsHTML(activity)}
+      </details>
+      <details class="tool-activity-details subagent-task-audit">
+        <summary>${escapeHtml(cr("subagent.auditDetails"))}</summary>
+        <div class="tool-activity-meta">${escapeHtml(cr("activity.input"))}</div>
+        <pre class="tool-activity-command">${escapeHtml(input || cr("activity.noOutput"))}</pre>
+        <div class="tool-activity-meta">${escapeHtml(cr("activity.output"))}</div>
+        ${output ? `<pre class="tool-activity-output live-tool-output-body">${escapeHtml(output)}</pre>` : `<div class="tool-activity-empty">${escapeHtml(cr("activity.noOutput"))}</div>`}
+        ${tool.truncated ? `<div class="tool-activity-truncated">${escapeHtml(cr("activity.truncated"))}</div>` : ""}
+      </details>
+    </article>
+  `;
+}
+
+function renderGenericToolActivityCardHTML(item = {}) {
   const tool = normalizeToolActivity(item);
   const status = tool.status;
   const target = toolActivityTarget(tool);
@@ -600,20 +816,46 @@ export function renderToolActivityCardHTML(item = {}) {
   `;
 }
 
+export function renderToolActivityCardHTML(item = {}, options = {}) {
+  const tool = normalizeToolActivity(item);
+  if (!isAgentToolActivity(tool)) return renderGenericToolActivityCardHTML(tool);
+  const resolved = resolveAgentBackgroundTask(item, tool, options || {});
+  if (!resolved.ok) return renderGenericToolActivityCardHTML(tool);
+  return renderAgentTaskActivityCardHTML(tool, resolved.task);
+}
+
+function toolActivityRecordNeedsExpansion({ item, tool }, options = {}) {
+  if (tool.status !== "completed") return true;
+  if (!isAgentToolActivity(tool)) return false;
+  const resolved = resolveAgentBackgroundTask(item, tool, options);
+  if (!resolved.ok) return true;
+  const activity = normalizeAgentTaskActivity(item, resolved.task);
+  return !activity || activity.status !== "succeeded";
+}
+
+function toolActivityGroupExpanded(records, options = {}) {
+  if (typeof options.expanded === "boolean") return options.expanded;
+  if (options.live === true && options.runActive !== false) return true;
+  return records.some((record) => toolActivityRecordNeedsExpansion(record, options));
+}
+
 export function renderToolActivityStackHTML(toolCalls = [], options = {}) {
-  const allTools = (Array.isArray(toolCalls) ? toolCalls : []).map((call) => normalizeToolActivity(call)).filter((call) => call.toolUseId || call.toolName);
-  if (!allTools.length) return "";
-  const tools = allTools;
+  const records = (Array.isArray(toolCalls) ? toolCalls : [])
+    .map((item) => ({ item, tool: normalizeToolActivity(item) }))
+    .filter(({ tool }) => tool.toolUseId || tool.toolName);
+  if (!records.length) return "";
+  const tools = records.map(({ tool }) => tool);
   const omitted = 0;
+  const expanded = toolActivityGroupExpanded(records, options);
   const steps = tools.map((tool) => `${toolActivityVerb(tool.toolName)}${toolActivityTarget(tool) ? ` ${toolActivityTarget(tool)}` : ""}`);
   const modeClass = options.compact ? "conversation-tool-activity " : "";
   return `
-    <section class="${options.live ? "live-tool-output-stack " : ""}${modeClass}tool-activity-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-tool-activity-stack data-tool-activity-count="${escapeAttr(String(allTools.length))}"${options.live ? " data-live-tool-output-stack" : ""}${options.compact ? " data-conversation-run-tool-activity" : ""}>
-      <details class="tool-activity-group" open>
-        <summary class="tool-activity-summary">${escapeHtml(cr("activity.processTitle", { count: allTools.length }))}</summary>
+    <section class="${options.live ? "live-tool-output-stack " : ""}${modeClass}tool-activity-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-tool-activity-stack data-tool-activity-count="${escapeAttr(String(records.length))}" data-tool-activity-default="${expanded ? "expanded" : "collapsed"}"${options.live ? " data-live-tool-output-stack" : ""}${options.compact ? " data-conversation-run-tool-activity" : ""}>
+      <details class="tool-activity-group"${expanded ? " open" : ""}>
+        <summary class="tool-activity-summary">${escapeHtml(cr("activity.processTitle", { count: records.length }))}</summary>
         <div class="tool-activity-protected">${escapeHtml(cr("activity.processProtected"))}</div>
         <ul class="tool-activity-steps">${steps.map((step) => `<li>${escapeHtml(compactToolText(step, 220))}</li>`).join("")}</ul>
-        <div class="tool-activity-cards">${tools.map(renderToolActivityCardHTML).join("")}</div>
+        <div class="tool-activity-cards">${records.map(({ item }) => renderToolActivityCardHTML(item, options)).join("")}</div>
         ${omitted > 0 ? `<div class="tool-activity-more">${escapeHtml(cr("run.moreToolCalls", { count: omitted }))}</div>` : ""}
       </details>
     </section>
@@ -629,6 +871,7 @@ export function createChatRenderingController({
   notifyTerminal,
   openGitModal,
   refreshGitWorkflow,
+  resolveBackgroundTask,
   selectedModelValue,
   shortPath,
   showError,
@@ -1252,7 +1495,7 @@ export function createChatRenderingController({
   function renderConversationRunOutcomeHTML(run, runId, toolCalls) {
     const status = String(run?.status || "unknown").trim().toLowerCase();
     if (status === "superseded") return "";
-    const toolActivity = renderToolActivityStackHTML(toolCalls, { compact: true });
+    const toolActivity = renderToolActivityStackHTML(toolCalls, { compact: true, resolveBackgroundTask });
     const loadEarlier = renderEarlierRunToolCallsButton(runId, { compact: true });
     const notice = renderConversationRunNoticeHTML(run, status);
     if (!toolActivity && !loadEarlier && !notice) return "";
@@ -1360,7 +1603,7 @@ export function createChatRenderingController({
     return `
       <div class="run-summary-section">
         <div class="run-summary-section-title">${escapeHtml(cr("run.toolCalls"))}</div>
-        ${renderToolActivityStackHTML(toolCalls)}
+        ${renderToolActivityStackHTML(toolCalls, { resolveBackgroundTask })}
       </div>
     `;
   }
@@ -1710,7 +1953,8 @@ export function createChatRenderingController({
   }
 
   function renderLiveToolOutputCardsHTML() {
-    return renderToolActivityStackHTML(currentLiveToolOutputList(), { live: true });
+    const runActive = String(state.agent?.status || "").trim().toLowerCase() === "running";
+    return renderToolActivityStackHTML(currentLiveToolOutputList(), { live: true, runActive, resolveBackgroundTask });
   }
 
   function renderLiveToolOutputCards() {

@@ -94,7 +94,7 @@ func TestRuntimeSummaryRouteReturnsProcessAndConfigStats(t *testing.T) {
 func TestBuildRuntimeSummaryUsesSafeDefaults(t *testing.T) {
 	started := time.Now().Add(-2 * time.Minute)
 	summary := buildRuntimeSummary(config.Config{}, "", started)
-	if summary.Server.Address != "localhost:7788" {
+	if summary.Server.Address != "localhost:16888" {
 		t.Fatalf("expected safe default address, got %q", summary.Server.Address)
 	}
 	if summary.Process.UptimeSeconds < 100 {

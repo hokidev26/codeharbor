@@ -558,13 +558,13 @@ export function createSharedAPISettingsController({
 
   function renderKeys() {
     return `
-      <section class="compact-settings-section">
+      <section class="compact-settings-section shared-api-keys-section">
         <div class="compact-settings-section-copy"><h2>${escapeHtml(t("sharedAPI.keysTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("sharedAPI.keysDescription"))}</p></div>
         <div class="compact-settings-section-controls">
           <div class="compact-settings-section-toolbar"><span class="settings-badge">${escapeHtml(t("sharedAPI.keyCount", { count: state.gatewayKeys.length }))}</span><button class="settings-action-btn primary" type="button" data-gateway-key-add ${gateway().enabled ? "" : "disabled"}>${escapeHtml(t("sharedAPI.addKey"))}</button></div>
           ${renderOneTimeToken()}
           ${keyEditorOpen && !editingKeyID ? renderKeyForm() : ""}
-          <div class="shared-api-key-list">${state.gatewayKeys.length ? state.gatewayKeys.map((key) => editingKeyID === key.id ? renderKeyForm(key) : renderKey(key)).join("") : `<div class="settings-empty-state">${escapeHtml(t("sharedAPI.noKeys"))}</div>`}</div>
+          <div class="shared-api-key-list">${state.gatewayKeys.length ? state.gatewayKeys.map((key) => editingKeyID === key.id ? renderKeyForm(key) : renderKey(key)).join("") : `<div class="settings-empty-state shared-api-compact-empty">${escapeHtml(t("sharedAPI.noKeys"))}</div>`}</div>
         </div>
       </section>`;
   }
@@ -577,7 +577,7 @@ export function createSharedAPISettingsController({
       ["activeKeys", summary.activeKeys],
       ["errors", summary.errors ?? summary.errorCount],
     ].filter(([, value]) => value !== undefined && value !== null);
-    return `<section class="compact-settings-section"><div class="compact-settings-section-copy"><h2>${escapeHtml(t("sharedAPI.usageTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("sharedAPI.usageDescription"))}</p></div><div class="compact-settings-section-controls">${values.length ? `<div class="shared-api-usage-grid">${values.map(([key, value]) => `<div><strong>${escapeHtml(formatNumber(value))}</strong><span>${escapeHtml(t(`sharedAPI.usage.${key}`))}</span></div>`).join("")}</div>` : `<div class="settings-empty-state">${escapeHtml(t("sharedAPI.noUsage"))}</div>`}</div></section>`;
+    return `<section class="compact-settings-section shared-api-usage-section"><div class="compact-settings-section-copy"><h2>${escapeHtml(t("sharedAPI.usageTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("sharedAPI.usageDescription"))}</p></div><div class="compact-settings-section-controls">${values.length ? `<div class="shared-api-usage-grid">${values.map(([key, value]) => `<div><strong>${escapeHtml(formatNumber(value))}</strong><span>${escapeHtml(t(`sharedAPI.usage.${key}`))}</span></div>`).join("")}</div>` : `<div class="settings-empty-state shared-api-compact-empty">${escapeHtml(t("sharedAPI.noUsage"))}</div>`}</div></section>`;
   }
 
   function render() {
@@ -585,7 +585,7 @@ export function createSharedAPISettingsController({
     return `<div class="compact-settings-page shared-api-page">
       <header class="compact-settings-header"><div class="compact-settings-heading"><h1>${escapeHtml(t("sharedAPI.title"))}</h1><p data-settings-help-copy>${escapeHtml(t("sharedAPI.description"))}</p></div><div class="compact-settings-header-actions"><span class="settings-badge ${gateway().enabled ? "ok" : "warn"}">${escapeHtml(t(gateway().enabled ? "sharedAPI.gatewayOn" : "sharedAPI.gatewayOff"))}</span><button class="settings-action-btn subtle" type="button" data-gateway-refresh ${state.gatewayDataLoading ? "disabled" : ""}>${escapeHtml(state.gatewayDataLoading ? t("sharedAPI.loading") : t("sharedAPI.refresh"))}</button></div></header>
       ${state.gatewayAPIError ? `<div class="settings-inline-alert settings-alert shared-api-error" role="alert">${escapeHtml(t("sharedAPI.error", { message: state.gatewayAPIError }))}</div>` : ""}
-      ${renderGateway()}${renderProviders()}${renderModels()}${renderKeys()}${renderUsage()}
+      ${renderGateway()}${renderProviders()}${renderKeys()}${renderUsage()}
     </div>`;
   }
 

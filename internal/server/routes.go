@@ -29,36 +29,64 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"hasUsers": hasUsers, "registrationOpen": s.configSnapshot().Auth.RegistrationOpen})
 }
 
+type settingsProviderHeaderResponse struct {
+	Name       string `json:"name"`
+	Configured bool   `json:"configured"`
+}
+
 type settingsProviderResponse struct {
-	Name             string                      `json:"name"`
-	Type             string                      `json:"type"`
-	Profile          string                      `json:"profile,omitempty"`
-	BaseURL          string                      `json:"baseUrl,omitempty"`
-	Model            string                      `json:"model"`
-	MaxTokens        int64                       `json:"maxTokens,omitempty"`
-	Configured       bool                        `json:"configured"`
-	APIKeyConfigured bool                        `json:"apiKeyConfigured"`
-	APIKeyPersisted  bool                        `json:"apiKeyPersisted"`
-	APIKeyLastFive   string                      `json:"apiKeyLastFive,omitempty"`
-	APIKeySource     string                      `json:"apiKeySource"`
-	APIKeyOptional   bool                        `json:"apiKeyOptional,omitempty"`
-	GatewayEnabled   bool                        `json:"gatewayEnabled"`
-	Enabled          bool                        `json:"enabled"`
-	Origin           string                      `json:"origin"`
-	Capabilities     providers.Capabilities      `json:"capabilities"`
-	Management       *providerManagementResponse `json:"management,omitempty"`
+	Name                    string                           `json:"name"`
+	Type                    string                           `json:"type"`
+	Profile                 string                           `json:"profile,omitempty"`
+	BaseURL                 string                           `json:"baseUrl,omitempty"`
+	Model                   string                           `json:"model"`
+	MaxTokens               int64                            `json:"maxTokens,omitempty"`
+	Configured              bool                             `json:"configured"`
+	APIKeyConfigured        bool                             `json:"apiKeyConfigured"`
+	APIKeyPersisted         bool                             `json:"apiKeyPersisted"`
+	APIKeyLastFive          string                           `json:"apiKeyLastFive,omitempty"`
+	APIKeySource            string                           `json:"apiKeySource"`
+	APIKeyOptional          bool                             `json:"apiKeyOptional,omitempty"`
+	GatewayEnabled          bool                             `json:"gatewayEnabled"`
+	Enabled                 bool                             `json:"enabled"`
+	Origin                  string                           `json:"origin"`
+	ProxyURL                string                           `json:"proxyUrl,omitempty"`
+	ProxyAuthConfigured     bool                             `json:"proxyAuthConfigured"`
+	ProxyAuthPersisted      bool                             `json:"proxyAuthPersisted"`
+	ProxyAuthSource         string                           `json:"proxyAuthSource"`
+	UserAgent               string                           `json:"userAgent,omitempty"`
+	RequestHeaders          []settingsProviderHeaderResponse `json:"requestHeaders,omitempty"`
+	RequestHeadersPersisted bool                             `json:"requestHeadersPersisted"`
+	RequestHeadersSource    string                           `json:"requestHeadersSource"`
+	InsecureSkipTLSVerify   bool                             `json:"insecureSkipTLSVerify"`
+	Capabilities            providers.Capabilities           `json:"capabilities"`
+	Management              *providerManagementResponse      `json:"management,omitempty"`
 }
 
 func (s *Server) settingsProviderResponse(ctx context.Context, provider config.ProviderConfig) settingsProviderResponse {
+	safeProvider := config.NormalizeProviderConfig(provider)
 	summary := provider.Summary()
 	metadata := s.providerSettingsMetadata(summary)
 	keyStatus := s.providerAPIKeyStatus(ctx, provider)
+	proxyStatus := s.providerProxyAuthStatus(ctx, provider)
+	headerStatus := s.providerRequestHeadersStatus(ctx, provider)
+	headers := make([]settingsProviderHeaderResponse, 0, len(provider.RequestHeaders))
+	for _, header := range provider.RequestHeaders {
+		name := strings.TrimSpace(header.Name)
+		if name == "" {
+			continue
+		}
+		headers = append(headers, settingsProviderHeaderResponse{Name: name, Configured: headerStatus.Configured && header.Value != ""})
+	}
 	return settingsProviderResponse{
 		Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
 		MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyConfigured: keyStatus.Configured,
 		APIKeyPersisted: keyStatus.Persisted, APIKeyLastFive: keyStatus.LastFive, APIKeySource: keyStatus.Source,
 		APIKeyOptional: summary.APIKeyOptional, GatewayEnabled: summary.GatewayEnabled, Enabled: summary.Enabled,
-		Origin: summary.Origin, Capabilities: metadata.Capabilities, Management: metadata.Management,
+		Origin: summary.Origin, ProxyURL: safeProvider.ProxyURL, ProxyAuthConfigured: proxyStatus.Configured,
+		ProxyAuthPersisted: proxyStatus.Persisted, ProxyAuthSource: proxyStatus.Source, UserAgent: provider.UserAgent,
+		RequestHeaders: headers, RequestHeadersPersisted: headerStatus.Persisted, RequestHeadersSource: headerStatus.Source,
+		InsecureSkipTLSVerify: provider.InsecureSkipTLSVerify, Capabilities: metadata.Capabilities, Management: metadata.Management,
 	}
 }
 

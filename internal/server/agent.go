@@ -106,12 +106,14 @@ type agentLiveSnapshotResponse struct {
 	BackgroundTasks       []tools.BackgroundTask   `json:"backgroundTasks,omitempty"`
 	RecentBackgroundTasks []tools.BackgroundTask   `json:"recentBackgroundTasks,omitempty"`
 	Continuation          map[string]any           `json:"continuation,omitempty"`
+	Context               agentContextStatus       `json:"context"`
 	WorkState             *workStateSnapshot       `json:"workState,omitempty"`
 	Stream                agentpkg.StreamWatermark `json:"stream"`
 }
 
 func publicLiveSnapshotAgent(agent db.Agent) db.Agent {
 	agent.SystemPrompt = ""
+	agent.ContextSummary = ""
 	return agent
 }
 
@@ -379,6 +381,7 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		BackgroundTasks:       backgroundTasks,
 		RecentBackgroundTasks: recentBackgroundTasks(backgroundTasks, 8),
 		Continuation:          continuation,
+		Context:               s.agentContextStatus(snapshot.Agent),
 		WorkState:             workState,
 		Stream:                watermark,
 	})
@@ -444,7 +447,80 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	agent.ContextSummary = ""
 	writeJSON(w, http.StatusOK, agent)
+}
+
+type agentContextStatus struct {
+	HasSummary             bool `json:"hasSummary"`
+	PrunedPercent          int  `json:"prunedPercent"`
+	MessageCount           int  `json:"messageCount"`
+	CanCompact             bool `json:"canCompact"`
+	SummaryModelConfigured bool `json:"summaryModelConfigured"`
+}
+
+type compactAgentContextRequest struct {
+	EntityGeneration strictInt64 `json:"entityGeneration"`
+}
+
+type compactAgentContextResponse struct {
+	Context               agentContextStatus `json:"context"`
+	Compacted             bool               `json:"compacted"`
+	CompactedMessageCount int                `json:"compactedMessageCount"`
+}
+
+func (s *Server) agentContextStatus(agent db.Agent) agentContextStatus {
+	summaryModelConfigured := false
+	if s != nil && s.runner != nil {
+		summaryModelConfigured = strings.TrimSpace(s.runner.SummaryModel()) != ""
+	}
+	compactedMessageCount := (agent.MessageCount*agent.PrunedPercent + 50) / 100
+	uncompactedMessageCount := agent.MessageCount - compactedMessageCount
+	return agentContextStatus{
+		HasSummary:             strings.TrimSpace(agent.ContextSummary) != "",
+		PrunedPercent:          agent.PrunedPercent,
+		MessageCount:           agent.MessageCount,
+		CanCompact:             strings.TrimSpace(agent.Status) != "running" && uncompactedMessageCount > 8,
+		SummaryModelConfigured: summaryModelConfigured,
+	}
+}
+
+func (s *Server) compactAgentContext(w http.ResponseWriter, r *http.Request) {
+	var req compactAgentContextRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.EntityGeneration.set || req.EntityGeneration.value <= 0 {
+		writeError(w, http.StatusBadRequest, "entityGeneration must be a positive integer")
+		return
+	}
+	if s == nil || s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is unavailable")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if err := validateAPIIdentifier("agent id", agentID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, updated, err := s.runner.CompactAgentContext(r.Context(), agentID, req.EntityGeneration.value)
+	if err != nil {
+		switch {
+		case errors.Is(err, agentpkg.ErrAgentBusy), errors.Is(err, db.ErrConflict):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "agent not found")
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, compactAgentContextResponse{
+		Context:               s.agentContextStatus(updated),
+		Compacted:             result.Compacted,
+		CompactedMessageCount: result.CompactedMessageCount,
+	})
 }
 
 type updateAgentTitleRequest struct {

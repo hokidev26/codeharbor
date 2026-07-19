@@ -20,7 +20,9 @@ import (
 )
 
 const (
-	ProviderAPIKeyKind = "api_key"
+	ProviderAPIKeyKind         = "api_key"
+	ProviderProxyAuthKind      = "proxy_auth"
+	ProviderRequestHeadersKind = "request_headers"
 
 	ProviderSecretSourceNone              = "none"
 	ProviderSecretSourceEnvironment       = "environment"
@@ -85,11 +87,14 @@ type ProviderSecretPending struct {
 // key may be sent. SecretRevision is persisted in config.json and coordinates
 // crash-safe two-phase updates with the SQLite pending record.
 type ProviderBinding struct {
-	Name           string
-	Type           string
-	Profile        string
-	BaseURL        string
-	SecretRevision int64
+	Name                    string
+	Type                    string
+	Profile                 string
+	BaseURL                 string
+	ProxyURL                string
+	InsecureSkipTLSVerify   bool
+	SecretRevision          int64
+	TransportSecretRevision int64
 }
 
 // ProviderSecretMetadata is safe to expose through server response types. It
@@ -136,26 +141,46 @@ func (v *ProviderVault) KeyPath() string {
 
 func ProviderBindingFingerprint(binding ProviderBinding) []byte {
 	canonical := canonicalProviderBinding(binding)
-	digest := sha256.Sum256([]byte(strings.Join([]string{
+	parts := []string{
 		"autoto-provider-binding-v1",
 		canonical.Name,
 		canonical.Type,
 		canonical.Profile,
 		canonical.BaseURL,
-	}, "\x00")))
+	}
+	// Existing providers with the default direct/TLS-safe transport retain the
+	// exact v1 fingerprint. The expanded scope is used only once a provider opts
+	// into proxying or insecure TLS.
+	if canonical.ProxyURL != "" || canonical.InsecureSkipTLSVerify {
+		parts = []string{
+			"autoto-provider-binding-v2",
+			canonical.Name,
+			canonical.Type,
+			canonical.Profile,
+			canonical.BaseURL,
+			canonical.ProxyURL,
+			fmt.Sprintf("%t", canonical.InsecureSkipTLSVerify),
+		}
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return append([]byte(nil), digest[:]...)
 }
 
 func (v *ProviderVault) PrepareSet(ctx context.Context, binding ProviderBinding, plaintext string) (ProviderSecretMetadata, error) {
+	plaintext = strings.TrimSpace(plaintext)
+	return v.PrepareSetKind(ctx, binding, ProviderAPIKeyKind, plaintext, SecretLastFive(plaintext))
+}
+
+func (v *ProviderVault) PrepareSetKind(ctx context.Context, binding ProviderBinding, kind, plaintext, lastFive string) (ProviderSecretMetadata, error) {
 	if v == nil || v.store == nil {
 		return ProviderSecretMetadata{}, ErrProviderSecretKeyUnavailable
 	}
-	plaintext = strings.TrimSpace(plaintext)
 	if plaintext == "" {
 		return ProviderSecretMetadata{}, ErrProviderSecretNotConfigured
 	}
+	kind = strings.TrimSpace(kind)
 	binding = canonicalProviderBinding(binding)
-	if err := validateProviderBinding(binding); err != nil {
+	if err := validateProviderBinding(binding, kind); err != nil {
 		return ProviderSecretMetadata{}, err
 	}
 
@@ -165,21 +190,20 @@ func (v *ProviderVault) PrepareSet(ctx context.Context, binding ProviderBinding,
 	if err != nil {
 		return ProviderSecretMetadata{}, err
 	}
-	ciphertext, nonce, err := encryptProviderSecret(key, binding, ProviderAPIKeyKind, []byte(plaintext))
+	ciphertext, nonce, err := encryptProviderSecret(key, binding, kind, []byte(plaintext))
 	if err != nil {
 		return ProviderSecretMetadata{}, err
 	}
-	lastFive := SecretLastFive(plaintext)
 	if err := v.store.PutProviderSecretPending(ctx, ProviderSecretPending{
 		ProviderName:       binding.Name,
-		SecretKind:         ProviderAPIKeyKind,
+		SecretKind:         kind,
 		Action:             ProviderSecretPendingSet,
 		Ciphertext:         ciphertext,
 		Nonce:              nonce,
 		BindingFingerprint: ProviderBindingFingerprint(binding),
 		KeyVersion:         1,
 		LastFive:           lastFive,
-		SecretRevision:     binding.SecretRevision,
+		SecretRevision:     providerSecretRevision(binding, kind),
 	}); err != nil {
 		return ProviderSecretMetadata{}, fmt.Errorf("prepare provider secret update: %w", err)
 	}
@@ -187,21 +211,26 @@ func (v *ProviderVault) PrepareSet(ctx context.Context, binding ProviderBinding,
 }
 
 func (v *ProviderVault) PrepareClear(ctx context.Context, binding ProviderBinding) error {
+	return v.PrepareClearKind(ctx, binding, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) PrepareClearKind(ctx context.Context, binding ProviderBinding, kind string) error {
 	if v == nil || v.store == nil {
 		return ErrProviderSecretKeyUnavailable
 	}
+	kind = strings.TrimSpace(kind)
 	binding = canonicalProviderBinding(binding)
-	if err := validateProviderBinding(binding); err != nil {
+	if err := validateProviderBinding(binding, kind); err != nil {
 		return err
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.store.PutProviderSecretPending(ctx, ProviderSecretPending{
 		ProviderName:       binding.Name,
-		SecretKind:         ProviderAPIKeyKind,
+		SecretKind:         kind,
 		Action:             ProviderSecretPendingClear,
 		BindingFingerprint: ProviderBindingFingerprint(binding),
-		SecretRevision:     binding.SecretRevision,
+		SecretRevision:     providerSecretRevision(binding, kind),
 	}); err != nil {
 		return fmt.Errorf("prepare provider secret clear: %w", err)
 	}
@@ -209,18 +238,26 @@ func (v *ProviderVault) PrepareClear(ctx context.Context, binding ProviderBindin
 }
 
 func (v *ProviderVault) PrepareDelete(ctx context.Context, providerName string) error {
+	return v.PrepareDeleteKind(ctx, providerName, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) PrepareDeleteKind(ctx context.Context, providerName, kind string) error {
 	if v == nil || v.store == nil {
 		return ErrProviderSecretKeyUnavailable
 	}
 	providerName = strings.TrimSpace(providerName)
+	kind = strings.TrimSpace(kind)
 	if providerName == "" {
 		return errors.New("provider name is required")
+	}
+	if kind == "" {
+		return errors.New("provider secret kind is required")
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.store.PutProviderSecretPending(ctx, ProviderSecretPending{
 		ProviderName: providerName,
-		SecretKind:   ProviderAPIKeyKind,
+		SecretKind:   kind,
 		Action:       ProviderSecretPendingDelete,
 	}); err != nil {
 		return fmt.Errorf("prepare provider secret delete: %w", err)
@@ -229,56 +266,74 @@ func (v *ProviderVault) PrepareDelete(ctx context.Context, providerName string) 
 }
 
 func (v *ProviderVault) CommitPending(ctx context.Context, providerName string) error {
+	return v.CommitPendingKind(ctx, providerName, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) CommitPendingKind(ctx context.Context, providerName, kind string) error {
 	if v == nil || v.store == nil {
 		return ErrProviderSecretKeyUnavailable
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if err := v.store.CommitProviderSecretPending(ctx, strings.TrimSpace(providerName), ProviderAPIKeyKind); err != nil {
+	if err := v.store.CommitProviderSecretPending(ctx, strings.TrimSpace(providerName), strings.TrimSpace(kind)); err != nil {
 		return fmt.Errorf("commit provider secret update: %w", err)
 	}
 	return nil
 }
 
 func (v *ProviderVault) RollbackPending(ctx context.Context, providerName string) error {
+	return v.RollbackPendingKind(ctx, providerName, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) RollbackPendingKind(ctx context.Context, providerName, kind string) error {
 	if v == nil || v.store == nil {
 		return ErrProviderSecretKeyUnavailable
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if err := v.store.RollbackProviderSecretPending(ctx, strings.TrimSpace(providerName), ProviderAPIKeyKind); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := v.store.RollbackProviderSecretPending(ctx, strings.TrimSpace(providerName), strings.TrimSpace(kind)); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("rollback provider secret update: %w", err)
 	}
 	return nil
 }
 
 func (v *ProviderVault) Delete(ctx context.Context, providerName string) error {
+	return v.DeleteKind(ctx, providerName, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) DeleteKind(ctx context.Context, providerName, kind string) error {
 	if v == nil || v.store == nil {
 		return ErrProviderSecretKeyUnavailable
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if err := v.store.DeleteProviderSecret(ctx, strings.TrimSpace(providerName), ProviderAPIKeyKind); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := v.store.DeleteProviderSecret(ctx, strings.TrimSpace(providerName), strings.TrimSpace(kind)); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("delete provider secret: %w", err)
 	}
 	return nil
 }
 
-// Resolve returns an active secret only when its stored binding and revision
-// exactly match the current Provider configuration. It never creates a missing
-// master key while reading existing database material.
+// Resolve returns an active API key only when its stored binding and revision
+// exactly match the current Provider configuration.
 func (v *ProviderVault) Resolve(ctx context.Context, binding ProviderBinding) (string, ProviderSecretMetadata, error) {
+	return v.ResolveKind(ctx, binding, ProviderAPIKeyKind)
+}
+
+// ResolveKind never creates a missing master key while reading existing
+// database material.
+func (v *ProviderVault) ResolveKind(ctx context.Context, binding ProviderBinding, kind string) (string, ProviderSecretMetadata, error) {
 	if v == nil || v.store == nil {
 		return "", ProviderSecretMetadata{Source: ProviderSecretSourceNone}, ErrProviderSecretNotConfigured
 	}
+	kind = strings.TrimSpace(kind)
 	binding = canonicalProviderBinding(binding)
-	if err := validateProviderBinding(binding); err != nil {
+	if err := validateProviderBinding(binding, kind); err != nil {
 		return "", ProviderSecretMetadata{Source: ProviderSecretSourceStoredUnavailable}, err
 	}
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	record, err := v.store.GetProviderSecret(ctx, binding.Name, ProviderAPIKeyKind)
+	record, err := v.store.GetProviderSecret(ctx, binding.Name, kind)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ProviderSecretMetadata{Source: ProviderSecretSourceNone}, ErrProviderSecretNotConfigured
@@ -298,7 +353,7 @@ func (v *ProviderVault) Resolve(ctx context.Context, binding ProviderBinding) (s
 		metadata.Source = ProviderSecretSourceNone
 		return "", metadata, ErrProviderSecretNotConfigured
 	}
-	if !bytes.Equal(record.ActiveBindingFingerprint, ProviderBindingFingerprint(binding)) || record.ActiveSecretRevision != binding.SecretRevision {
+	if !bytes.Equal(record.ActiveBindingFingerprint, ProviderBindingFingerprint(binding)) || record.ActiveSecretRevision != providerSecretRevision(binding, kind) {
 		metadata.Configured = false
 		metadata.Source = ProviderSecretSourceStoredUnavailable
 		return "", metadata, ErrProviderSecretBindingMismatch
@@ -312,7 +367,7 @@ func (v *ProviderVault) Resolve(ctx context.Context, binding ProviderBinding) (s
 		}
 		return "", metadata, err
 	}
-	plaintext, err := decryptProviderSecret(key, binding, ProviderAPIKeyKind, record.ActiveNonce, record.ActiveCiphertext)
+	plaintext, err := decryptProviderSecret(key, binding, kind, record.ActiveNonce, record.ActiveCiphertext)
 	if err != nil {
 		metadata.Configured = false
 		metadata.Source = ProviderSecretSourceStoredUnavailable
@@ -322,7 +377,11 @@ func (v *ProviderVault) Resolve(ctx context.Context, binding ProviderBinding) (s
 }
 
 func (v *ProviderVault) Metadata(ctx context.Context, binding ProviderBinding) ProviderSecretMetadata {
-	secret, metadata, err := v.Resolve(ctx, binding)
+	return v.MetadataKind(ctx, binding, ProviderAPIKeyKind)
+}
+
+func (v *ProviderVault) MetadataKind(ctx context.Context, binding ProviderBinding, kind string) ProviderSecretMetadata {
+	secret, metadata, err := v.ResolveKind(ctx, binding, kind)
 	_ = secret
 	if err == nil {
 		return metadata
@@ -350,7 +409,7 @@ func (v *ProviderVault) ReconcilePending(ctx context.Context, bindings map[strin
 		if record.PendingAction != "" && record.PendingAction != ProviderSecretPendingNone {
 			targetMatches := exists &&
 				bytes.Equal(record.PendingBindingFingerprint, ProviderBindingFingerprint(binding)) &&
-				record.PendingSecretRevision == binding.SecretRevision
+				record.PendingSecretRevision == providerSecretRevision(binding, record.SecretKind)
 			commit := (record.PendingAction == ProviderSecretPendingDelete && !exists) ||
 				((record.PendingAction == ProviderSecretPendingSet || record.PendingAction == ProviderSecretPendingClear) && targetMatches)
 			if commit {
@@ -522,7 +581,7 @@ func decryptProviderSecret(key []byte, binding ProviderBinding, kind string, non
 
 func providerSecretAAD(binding ProviderBinding, kind string) []byte {
 	binding = canonicalProviderBinding(binding)
-	return []byte(fmt.Sprintf("autoto-provider-secret-v1\x00%s\x00%s\x00%d", hex.EncodeToString(ProviderBindingFingerprint(binding)), kind, binding.SecretRevision))
+	return []byte(fmt.Sprintf("autoto-provider-secret-v1\x00%s\x00%s\x00%d", hex.EncodeToString(ProviderBindingFingerprint(binding)), kind, providerSecretRevision(binding, kind)))
 }
 
 func canonicalProviderBinding(binding ProviderBinding) ProviderBinding {
@@ -530,6 +589,7 @@ func canonicalProviderBinding(binding ProviderBinding) ProviderBinding {
 	binding.Type = strings.ToLower(strings.TrimSpace(binding.Type))
 	binding.Profile = strings.ToLower(strings.TrimSpace(binding.Profile))
 	binding.BaseURL = canonicalProviderBaseURL(binding.BaseURL)
+	binding.ProxyURL = canonicalProviderProxyURL(binding.ProxyURL)
 	return binding
 }
 
@@ -553,11 +613,41 @@ func canonicalProviderBaseURL(value string) string {
 	return parsed.String()
 }
 
-func validateProviderBinding(binding ProviderBinding) error {
+func canonicalProviderProxyURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(value, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	parsed.Path = ""
+	return parsed.String()
+}
+
+func providerSecretRevision(binding ProviderBinding, kind string) int64 {
+	if strings.TrimSpace(kind) == ProviderAPIKeyKind {
+		return binding.SecretRevision
+	}
+	return binding.TransportSecretRevision
+}
+
+func validateProviderBinding(binding ProviderBinding, kind string) error {
 	if binding.Name == "" {
 		return errors.New("provider name is required")
 	}
-	if binding.SecretRevision < 0 {
+	if strings.TrimSpace(kind) == "" {
+		return errors.New("provider secret kind is required")
+	}
+	if providerSecretRevision(binding, kind) < 0 {
 		return errors.New("provider secret revision is invalid")
 	}
 	return nil

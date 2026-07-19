@@ -22,12 +22,53 @@ function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
-function publicSummary(value) {
+function publicSummary(value, fallback = {}) {
   const candidate = value?.publicSummary ?? value?.public_summary ?? value?.summary;
+  if (candidate === undefined || candidate === null || candidate === "") return object(fallback);
   if (typeof candidate === "string") {
-    try { return object(JSON.parse(candidate)); } catch { return {}; }
+    try { return object(JSON.parse(candidate)); } catch { return object(fallback); }
   }
   return object(candidate);
+}
+
+function taskRevision(value) {
+  const source = taskPayload(value);
+  return number(source.revision ?? source.taskRevision ?? source.task_revision ?? value?.revision);
+}
+
+function associationKey(parentRunId, parentToolUseId) {
+  const runId = text(parentRunId);
+  const toolUseId = text(parentToolUseId);
+  return runId && toolUseId ? JSON.stringify([runId, toolUseId]) : "";
+}
+
+function knownValue(value) {
+  if (value === undefined || value === null || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
+function preserveKnownTask(previous, candidate) {
+  const merged = { ...candidate };
+  for (const [key, value] of Object.entries(previous || {})) {
+    if (knownValue(value)) merged[key] = value;
+  }
+  return merged;
+}
+
+function clonePublicValue(value) {
+  if (Array.isArray(value)) return value.map(clonePublicValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !key.toLowerCase().includes("prompt"))
+    .map(([key, item]) => [key, clonePublicValue(item)]));
+}
+
+function readonlySnapshot(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const item of Object.values(value)) readonlySnapshot(item);
+  return Object.freeze(value);
 }
 
 function publicTaskTitle(source, kind) {
@@ -59,7 +100,14 @@ export function normalizeBackgroundTask(value, fallback = {}) {
   const source = taskPayload(value);
   const id = taskId(source) || taskId(value) || taskId(fallback);
   if (!id) return null;
+  const ownerAgentId = text(
+    source.ownerAgentId || source.owner_agent_id || source.agentId || source.agent_id
+    || value?.ownerAgentId || value?.agentId || fallback.ownerAgentId || fallback.agentId,
+  );
   const status = text(source.status || source.state || value?.status || fallback.status || "pending").toLowerCase();
+  const createdAt = text(source.createdAt || source.created_at || value?.createdAt || fallback.createdAt);
+  const updatedAt = text(source.updatedAt || source.updated_at || value?.updatedAt || fallback.updatedAt);
+  const cancelRequestedAt = text(source.cancelRequestedAt || source.cancel_requested_at || fallback.cancelRequestedAt);
   const startedAt = text(source.startedAt || source.started_at || fallback.startedAt);
   const completedAt = text(source.completedAt || source.finishedAt || source.endedAt || source.completed_at || fallback.completedAt);
   let durationMs = number(source.durationMs ?? source.duration_ms ?? fallback.durationMs);
@@ -68,25 +116,36 @@ export function normalizeBackgroundTask(value, fallback = {}) {
     if (Number.isFinite(elapsed) && elapsed >= 0) durationMs = elapsed;
   }
   const kind = text(source.kind || source.type || source.taskKind || fallback.kind || "task");
-  const summary = publicSummary(source);
+  const summary = publicSummary(source, fallback.publicSummary || fallback.summary);
+  const revision = number(source.revision ?? source.taskRevision ?? source.task_revision ?? value?.revision ?? fallback.revision);
   return {
     ...fallback,
     ...source,
     id,
     taskId: id,
-    agentId: text(source.agentId || source.agent_id || value?.agentId || fallback.agentId),
+    ownerAgentId,
+    agentId: ownerAgentId,
+    parentRunId: text(source.parentRunId || source.parentRunID || source.parent_run_id || fallback.parentRunId),
+    parentToolUseId: text(source.parentToolUseId || source.parentToolUseID || source.parentToolId || source.parentToolID || source.parent_tool_use_id || fallback.parentToolUseId),
     kind,
     status,
-    title: publicTaskTitle(source, kind) || text(fallback.title),
+    revision,
+    title: text(source.title || source.name || source.label) || text(fallback.title) || publicTaskTitle({ ...source, publicSummary: summary }, kind),
+    publicSummary: summary,
     summary,
-    createdAt: text(source.createdAt || source.created_at || fallback.createdAt),
+    createdAt,
+    updatedAt,
+    cancelRequestedAt,
     startedAt,
     completedAt,
     durationMs,
     childAgentId: text(source.childAgentId || source.childAgent?.id || source.child_agent_id || fallback.childAgentId),
     childRunId: text(source.childRunId || source.childRun?.id || source.runId || source.child_run_id || fallback.childRunId),
-    error: text(source.error || source.errorMessage || (terminalStatuses.has(status) ? source.message : "") || fallback.error),
-    truncated: Boolean(source.truncated ?? source.outputTruncated ?? fallback.truncated),
+    errorCode: text(source.errorCode || source.error_code || fallback.errorCode),
+    error: text(source.error || source.errorMessage || source.error_message || (terminalStatuses.has(status) ? source.message : "") || fallback.error),
+    lastOutputSequence: number(source.lastOutputSequence ?? source.last_output_sequence ?? fallback.lastOutputSequence),
+    outputBytes: number(source.outputBytes ?? source.output_bytes ?? fallback.outputBytes),
+    truncated: Boolean(source.truncated ?? source.outputTruncated ?? source.output_truncated ?? fallback.truncated),
   };
 }
 
@@ -180,11 +239,14 @@ export function createBackgroundTasksController({
   if (typeof request !== "function") throw new Error("createBackgroundTasksController requires request");
 
   const tasksById = new Map();
+  const tasksByParentTool = new Map();
   const order = [];
   const outputs = new Map();
   const outputCursors = new Map();
   const cancelBusy = new Set();
   const waitBusy = new Set();
+  const hydrationRequests = new Map();
+  const listeners = new Set();
   let selected = "";
   let agentId = "";
   let agentGeneration = 0;
@@ -213,9 +275,65 @@ export function createBackgroundTasksController({
     return summarizeBackgroundTasks(orderedTasks());
   }
 
+  function publicTaskSnapshot(task) {
+    if (!task) return null;
+    const summary = clonePublicValue(task.publicSummary || task.summary || {});
+    return {
+      id: task.id,
+      taskId: task.taskId,
+      ownerAgentId: task.ownerAgentId,
+      agentId: task.agentId,
+      parentRunId: task.parentRunId,
+      parentToolUseId: task.parentToolUseId,
+      kind: task.kind,
+      status: task.status,
+      revision: task.revision,
+      title: task.title,
+      publicSummary: summary,
+      summary: clonePublicValue(summary),
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      cancelRequestedAt: task.cancelRequestedAt,
+      startedAt: task.startedAt,
+      completedAt: task.completedAt,
+      durationMs: task.durationMs,
+      childAgentId: task.childAgentId,
+      childRunId: task.childRunId,
+      errorCode: task.errorCode,
+      error: task.error,
+      lastOutputSequence: task.lastOutputSequence,
+      outputBytes: task.outputBytes,
+      truncated: task.truncated,
+      outputHasMore: Boolean(task.outputHasMore),
+    };
+  }
+
+  function publicSummarySnapshot() {
+    const summary = taskSummary();
+    return {
+      ...summary,
+      current: publicTaskSnapshot(summary.current),
+    };
+  }
+
+  function publicStateSnapshot(reason = "change") {
+    return readonlySnapshot({
+      reason,
+      agentId,
+      selected,
+      continuation: clonePublicValue(continuation),
+      summary: publicSummarySnapshot(),
+      tasks: orderedTasks().map(publicTaskSnapshot),
+    });
+  }
+
   function emit(reason = "change") {
     render();
-    onChange?.({ reason, agentId, selected, continuation: { ...continuation }, summary: taskSummary() });
+    const snapshot = publicStateSnapshot(reason);
+    onChange?.(snapshot);
+    for (const listener of [...listeners]) {
+      try { listener(snapshot); } catch (cause) { onError?.(cause); }
+    }
   }
 
   function rememberOrder(id, recent = false) {
@@ -225,12 +343,28 @@ export function createBackgroundTasksController({
     else order.unshift(id);
   }
 
+  function updateParentToolIndex(previous, task) {
+    const previousKey = associationKey(previous?.parentRunId, previous?.parentToolUseId);
+    const nextKey = associationKey(task?.parentRunId, task?.parentToolUseId);
+    if (previousKey && previousKey !== nextKey && tasksByParentTool.get(previousKey) === previous?.id) {
+      tasksByParentTool.delete(previousKey);
+    }
+    if (nextKey) tasksByParentTool.set(nextKey, task.id);
+  }
+
   function upsertTask(value, { recent = false } = {}) {
     const id = taskId(value);
     const previous = id ? tasksById.get(id) : null;
-    const task = normalizeBackgroundTask(value, previous || { agentId });
+    const incomingRevision = taskRevision(value);
+    const previousRevision = number(previous?.revision);
+    if (previous && incomingRevision !== null && previousRevision !== null && incomingRevision < previousRevision) return null;
+    let task = normalizeBackgroundTask(value, previous || { ownerAgentId: agentId, agentId });
     if (!task || (agentId && task.agentId && task.agentId !== agentId)) return null;
+    if (previous && previousRevision !== null && incomingRevision === null) {
+      task = preserveKnownTask(previous, task);
+    }
     tasksById.set(task.id, task);
+    updateParentToolIndex(previous, task);
     rememberOrder(task.id, recent);
     return task;
   }
@@ -276,9 +410,9 @@ export function createBackgroundTasksController({
     error = "";
     emit("loading");
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(requestedAgentId)}/background-tasks`, { method: "GET" });
+      const response = await request(`/api/agents/${encodeURIComponent(requestedAgentId)}/background-tasks?limit=100`, { method: "GET" });
       if (!operationIsCurrent(requestedAgentId, requestedGeneration)) return [];
-      ingestTasks(response);
+      ingestTasks(response, { recent: true });
       if (response?.continuation) continuation = normalizeContinuation(response.continuation, continuation);
       return taskCollection(response);
     } catch (cause) {
@@ -303,8 +437,39 @@ export function createBackgroundTasksController({
     const response = await request(`/api/background-tasks/${encodeURIComponent(normalized)}`, { method: "GET" });
     if (!operationIsCurrent(expectedAgentId, expectedGeneration)) return null;
     const task = upsertTask(response);
-    emit("task-loaded");
+    if (task) emit("task-loaded");
     return task;
+  }
+
+  function taskNeedsHydration(task) {
+    if (!task) return true;
+    return !task.parentRunId
+      || !task.parentToolUseId
+      || !task.createdAt
+      || !task.updatedAt
+      || task.revision === null
+      || task.kind === "task"
+      || !Object.keys(task.publicSummary || task.summary || {}).length;
+  }
+
+  function hydrateTask(id, { force = false } = {}) {
+    const normalized = text(id);
+    if (!normalized) return Promise.resolve(null);
+    const expectedAgentId = agentId;
+    const expectedGeneration = agentGeneration;
+    const pending = hydrationRequests.get(normalized);
+    if (!force && pending?.agentId === expectedAgentId && pending?.generation === expectedGeneration) return pending.promise;
+    const entry = { agentId: expectedAgentId, generation: expectedGeneration, promise: null };
+    entry.promise = loadTask(normalized)
+      .catch((cause) => {
+        if (operationIsCurrent(expectedAgentId, expectedGeneration)) onError?.(cause);
+        return null;
+      })
+      .finally(() => {
+        if (hydrationRequests.get(normalized) === entry) hydrationRequests.delete(normalized);
+      });
+    hydrationRequests.set(normalized, entry);
+    return entry.promise;
   }
 
   async function loadOutput(id, { afterSequence } = {}) {
@@ -323,14 +488,17 @@ export function createBackgroundTasksController({
 
   async function selectTask(id) {
     const normalized = text(id);
-    if (!normalized || !tasksById.has(normalized)) return null;
+    if (!normalized) return null;
     const expectedAgentId = agentId;
     const expectedGeneration = agentGeneration;
-    selected = normalized;
-    setTrayOpen(true, "task-selected");
-    emit("selected");
+    const alreadyLoaded = tasksById.has(normalized);
     try {
-      await loadTask(normalized);
+      if (!alreadyLoaded) await loadTask(normalized);
+      if (!operationIsCurrent(expectedAgentId, expectedGeneration) || !tasksById.has(normalized)) return null;
+      selected = normalized;
+      setTrayOpen(true, "task-selected");
+      emit("selected");
+      if (alreadyLoaded) await loadTask(normalized);
       if (!operationIsCurrent(expectedAgentId, expectedGeneration)) return null;
       if (!(outputs.get(normalized) || []).length) await loadOutput(normalized, { afterSequence: 0 });
     } catch (cause) {
@@ -385,9 +553,11 @@ export function createBackgroundTasksController({
   function applySnapshot(snapshot = {}, options = {}) {
     const snapshotAgentId = text(options.agentId || snapshot?.agent?.id || snapshot?.agentId);
     if (agentId && snapshotAgentId && snapshotAgentId !== agentId) return false;
-    ingestTasks(snapshot.backgroundTasks);
-    ingestTasks(snapshot.recentBackgroundTasks, { recent: true });
-    if (snapshot.continuation) continuation = normalizeContinuation(snapshot.continuation, continuation);
+    if (snapshot && typeof snapshot === "object") {
+      if (snapshot.backgroundTasks !== undefined) ingestTasks(snapshot.backgroundTasks);
+      if (snapshot.recentBackgroundTasks !== undefined) ingestTasks(snapshot.recentBackgroundTasks, { recent: true });
+      if (snapshot.continuation) continuation = normalizeContinuation(snapshot.continuation, continuation);
+    }
     emit("snapshot");
     return true;
   }
@@ -399,8 +569,13 @@ export function createBackgroundTasksController({
     if (["task.created", "task.status", "task.completed"].includes(type)) {
       const task = upsertTask(event);
       if (task && type === "task.completed" && !terminalStatuses.has(task.status)) {
-        tasksById.set(task.id, { ...task, status: "completed" });
+        const completedTask = { ...task, status: "completed" };
+        tasksById.set(task.id, completedTask);
+        updateParentToolIndex(task, completedTask);
       }
+      const current = task ? tasksById.get(task.id) : null;
+      const lifecycleRefresh = Boolean(current && type !== "task.created");
+      if (current && (lifecycleRefresh || taskNeedsHydration(current))) void hydrateTask(current.id, { force: lifecycleRefresh });
     } else if (type === "task.output") {
       const id = taskId(event);
       if (id) {
@@ -427,6 +602,8 @@ export function createBackgroundTasksController({
     agentId = normalized;
     agentGeneration += 1;
     tasksById.clear();
+    tasksByParentTool.clear();
+    hydrationRequests.clear();
     order.splice(0);
     outputs.clear();
     outputCursors.clear();
@@ -452,7 +629,7 @@ export function createBackgroundTasksController({
   function renderTaskRow(task) {
     const active = task.id === selected;
     const duration = task.durationMs === null || task.durationMs === undefined ? "—" : formatDuration(task.durationMs);
-    const preview = text(task.error || task.summary?.description || task.summary?.command || task.summary?.prompt);
+    const preview = text(task.error || task.summary?.description || task.summary?.command);
     return `<button class="background-task-row ${active ? "active" : ""}" type="button" data-background-task="${escapeAttr(task.id)}" aria-pressed="${active ? "true" : "false"}">
       <span class="background-task-kind">${escapeHtml(task.kind || t("backgroundTasks.task"))}</span>
       <span class="background-task-main"><strong>${escapeHtml(task.title || task.id)}</strong><small>${escapeHtml(preview || `${taskStatusLabel(task.status)} · ${duration}`)}</small></span>
@@ -568,6 +745,22 @@ export function createBackgroundTasksController({
     render();
   }
 
+  function subscribe(listener) {
+    if (typeof listener !== "function") throw new TypeError("background task subscriber must be a function");
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  function getTaskSnapshot(id) {
+    return readonlySnapshot(publicTaskSnapshot(tasksById.get(text(id))));
+  }
+
+  function getTaskByParentTool(parentRunId, parentToolUseId) {
+    const key = associationKey(parentRunId, parentToolUseId);
+    const id = key ? tasksByParentTool.get(key) : "";
+    return id ? getTaskSnapshot(id) : null;
+  }
+
   function renderContinuationStatusHTML() {
     const mode = continuation.mode === "safe" ? t("backgroundTasks.continuation.safe") : t("backgroundTasks.continuation.off");
     const waitingTask = continuation.waitingTaskId ? tasksById.get(continuation.waitingTaskId) : null;
@@ -590,9 +783,10 @@ export function createBackgroundTasksController({
     bind,
     cancel,
     closeTray,
-    getContinuation: () => ({ ...continuation }),
-    getSummary: () => taskSummary(),
-    getTask: (id) => tasksById.get(text(id)) || null,
+    getContinuation: () => readonlySnapshot(clonePublicValue(continuation)),
+    getSummary: () => readonlySnapshot(publicSummarySnapshot()),
+    getTask: getTaskSnapshot,
+    getTaskByParentTool,
     handleEvent,
     loadAgent,
     loadOutput,
@@ -601,6 +795,7 @@ export function createBackgroundTasksController({
     renderContinuationStatusHTML,
     selectTask,
     setAgent,
+    subscribe,
     wait,
     state: () => ({
       agentId,

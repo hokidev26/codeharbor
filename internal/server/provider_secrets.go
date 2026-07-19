@@ -16,13 +16,22 @@ type providerAPIKeyStatus struct {
 	Source     string
 }
 
+type providerSecretStatus struct {
+	Configured bool
+	Persisted  bool
+	Source     string
+}
+
 func serverProviderSecretBinding(provider config.ProviderConfig) secrets.ProviderBinding {
 	return secrets.ProviderBinding{
-		Name:           provider.Name,
-		Type:           provider.Type,
-		Profile:        provider.Profile,
-		BaseURL:        provider.BaseURL,
-		SecretRevision: provider.SecretRevision,
+		Name:                    provider.Name,
+		Type:                    provider.Type,
+		Profile:                 provider.Profile,
+		BaseURL:                 provider.BaseURL,
+		ProxyURL:                provider.ProxyURL,
+		InsecureSkipTLSVerify:   provider.InsecureSkipTLSVerify,
+		SecretRevision:          provider.SecretRevision,
+		TransportSecretRevision: provider.TransportSecretRevision,
 	}
 }
 
@@ -78,4 +87,39 @@ func (s *Server) providerAPIKeyStatus(ctx context.Context, provider config.Provi
 		return providerAPIKeyStatus{Source: secrets.ProviderSecretSourceOptional}
 	}
 	return providerAPIKeyStatus{Source: secrets.ProviderSecretSourceNone}
+}
+
+func (s *Server) providerTransportSecretStatus(ctx context.Context, provider config.ProviderConfig, kind, source string, runtimeConfigured bool) providerSecretStatus {
+	source = strings.TrimSpace(source)
+	switch source {
+	case secrets.ProviderSecretSourceRuntime:
+		return providerSecretStatus{Configured: runtimeConfigured, Source: source}
+	case secrets.ProviderSecretSourceStored, secrets.ProviderSecretSourceStoredUnavailable:
+		if s.providerVault == nil {
+			return providerSecretStatus{Source: secrets.ProviderSecretSourceStoredUnavailable}
+		}
+		metadata := s.providerVault.MetadataKind(ctx, serverProviderSecretBinding(provider), kind)
+		return providerSecretStatus{Configured: metadata.Configured, Persisted: metadata.Persisted, Source: metadata.Source}
+	default:
+		if runtimeConfigured {
+			return providerSecretStatus{Configured: true, Source: secrets.ProviderSecretSourceRuntime}
+		}
+		return providerSecretStatus{Source: secrets.ProviderSecretSourceNone}
+	}
+}
+
+func (s *Server) providerProxyAuthStatus(ctx context.Context, provider config.ProviderConfig) providerSecretStatus {
+	configured := strings.TrimSpace(provider.ProxyUsername) != "" || provider.ProxyPassword != ""
+	return s.providerTransportSecretStatus(ctx, provider, secrets.ProviderProxyAuthKind, provider.ProxyAuthSource, configured)
+}
+
+func (s *Server) providerRequestHeadersStatus(ctx context.Context, provider config.ProviderConfig) providerSecretStatus {
+	configured := len(provider.RequestHeaders) > 0
+	for _, header := range provider.RequestHeaders {
+		if strings.TrimSpace(header.Name) == "" || header.Value == "" {
+			configured = false
+			break
+		}
+	}
+	return s.providerTransportSecretStatus(ctx, provider, secrets.ProviderRequestHeadersKind, provider.RequestHeadersSource, configured)
 }

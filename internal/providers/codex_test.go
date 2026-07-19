@@ -98,6 +98,12 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 		if got := r.Header.Get("originator"); got != "autoto" {
 			t.Fatalf("unexpected originator header: %q", got)
 		}
+		if got := r.Header.Get("User-Agent"); got != "Autoto Codex Transport/1.0" {
+			t.Fatalf("unexpected configured user agent: %q", got)
+		}
+		if got := r.Header.Get("X-Codex-Test"); got != "codex-header-secret" {
+			t.Fatalf("unexpected configured request header: %q", got)
+		}
 		switch r.URL.Path {
 		case "/models":
 			if got := r.URL.Query().Get("client_version"); got != "1.2.3" {
@@ -145,6 +151,8 @@ func TestCodexProviderListsModelsAndStreamsDirectly(t *testing.T) {
 		ClientVersion:                  "1.2.3",
 		InstallationID:                 "123e4567-e89b-42d3-a456-426614174000",
 		CredentialStorePath:            storeDir,
+		UserAgent:                      "Autoto Codex Transport/1.0",
+		RequestHeaders:                 []config.ProviderRequestHeader{{Name: "X-Codex-Test", Value: "codex-header-secret"}},
 		CodexAllowInsecureTestEndpoint: true,
 	})
 	models, err := provider.ListModels(context.Background())

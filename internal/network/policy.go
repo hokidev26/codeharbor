@@ -19,6 +19,9 @@ const (
 	// PolicyProviderDirect allows only public HTTPS destinations or HTTP(S)
 	// loopback endpoints. It is intended for user-configurable provider URLs.
 	PolicyProviderDirect Policy = "provider_direct"
+	// PolicyProviderProxy allows a user-configured proxy on a public, private-LAN,
+	// or loopback address while continuing to deny metadata and special endpoints.
+	PolicyProviderProxy Policy = "provider_proxy"
 )
 
 const (
@@ -186,7 +189,7 @@ func withClock(now func() time.Time) Option {
 
 func validPolicy(policy Policy) bool {
 	switch policy {
-	case PolicyEnvironmentProxy, PolicyPublicDirect, PolicyPrivateLANDirect, PolicyProviderDirect:
+	case PolicyEnvironmentProxy, PolicyPublicDirect, PolicyPrivateLANDirect, PolicyProviderDirect, PolicyProviderProxy:
 		return true
 	default:
 		return false

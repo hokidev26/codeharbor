@@ -59,6 +59,8 @@ func TestSensitiveProviderRoutesAlwaysRequireCanonicalLocalToken(t *testing.T) {
 		path   string
 	}{
 		{http.MethodGet, "/api/providers/oauth/codex/accounts"},
+		{http.MethodPost, "/api/providers/oauth/codex/accounts/batch"},
+		{http.MethodPost, "/api/providers/oauth/codex/import/batch"},
 		{http.MethodGet, "/api/providers/oauth/codex/accounts/codex_fixture/export"},
 		{http.MethodPatch, "/api/providers/oauth/codex/accounts/codex_fixture"},
 		{http.MethodPost, "/api/providers/oauth/codex/accounts/codex_fixture/refresh"},

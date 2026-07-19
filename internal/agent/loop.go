@@ -52,8 +52,9 @@ type Runner struct {
 	reasoningMu            sync.RWMutex
 	defaultReasoningEffort string
 
-	runMu   sync.Mutex
-	running map[string]*activeRun
+	runMu      sync.Mutex
+	running    map[string]*activeRun
+	compacting map[string]struct{}
 
 	approvalMu    sync.Mutex
 	approvals     map[string]*pendingApproval
@@ -185,13 +186,13 @@ const (
 )
 
 var (
-	toolActivitySecretAssignmentPattern = regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|cookie|password|passwd|secret|session[_-]?token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	toolActivitySecretAssignmentPattern = regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|cookie|password|passwd|secret|session[_-]?token|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
 	toolActivityBearerPattern           = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
 	toolActivitySensitiveQueryPattern   = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|access[_-]?token|auth|authorization|key|password|secret|session|token)=)[^&#\s]*`)
 )
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	runner := &Runner{store: store, providers: providers, tools: toolRegistry, toolOutputPipeline: toolpipeline.NewManager(), hub: hub, cfg: cfg, continuationConfig: cfg, continuationRunLimits: make(map[string]continuationLimits), defaultReasoningEffort: "auto", running: make(map[string]*activeRun), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	runner := &Runner{store: store, providers: providers, tools: toolRegistry, toolOutputPipeline: toolpipeline.NewManager(), hub: hub, cfg: cfg, continuationConfig: cfg, continuationRunLimits: make(map[string]continuationLimits), defaultReasoningEffort: "auto", running: make(map[string]*activeRun), compacting: make(map[string]struct{}), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
 	runner.SetAgentModelSettings(cfg)
 	if store != nil {
 		if settings, err := store.GetRuntimeSettings(context.Background()); err == nil {
@@ -676,6 +677,10 @@ func (r *Runner) SubmitSource(ctx context.Context, submission SourceSubmission) 
 		r.runMu.Unlock()
 		return db.Run{}, ErrAgentBusy
 	}
+	if _, compacting := r.compacting[submission.AgentID]; compacting {
+		r.runMu.Unlock()
+		return db.Run{}, ErrAgentBusy
+	}
 	var durableBusy int
 	if err := r.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE agent_id = ? AND status IN ('pending','running')`, submission.AgentID).Scan(&durableBusy); err != nil {
 		r.runMu.Unlock()
@@ -734,6 +739,95 @@ func (r *Runner) ActiveRunCount() int {
 	r.runMu.Lock()
 	defer r.runMu.Unlock()
 	return len(r.running)
+}
+
+type ContextCompactionResult struct {
+	Compacted             bool
+	MessageCount          int
+	CompactedMessageCount int
+	PrunedPercent         int
+}
+
+func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expectedEntityGeneration int64) (ContextCompactionResult, db.Agent, error) {
+	if r == nil || r.store == nil {
+		return ContextCompactionResult{}, db.Agent{}, errors.New("agent context store is unavailable")
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return ContextCompactionResult{}, db.Agent{}, errors.New("agent id is required")
+	}
+	if err := r.beginContextCompaction(ctx, agentID); err != nil {
+		return ContextCompactionResult{}, db.Agent{}, err
+	}
+	defer r.finishContextCompaction(agentID)
+
+	agent, err := r.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return ContextCompactionResult{}, db.Agent{}, err
+	}
+	if expectedEntityGeneration > 0 && agent.EntityGeneration != expectedEntityGeneration {
+		return ContextCompactionResult{}, db.Agent{}, fmt.Errorf("%w: agent settings changed", db.ErrConflict)
+	}
+	messages, err := r.store.ListMessages(ctx, agentID)
+	if err != nil {
+		return ContextCompactionResult{}, db.Agent{}, err
+	}
+	result := ContextCompactionResult{MessageCount: len(messages), PrunedPercent: agent.PrunedPercent}
+	candidates := selectSummaryCandidates(messages, agent.PruneBoundaryMessageID, contextKeepRecentMessages)
+	if len(candidates) == 0 {
+		return result, agent, nil
+	}
+	summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
+	if err := ctx.Err(); err != nil {
+		return ContextCompactionResult{}, db.Agent{}, err
+	}
+	if summary == "" {
+		return ContextCompactionResult{}, db.Agent{}, errors.New("context summary is empty")
+	}
+	boundaryID := candidates[len(candidates)-1].ID
+	compactedMessageCount, prunedPercent := contextPrunedProgress(messages, boundaryID)
+	if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
+		return ContextCompactionResult{}, db.Agent{}, err
+	}
+	agent.ContextSummary = summary
+	agent.PruneBoundaryMessageID = boundaryID
+	agent.PrunedPercent = prunedPercent
+	result.Compacted = true
+	result.CompactedMessageCount = compactedMessageCount
+	result.PrunedPercent = prunedPercent
+	return result, agent, nil
+}
+
+func (r *Runner) beginContextCompaction(ctx context.Context, agentID string) error {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	if r.running == nil {
+		r.running = make(map[string]*activeRun)
+	}
+	if r.compacting == nil {
+		r.compacting = make(map[string]struct{})
+	}
+	if r.running[agentID] != nil {
+		return ErrAgentBusy
+	}
+	if _, compacting := r.compacting[agentID]; compacting {
+		return ErrAgentBusy
+	}
+	var durableBusy int
+	if err := r.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE agent_id = ? AND status IN ('pending','running','continuation_pending')`, agentID).Scan(&durableBusy); err != nil {
+		return err
+	}
+	if durableBusy > 0 {
+		return ErrAgentBusy
+	}
+	r.compacting[agentID] = struct{}{}
+	return nil
+}
+
+func (r *Runner) finishContextCompaction(agentID string) {
+	r.runMu.Lock()
+	delete(r.compacting, agentID)
+	r.runMu.Unlock()
 }
 
 func (r *Runner) expandServerSkillCommand(ctx context.Context, values ...string) (contentText, commandText string, err error) {
@@ -986,6 +1080,10 @@ func (r *Runner) registerRun(ctx context.Context, agentID, runID, triggerMessage
 	if r.running == nil {
 		r.running = make(map[string]*activeRun)
 	}
+	if _, compacting := r.compacting[agentID]; compacting {
+		r.runMu.Unlock()
+		return nil, nil, false, ErrAgentBusy
+	}
 	if active := r.running[agentID]; active != nil {
 		// Keep only the newest queued request. Persistently supersede the prior
 		// pending run before it can be forgotten by this in-memory slot.
@@ -1166,10 +1264,7 @@ func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, mess
 		summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
 		if summary != "" {
 			boundaryID := candidates[len(candidates)-1].ID
-			prunedPercent := 0
-			if len(messages) > 0 {
-				prunedPercent = int(float64(len(candidates)) / float64(len(messages)) * 100)
-			}
+			_, prunedPercent := contextPrunedProgress(messages, boundaryID)
 			if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
 				return nil, agent, err
 			}
@@ -1274,6 +1369,17 @@ func messagesStartAfterBoundary(messages []db.Message, boundaryID string) int {
 		}
 	}
 	return 0
+}
+
+func contextPrunedProgress(messages []db.Message, boundaryID string) (int, int) {
+	if len(messages) == 0 {
+		return 0, 0
+	}
+	compactedMessageCount := messagesStartAfterBoundary(messages, boundaryID)
+	if compactedMessageCount <= 0 {
+		return 0, 0
+	}
+	return compactedMessageCount, compactedMessageCount * 100 / len(messages)
 }
 
 func summaryProviderMessage(summary string) providers.Message {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -79,9 +80,13 @@ func TestParseCloudflareQuickTunnelURL(t *testing.T) {
 
 func TestTemporaryTunnelManagerStartsAndStopsWithFakeProcess(t *testing.T) {
 	process := newFakeTemporaryTunnelProcess()
+	var commandName string
+	var commandArgs []string
 	manager := newTemporaryTunnelManager("127.0.0.1:7788", temporaryTunnelOptions{
 		lookPath: func(string) (string, error) { return "/fake/cloudflared", nil },
-		command: func(context.Context, string, ...string) temporaryTunnelProcess {
+		command: func(_ context.Context, name string, args ...string) temporaryTunnelProcess {
+			commandName = name
+			commandArgs = append([]string(nil), args...)
 			return process
 		},
 		startTimeout: time.Second,
@@ -90,6 +95,12 @@ func TestTemporaryTunnelManagerStartsAndStopsWithFakeProcess(t *testing.T) {
 	snapshot, err := manager.StartTunnel(context.Background())
 	if err != nil {
 		t.Fatalf("start tunnel: %v", err)
+	}
+	if commandName != "/fake/cloudflared" {
+		t.Fatalf("unexpected cloudflared binary: %q", commandName)
+	}
+	if got, want := strings.Join(commandArgs, "\x00"), strings.Join([]string{"--config", os.DevNull, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:7788"}, "\x00"); got != want {
+		t.Fatalf("unexpected cloudflared arguments: %q", commandArgs)
 	}
 	if snapshot.Status != temporaryTunnelRunning || snapshot.PublicURL != "https://example.trycloudflare.com" {
 		t.Fatalf("unexpected running snapshot: %+v", snapshot)

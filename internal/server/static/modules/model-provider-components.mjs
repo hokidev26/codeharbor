@@ -73,7 +73,6 @@ const categoryMeta = {
   all: { labelKey: "categories.all", titleKey: "categories.all" },
   official: { labelKey: "categories.officialPlatforms", titleKey: "officialPlatforms" },
   custom: { labelKey: "categories.custom", titleKey: "customProviders" },
-  compatible: { labelKey: "categories.compatibleAdvanced", titleKey: "compatibleAdvanced" },
 };
 
 function asArray(value) {
@@ -111,11 +110,44 @@ function safeApiKeyMetadata(provider = {}) {
   };
 }
 
+function safeProxyURL(value) {
+  const raw = stringValue(value);
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/\/[^/@\s]+@/, "//");
+  }
+}
+
+function safeTransportMetadata(provider = {}) {
+  const proxySource = stringValue(provider.proxyAuthSource).toLowerCase();
+  const headerSource = stringValue(provider.requestHeadersSource).toLowerCase();
+  return {
+    proxyUrl: safeProxyURL(provider.proxyUrl),
+    proxyAuthConfigured: Boolean(provider.proxyAuthConfigured),
+    proxyAuthPersisted: Boolean(provider.proxyAuthPersisted),
+    proxyAuthSource: apiKeySources.has(proxySource) ? proxySource : "none",
+    userAgent: stringValue(provider.userAgent),
+    requestHeaders: asArray(provider.requestHeaders).map((header) => ({
+      name: stringValue(header?.name),
+      configured: Boolean(header?.configured),
+    })).filter((header) => header.name),
+    requestHeadersPersisted: Boolean(provider.requestHeadersPersisted),
+    requestHeadersSource: apiKeySources.has(headerSource) ? headerSource : "none",
+    insecureSkipTLSVerify: Boolean(provider.insecureSkipTLSVerify),
+  };
+}
+
 function settingsRecord(provider = {}) {
-  const { apiKey: _apiKey, ...safeProvider } = provider || {};
+  const { apiKey: _apiKey, proxyUsername: _proxyUsername, proxyPassword: _proxyPassword, ...safeProvider } = provider || {};
   return {
     ...safeProvider,
     ...safeApiKeyMetadata(provider),
+    ...safeTransportMetadata(provider),
     name: stringValue(provider.name || provider.type),
     type: stringValue(provider.type || provider.name || "openai-compatible"),
     defaultModel: stringValue(provider.defaultModel || provider.model),
@@ -145,18 +177,19 @@ export function providerCategory(provider = {}) {
   const type = stringValue(provider.type).toLowerCase();
   const name = providerKey(provider);
   if (stringValue(provider.origin).toLowerCase() === "custom") return "custom";
-  if (type === "openai-compatible" || type === "anthropic-compatible" || provider.profile === "cliproxyapi") return "compatible";
+  if (type === "openai-compatible" || type === "anthropic-compatible" || provider.profile === "cliproxyapi") return "custom";
   if (isBuiltinProvider(provider) || ["codex", "openai", "anthropic", "ollama"].includes(type) || name === "ollama") return "official";
   return "custom";
 }
 
 export function normalizeConsoleProvider(provider = {}) {
-  const { apiKey: _apiKey, ...safeProvider } = provider || {};
+  const { apiKey: _apiKey, proxyUsername: _proxyUsername, proxyPassword: _proxyPassword, ...safeProvider } = provider || {};
   const type = stringValue(provider.type || provider.name || "openai-compatible");
   const name = stringValue(provider.name || type || "provider");
   const models = asArray(provider.models).map(stringValue).filter(Boolean);
   const defaultModel = stringValue(provider.defaultModel || provider.model);
   const apiKeyMetadata = safeApiKeyMetadata(provider);
+  const transportMetadata = safeTransportMetadata(provider);
   const configured = Boolean(provider.configured);
   const enabled = provider.enabled === undefined || provider.enabled === null
     ? configured
@@ -166,6 +199,7 @@ export function normalizeConsoleProvider(provider = {}) {
   return {
     ...safeProvider,
     ...apiKeyMetadata,
+    ...transportMetadata,
     name,
     type,
     profile: stringValue(provider.profile),
@@ -284,6 +318,13 @@ export function createProviderDraft(typeKey, provider = null) {
   const hasProviderName = Boolean(provider && Object.hasOwn(provider, "name"));
   const hasProviderBaseUrl = Boolean(provider && Object.hasOwn(provider, "baseUrl"));
   const localApiKey = provider?.apiKeyDraft === true ? stringValue(provider.apiKey) : "";
+  const localProxyURL = provider?.proxyUrlDraft === true ? String(provider.proxyUrl || "") : safeProxyURL(source?.proxyUrl || provider?.proxyUrl);
+  const localHeaders = asArray(provider?.requestHeaders).map((header) => ({
+    name: stringValue(header?.name),
+    value: provider?.requestHeadersDraft === true ? String(header?.value || "") : "",
+    keepExisting: provider?.requestHeadersDraft === true ? Boolean(header?.keepExisting) : Boolean(header?.configured),
+    configured: Boolean(header?.configured),
+  })).filter((header) => header.name || header.value);
   return {
     name: hasProviderName ? stringValue(provider.name) : (source?.name || template.name),
     type: source?.type || template.type,
@@ -298,6 +339,19 @@ export function createProviderDraft(typeKey, provider = null) {
     apiKeyLastFive: source?.apiKeyLastFive || "",
     apiKeySource: source?.apiKeySource || "none",
     clearApiKey: Boolean(provider?.clearApiKey),
+    proxyUrl: localProxyURL,
+    proxyUrlDraft: provider?.proxyUrlDraft === true,
+    proxyAuthConfigured: source?.proxyAuthConfigured ?? false,
+    proxyAuthPersisted: source?.proxyAuthPersisted ?? false,
+    proxyAuthSource: source?.proxyAuthSource || "none",
+    clearProxyAuth: Boolean(provider?.clearProxyAuth),
+    userAgent: provider?.userAgentDraft === true ? String(provider.userAgent || "") : (source?.userAgent || ""),
+    userAgentDraft: provider?.userAgentDraft === true,
+    requestHeaders: localHeaders,
+    requestHeadersDraft: provider?.requestHeadersDraft === true,
+    requestHeadersPersisted: source?.requestHeadersPersisted ?? false,
+    requestHeadersSource: source?.requestHeadersSource || "none",
+    insecureSkipTLSVerify: provider?.insecureSkipTLSVerify ?? source?.insecureSkipTLSVerify ?? false,
     model: source?.defaultModel || template.model || "",
     models: source?.models || [],
     maxTokens: source?.maxTokens || template.maxTokens || 0,
@@ -317,9 +371,20 @@ export function providerConfigPayload(draft = {}) {
     // Empty keeps the existing key; clearApiKey is the only explicit removal path.
     apiKey: draft.clearApiKey ? "" : stringValue(draft.apiKey),
     ...(draft.clearApiKey ? { clearApiKey: true } : {}),
+    ...(draft.createOnly ? { createOnly: true } : {}),
+    ...(stringValue(draft.originalName) ? { originalName: stringValue(draft.originalName) } : {}),
     model: stringValue(draft.model),
     maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 0,
     apiKeyOptional: Boolean(draft.apiKeyOptional),
+    proxyUrl: String(draft.proxyUrl || "").trim(),
+    ...(draft.clearProxyAuth ? { clearProxyAuth: true } : {}),
+    userAgent: String(draft.userAgent || "").trim(),
+    requestHeaders: asArray(draft.requestHeaders).map((header) => ({
+      name: stringValue(header?.name),
+      value: String(header?.value || ""),
+      keepExisting: Boolean(header?.keepExisting),
+    })).filter((header) => header.name || header.value),
+    insecureSkipTLSVerify: Boolean(draft.insecureSkipTLSVerify),
   };
 }
 
@@ -411,6 +476,20 @@ function renderModelChips(models) {
   return `<div class="mp-provider-models" aria-label="${escapeAttr(ct("fields.modelCount", { count: choices.length }))}">${visible.map((model) => `<span class="mp-model-chip" title="${escapeAttr(model)}">${escapeHtml(model)}</span>`).join("")}${remainder > 0 ? `<span class="mp-model-chip" title="${escapeAttr(ct("fields.modelCount", { count: choices.length }))}">+${remainder}</span>` : ""}</div>`;
 }
 
+function renderProviderRequestHeaderRows(headers = []) {
+  const rows = asArray(headers);
+  if (!rows.length) return `<div class="mp-provider-header-empty" data-mp-request-header-empty>${escapeHtml(ct("createPage.headersEmpty"))}</div>`;
+  return rows.map((header, index) => {
+    const configured = Boolean(header?.configured || header?.keepExisting);
+    const keepExisting = Boolean(header?.keepExisting);
+    return `<div class="mp-provider-header-row" data-mp-request-header-row data-keep-existing="${keepExisting ? "true" : "false"}" data-configured="${configured ? "true" : "false"}" data-original-name="${escapeAttr(header?.name || "")}">
+      <label><span>${escapeHtml(ct("fields.requestHeaderName"))}</span><input type="text" data-mp-request-header-name value="${escapeAttr(header?.name || "")}" maxlength="128" autocomplete="off" spellcheck="false" placeholder="X-Custom-Header"></label>
+      <label><span>${escapeHtml(ct("fields.requestHeaderValue"))}</span><input type="password" data-mp-request-header-value value="${escapeAttr(header?.value || "")}" maxlength="8192" autocomplete="new-password" spellcheck="false" placeholder="${escapeAttr(configured ? ct("fields.requestHeaderBlankKeepsCurrent") : ct("fields.requestHeaderValuePlaceholder"))}"></label>
+      <button class="mp-provider-header-remove" type="button" data-mp-remove-request-header="${index}" aria-label="${escapeAttr(ct("actions.removeHeader"))}">×</button>
+    </div>`;
+  }).join("");
+}
+
 export function renderProviderCreatePage(consoleState = {}) {
   const state = {
     mode: "create",
@@ -436,6 +515,87 @@ export function renderProviderCreatePage(consoleState = {}) {
     : "";
   const modelChoices = renderModelChoiceSelect(discoveredModels, draft.model, "mp-provider-create-model-choice");
   const modelReference = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+  const nameError = stringValue(state.nameError);
+  const apiKeyHelp = editing && draft.apiKeyPersisted
+    ? ct("fields.apiKeyPersisted", { lastFive: draft.apiKeyLastFive })
+    : editing ? ct("fields.apiKeyBlankKeepsCurrent") : ct("createPage.apiKeyHelp");
+  const apiKeyPlaceholder = editing ? ct("fields.apiKeyEditingPlaceholder") : ct("createPage.apiKeyPlaceholder");
+  const proxyHelp = editing && draft.proxyAuthPersisted
+    ? ct("fields.proxyAuthPersisted")
+    : ct("createPage.proxyHelp");
+  const result = state.result && typeof state.result === "object"
+    ? `<div class="mp-provider-result settings-alert ${escapeAttr(state.result.tone || "info")}" role="status" aria-live="polite">${escapeHtml(state.result.message || "")}</div>`
+    : "";
+  return `<form class="mp-provider-page mp-provider-create-page mp-provider-create-form mp-provider-linear-form settings-page-section${editing ? " mp-provider-edit-page" : ""}" data-mp-provider-form aria-labelledby="mp-provider-create-title" aria-describedby="mp-provider-create-description" aria-busy="${busy ? "true" : "false"}">
+    <header class="mp-provider-create-header">
+      <p class="mp-provider-kicker">${escapeHtml(ct(editing ? "drawer.editProvider" : "createPage.kicker"))}</p>
+      <div class="mp-provider-create-heading">
+        <button class="mp-provider-create-back" type="button" data-mp-close-drawer><span aria-hidden="true">←</span><span>${escapeHtml(ct("createPage.back"))}</span></button>
+        <div><h1 id="mp-provider-create-title">${escapeHtml(providerDisplayName(draft))}</h1><p id="mp-provider-create-description" data-settings-help-copy>${escapeHtml(ct(editing ? "drawer.configurationDescription" : "createPage.description"))}</p></div>
+      </div>
+    </header>
+    <div class="mp-provider-create-body">
+      <section class="mp-provider-create-section mp-provider-create-section-linear" aria-labelledby="mp-provider-create-connection-title">
+        <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-connection-title">${escapeHtml(ct("createPage.connectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.connectionDescription"))}</p></div>
+        <div class="mp-provider-create-fields mp-provider-create-fields-linear">
+          <div class="mp-provider-create-field"><label for="mp-provider-create-name">${escapeHtml(ct("fields.name"))}</label><small id="mp-provider-create-name-help" data-settings-help-copy>${escapeHtml(ct("createPage.nameHelp", { example: modelReference }))}</small><input id="mp-provider-create-name" name="name" value="${escapeAttr(createDraftPlaceholder ? "" : draft.name)}" autocomplete="off" placeholder="${escapeAttr(createDraftPlaceholder ? draft.name : "")}" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" maxlength="64" aria-invalid="${nameError ? "true" : "false"}" aria-describedby="mp-provider-create-name-help mp-provider-create-name-error" spellcheck="false" ${nameEditable ? "required" : "readonly"}><small id="mp-provider-create-name-error" class="mp-provider-field-error" data-mp-name-error role="alert" aria-live="polite" ${nameError ? "" : "hidden"}>${escapeHtml(nameError)}</small></div>
+          <div class="mp-provider-create-field"><label>${escapeHtml(ct("fields.protocol"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.protocolHelp"))}</small><fieldset class="mp-provider-create-protocol"><legend class="mp-visually-hidden">${escapeHtml(ct("fields.protocol"))}</legend>${renderCreateProtocolChoices(draft.type)}</fieldset></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-base-url">${escapeHtml(ct("fields.baseUrl"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.baseUrlHelp"))}</small><input id="mp-provider-create-base-url" name="baseUrl" type="url" value="${escapeAttr(createDraftPlaceholder ? "" : draft.baseUrl)}" autocomplete="url" placeholder="${escapeAttr(createDraftPlaceholder ? (draft.baseUrl || "https://api.example.com/v1") : "https://api.example.com/v1")}" spellcheck="false"></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-api-key">${escapeHtml(ct("fields.apiKey"))}</label><small data-settings-help-copy>${escapeHtml(apiKeyHelp)}</small><input id="mp-provider-create-api-key" name="apiKey" type="password" value="" autocomplete="new-password" placeholder="${escapeAttr(apiKeyPlaceholder)}" spellcheck="false">${editing && draft.apiKeyPersisted ? `<label class="mp-provider-create-clear-key"><input name="clearApiKey" type="checkbox" ${draft.clearApiKey ? "checked" : ""} data-mp-clear-api-key><span>${escapeHtml(ct("fields.clearApiKey"))}</span></label>` : ""}</div>
+          <label class="mp-provider-create-switch mp-provider-inline-switch"><span><strong>${escapeHtml(ct("fields.apiKeyOptional"))}</strong><small data-settings-help-copy>${escapeHtml(ct("createPage.apiKeyOptionalHelp"))}</small></span><input name="apiKeyOptional" type="checkbox" ${draft.apiKeyOptional ? "checked" : ""}></label>
+        </div>
+      </section>
+      <section class="mp-provider-create-section mp-provider-create-section-linear" aria-labelledby="mp-provider-create-model-title">
+        <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-model-title">${escapeHtml(ct("createPage.modelTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.modelDescription"))}</p></div>
+        <div class="mp-provider-create-fields mp-provider-create-fields-linear">
+          <div class="mp-provider-create-field"><label for="mp-provider-create-model">${escapeHtml(ct("fields.defaultModel"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.defaultModelHelp"))}</small><div class="mp-provider-create-input-action"><input id="mp-provider-create-model" name="model" data-select-on-focus="true" value="${escapeAttr(draft.model)}" autocomplete="off" placeholder="${escapeAttr(ct("fields.defaultModelPlaceholder"))}" spellcheck="false" required ${discoveredModels.length ? "list=\"mp-provider-create-model-options\"" : ""}>${modelList}<button class="mp-action" type="button" data-mp-fetch-models ${modelBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(modelBusy ? ct("actions.fetchingModels") : ct("actions.fetchModels"))}</button></div>${modelChoices}</div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-max-tokens">${escapeHtml(ct("fields.maxTokens"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.maxTokensHelp"))}</small><input id="mp-provider-create-max-tokens" name="maxTokens" data-select-on-focus="true" type="number" min="0" step="1" value="${escapeAttr(draft.maxTokens || "")}"></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-reference">${escapeHtml(ct("createPage.modelReference"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.modelReferenceHelp"))}</small><input id="mp-provider-create-reference" value="${escapeAttr(modelReference)}" readonly data-mp-model-example></div>
+        </div>
+        <div class="mp-provider-create-inline-actions"><button class="mp-action" type="button" data-mp-test-provider ${messageTestBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(messageTestBusy ? ct("test.sending") : ct("actions.sendTest"))}</button></div>
+      </section>
+      <section class="mp-provider-create-section mp-provider-create-section-linear" aria-labelledby="mp-provider-create-network-title">
+        <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-network-title">${escapeHtml(ct("createPage.networkTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.networkDescription"))}</p></div>
+        <div class="mp-provider-create-fields mp-provider-create-fields-linear">
+          <div class="mp-provider-create-field"><label for="mp-provider-create-proxy">${escapeHtml(ct("fields.proxyUrl"))}</label><small data-settings-help-copy>${escapeHtml(proxyHelp)}</small><input id="mp-provider-create-proxy" name="proxyUrl" type="text" inputmode="url" value="${escapeAttr(draft.proxyUrl || "")}" autocomplete="off" placeholder="http://user:password@127.0.0.1:7890" spellcheck="false">${editing && draft.proxyAuthConfigured ? `<label class="mp-provider-create-clear-key"><input name="clearProxyAuth" type="checkbox" ${draft.clearProxyAuth ? "checked" : ""} data-mp-clear-proxy-auth><span>${escapeHtml(ct("fields.clearProxyAuth"))}</span></label>` : ""}</div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-user-agent">${escapeHtml(ct("fields.userAgent"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.userAgentHelp"))}</small><input id="mp-provider-create-user-agent" name="userAgent" type="text" value="${escapeAttr(draft.userAgent || "")}" maxlength="512" autocomplete="off" placeholder="Autoto Custom Client" spellcheck="false"></div>
+          <div class="mp-provider-create-field mp-provider-header-field"><div class="mp-provider-create-field-head"><div><label>${escapeHtml(ct("fields.requestHeaders"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.headersHelp"))}</small></div><button class="mp-action" type="button" data-mp-add-request-header>+ ${escapeHtml(ct("actions.addHeader"))}</button></div><div class="mp-provider-header-list" data-mp-request-header-list>${renderProviderRequestHeaderRows(draft.requestHeaders)}</div></div>
+          <label class="mp-provider-create-switch mp-provider-tls-switch"><span><strong>${escapeHtml(ct("fields.insecureSkipTLSVerify"))}</strong><small data-settings-help-copy>${escapeHtml(ct("createPage.tlsHelp"))}</small></span><input name="insecureSkipTLSVerify" type="checkbox" ${draft.insecureSkipTLSVerify ? "checked" : ""}></label>
+          ${draft.insecureSkipTLSVerify ? `<div class="mp-provider-security-warning settings-alert attention" role="alert">${escapeHtml(ct("createPage.tlsWarning"))}</div>` : ""}
+        </div>
+      </section>
+      ${result}
+    </div>
+    <footer class="mp-provider-create-footer"><span>${escapeHtml(ct("createPage.footerHint"))}</span><div class="mp-provider-create-footer-actions settings-inline-actions">${isProviderDeletable(draft) && editing ? `<button class="mp-action danger" type="button" data-mp-delete-provider="${escapeAttr(deleteName)}" ${deleteBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(ct("actions.delete"))}</button>` : ""}<button class="mp-action" type="button" data-mp-close-drawer>${escapeHtml(ct("actions.discardChanges"))}</button><button class="mp-action primary" type="submit" data-mp-save-provider ${saveBusy ? "disabled aria-busy=\"true\"" : ""}>${escapeHtml(saveBusy ? ct("actions.saving") : ct("actions.saveAndEnable"))}</button></div></footer>
+  </form>${renderProviderMessageTestDialog(state, draft)}`;
+}
+
+function renderLegacyProviderCreatePage(consoleState = {}) {
+  const state = {
+    mode: "create",
+    type: "openai-compatible",
+    draft: null,
+    busy: {},
+    result: null,
+    ...consoleState,
+  };
+  const draft = createProviderDraft(state.type, state.draft || null);
+  const editing = state.mode === "edit";
+  const createDraftPlaceholder = !editing && !state.dirty;
+  const nameEditable = !editing || isProviderDeletable(draft);
+  const deleteName = editing ? stringValue(state.providerName || draft.name) : draft.name;
+  const messageTestBusy = Boolean(state.busy?.[`message-test:${draft.name}`]);
+  const modelBusy = Boolean(state.busy?.[`models:${draft.name}`]);
+  const saveBusy = Boolean(state.busy?.[`save:${draft.name}`]);
+  const deleteBusy = Boolean(state.busy?.[`delete:${draft.name}`]);
+  const busy = messageTestBusy || modelBusy || saveBusy || deleteBusy;
+  const discoveredModels = normalizedDiscoveredModels(draft.models);
+  const modelList = discoveredModels.length
+    ? `<datalist id="mp-provider-create-model-options">${discoveredModels.map((model) => `<option value="${escapeAttr(model)}"></option>`).join("")}</datalist>`
+    : "";
+  const modelChoices = renderModelChoiceSelect(discoveredModels, draft.model, "mp-provider-create-model-choice");
+  const modelReference = `${draft.name || "provider"}:${draft.model || "your-model"}`;
+  const nameError = stringValue(state.nameError);
   const apiKeyHelp = editing && draft.apiKeyPersisted
     ? ct("fields.apiKeyPersisted", { lastFive: draft.apiKeyLastFive })
     : editing
@@ -457,7 +617,7 @@ export function renderProviderCreatePage(consoleState = {}) {
       <section class="mp-provider-create-section" aria-labelledby="mp-provider-create-connection-title">
         <div class="mp-provider-create-section-heading"><h2 id="mp-provider-create-connection-title">${escapeHtml(ct("createPage.connectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(ct("createPage.connectionDescription"))}</p></div>
         <div class="mp-provider-create-fields">
-          <div class="mp-provider-create-field"><label for="mp-provider-create-name">${escapeHtml(ct("fields.name"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.nameHelp", { example: modelReference }))}</small><input id="mp-provider-create-name" name="name" value="${escapeAttr(createDraftPlaceholder ? "" : draft.name)}" autocomplete="off" placeholder="${escapeAttr(createDraftPlaceholder ? draft.name : "")}" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false" ${nameEditable ? "required" : "readonly"}></div>
+          <div class="mp-provider-create-field"><label for="mp-provider-create-name">${escapeHtml(ct("fields.name"))}</label><small id="mp-provider-create-name-help" data-settings-help-copy>${escapeHtml(ct("createPage.nameHelp", { example: modelReference }))}</small><input id="mp-provider-create-name" name="name" value="${escapeAttr(createDraftPlaceholder ? "" : draft.name)}" autocomplete="off" placeholder="${escapeAttr(createDraftPlaceholder ? draft.name : "")}" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" maxlength="64" aria-invalid="${nameError ? "true" : "false"}" aria-describedby="mp-provider-create-name-help mp-provider-create-name-error" spellcheck="false" ${nameEditable ? "required" : "readonly"}><small id="mp-provider-create-name-error" class="mp-provider-field-error" data-mp-name-error role="alert" aria-live="polite" ${nameError ? "" : "hidden"}>${escapeHtml(nameError)}</small></div>
           <div class="mp-provider-create-field"><label for="mp-provider-create-api-key">${escapeHtml(ct("fields.apiKey"))}</label><small data-settings-help-copy>${escapeHtml(apiKeyHelp)}</small><input id="mp-provider-create-api-key" name="apiKey" type="password" value="" autocomplete="new-password" placeholder="${escapeAttr(apiKeyPlaceholder)}" spellcheck="false">${editing && draft.apiKeyPersisted ? `<label class="mp-provider-create-clear-key"><input name="clearApiKey" type="checkbox" ${draft.clearApiKey ? "checked" : ""} data-mp-clear-api-key><span>${escapeHtml(ct("fields.clearApiKey"))}</span></label>` : ""}</div>
           <div class="mp-provider-create-field"><label for="mp-provider-create-base-url">${escapeHtml(ct("fields.baseUrl"))}</label><small data-settings-help-copy>${escapeHtml(ct("createPage.baseUrlHelp"))}</small><input id="mp-provider-create-base-url" name="baseUrl" type="url" value="${escapeAttr(createDraftPlaceholder ? "" : draft.baseUrl)}" autocomplete="url" placeholder="${escapeAttr(createDraftPlaceholder ? (draft.baseUrl || "https://api.example.com/v1") : "https://api.example.com/v1")}" spellcheck="false"></div>
         </div>
@@ -485,13 +645,14 @@ export function renderProviderCreatePage(consoleState = {}) {
 function renderCreateProtocolChoices(selected) {
   const types = [
     ["openai", "typeLabels.openai"],
-    ["anthropic", "typeLabels.anthropic"],
     ["openai-compatible", "typeLabels.openaiCompatible"],
+    ["anthropic", "typeLabels.anthropic"],
+    ["gemini-interactions", "typeLabels.geminiInteractions"],
   ];
   return `<div class="mp-provider-create-protocol-options">${types.map(([value, labelKey]) => `<label><input type="radio" name="type" value="${escapeAttr(value)}" ${value === selected ? "checked" : ""}><span>${escapeHtml(ct(labelKey))}</span></label>`).join("")}</div>`;
 }
 
-export function renderProviderConsolePage({ providers = [], consoleState = {}, relayDrawer = "" } = {}) {
+export function renderProviderConsolePage({ providers = [], consoleState = {} } = {}) {
   const state = {
     search: "",
     category: "all",
@@ -504,21 +665,21 @@ export function renderProviderConsolePage({ providers = [], consoleState = {}, r
     result: null,
     ...consoleState,
   };
+  if (!Object.hasOwn(categoryMeta, state.category)) state.category = "all";
   if (state.drawer === "provider" && (state.mode === "create" || state.mode === "edit")) return renderProviderCreatePage(state);
   const stats = providerConsoleStats(providers);
   const filtered = filterConsoleProviders(providers, state);
-  const categories = ["official", "custom", "compatible"];
+  const categories = ["official", "custom"];
   const sectionHTML = categories
     .filter((category) => state.category === "all" || state.category === category)
     .map((category) => {
       const cards = filtered.filter((provider) => providerCategory(provider) === category);
-      const relayCard = category === "compatible" && !state.search ? renderRelayEntryCard() : "";
-      if (!cards.length && !relayCard) return "";
+      if (!cards.length) return "";
       const panelId = `mp-provider-panel-${category}`;
       const headingId = `mp-provider-section-title-${category}`;
       return `<section class="mp-provider-section settings-card" id="${panelId}" data-mp-category-section="${escapeAttr(category)}" aria-labelledby="${headingId}">
-        <header class="mp-provider-section-head settings-card-header"><h2 id="${headingId}">${escapeHtml(ct(categoryMeta[category].titleKey))}</h2><span class="settings-badge">${escapeHtml(String(cards.length + (relayCard ? 1 : 0)))}</span></header>
-        <div class="mp-provider-grid settings-card-content">${cards.map((provider) => renderProviderCard(provider, state)).join("")}${relayCard}</div>
+        <header class="mp-provider-section-head settings-card-header"><h2 id="${headingId}">${escapeHtml(ct(categoryMeta[category].titleKey))}</h2><span class="settings-badge">${escapeHtml(String(cards.length))}</span></header>
+        <div class="mp-provider-grid settings-card-content">${cards.map((provider) => renderProviderCard(provider, state)).join("")}</div>
       </section>`;
     }).join("");
   const result = state.result && typeof state.result === "object"
@@ -540,7 +701,6 @@ export function renderProviderConsolePage({ providers = [], consoleState = {}, r
     </section>
     ${result}
     <div class="mp-provider-sections">${sectionHTML || `<div class="mp-empty settings-card settings-alert" role="status">${escapeHtml(ct("messages.noResults"))}</div>`}</div>
-    ${state.drawer ? renderProviderDrawer(state, relayDrawer) : ""}
   </div>`;
 }
 
@@ -574,14 +734,6 @@ function renderProviderCard(provider, state = {}) {
   </article>`;
 }
 
-function renderRelayEntryCard() {
-  return `<article class="mp-provider-card mp-relay-card settings-card" data-mp-open-relay role="button" tabindex="0" aria-label="${escapeAttr(ct("aria.openRelay"))}">
-    <header class="mp-provider-card-head settings-card-header"><div><h3 class="settings-card-title">${escapeHtml(ct("relay.title"))}</h3><span class="mp-provider-badge settings-badge">${escapeHtml(ct("compatibleAdvanced"))}</span></div></header>
-    <div class="settings-card-content"><div class="mp-provider-card-meta"><span class="mp-status settings-badge muted">${escapeHtml(ct("relay.optional"))}</span><span>${escapeHtml(ct("relay.legacyEntry"))}</span></div>
-    <dl class="mp-provider-facts"><div><dt>${escapeHtml(ct("relay.purpose"))}</dt><dd>${escapeHtml(ct("relay.purposeValue"))}</dd></div><div><dt>${escapeHtml(ct("fields.model"))}</dt><dd>${escapeHtml(ct("relay.modelsRefreshable"))}</dd></div><div><dt>${escapeHtml(ct("fields.baseUrl"))}</dt><dd>${escapeHtml(ct("relay.savedByProtocol"))}</dd></div></dl></div>
-  </article>`;
-}
-
 function renderProviderTypeModal() {
   return `<div class="mp-provider-type-modal" data-mp-backdrop="modal" role="presentation"><section class="mp-modal-panel settings-card" role="dialog" aria-modal="true" tabindex="-1" aria-labelledby="mp-provider-type-title" aria-describedby="mp-provider-type-description">
     <header class="mp-modal-head settings-card-header"><div><p class="mp-provider-kicker">${escapeHtml(ct("addProvider"))}</p><h2 id="mp-provider-type-title" class="settings-card-title">${escapeHtml(ct("typeModalTitle"))}</h2><p id="mp-provider-type-description" class="settings-card-description" data-settings-help-copy>${escapeHtml(ct("typeSelectDescription"))}</p></div></header>
@@ -590,11 +742,8 @@ function renderProviderTypeModal() {
   </section></div>`;
 }
 
-function renderProviderDrawer(state, relayDrawer) {
-  let content = "";
-  if (state.mode === "relay") content = relayDrawer;
-  else if (state.mode === "create" || state.mode === "edit") content = renderProviderCreatePage(state);
-  else content = renderConfigDrawerForm(state);
+function renderProviderDrawer(state) {
+  const content = state.mode === "create" || state.mode === "edit" ? renderProviderCreatePage(state) : renderConfigDrawerForm(state);
   const busy = Object.values(state.busy || {}).some(Boolean);
   return `<div class="mp-provider-drawer-backdrop" data-mp-backdrop="drawer" role="presentation"><aside class="mp-provider-drawer settings-card" role="dialog" aria-modal="true" tabindex="-1" aria-busy="${busy ? "true" : "false"}" aria-labelledby="mp-drawer-title" aria-describedby="mp-drawer-description">${content}</aside></div>`;
 }
@@ -639,8 +788,9 @@ function renderConfigDrawerForm(state) {
 function renderTypeOptions(selected) {
   const types = [
     ["openai", "typeLabels.openai"],
-    ["anthropic", "typeLabels.anthropic"],
     ["openai-compatible", "typeLabels.openaiCompatible"],
+    ["anthropic", "typeLabels.anthropic"],
+    ["gemini-interactions", "typeLabels.geminiInteractions"],
   ];
   return types.map(([value, labelKey]) => `<option value="${escapeAttr(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(ct(labelKey))}</option>`).join("");
 }

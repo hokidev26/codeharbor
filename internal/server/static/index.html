@@ -1,13 +1,21 @@
 <!doctype html>
-<html lang="zh-Hans">
+<html lang="zh-Hans" data-ui-locale-pending="true">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoto</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-1-rail-compact-1-message-editing-1-message-neutral-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-preview-compact-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-settings-shell-stable-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-composer-responsive-2-user-message-content-2-mobile-toolbar-right-3-icon-rail-1-terminal-actions-compact-1-about-brand-license-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-model-picker-1-navigation-state-1-storage-card-gap-1-agent-model-wrap-1-archive-3-message-switch-3-hide-run-loading-1-provider-full-page-2-settings-icons-1-lightning-icon-1-autoto-themes-1-settings-content-left-1-mobile-desktop-guard-1-root-shortcut-removed-1-project-context-2" />
+    <link rel="stylesheet" href="/ui/styles.css?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-1-settings-left-font-1-conversation-fig2-1-flat-settings-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-codex-import-1-codex-accounts-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-1-rail-compact-1-message-editing-1-message-neutral-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-tool-activity-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-preview-compact-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-settings-shell-stable-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-composer-responsive-2-user-message-content-2-mobile-toolbar-right-3-icon-rail-2-terminal-actions-compact-2-about-brand-license-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-2-model-picker-1-navigation-state-1-storage-card-gap-1-agent-model-wrap-1-archive-3-message-switch-3-hide-run-loading-1-provider-full-page-2-settings-icons-1-lightning-icon-1-autoto-themes-1-settings-content-left-1-mobile-desktop-guard-2-root-shortcut-removed-1-project-context-2-locale-first-paint-1-mobile-settings-compact-1-mobile-sidebar-list-compact-1-boot-dots-only-1-composer-effort-compact-2-navigation-split-1-header-divider-align-1-overview-home-2-subagent-cards-1-tool-activity-collapse-1-settings-nav-flat-1-codex-usage-clean-1-shared-api-compact-1-nav-schedules-1-settings-cleanup-1-mobile-logo-1-mobile-no-home-1-schedule-workspace-1" />
     <link rel="stylesheet" href="/ui/theme-runtime.css?v=autoto-themes-1" />
   </head>
   <body class="theme-light white-shell ui-density-comfortable">
+    <div id="bootTransition" class="boot-transition" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="bootTransitionLabel">
+      <span id="bootTransitionLabel" class="sr-only" data-i18n="workspace.main.loadingProjectTitle">正在加载项目</span>
+      <div class="boot-transition-mark" aria-hidden="true">
+        <span class="boot-transition-dot"></span>
+        <span class="boot-transition-dot"></span>
+        <span class="boot-transition-dot"></span>
+      </div>
+    </div>
     <main id="appShell" class="app-shell terminal-collapsed">
       <header class="mobile-topbar" aria-label="移动端工具栏" data-i18n-aria-label="shell.mobileTopbar">
         <div class="mobile-topbar-left">
@@ -19,7 +27,7 @@
           <div class="mobile-update-pill" aria-label="版本更新" data-i18n-aria-label="staticExtra.shell.versionUpdate"><span class="mobile-update-icon" aria-hidden="true">♙</span><span id="mobileVersionChip">更新: v0.1.0 → …</span></div>
         </div>
         <div class="mobile-topbar-actions" role="group" aria-label="页面操作" data-i18n-aria-label="shell.mobilePageActions">
-          <button id="mobileWorkbenchBtn" class="mobile-icon-btn" type="button" title="切换任务工作台" aria-label="切换任务工作台" aria-pressed="false" data-i18n-title="workbench.toggle" data-i18n-aria-label="workbench.toggle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h4v5H4zM10 5.5h4v8h-4zM16 5.5h4v12h-4z"></path><path d="M4 13.5h4v5H4zM10 16.5h4v2h-4z"></path></svg></button>
+          <button id="mobileWorkbenchBtn" class="mobile-icon-btn" type="button" title="切换任务工作台" aria-label="切换任务工作台" aria-pressed="false" data-i18n-title="workbench.toggle" data-i18n-aria-label="workbench.toggle"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3.5" width="16" height="17" rx="3"></rect><path d="m7.5 8 1.4 1.4 2.6-2.6M13.5 8.2h3M7.5 14l1.4 1.4 2.6-2.6M13.5 14.2h3"></path></svg></button>
           <button id="mobileTerminalBtn" class="mobile-icon-btn" type="button" title="终端" aria-label="终端" data-project-context-only aria-hidden="true" data-i18n-title="terminal.title" data-i18n-aria-label="terminal.title"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
           <button id="mobileSearchBtn" class="mobile-icon-btn mobile-primary-action" type="button" title="搜索" aria-label="搜索" data-i18n-title="staticExtra.shell.search" data-i18n-aria-label="staticExtra.shell.search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m15.5 15.5 4.2 4.2"></path></svg></button>
         </div>
@@ -31,11 +39,14 @@
           <span class="global-rail-brand-text">AUTOTO</span>
         </div>
         <nav class="global-rail-nav" aria-label="主要功能" data-i18n-aria-label="shell.primaryFeatures">
-          <button class="global-rail-button active" type="button" data-global-rail-target="conversation" aria-pressed="true" title="对话" data-i18n-title="shell.nav.conversation">
+          <button class="global-rail-button active" type="button" data-global-rail-target="home" aria-pressed="true" title="首页" data-i18n-title="shell.nav.home">
+            <span class="global-rail-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3.5 10.5 8.5-7 8.5 7"></path><path d="M5.5 9.5v10h13v-10M9.5 19.5v-6h5v6"></path></svg></span><span class="global-rail-label" data-i18n="shell.nav.home">首页</span>
+          </button>
+          <button class="global-rail-button" type="button" data-global-rail-target="conversation" aria-pressed="false" title="对话" data-i18n-title="shell.nav.conversation">
             <span class="global-rail-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 5.5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H10l-4.5 3v-3H5a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z"></path></svg></span><span class="global-rail-label" data-i18n="shell.nav.conversation">对话</span>
           </button>
-          <button class="global-rail-button" type="button" data-global-rail-target="tasks" aria-pressed="false" title="任务" data-i18n-title="shell.nav.tasks">
-            <span class="global-rail-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5h4v5H4zM10 5.5h4v8h-4zM16 5.5h4v12h-4z"></path><path d="M4 13.5h4v5H4zM10 16.5h4v2h-4z"></path></svg></span><span class="global-rail-label" data-i18n="shell.nav.tasks">任务</span>
+          <button class="global-rail-button" type="button" data-global-rail-target="schedules" aria-pressed="false" title="排程" data-i18n-title="shell.nav.schedules">
+            <span class="global-rail-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"></rect><path d="M8 3v4M16 3v4M4 9h16M8 13h3M8 16h6"></path></svg></span><span class="global-rail-label" data-i18n="shell.nav.schedules">排程</span>
           </button>
         </nav>
         <div class="global-rail-footer">
@@ -63,7 +74,9 @@
         </div>
         <div class="mobile-drawer-primary-actions" role="group" aria-label="对话快捷操作" data-i18n-aria-label="shell.mobileConversationActions">
           <button id="mobileNewConversationBtn" class="mobile-drawer-primary-action" type="button" data-create-conversation title="新建对话" aria-label="新建对话" data-i18n="shell.newConversation" data-i18n-title="shell.newConversation" data-i18n-aria-label="shell.newConversation">新建对话</button>
+          <button id="mobileNewScheduleBtn" class="mobile-drawer-primary-action hidden" type="button" title="新建排程" aria-label="新建排程">新建排程</button>
           <button id="mobileChooseDirectoryBtn" class="mobile-drawer-secondary-action" type="button" data-open-directory-shortcut="current" title="选择资料夹" aria-label="选择资料夹" data-i18n="shell.chooseFolder" data-i18n-title="shell.chooseFolder" data-i18n-aria-label="shell.chooseFolder">选择资料夹</button>
+          <button id="mobileScheduleModeBtn" class="mobile-drawer-secondary-action" type="button" title="排程" aria-label="排程" data-i18n="shell.nav.schedules" data-i18n-title="shell.nav.schedules" data-i18n-aria-label="shell.nav.schedules">排程</button>
         </div>
         <header class="session-sidebar-header">
           <div class="session-sidebar-heading">
@@ -72,7 +85,7 @@
           </div>
           <div id="sessionSidebarActions" class="session-sidebar-actions" aria-label="会话操作" data-i18n-aria-label="shell.sessionActions">
             <button id="projectSearchToggleBtn" class="icon-btn session-sidebar-action" type="button" title="搜索项目或目录" aria-label="搜索项目或目录" data-i18n-title="shell.searchProjectsLabel" data-i18n-aria-label="shell.searchProjectsLabel"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"></circle><path d="m15 15 4.5 4.5"></path></svg></button>
-            <button id="newProjectBtn" class="icon-btn session-sidebar-action conversation-mode-only" type="button" title="新建对话" aria-label="新建对话" data-i18n-title="shell.newConversation" data-i18n-aria-label="shell.newConversation" data-create-conversation><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+            <button id="newProjectBtn" class="icon-btn session-sidebar-action" type="button" title="新建对话" aria-label="新建对话" data-i18n-title="shell.newConversation" data-i18n-aria-label="shell.newConversation" data-create-navigation-item><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
             <button id="newTaskBtn" class="icon-btn session-sidebar-action task-mode-action hidden" type="button" title="新建任务" aria-label="新建任务" data-i18n-title="workbench.createTask" data-i18n-aria-label="workbench.createTask" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h8M5 12h8M5 18h8M17 8v8M13 12h8"></path></svg></button>
             <button id="refreshBtn" class="icon-btn session-sidebar-action" type="button" title="刷新会话" aria-label="刷新会话" data-i18n-title="shell.refreshSessions" data-i18n-aria-label="shell.refreshSessions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"></path><path d="M18.3 16a7.5 7.5 0 1 1 .8-7.8L20 12"></path></svg></button>
           </div>
@@ -80,15 +93,13 @@
 
         <section class="sidebar-section agent-list-section">
           <div id="navigationFilters" class="navigation-filters conversation-mode-only" role="group" aria-label="导航筛选" data-i18n-aria-label="shell.filterNavigation">
-            <button class="navigation-filter active" type="button" data-navigation-mode="all" aria-pressed="true" data-i18n="shell.filters.all">全部</button>
-            <button class="navigation-filter" type="button" data-navigation-mode="projects" aria-pressed="false" data-i18n="shell.filters.projects">项目</button>
+            <button class="navigation-filter active" type="button" data-navigation-mode="projects" aria-pressed="true" data-i18n="shell.filters.projects">项目</button>
             <button class="navigation-filter" type="button" data-navigation-mode="conversations" aria-pressed="false" data-i18n="shell.filters.conversations">会话</button>
           </div>
           <div id="projectSearchWrap" class="sidebar-search-wrap hidden">
             <input id="projectSearch" class="sidebar-search" placeholder="搜索会话或项目" aria-label="搜索项目、工作线、Agent 或模型" data-i18n-placeholder="shell.searchProjects" data-i18n-aria-label="shell.searchProjectsLabel" />
             <button id="projectSearchClearBtn" class="sidebar-search-clear" type="button" aria-label="关闭搜索" data-i18n-aria-label="staticExtra.shell.closeSearch">×</button>
           </div>
-          <div id="navigationListHeading" class="navigation-list-heading" data-i18n="shell.filters.projects">项目</div>
           <div id="projects" class="project-list navigation-list"></div>
           <div id="navigationContextMenu" class="navigation-context-menu hidden" role="menu" aria-label="项目或对话操作" data-i18n-aria-label="shell.navigationActions">
             <button type="button" role="menuitem" data-navigation-menu-action="pin"></button>
@@ -164,7 +175,15 @@
 
       <div id="sidebarResizeHandle" class="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整会话栏宽度" data-i18n-aria-label="shell.resizeSidebar" aria-valuemin="220" aria-valuemax="420" aria-valuenow="296" tabindex="0"><span aria-hidden="true"></span></div>
 
-      <section id="conversationPanel" class="chat-panel">
+      <section id="overviewDashboard" class="overview-dashboard-page" aria-label="首页总览" data-i18n-aria-label="overview.title" aria-busy="true">
+        <div class="overview-dashboard-bootstrap" role="status" aria-live="polite" aria-atomic="true" data-i18n="overview.loading">正在加载首页总览…</div>
+      </section>
+
+      <section id="schedulePanel" class="schedule-workspace-panel hidden" aria-label="排程" data-i18n-aria-label="shell.nav.schedules" aria-busy="true">
+        <div id="scheduleWorkspaceBody"><div class="schedule-workspace-bootstrap" role="status" aria-live="polite" aria-atomic="true">正在加载排程…</div></div>
+      </section>
+
+      <section id="conversationPanel" class="chat-panel hidden">
         <header class="chat-header">
           <div class="header-left">
             <div class="chat-heading">
@@ -193,7 +212,7 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"></circle><circle cx="6" cy="19" r="2"></circle><circle cx="18" cy="6" r="2"></circle><path d="M6 7v10M8 7.5c5 .5 4 7 8 8.5M16 8c-1 4-5 4-8 4"></path></svg>
                 <span class="header-tool-badge hidden" data-git-tool-badge></span>
               </button>
-              <button id="specBoardBtn" class="icon-btn header-tool-btn hidden" type="button" data-project-context-only aria-hidden="true" title="打开任务清单" aria-label="打开任务清单" data-i18n-aria-label="chat.taskList" aria-expanded="false" aria-controls="specBoardModal" disabled>
+              <button id="specBoardBtn" class="icon-btn header-tool-btn" type="button" data-project-context-only aria-hidden="true" title="打开任务清单" aria-label="打开任务清单" data-i18n-aria-label="chat.taskList" aria-expanded="false" aria-controls="specBoardModal" disabled>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"></path><path d="m3.5 6 1.2 1.2L7 4.8M3.5 12l1.2 1.2L7 10.8M3.5 18l1.2 1.2L7 16.8"></path></svg>
                 <span class="header-tool-badge hidden" data-spec-tool-badge></span>
               </button>
@@ -278,7 +297,6 @@
               </div>
               <div class="composer-actions" data-project-context-only aria-hidden="true" aria-label="工作区快捷操作" data-i18n-aria-label="chat.workspaceShortcuts">
                 <button id="composerFolderBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="选择或切换目录" aria-label="选择或切换目录" data-i18n-title="chat.switchDirectory" data-i18n-aria-label="chat.switchDirectory" data-open-directory-shortcut="current"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path><path d="M15.5 12.5v5M13 15h5"></path></svg></button>
-                <button id="composerTerminalBtn" class="model-tool-btn icon-only composer-toolbar-icon" type="button" title="收起/展开终端" aria-label="收起/展开终端" data-i18n-title="chat.toggleTerminal" data-i18n-aria-label="chat.toggleTerminal"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><path d="m7.5 9 2.5 2.5L7.5 14M13 14h3.5"></path></svg></button>
               </div>
             </div>
             <div id="pendingAttachments" class="pending-attachments hidden" aria-live="polite"></div>
@@ -320,7 +338,7 @@
           <div class="workbench-header-actions">
             <span id="workbenchAgentStatus" class="pill workbench-status-pill">idle</span>
             <div class="header-tool-group workbench-tool-group" aria-label="任务工作台工具" data-i18n-aria-label="workbench.tools">
-              <button id="workbenchBoardBtn" class="icon-btn header-tool-btn active" type="button" title="任务看板" aria-label="任务看板" aria-pressed="true" data-i18n-title="workbench.board" data-i18n-aria-label="workbench.board"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h4v5H4zM10 5.5h4v8h-4zM16 5.5h4v12h-4z"></path><path d="M4 13.5h4v5H4zM10 16.5h4v2h-4z"></path></svg></button>
+              <button id="workbenchBoardBtn" class="icon-btn header-tool-btn active" type="button" title="任务看板" aria-label="任务看板" aria-pressed="true" data-i18n-title="workbench.board" data-i18n-aria-label="workbench.board"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3.5" width="16" height="17" rx="3"></rect><path d="m7.5 8 1.4 1.4 2.6-2.6M13.5 8.2h3M7.5 14l1.4 1.4 2.6-2.6M13.5 14.2h3"></path></svg></button>
               <button id="workbenchFilesBtn" class="icon-btn header-tool-btn" type="button" title="工作区文件" aria-label="工作区文件" data-i18n-title="workbench.files" data-i18n-aria-label="workbench.files" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5z"></path></svg></button>
               <button id="workbenchGitBtn" class="icon-btn header-tool-btn" type="button" title="Git 变更" aria-label="Git 变更" data-i18n-title="workbench.changes" data-i18n-aria-label="workbench.changes" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"></circle><circle cx="6" cy="19" r="2"></circle><circle cx="18" cy="6" r="2"></circle><path d="M6 7v10M8 7.5c5 .5 4 7 8 8.5M16 8c-1 4-5 4-8 4"></path></svg><span class="header-tool-badge hidden" data-workbench-git-badge></span></button>
               <button id="workbenchRunBtn" class="icon-btn header-tool-btn" type="button" title="运行摘要" aria-label="运行摘要" data-i18n-title="workbench.run" data-i18n-aria-label="workbench.run" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 10.5v5M12 7.5h.01"></path></svg></button>
@@ -447,7 +465,7 @@
     <div id="settingsModal" class="modal hidden legacy-settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" tabindex="-1">
       <div class="modal-card settings-modal-card legacy-settings-modal-card settings-dialog-shell">
         <aside id="settingsSidebar" class="settings-sidebar legacy-settings-topbar" aria-label="设置目录" data-i18n-aria-label="settings.directory">
-          <header class="settings-sidebar-header">
+          <header class="settings-sidebar-header settings-modal-header">
             <div id="settingsModalTitle" class="settings-title" data-i18n="settings.dialogTitle">设置</div>
             <button id="closeSettingsModalBtn" class="settings-close-btn legacy-settings-close" type="button" title="返回聊天" aria-label="返回聊天" data-i18n-title="settings.backToChat" data-i18n-aria-label="settings.backToChat">×</button>
           </header>
@@ -502,16 +520,6 @@
           <button id="setupWizardCancelBtn" class="ghost-btn" type="button">取消</button>
           <button id="setupWizardRefreshBtn" class="settings-action-btn primary" type="button">刷新模型</button>
         </div>
-      </div>
-    </div>
-
-    <div id="employeeOverviewModal" class="modal hidden legacy-workbench-modal" role="dialog" aria-modal="true" aria-labelledby="employeeOverviewTitle">
-      <div class="modal-card employee-overview-card">
-        <header class="legacy-workbench-head">
-          <div><div id="employeeOverviewTitle" class="legacy-workbench-title" data-i18n="staticExtra.workspace.main.employeeOverviewTitle">AI 员工总览</div><div class="legacy-workbench-subtitle" data-i18n="staticExtra.workspace.main.employeeOverviewDescription">查看项目中的 Agent、工作线与后台排程。</div></div>
-          <button id="closeEmployeeOverviewBtn" class="settings-close-btn" type="button" aria-label="关闭 AI 员工总览" data-i18n-aria-label="staticExtra.workspace.main.closeEmployeeOverview">×</button>
-        </header>
-        <div id="employeeOverviewBody" class="employee-overview-body"></div>
       </div>
     </div>
 
@@ -650,6 +658,6 @@
       </div>
     </div>
     <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
-    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-1-codex-import-open-1-terminal-actions-compact-1-users-panel-removed-1-remote-control-full-2-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-shared-api-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-1-provider-secrets-1-model-picker-1-navigation-state-2-agent-admin-removed-1-archive-1-switch-fix-1-provider-full-page-2-provider-placeholders-1-settings-icons-1-autoto-themes-1-boot-locale-1-mobile-viewport-1-i18n-shared-1-root-shortcut-removed-1-hidden-toggle-removed-1-project-context-1-standalone-conversation-1"></script>
+    <script src="/ui/app.js?v=white-shell-2-workspace-1-automation-1-spec-1-legacy-ui-1-settings-dock-1-rail-1-about-1-i18n-2-conversation-fig2-1-scroll-skills-1-market-layout-1-theme-stable-1-settings-copy-1-chat-flat-1-chat-transcript-1-native-codex-3-provider-console-1-compact-composer-5-custom-select-1-right-toolbar-1-sidebar-resize-2-permission-panel-1-mobile-header-composer-1-fast-mode-1-throughput-1-usage-history-1-workbench-2-rail-compact-1-message-editing-1-message-thread-1-mode-boundaries-1-settings-shadcn-1-folder-picker-remote-2-root-card-1-provider-model-discovery-1-conversation-switch-1-user-message-fit-1-plan-mode-1-background-tasks-2-remote-access-1-mobile-short-labels-1-task-toolbar-2-anthropic-accounts-1-provider-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-user-message-left-1-workbench-header-1-mobile-toolbar-right-3-icon-rail-2-codex-import-open-1-terminal-actions-compact-2-users-panel-removed-1-remote-control-full-2-about-brand-license-1-security-banner-hidden-1-workbench-title-edit-1-provider-create-page-2-codex-browser-login-1-shared-api-1-apple-theme-1-project-flat-1-simple-composer-1-settings-help-1-task-workspace-2-provider-secrets-1-model-picker-1-navigation-state-2-agent-admin-removed-1-archive-1-switch-fix-1-provider-full-page-2-provider-placeholders-1-settings-icons-1-autoto-themes-1-boot-locale-2-mobile-viewport-1-i18n-shared-1-root-shortcut-removed-1-hidden-toggle-removed-1-project-context-1-standalone-conversation-1-mobile-settings-compact-1-sidebar-width-first-paint-1-boot-dots-only-1-contextual-create-1-navigation-split-1-sidebar-wheel-1-overview-home-2-subagent-cards-1-tool-activity-collapse-1-settings-nav-flat-1-codex-usage-clean-1-shared-api-compact-1-model-sections-hidden-1-mobile-no-home-1-mobile-title-1-schedule-workspace-1"></script>
   </body>
 </html>

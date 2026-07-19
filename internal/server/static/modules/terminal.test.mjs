@@ -27,12 +27,10 @@ test("terminal toggle synchronizes the legacy header button ARIA state", () => {
     setAttribute(name, value) { this.attributes.set(name, value); },
   };
   const expand = { classList: classList() };
-  const composer = { classList: classList() };
   const elements = {
     appShell,
     toggleTerminalBtn: button,
     expandTerminalBtn: expand,
-    composerTerminalBtn: composer,
   };
   const previousDocument = globalThis.document;
   globalThis.document = {

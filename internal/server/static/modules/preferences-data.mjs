@@ -19,7 +19,6 @@ export const terminalPrefsKey = "autoto.terminal";
 export const regionalPrefsKey = "autoto.regional";
 export const chatDraftsKey = "autoto.chatDrafts";
 export const promptHistoryKey = "autoto.promptHistory";
-export const relayProtocolPrefsKey = "autoto.relayProtocol";
 export const primaryModePrefsKey = "autoto.ui.primaryMode";
 export const defaultPrimaryModePreference = "conversation";
 export const localPreferenceBackupKind = "autoto.local-preferences";
@@ -46,7 +45,6 @@ export const localPreferenceKeys = [
   regionalPrefsKey,
   chatDraftsKey,
   promptHistoryKey,
-  relayProtocolPrefsKey,
   primaryModePrefsKey,
 ];
 
@@ -95,7 +93,6 @@ export const localPreferenceBackupKeys = [
   { key: recentConversationsKey, labelKey: "recentConversations", type: "json" },
   { key: preferredModelKey, labelKey: "preferredModel", type: "string" },
   { key: modelVisibilityPrefsKey, labelKey: "modelVisibility", type: "json" },
-  { key: relayProtocolPrefsKey, labelKey: "relayProtocol", type: "string" },
   { key: primaryModePrefsKey, labelKey: "primaryMode", type: "string" },
 ].map((entry) => ({ ...entry, label: localPreferenceBackupLabel(entry) }));
 
@@ -104,7 +101,8 @@ export function localPreferenceBackupLabel(entry, locale = currentUILocale()) {
 }
 
 export function normalizePrimaryModePreference(value) {
-  return String(value || "").trim() === "workbench" ? "workbench" : defaultPrimaryModePreference;
+  const mode = String(value || "").trim();
+  return ["workbench", "schedules"].includes(mode) ? mode : defaultPrimaryModePreference;
 }
 
 export const defaultProfilePrefs = {

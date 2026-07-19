@@ -193,13 +193,8 @@ func ModelCapabilitiesFor(provider Provider, model string) ModelCapabilities {
 // NewProvider constructs a provider adapter from a normalized provider config.
 func NewProvider(cfg config.ProviderConfig) (Provider, error) {
 	providerType := strings.TrimSpace(cfg.Type)
-	if providerType == "openai" || providerType == "openai-compatible" || providerType == "anthropic" || providerType == "gemini-interactions" {
+	if providerType == "openai" || providerType == "openai-compatible" || providerType == "anthropic" || providerType == "gemini-interactions" || providerType == config.ProviderTypeCodex {
 		if err := validateProviderRuntimeConfig(cfg); err != nil {
-			return nil, err
-		}
-	}
-	if providerType == config.ProviderTypeCodex {
-		if err := validateProviderRuntimeIdentity(cfg); err != nil {
 			return nil, err
 		}
 	}

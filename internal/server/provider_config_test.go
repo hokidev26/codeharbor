@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +18,42 @@ import (
 	"autoto/internal/config"
 	"autoto/internal/providers"
 )
+
+func TestSettingsProviderResponseNeverExposesProxyUserinfo(t *testing.T) {
+	provider := config.ProviderConfig{
+		Name:     "relay",
+		Type:     "openai-compatible",
+		BaseURL:  "https://relay.example/v1",
+		Model:    "relay-model",
+		ProxyURL: "http://proxy-user:proxy-pass@127.0.0.1:7890",
+	}
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{provider}}}, nil, nil, nil, providers.NewRegistry())
+	response := app.settingsProviderResponse(context.Background(), provider)
+	if response.ProxyURL != "http://127.0.0.1:7890" || strings.Contains(response.ProxyURL, "proxy-user") || strings.Contains(response.ProxyURL, "proxy-pass") {
+		t.Fatalf("settings response exposed proxy userinfo: %+v", response)
+	}
+}
+
+func TestProviderHeadersKeepBlankOnlyForMatchingSavedName(t *testing.T) {
+	existing := config.ProviderConfig{
+		RequestHeaders:       []config.ProviderRequestHeader{{Name: "X-Saved", Value: "saved-secret"}},
+		RequestHeadersSource: "runtime",
+	}
+	matching := []providerRequestHeaderInput{{Name: "X-Saved", KeepExisting: true}}
+	headers, source, err := providerHeadersFromRequest(existing, &matching, true)
+	if err != nil || source != "runtime" || len(headers) != 1 || headers[0].Value != "saved-secret" {
+		t.Fatalf("matching saved header was not preserved: headers=%+v source=%q err=%v", headers, source, err)
+	}
+
+	renamed := []providerRequestHeaderInput{{Name: "X-Renamed", KeepExisting: true}}
+	if _, _, err := providerHeadersFromRequest(existing, &renamed, true); err == nil {
+		t.Fatal("renamed header reused a saved value without a new secret")
+	}
+	newBlank := []providerRequestHeaderInput{{Name: "X-New"}}
+	if err := validateProviderConfigRequest(providerConfigUpdateRequest{RequestHeaders: &newBlank}); err == nil {
+		t.Fatal("new header without a value was accepted")
+	}
+}
 
 func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +192,19 @@ func TestUpdateProviderConfigRejectsProviderRenameConflict(t *testing.T) {
 	}
 	if _, ok := app.providerConfig("relay"); !ok {
 		t.Fatal("rename conflict removed the original provider")
+	}
+
+	recorder = httptest.NewRecorder()
+	request = newTestRequest(http.MethodPut, "/api/providers/occupied/config", strings.NewReader(`{"name":"occupied","type":"openai-compatible","baseUrl":"http://127.0.0.1:9999/v1","model":"overwritten","createOnly":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected create-only conflict, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	stillOccupied, ok := app.providerConfig("occupied")
+	if !ok || stillOccupied.BaseURL != occupied.BaseURL || stillOccupied.Model != occupied.Model {
+		t.Fatalf("create-only conflict mutated existing provider: %+v", stillOccupied)
 	}
 }
 
@@ -777,6 +828,122 @@ func TestProviderTestsAllowOptionalAPIKey(t *testing.T) {
 	}
 }
 
+func TestProviderNetworkSettingsApplyToDiscoveryMessageTestAndRuntime(t *testing.T) {
+	const (
+		proxyUser   = "proxy-user"
+		proxyPass   = "proxy-pass"
+		tenantValue = "tenant-secret"
+		userAgent   = "Autoto Provider Integration/1.0"
+	)
+	var modelsCalls, messageCalls int
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Proxy-Authorization"); got != "Basic "+base64.StdEncoding.EncodeToString([]byte(proxyUser+":"+proxyPass)) {
+			t.Fatalf("unexpected proxy authorization %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Fatalf("unexpected user agent %q", got)
+		}
+		if got := r.Header.Get("X-Tenant"); got != tenantValue {
+			t.Fatalf("unexpected tenant header %q", got)
+		}
+		switch r.URL.Path {
+		case "/v1/models":
+			modelsCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"model-a"}]}`))
+		case "/v1/chat/completions":
+			messageCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+		default:
+			t.Fatalf("unexpected proxied path %s", r.URL.Path)
+		}
+	}))
+	defer proxy.Close()
+
+	provider := config.ProviderConfig{
+		Name:          "relay",
+		Type:          "openai-compatible",
+		BaseURL:       "http://127.0.0.1:65535/v1",
+		APIKey:        "runtime-key",
+		Model:         "model-a",
+		ProxyURL:      proxy.URL,
+		ProxyUsername: proxyUser,
+		ProxyPassword: proxyPass,
+		UserAgent:     userAgent,
+		RequestHeaders: []config.ProviderRequestHeader{{
+			Name:  "X-Tenant",
+			Value: tenantValue,
+		}},
+	}
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{provider}}}, nil, nil, nil, providers.NewRegistry())
+
+	discoveryBody := `{"name":"relay","type":"openai-compatible","baseUrl":"http://127.0.0.1:65535/v1","apiKey":"draft-key","model":"model-a","proxyUrl":"` + proxy.URL[:len("http://")] + proxyUser + `:` + proxyPass + `@` + strings.TrimPrefix(proxy.URL, "http://") + `","userAgent":"` + userAgent + `","requestHeaders":[{"name":"X-Tenant","value":"` + tenantValue + `"}]}`
+	discovery := httptest.NewRecorder()
+	discoveryRequest := newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(discoveryBody))
+	discoveryRequest.Header.Set("Content-Type", "application/json")
+	discoveryRequest.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(discovery, discoveryRequest)
+	if discovery.Code != http.StatusOK {
+		t.Fatalf("discovery failed: %d %s", discovery.Code, discovery.Body.String())
+	}
+	var discoveryResult providerTestResponse
+	if err := json.NewDecoder(discovery.Body).Decode(&discoveryResult); err != nil {
+		t.Fatal(err)
+	}
+	if !discoveryResult.Reachable || len(discoveryResult.Models) != 1 || discoveryResult.Models[0] != "model-a" {
+		t.Fatalf("unexpected discovery result: %+v", discoveryResult)
+	}
+
+	messageBody := strings.TrimSuffix(discoveryBody, "}") + `,"prompt":"reply"}`
+	message := httptest.NewRecorder()
+	messageRequest := newTestRequest(http.MethodPost, "/api/providers/test-message", strings.NewReader(messageBody))
+	messageRequest.Header.Set("Content-Type", "application/json")
+	messageRequest.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(message, messageRequest)
+	if message.Code != http.StatusOK {
+		t.Fatalf("message test failed: %d %s", message.Code, message.Body.String())
+	}
+	var messageResult providerMessageTestResponse
+	if err := json.NewDecoder(message.Body).Decode(&messageResult); err != nil {
+		t.Fatal(err)
+	}
+	if !messageResult.Success || messageResult.Output != "ok" {
+		t.Fatalf("unexpected message result: %+v", messageResult)
+	}
+
+	adapter, err := app.newRuntimeProvider(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := adapter.Generate(context.Background(), providers.GenerateRequest{Model: "model-a", Messages: []providers.Message{{Role: "user", Content: "runtime"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runtimeDone, runtimeError bool
+	for event := range events {
+		if event.Type == "done" {
+			runtimeDone = true
+		}
+		if event.Type == "error" {
+			runtimeError = true
+		}
+	}
+	if !runtimeDone || runtimeError {
+		t.Fatalf("runtime request did not complete: done=%v error=%v", runtimeDone, runtimeError)
+	}
+	if modelsCalls != 1 || messageCalls != 2 {
+		t.Fatalf("network settings were not shared across all paths: models=%d messages=%d", modelsCalls, messageCalls)
+	}
+	for _, body := range []string{discovery.Body.String(), message.Body.String()} {
+		for _, secret := range []string{proxyUser, proxyPass, tenantValue, "draft-key"} {
+			if strings.Contains(body, secret) {
+				t.Fatalf("provider response leaked %q: %s", secret, body)
+			}
+		}
+	}
+}
+
 func TestProviderMessageTestSendsPromptWithoutMutatingDraftProvider(t *testing.T) {
 	var requestBody struct {
 		Model    string `json:"model"`
@@ -870,15 +1037,15 @@ func TestProviderMessageTestRejectsMissingAPIKeyWithoutUpstreamCall(t *testing.T
 	}
 }
 
-func TestProviderDraftTestUsesExistingRuntimeKeyWithoutMutation(t *testing.T) {
-	var draftCalls int
+func TestProviderDraftTestDoesNotReuseExistingRuntimeKeyAcrossBinding(t *testing.T) {
+	var savedBindingCalls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/draft/v1/models" {
-			t.Fatalf("unexpected draft path %s", r.URL.Path)
+		if r.URL.Path != "/saved/v1/models" {
+			t.Fatalf("draft reached changed binding %s", r.URL.Path)
 		}
-		draftCalls++
+		savedBindingCalls++
 		if got := r.Header.Get("Authorization"); got != "Bearer runtime-only-key" {
-			t.Fatalf("draft did not reuse in-memory key: %q", got)
+			t.Fatalf("same-binding draft did not reuse in-memory key: %q", got)
 		}
 		_, _ = w.Write([]byte(`{"data":[{"id":"draft-model"}]}`))
 	}))
@@ -907,11 +1074,28 @@ func TestProviderDraftTestUsesExistingRuntimeKeyWithoutMutation(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Configured || !result.Reachable || result.ErrorCode != "" {
-		t.Fatalf("draft test with an existing runtime key did not run normally: %+v", result)
+	if result.Configured || result.Reachable || result.ErrorCode != "not_configured" {
+		t.Fatalf("changed-binding draft unexpectedly reused an existing runtime key: %+v", result)
 	}
-	if draftCalls != 1 {
-		t.Fatalf("expected one draft call, got %d", draftCalls)
+	if savedBindingCalls != 0 {
+		t.Fatalf("changed-binding draft reached upstream %d times", savedBindingCalls)
+	}
+
+	sameBindingPayload := `{"name":"relay","type":"openai-compatible","baseUrl":"` + upstream.URL + `/saved/v1","model":"draft-model"}`
+	recorder = httptest.NewRecorder()
+	request = newTestRequest(http.MethodPost, "/api/providers/test", strings.NewReader(sameBindingPayload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(localTokenHeader, app.localToken)
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("same-binding draft test failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	result = providerTestResponse{}
+	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Configured || !result.Reachable || result.ErrorCode != "" || savedBindingCalls != 1 {
+		t.Fatalf("same-binding draft did not reuse the existing runtime key: result=%+v calls=%d", result, savedBindingCalls)
 	}
 	stored, ok := app.providerConfig("relay")
 	if !ok || stored.BaseURL != existing.BaseURL || stored.Model != existing.Model || stored.APIKey != "runtime-only-key" {
@@ -942,8 +1126,8 @@ func TestProviderDraftTestUsesExistingRuntimeKeyWithoutMutation(t *testing.T) {
 			t.Fatalf("draft validation leaked secret: %s", recorder.Body.String())
 		}
 	}
-	if draftCalls != 1 {
-		t.Fatalf("rejected drafts reached upstream %d times", draftCalls)
+	if savedBindingCalls != 1 {
+		t.Fatalf("rejected drafts reached upstream; saved-binding calls=%d", savedBindingCalls)
 	}
 }
 

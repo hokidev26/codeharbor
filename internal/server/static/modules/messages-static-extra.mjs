@@ -65,9 +65,6 @@ const messagesStaticExtra = Object.freeze({
         main: {
           conversationDetails: "会话详情",
           closeConversationDetails: "关闭会话详情",
-          employeeOverviewTitle: "AI 员工总览",
-          employeeOverviewDescription: "查看项目中的 Agent、工作线与后台排程。",
-          closeEmployeeOverview: "关闭 AI 员工总览",
         },
         spec: {
           title: "Dynamic Spec",
@@ -146,9 +143,6 @@ const messagesStaticExtra = Object.freeze({
         main: {
           conversationDetails: "對話詳細資料",
           closeConversationDetails: "關閉對話詳細資料",
-          employeeOverviewTitle: "AI 員工總覽",
-          employeeOverviewDescription: "查看專案中的 Agent、工作線與背景排程。",
-          closeEmployeeOverview: "關閉 AI 員工總覽",
         },
         spec: {
           title: "Dynamic Spec",
@@ -227,9 +221,6 @@ const messagesStaticExtra = Object.freeze({
         main: {
           conversationDetails: "Conversation details",
           closeConversationDetails: "Close conversation details",
-          employeeOverviewTitle: "AI employee overview",
-          employeeOverviewDescription: "Review agents, worklines, and background schedules in this project.",
-          closeEmployeeOverview: "Close AI employee overview",
         },
         spec: {
           title: "Dynamic Spec",

@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
@@ -355,6 +356,86 @@ func TestProviderHTTPClientValidatesThenRejectsRedirects(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("provider redirect was followed despite rejection: %d", requests)
+	}
+}
+
+func TestConfiguredProviderHTTPClientAppliesProxyCredentialsAndHeaders(t *testing.T) {
+	var calls int
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.Header.Get("Proxy-Authorization"); got != "Basic "+base64.StdEncoding.EncodeToString([]byte("proxy-user:proxy-pass")) {
+			t.Fatalf("unexpected proxy authorization %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "Autoto Provider Test/1.0" {
+			t.Fatalf("unexpected user agent %q", got)
+		}
+		if got := r.Header.Get("X-Tenant"); got != "tenant-secret" {
+			t.Fatalf("unexpected custom header %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer configured-override" {
+			t.Fatalf("configured header did not override request default: %q", got)
+		}
+		if r.URL.String() != "http://127.0.0.1:65535/v1/models" {
+			t.Fatalf("unexpected proxied target %q", r.URL.String())
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer proxy.Close()
+
+	client, err := NewConfiguredProviderHTTPClient(2*time.Second, ProviderHTTPConfig{
+		ProxyURL:      proxy.URL,
+		ProxyUsername: "proxy-user",
+		ProxyPassword: "proxy-pass",
+		UserAgent:     "Autoto Provider Test/1.0",
+		Headers: http.Header{
+			"X-Tenant":      []string{"tenant-secret"},
+			"Authorization": []string{"Bearer configured-override"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:65535/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer sdk-default")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent || calls != 1 {
+		t.Fatalf("unexpected proxy result: status=%d calls=%d", response.StatusCode, calls)
+	}
+}
+
+func TestConfiguredProviderHTTPClientScopesTLSVerification(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	strict, err := NewConfiguredProviderHTTPClient(2*time.Second, ProviderHTTPConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response, err := strict.Get(server.URL); err == nil {
+		response.Body.Close()
+		t.Fatal("strict provider client accepted an untrusted certificate")
+	}
+
+	insecure, err := NewConfiguredProviderHTTPClient(2*time.Second, ProviderHTTPConfig{InsecureSkipTLSVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := insecure.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected insecure TLS status %d", response.StatusCode)
 	}
 }
 

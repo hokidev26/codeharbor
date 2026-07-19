@@ -13,7 +13,7 @@ go run ./cmd/autoto
 Open:
 
 ```text
-http://localhost:7788
+http://localhost:16888
 ```
 
 The Go module is `autoto`. `cmd/codeharbor` is retained only as a legacy command shim; use `cmd/autoto` for development, tests, examples, and new automation.
