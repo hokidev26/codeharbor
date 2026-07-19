@@ -115,6 +115,29 @@ func publicLiveSnapshotAgent(agent db.Agent) db.Agent {
 	return agent
 }
 
+func publicRunErrorText(value string) string {
+	value, _ = truncateActivityString(agentpkg.RedactToolActivityText(value), activityErrorMessageBytes)
+	return value
+}
+
+func publicRunSummary(summary db.RunSummary) db.RunSummary {
+	summary.Run.ErrorMessage = publicRunErrorText(summary.Run.ErrorMessage)
+	summary.Run.CheckpointError = publicRunErrorText(summary.Run.CheckpointError)
+	for index := range summary.ToolCalls {
+		summary.ToolCalls[index].ErrorMessage = publicRunErrorText(summary.ToolCalls[index].ErrorMessage)
+	}
+	return summary
+}
+
+func publicActiveRunSummary(summary db.ActiveRunSummary) db.ActiveRunSummary {
+	summary.Run.ErrorMessage = publicRunErrorText(summary.Run.ErrorMessage)
+	summary.Run.CheckpointError = publicRunErrorText(summary.Run.CheckpointError)
+	for index := range summary.ToolCalls {
+		summary.ToolCalls[index].ErrorMessage = publicRunErrorText(summary.ToolCalls[index].ErrorMessage)
+	}
+	return summary
+}
+
 func (s *Server) liveSnapshotChildrenForRequest(r *http.Request, children []db.Agent) ([]db.Agent, error) {
 	out := make([]db.Agent, 0, len(children))
 	if s == nil || s.store == nil {
@@ -535,6 +558,10 @@ func (s *Server) updateAgentModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "agent store is unavailable")
 		return
 	}
+	if _, _, err := s.resolveExecutableModel(model); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
 	unlock := s.lockAgentMutation(agentID)
 	defer unlock()
@@ -696,7 +723,7 @@ func (s *Server) getActiveRunSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, summary)
+	writeJSON(w, http.StatusOK, publicActiveRunSummary(summary))
 }
 
 func (s *Server) getRunSummary(w http.ResponseWriter, r *http.Request) {
@@ -709,7 +736,7 @@ func (s *Server) getRunSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, summary)
+	writeJSON(w, http.StatusOK, publicRunSummary(summary))
 }
 
 const (
@@ -1231,6 +1258,66 @@ type postMessageRequest struct {
 	Text      string `json:"text"`
 	CreatedBy string `json:"createdBy"`
 	Mode      string `json:"mode,omitempty"`
+	Context   string `json:"context,omitempty"`
+}
+
+func messageContextPermissionModeCap(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "", "project":
+		return "", nil
+	case "conversation":
+		return "readOnly", nil
+	default:
+		return "", errors.New("context must be conversation or project")
+	}
+}
+
+func messageContextRunSource(value string) string {
+	if strings.TrimSpace(value) == "conversation" {
+		return db.RunSourceConversation
+	}
+	return db.RunSourceManual
+}
+
+func (s *Server) messageRunBoundary(ctx context.Context, agentID, clientContext string) (string, string, error) {
+	if s == nil || s.store == nil {
+		return "", "", errors.New("agent store is unavailable")
+	}
+	flowMode, err := s.store.GetAgentProjectFlowMode(ctx, agentID)
+	if err != nil {
+		return "", "", err
+	}
+	if flowMode == db.ProjectFlowModeConversation {
+		return "readOnly", db.RunSourceConversation, nil
+	}
+	contextCap, err := messageContextPermissionModeCap(clientContext)
+	if err != nil {
+		return "", "", err
+	}
+	return contextCap, messageContextRunSource(clientContext), nil
+}
+
+func statusFromMessageBoundaryError(err error) int {
+	if db.IsNotFound(err) {
+		return http.StatusNotFound
+	}
+	if strings.Contains(err.Error(), "context must be") {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
+func narrowPermissionModeCaps(values ...string) string {
+	result := ""
+	for _, value := range values {
+		switch strings.TrimSpace(value) {
+		case "readOnly":
+			return "readOnly"
+		case "acceptEdits":
+			result = "acceptEdits"
+		}
+	}
+	return result
 }
 
 func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
@@ -1252,7 +1339,16 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentID := chi.URLParam(r, "id")
+	contextCap, runSource, err := s.messageRunBoundary(r.Context(), agentID, req.Context)
+	if err != nil {
+		writeError(w, statusFromMessageBoundaryError(err), err.Error())
+		return
+	}
 	if goal, ok := parseGoalCommand(req.Text); ok {
+		if runSource == db.RunSourceConversation {
+			writeError(w, http.StatusForbidden, "project context is required for goal commands")
+			return
+		}
 		s.createGoalResponse(w, r, agentID, goal)
 		return
 	}
@@ -1268,12 +1364,16 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.CreatedBy = ""
 	}
-	mode, err := s.reviewModeForMessage(r.Context(), agentID, req.Mode)
-	if err != nil {
-		writeReviewServiceError(w, err)
-		return
+	mode := db.RunExecutionModeExecute
+	if runSource != db.RunSourceConversation {
+		mode, err = s.reviewModeForMessage(r.Context(), agentID, req.Mode)
+		if err != nil {
+			writeReviewServiceError(w, err)
+			return
+		}
 	}
-	msg, err := s.submitReviewRun(r.Context(), agentID, req.Text, req.CreatedBy, mode, s.remotePermissionModeCapForRequest(r), nil)
+	permissionModeCap := narrowPermissionModeCaps(contextCap, s.remotePermissionModeCapForRequest(r))
+	msg, err := s.submitReviewRunWithSource(r.Context(), agentID, req.Text, req.CreatedBy, mode, permissionModeCap, runSource, nil)
 	if err != nil {
 		writeReviewServiceError(w, err)
 		return
@@ -1298,6 +1398,11 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentID := chi.URLParam(r, "id")
+	contextCap, runSource, err := s.messageRunBoundary(r.Context(), agentID, r.FormValue("context"))
+	if err != nil {
+		writeError(w, statusFromMessageBoundaryError(err), err.Error())
+		return
+	}
 	if user, ok, err := s.currentUser(r); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1306,12 +1411,16 @@ func (s *Server) postMultipartMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		createdBy = ""
 	}
-	mode, err := s.reviewModeForMessage(r.Context(), agentID, r.FormValue("mode"))
-	if err != nil {
-		writeReviewServiceError(w, err)
-		return
+	mode := db.RunExecutionModeExecute
+	if runSource != db.RunSourceConversation {
+		mode, err = s.reviewModeForMessage(r.Context(), agentID, r.FormValue("mode"))
+		if err != nil {
+			writeReviewServiceError(w, err)
+			return
+		}
 	}
-	msg, err := s.submitReviewRun(r.Context(), agentID, text, createdBy, mode, s.remotePermissionModeCapForRequest(r), attachments)
+	permissionModeCap := narrowPermissionModeCaps(contextCap, s.remotePermissionModeCapForRequest(r))
+	msg, err := s.submitReviewRunWithSource(r.Context(), agentID, text, createdBy, mode, permissionModeCap, runSource, attachments)
 	if err != nil {
 		writeReviewServiceError(w, err)
 		return

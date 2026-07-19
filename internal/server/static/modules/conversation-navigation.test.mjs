@@ -83,6 +83,56 @@ test("normalizeNavigationPayload normalizes the backend contract and target ids"
   assert.equal(normalized.conversations[0].targetId, createNavigationTargetId({ projectId: "p1", worklineId: "w1", agentId: "a1" }));
 });
 
+test("standalone conversations stay out of project synthesis and project groups", () => {
+  const mixed = {
+    projects: payload.projects,
+    conversations: [
+      ...payload.conversations,
+      {
+        context: "conversation",
+        projectFlowMode: false,
+        agentId: "standalone-1",
+        agentTitle: "Independent chat",
+        agentStatus: "idle",
+        model: "codex:gpt-5.5",
+        messageCount: 2,
+        lastActivityAt: "2026-01-06T00:00:00Z",
+      },
+      {
+        projectId: "hidden-project",
+        projectName: "Must stay hidden",
+        projectPath: "/hidden/project",
+        worklineId: "hidden-workline",
+        worklineTitle: "Hidden",
+        agentId: "standalone-2",
+        agentTitle: "Backend-marked standalone",
+        context: "conversation",
+        projectFlowMode: false,
+      },
+    ],
+  };
+  const normalized = normalizeNavigationPayload(mixed);
+  assert.deepEqual(normalized.conversations.filter((item) => item.standalone).map((item) => item.agentId), ["standalone-1", "standalone-2"]);
+  assert.equal(normalized.projects.some((item) => item.id === "hidden-project"), false);
+  assert.deepEqual(normalized.conversations.find((item) => item.agentId === "standalone-1").targetId, "::::standalone-1");
+
+  const conversations = buildNavigationView(mixed, { mode: "conversations" });
+  assert.deepEqual(conversations.conversations.map((item) => item.agentId), ["standalone-1", "standalone-2"]);
+  assert.deepEqual(conversations.groups, []);
+  const projects = buildNavigationView(mixed, { mode: "projects" });
+  assert.equal(projects.projects.some((item) => item.id === "hidden-project"), false);
+  assert.equal(projects.groups.flatMap((group) => group.conversations).some((item) => item.standalone), false);
+
+  const all = buildNavigationView(mixed, { mode: "all" });
+  const html = renderNavigationHTML(all);
+  assert.equal((html.match(/data-navigation-target="::::standalone-1"/g) || []).length, 1);
+  assert.equal((html.match(/data-navigation-target="hidden-project::hidden-workline::standalone-2"/g) || []).length, 1);
+  assert.equal((html.match(/data-navigation-target="p1::w1::a1"/g) || []).length, 1);
+  assert.match(html, /data-standalone-conversation="true"/);
+  assert.match(html, /data-navigation-context="conversation"/);
+  assert.match(html, /data-navigation-context="project"/);
+});
+
 test("navigation preserves pin and archive state and exposes action triggers", () => {
   const statePayload = {
     projects: [
@@ -103,7 +153,7 @@ test("navigation preserves pin and archive state and exposes action triggers", (
   assert.deepEqual(normalized.conversations.map((item) => item.agentId), ["a2", "a1", "a4", "a3"]);
   assert.equal(normalized.conversations[0].agentPinned, true);
   assert.equal(normalized.conversations[3].agentArchivedAt, "2026-01-04T00:00:00Z");
-  assert.deepEqual(buildNavigationView(statePayload, { mode: "conversations" }).conversations.map((item) => item.agentId), ["a2", "a4", "a1", "a3"]);
+  assert.deepEqual(buildNavigationView(statePayload, { mode: "conversations" }).conversations, []);
 
   const html = renderNavigationHTML(buildNavigationView(statePayload, { mode: "all" }));
   assert.match(html, /data-navigation-kind="project" data-navigation-id="p1"/);
@@ -168,6 +218,11 @@ test("project groups contain every conversation once and preserve recent orderin
   assert.equal((html.match(/data-navigation-target="p1::w1::a1"/g) || []).length, 1);
   assert.equal((html.match(/data-navigation-target="p1::w2::a2"/g) || []).length, 1);
   assert.match(html, /navigation-conversation-row nested active/);
+  assert.doesNotMatch(html, /navigation-project-row active/);
+  const projectContextHTML = renderNavigationHTML(all, { activeProjectId: "p1", activeAgentId: "a2", activeSelectionKind: "project" });
+  assert.match(projectContextHTML, /navigation-project-row active/);
+  assert.doesNotMatch(projectContextHTML, /navigation-conversation-row nested active/);
+  assert.match(projectContextHTML, /data-navigation-context="project"/);
   assert.match(html, /navigation-project-title"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span><\/span>/);
   assert.doesNotMatch(html, /project-agent-count|AGENT 2/);
   assert.match(html, /navigation-conversation-row nested[^\"]*status-idle/);
@@ -195,7 +250,7 @@ test("buildNavigationView supports all, projects, and conversations modes", () =
   assert.doesNotMatch(projectsHTML, /data-navigation-project-group|data-project-conversations|data-navigation-target|project-agent-count/);
 
   const conversations = buildNavigationView(payload, { mode: "conversations" });
-  assert.deepEqual(conversations.conversations.map((item) => item.agentId), ["a1", "a3", "a2"]);
+  assert.deepEqual(conversations.conversations, []);
   assert.deepEqual(conversations.projects, []);
 });
 
@@ -220,9 +275,13 @@ test("task navigation stays project-level and exposes aggregate counts", () => {
 
 test("navigation search matches project path, workline, agent title, and model", () => {
   assert.deepEqual(buildNavigationView(payload, { mode: "projects", query: "/work/beta" }).projects.map((item) => item.id), ["p2"]);
-  assert.deepEqual(buildNavigationView(payload, { mode: "conversations", query: "Feature login" }).conversations.map((item) => item.agentId), ["a1"]);
-  assert.deepEqual(buildNavigationView(payload, { mode: "conversations", query: "Writer" }).conversations.map((item) => item.agentId), ["a2"]);
-  assert.deepEqual(buildNavigationView(payload, { mode: "conversations", query: "gemini-pro" }).conversations.map((item) => item.agentId), ["a3"]);
+
+  const feature = buildNavigationView(payload, { mode: "all", query: "Feature login" });
+  assert.deepEqual(feature.groups.flatMap((group) => group.conversations).map((item) => item.agentId), ["a1"]);
+  const writer = buildNavigationView(payload, { mode: "all", query: "Writer" });
+  assert.deepEqual(writer.groups.flatMap((group) => group.conversations).map((item) => item.agentId), ["a2"]);
+  const gemini = buildNavigationView(payload, { mode: "all", query: "gemini-pro" });
+  assert.deepEqual(gemini.groups.flatMap((group) => group.conversations).map((item) => item.agentId), ["a3"]);
 
   const grouped = buildNavigationView(payload, { mode: "all", query: "Docs" });
   assert.equal(grouped.groups.length, 1);

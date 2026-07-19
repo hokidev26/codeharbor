@@ -36,6 +36,22 @@ export function reasoningEffortValuesForCapabilities(capabilities = {}) {
   return source.reasoningEffort === true ? [...defaultReasoningEffortValues] : ["auto"];
 }
 
+export function reasoningEffortValuesForModel(provider, modelValue) {
+  const value = String(modelValue || "").trim();
+  const separator = value.indexOf(":");
+  const providerName = separator >= 0 ? value.slice(0, separator).trim() : String(provider?.name || "").trim();
+  const model = separator >= 0 ? value.slice(separator + 1).trim() : value;
+  const modelCapabilities = provider?.modelCapabilities && typeof provider.modelCapabilities === "object"
+    ? provider.modelCapabilities[model]
+    : null;
+  const hasModelReasoningCapabilities = Boolean(modelCapabilities && [
+    "reasoningEffort", "reasoningEfforts", "reasoningEffortValues", "effortValues",
+  ].some((key) => Object.hasOwn(modelCapabilities, key)));
+  if (hasModelReasoningCapabilities) return reasoningEffortValuesForCapabilities(modelCapabilities);
+  if (providerName === "codex" && model === "gpt-5.5") return [...knownReasoningEffortValues];
+  return reasoningEffortValuesForCapabilities(provider?.capabilities || {});
+}
+
 export function fastModeSupportedForModel(provider, modelValue) {
   const value = String(modelValue || "").trim();
   const separator = value.indexOf(":");
@@ -319,7 +335,7 @@ export function createChatComposerController({
 
   function reasoningEffortValues(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
     const provider = currentProviderConfig?.(modelValue) || null;
-    return reasoningEffortValuesForCapabilities(provider?.capabilities || {});
+    return reasoningEffortValuesForModel(provider, modelValue);
   }
 
   function currentReasoningEffort(modelValue) {
@@ -650,7 +666,8 @@ export function createChatComposerController({
     const draftKey = currentChatDraftKey();
     const input = $("messageText");
     const text = input.value.trim();
-    const mode = messageModeFor(agentId);
+    const context = state.navigationSelectionKind === "project" ? "project" : "conversation";
+    const mode = context === "project" ? messageModeFor(agentId) : "execute";
     const attachments = [...(state.pendingAttachments || [])];
     if (!text && !attachments.length) return;
     if (!isCurrentModelConfigured()) {
@@ -666,6 +683,7 @@ export function createChatComposerController({
         const form = new FormData();
         form.append("text", text);
         form.append("mode", mode);
+        form.append("context", context);
         attachments.forEach((item) => form.append("files", item.file, item.file?.name || "attachment"));
         accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
@@ -674,7 +692,7 @@ export function createChatComposerController({
       } else {
         accepted = await request(`/api/agents/${agentId}/messages`, {
           method: "POST",
-          body: JSON.stringify({ text, mode }),
+          body: JSON.stringify({ text, mode, context }),
         });
       }
       await onMessageAccepted?.(accepted, agentId);

@@ -50,7 +50,7 @@ func TestRemoteLoginCopyForLocale(t *testing.T) {
 			if copy.LanguageTag != test.languageTag || copy.PageTitle != test.pageTitle || copy.PasswordLabel != test.passwordText || copy.Footer != test.footer {
 				t.Fatalf("unexpected copy for %q: %#v", test.locale, copy)
 			}
-			if copy.RestrictedPolicyTitle == "" || copy.FullPolicyTitle == "" || copy.SubmitLabel == "" || copy.DisabledSubmitLabel == "" {
+			if copy.RestrictedPolicyTitle == "" || copy.FullPolicyTitle == "" || copy.SubmitLabel == "" || copy.DisabledSubmitLabel == "" || copy.HTTPSRequiredMessage == "" || copy.CrossSiteDeniedMessage == "" || copy.FormUnreadableMessage == "" || copy.IncorrectPasswordMessage == "" || copy.SessionFailedMessage == "" || copy.LockRetrySoonMessage == "" || copy.LockRetryMinutesMessage == "" {
 				t.Fatalf("copy for %q is incomplete: %#v", test.locale, copy)
 			}
 		})

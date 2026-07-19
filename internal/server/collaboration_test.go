@@ -388,6 +388,13 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	priorRun, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, TriggerMessageID: source.ID, Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignMessageRun(ctx, agent.ID, source.ID, priorRun.ID); err != nil {
+		t.Fatal(err)
+	}
 	other, err := store.AddMessageWithAttachments(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "other"}, []db.Attachment{{Filename: "other.txt", MIMEType: "text/plain", Kind: "text", SizeBytes: 5, Data: []byte("other")}})
 	if err != nil {
 		t.Fatal(err)
@@ -405,6 +412,9 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 	}
 	keepJSON, _ := json.Marshal([]string{source.Attachments[0].ID})
 	if err := writer.WriteField("keepAttachmentIds", string(keepJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("context", "conversation"); err != nil {
 		t.Fatal(err)
 	}
 	part, err := writer.CreateFormFile("files", "new.txt")
@@ -431,6 +441,16 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 	if correction.CorrectionOfMessageID != source.ID || correction.RunID == "" || len(correction.Attachments) != 2 {
 		t.Fatalf("unexpected correction response: %+v", correction)
 	}
+	correctionRun, err := store.GetRun(ctx, agent.ID, correction.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correctionRun.Source != db.RunSourceConversation || correctionRun.PermissionModeCap != "readOnly" || correctionRun.ExecutionMode != db.RunExecutionModeExecute || correctionRun.CheckpointState != db.RunCheckpointNone {
+		t.Fatalf("conversation correction escaped the chat-only boundary: %+v", correctionRun)
+	}
+	if correctionRun.ExecutionGeneration <= priorRun.ExecutionGeneration {
+		t.Fatalf("conversation correction did not receive a fresh execution generation: prior=%+v correction=%+v", priorRun, correctionRun)
+	}
 	all, err := store.ListMessagesWithAttachmentData(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -455,6 +475,55 @@ func TestCorrectionCopiesAndAddsAttachmentsAndRejectsCrossMessageAttachment(t *t
 	app.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected cross-message attachment rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	waitForAgentIdle(t, store, agent.ID)
+}
+
+func TestStandaloneCorrectionForcesConversationSourceDespiteProjectContext(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "standalone-correction.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateStandaloneConversation(ctx, "Standalone", "fake:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.AddMessage(ctx, db.Message{AgentID: agent.ID, Role: "user", ContentText: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorRun, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, TriggerMessageID: source.ID, Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignMessageRun(ctx, agent.ID, source.ID, priorRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(attachmentTestProvider{})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, nil, hub, config.AgentConfig{})
+	app := New(config.Config{}, store, runner, hub, registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/agents/"+agent.ID+"/messages/"+source.ID+"/corrections", strings.NewReader(`{"text":"corrected","context":"project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected correction 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var correction db.Message
+	if err := json.NewDecoder(recorder.Body).Decode(&correction); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, agent.ID, correction.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Source != db.RunSourceConversation || run.PermissionModeCap != "readOnly" || run.ExecutionMode != db.RunExecutionModeExecute || run.CheckpointState != db.RunCheckpointNone {
+		t.Fatalf("standalone correction escaped conversation boundary: %+v", run)
 	}
 	waitForAgentIdle(t, store, agent.ID)
 }

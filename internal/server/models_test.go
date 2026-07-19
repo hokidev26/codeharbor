@@ -81,6 +81,55 @@ func TestCreateProjectUsesRequestedModel(t *testing.T) {
 	}
 }
 
+func TestCreateStandaloneConversationUsesExecutableDefaultModel(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "conversation-api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	registry := providers.NewRegistry()
+	registry.Register(fakeModelProvider{name: "ready"})
+	app := New(config.Config{
+		Agent:     config.AgentConfig{DefaultModel: "ready:chat"},
+		Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{Name: "ready", Type: "openai-compatible", APIKeyOptional: true}}},
+	}, store, nil, nil, registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var created struct {
+		Project  db.Project  `json:"project"`
+		Workline db.Workline `json:"workline"`
+		Agent    db.Agent    `json:"agent"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Project.FlowMode != db.ProjectFlowModeConversation || created.Project.GitPath != "" || created.Workline.WorktreePath != "" || created.Agent.CWD != "" || created.Agent.PermissionMode != "readOnly" || created.Agent.Model != "ready:chat" || created.Agent.Title != "New conversation" {
+		t.Fatalf("unexpected standalone conversation response: %+v", created)
+	}
+
+	failed := httptest.NewRecorder()
+	badRequest := newTestRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{"title":"Bad","model":"missing:model"}`))
+	badRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(failed, badRequest)
+	if failed.Code != http.StatusBadRequest {
+		t.Fatalf("expected unregistered model rejection, got %d: %s", failed.Code, failed.Body.String())
+	}
+	var projectCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&projectCount); err != nil {
+		t.Fatal(err)
+	}
+	if projectCount != 1 {
+		t.Fatalf("rejected conversation request created partial rows: project count=%d", projectCount)
+	}
+}
+
 func TestAgentModelUpdateKeepsOnlyTargetSupportedReasoningEffort(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -95,7 +144,10 @@ func TestAgentModelUpdateKeepsOnlyTargetSupportedReasoningEffort(t *testing.T) {
 	registry := providers.NewRegistry()
 	registry.Register(fakeModelProvider{name: "reasoning", capabilities: providers.Capabilities{ReasoningEfforts: []string{"low", "medium", "high", "xhigh"}}})
 	registry.Register(fakeModelProvider{name: "basic", capabilities: providers.Capabilities{}})
-	app := New(config.Config{}, store, nil, nil, registry)
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{
+		{Name: "reasoning", Type: "openai-compatible", APIKeyOptional: true},
+		{Name: "basic", Type: "openai-compatible", APIKeyOptional: true},
+	}}}, store, nil, nil, registry)
 
 	patch := func(path, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
@@ -154,7 +206,10 @@ func TestConcurrentAgentModelAndReasoningPatchesRemainCapabilitySafe(t *testing.
 	registry := providers.NewRegistry()
 	registry.Register(fakeModelProvider{name: "reasoning", capabilities: providers.Capabilities{ReasoningEffort: true}})
 	registry.Register(fakeModelProvider{name: "basic", capabilities: providers.Capabilities{}})
-	app := New(config.Config{}, store, nil, nil, registry)
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{
+		{Name: "reasoning", Type: "openai-compatible", APIKeyOptional: true},
+		{Name: "basic", Type: "openai-compatible", APIKeyOptional: true},
+	}}}, store, nil, nil, registry)
 
 	start := make(chan struct{})
 	var group sync.WaitGroup
@@ -306,6 +361,73 @@ func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *
 	}
 	if len(settings.Providers) != 1 || settings.Providers[0].Enabled || settings.Providers[0].Origin != config.ProviderOriginCustom {
 		t.Fatalf("settings did not expose disabled custom provider: %+v", settings.Providers)
+	}
+}
+
+func TestModelsRouteMarksRuntimeRegistrationSeparatelyFromSettingsMetadata(t *testing.T) {
+	registry := providers.NewRegistry()
+	registry.Register(fakeModelProvider{name: "ready", models: []string{"chat"}})
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{
+		{Name: "ready", Type: "openai-compatible", Model: "chat", APIKeyOptional: true},
+		{Name: "metadata-only", Type: "openai-compatible", Model: "saved", APIKeyOptional: true},
+	}}}, nil, nil, nil, registry)
+
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/models", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body modelsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]modelProviderResponse, len(body.Providers))
+	for _, provider := range body.Providers {
+		byName[provider.Name] = provider
+	}
+	if ready := byName["ready"]; !ready.Registered || !ready.RuntimeAvailable || !ready.Configured {
+		t.Fatalf("registered configured provider was not runtime available: %+v", ready)
+	}
+	if metadata := byName["metadata-only"]; metadata.Registered || metadata.RuntimeAvailable || !metadata.Configured || len(metadata.Models) != 1 || metadata.Models[0] != "saved" {
+		t.Fatalf("unregistered settings metadata was not retained safely: %+v", metadata)
+	}
+}
+
+func TestAgentModelUpdateRejectsUnregisteredAndUnconfiguredProviders(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "model-validation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "ready:chat", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(fakeModelProvider{name: "ready"})
+	registry.Register(fakeModelProvider{name: "unconfigured"})
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{
+		{Name: "ready", Type: "openai-compatible", APIKeyOptional: true},
+		{Name: "unconfigured", Type: "openai-compatible"},
+		{Name: "metadata-only", Type: "openai-compatible", APIKeyOptional: true},
+	}}}, store, nil, nil, registry)
+
+	for _, model := range []string{"metadata-only:saved", "unconfigured:chat"} {
+		recorder := httptest.NewRecorder()
+		request := newTestRequest(http.MethodPatch, "/api/agents/"+agent.ID+"/model", strings.NewReader(`{"model":"`+model+`"}`))
+		request.Header.Set("Content-Type", "application/json")
+		app.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("expected %s to be rejected, got %d: %s", model, recorder.Code, recorder.Body.String())
+		}
+	}
+	stored, err := store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Model != "ready:chat" {
+		t.Fatalf("rejected model update mutated the agent: %+v", stored)
 	}
 }
 

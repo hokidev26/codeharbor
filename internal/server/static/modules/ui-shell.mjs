@@ -96,6 +96,8 @@ export function createUIShellController({
   translate = (key) => key,
 } = {}) {
   let settingsDialogFocusReturn = null;
+  const mobileViewport = () => window.matchMedia?.("(max-width: 767px)")?.matches
+    ?? (globalThis.innerWidth || document.documentElement.clientWidth) <= 767;
 
   function isVisibleDialog(node) {
     if (!node || node.classList?.contains("hidden") || node.getAttribute?.("aria-hidden") === "true" || node.closest?.("[hidden], .hidden, [aria-hidden=\"true\"]")) return false;
@@ -194,9 +196,9 @@ export function createUIShellController({
     const path = trigger.dataset.openDirectoryShortcut === "current"
       ? (state.agent?.cwd || state.project?.gitPath || "")
       : "";
-    const mobileViewport = window.matchMedia?.("(max-width: 760px)")?.matches;
+    const isMobileViewport = mobileViewport();
     if (document.body.classList.contains("mobile-sidebar-open")) closeMobileSidebar();
-    openDirectoryChooser(path, { trigger, preferNative: !mobileViewport }).catch(showError);
+    openDirectoryChooser(path, { trigger, preferNative: !isMobileViewport }).catch(showError);
   }
 
   function handleGlobalEscape(event) {
@@ -375,8 +377,6 @@ export function createUIShellController({
       return binding;
     }).filter(({ select }) => select);
 
-    const mobileViewport = () => window.matchMedia?.("(max-width: 767px)")?.matches
-      ?? (globalThis.innerWidth || document.documentElement.clientWidth) <= 767;
     const usesMobileSheet = (binding) => mobileViewport()
       && ["modelSelect", "reasoningEffort"].includes(binding.select.id);
 

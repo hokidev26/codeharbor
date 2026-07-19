@@ -311,6 +311,106 @@ func (planModeTestProvider) Generate(_ context.Context, request providers.Genera
 	return out, nil
 }
 
+func TestConversationMessageContextFreezesReadOnlyRunCap(t *testing.T) {
+	store, _, _, createdAgent := newReviewAPITestServer(t)
+	defer store.Close()
+	registry := providers.NewRegistry()
+	registry.Register(planModeTestProvider{})
+	toolRegistry := tools.NewRegistry()
+	tools.RegisterCore(toolRegistry)
+	runner := agentpkg.NewRunner(store, registry, toolRegistry, agentpkg.NewHub(), config.AgentConfig{ReviewModel: "fake:review", MaxTurns: 2})
+	app := New(config.Config{Agent: config.AgentConfig{ReviewModel: "fake:review"}}, store, runner, agentpkg.NewHub(), registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/agents/"+createdAgent.ID+"/messages", strings.NewReader(`{"text":"summarize public information","mode":"plan","context":"conversation"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected conversation submission 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var message db.Message
+	if err := json.NewDecoder(recorder.Body).Decode(&message); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(context.Background(), createdAgent.ID, message.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Source != db.RunSourceConversation || run.PermissionModeCap != "readOnly" || run.ExecutionMode != db.RunExecutionModeExecute {
+		t.Fatalf("conversation run did not freeze the chat-only boundary: %+v", run)
+	}
+	if run.CheckpointState != db.RunCheckpointNone || run.BaseHead != "" || run.CheckpointRepoRoot != "" || run.GitSnapshotAt != "" {
+		t.Fatalf("conversation run must not create a git checkpoint: %+v", run)
+	}
+	if run.ToolCatalogDigest != "" || run.WorkspaceFingerprint != "" || run.AutoContinuationMode != "off" {
+		t.Fatalf("conversation run must not freeze project workspace state: %+v", run)
+	}
+	persistedAgent, err := store.GetAgent(context.Background(), createdAgent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedAgent.PermissionMode != "acceptEdits" {
+		t.Fatalf("conversation cap must not rewrite the project permission default: %+v", persistedAgent)
+	}
+
+	goalRecorder := httptest.NewRecorder()
+	goalRequest := newTestRequest(http.MethodPost, "/api/agents/"+createdAgent.ID+"/messages", strings.NewReader(`{"text":"/goal change files","context":"conversation"}`))
+	goalRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(goalRecorder, goalRequest)
+	if goalRecorder.Code != http.StatusForbidden {
+		t.Fatalf("conversation context must reject project goal commands, got %d: %s", goalRecorder.Code, goalRecorder.Body.String())
+	}
+}
+
+func TestStandaloneConversationForcesConversationBoundaryRegardlessOfClientContext(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "standalone-message.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, createdAgent, err := store.CreateStandaloneConversation(ctx, "Standalone", "fake:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE agents SET plan_mode = 1 WHERE id = ?`, createdAgent.ID); err != nil {
+		t.Fatal(err)
+	}
+	registry := providers.NewRegistry()
+	registry.Register(planModeTestProvider{})
+	hub := agentpkg.NewHub()
+	runner := agentpkg.NewRunner(store, registry, tools.NewRegistry(), hub, config.AgentConfig{MaxTurns: 2})
+	app := New(config.Config{}, store, runner, hub, registry)
+
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, "/api/agents/"+createdAgent.ID+"/messages", strings.NewReader(`{"text":"summarize public information","mode":"plan","context":"project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected standalone submission 202, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var message db.Message
+	if err := json.NewDecoder(recorder.Body).Decode(&message); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, createdAgent.ID, message.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Source != db.RunSourceConversation || run.PermissionModeCap != "readOnly" || run.ExecutionMode != db.RunExecutionModeExecute || run.CheckpointState != db.RunCheckpointNone {
+		t.Fatalf("standalone message escaped conversation boundary: %+v", run)
+	}
+
+	goalRecorder := httptest.NewRecorder()
+	goalRequest := newTestRequest(http.MethodPost, "/api/agents/"+createdAgent.ID+"/messages", strings.NewReader(`{"text":"/goal change files","context":"project"}`))
+	goalRequest.Header.Set("Content-Type", "application/json")
+	app.Routes().ServeHTTP(goalRecorder, goalRequest)
+	if goalRecorder.Code != http.StatusForbidden {
+		t.Fatalf("standalone conversation accepted project goal command: %d %s", goalRecorder.Code, goalRecorder.Body.String())
+	}
+	waitForAgentIdle(t, store, createdAgent.ID)
+}
+
 func TestPlanMessageModeFreezesRunRestoresAgentDefaultAndPersistsReview(t *testing.T) {
 	store, _, _, agent := newReviewAPITestServer(t)
 	defer store.Close()

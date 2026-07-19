@@ -454,6 +454,10 @@ func (s *Server) filterNavigationConversationsForRequest(r *http.Request, conver
 	}
 	filtered := make([]db.NavigationConversation, 0, len(conversations))
 	for _, conversation := range conversations {
+		if conversation.Context == db.ProjectFlowModeConversation && strings.TrimSpace(conversation.CWD) == "" {
+			filtered = append(filtered, conversation)
+			continue
+		}
 		if s.filesystemPathWithinProjectRoot(conversation.CWD) {
 			filtered = append(filtered, conversation)
 		}

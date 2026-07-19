@@ -34,6 +34,8 @@ type modelProviderResponse struct {
 	Models            []string                               `json:"models"`
 	ModelsSource      string                                 `json:"modelsSource"`
 	Available         bool                                   `json:"available"`
+	RuntimeAvailable  bool                                   `json:"runtimeAvailable"`
+	Registered        bool                                   `json:"registered"`
 	Discovered        bool                                   `json:"discovered"`
 	Configured        bool                                   `json:"configured"`
 	APIKeyConfigured  bool                                   `json:"apiKeyConfigured"`
@@ -94,17 +96,20 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		Management:       metadata.Management,
 		ManagementURL:    providerManagementURL(provider),
 	}
-	// Disabled providers remain visible for settings cards but must not perform
-	// upstream discovery or be resolved through the runtime registry.
-	if !provider.Enabled {
-		return response
-	}
+	// Disabled and unregistered providers remain visible for settings cards, but
+	// explicit runtime markers prevent either state from becoming chat-selectable.
 	if s.providers == nil {
-		response.ModelsSource = "fallback"
-		response.Error = "模型注册表尚未初始化。"
+		if provider.Enabled {
+			response.ModelsSource = "fallback"
+			response.Error = "模型注册表尚未初始化。"
+		}
 		return response
 	}
 	registered, ok := s.providers.Get(provider.Name)
+	response.Registered = ok
+	if !provider.Enabled {
+		return response
+	}
 	if !ok {
 		response.ModelsSource = "fallback"
 		response.Error = fmt.Sprintf("provider %s 尚未注册。", provider.Name)
@@ -112,6 +117,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	}
 	response.Capabilities = providers.CapabilitiesFor(registered)
 	response.Configured = providers.ConfiguredFor(registered, provider.Configured)
+	response.RuntimeAvailable = response.Configured
 	listCtx, cancel := context.WithTimeout(ctx, modelListTimeout)
 	defer cancel()
 	models, err := registered.ListModels(listCtx)
@@ -164,6 +170,54 @@ func (s *Server) providerConfigured(provider config.ProviderSummary) bool {
 		return provider.Configured
 	}
 	return providers.ConfiguredFor(registered, provider.Configured)
+}
+
+// resolveExecutableModel is the server trust boundary for chat model changes.
+// Configuration metadata alone is insufficient: the live registry must resolve
+// the reference and the resolved provider must currently be enabled and ready.
+func (s *Server) resolveExecutableModel(model string) (providers.Provider, string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, "", fmt.Errorf("model is required")
+	}
+	if s == nil || s.providers == nil {
+		return nil, "", fmt.Errorf("model runtime registry is unavailable")
+	}
+	provider, resolvedModel, err := s.providers.Resolve(model)
+	if err != nil {
+		return nil, "", fmt.Errorf("model is not registered: %w", err)
+	}
+	providerName, _ := providers.SplitModel(model)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider.Name())
+	}
+	if providerName == "aggregate" {
+		listCtx, cancel := context.WithTimeout(context.Background(), modelListTimeout)
+		defer cancel()
+		members, listErr := provider.ListModels(listCtx)
+		if listErr != nil {
+			return nil, "", fmt.Errorf("aggregate model is unavailable: %w", listErr)
+		}
+		for _, member := range members {
+			if _, _, memberErr := s.resolveExecutableModel(member); memberErr == nil {
+				return provider, resolvedModel, nil
+			}
+		}
+		return nil, "", fmt.Errorf("aggregate model %q has no configured runtime member", resolvedModel)
+	}
+	var summary config.ProviderSummary
+	found := false
+	for _, candidate := range s.configSnapshot().Providers.Summaries() {
+		if candidate.Name == providerName {
+			summary = candidate
+			found = true
+			break
+		}
+	}
+	if !found || !summary.Enabled || !providers.ConfiguredFor(provider, summary.Configured) {
+		return nil, "", fmt.Errorf("provider %q is not configured for runtime chat", providerName)
+	}
+	return provider, resolvedModel, nil
 }
 
 func (s *Server) providerSettingsMetadata(provider config.ProviderSummary) providerSettingsMetadata {

@@ -438,6 +438,13 @@ func (r *Runner) SubmitUserMessageWithMode(ctx context.Context, agentID, text, c
 // permission mode, so a restricted remote submission cannot affect later local
 // work or a concurrent full session.
 func (r *Runner) SubmitUserMessageWithModeAndPermissionCap(ctx context.Context, agentID, text, createdBy string, mode ExecutionMode, permissionModeCap string, attachments ...db.Attachment) (db.Message, error) {
+	return r.SubmitUserMessageWithModePermissionCapAndSource(ctx, agentID, text, createdBy, mode, permissionModeCap, db.RunSourceManual, attachments...)
+}
+
+// SubmitUserMessageWithModePermissionCapAndSource additionally freezes the Run
+// source. Conversation runs are always execute-mode, read-only research runs;
+// callers cannot widen them by supplying a project execution mode or cap.
+func (r *Runner) SubmitUserMessageWithModePermissionCapAndSource(ctx context.Context, agentID, text, createdBy string, mode ExecutionMode, permissionModeCap, runSource string, attachments ...db.Attachment) (db.Message, error) {
 	var durableMode string
 	switch mode {
 	case ExecutionModePlan:
@@ -451,14 +458,27 @@ func (r *Runner) SubmitUserMessageWithModeAndPermissionCap(ctx context.Context, 
 	if permissionModeCap != "" && permissionModeCap != "readOnly" && permissionModeCap != "acceptEdits" {
 		return db.Message{}, fmt.Errorf("invalid permission mode cap %q", permissionModeCap)
 	}
-	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, durableMode, permissionModeCap, attachments...)
+	runSource = strings.TrimSpace(runSource)
+	if runSource == "" {
+		runSource = db.RunSourceManual
+	}
+	switch runSource {
+	case db.RunSourceManual:
+		// Keep the requested project capability boundary.
+	case db.RunSourceConversation:
+		durableMode = db.RunExecutionModeExecute
+		permissionModeCap = "readOnly"
+	default:
+		return db.Message{}, fmt.Errorf("invalid user message run source %q", runSource)
+	}
+	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, durableMode, permissionModeCap, runSource, attachments...)
 }
 
 func (r *Runner) submitUserMessageWithMode(ctx context.Context, agentID, text, createdBy, mode string, attachments ...db.Attachment) (db.Message, error) {
-	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, mode, "", attachments...)
+	return r.submitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, mode, "", db.RunSourceManual, attachments...)
 }
 
-func (r *Runner) submitUserMessageWithModeAndPermissionCap(ctx context.Context, agentID, text, createdBy, mode, permissionModeCap string, attachments ...db.Attachment) (db.Message, error) {
+func (r *Runner) submitUserMessageWithModeAndPermissionCap(ctx context.Context, agentID, text, createdBy, mode, permissionModeCap, runSource string, attachments ...db.Attachment) (db.Message, error) {
 	if err := r.EnsureLocalExecution(ctx, agentID); err != nil {
 		return db.Message{}, err
 	}
@@ -476,7 +496,7 @@ func (r *Runner) submitUserMessageWithModeAndPermissionCap(ctx context.Context, 
 	if err != nil {
 		return db.Message{}, err
 	}
-	runRequest, err := r.bindPlanRunSnapshot(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending", Source: "manual", ExecutionMode: mode, PermissionModeCap: permissionModeCap})
+	runRequest, err := r.bindPlanRunSnapshot(ctx, db.Run{AgentID: agentID, TriggerMessageID: msg.ID, Status: "pending", Source: runSource, ExecutionMode: mode, PermissionModeCap: permissionModeCap})
 	if err != nil {
 		return db.Message{}, err
 	}
@@ -500,17 +520,28 @@ func (r *Runner) submitUserMessageWithModeAndPermissionCap(ctx context.Context, 
 // SubmitCorrection creates an immutable follow-up to a user message and starts a
 // new run. It intentionally does not alter the source message or reuse its run.
 func (r *Runner) SubmitCorrection(ctx context.Context, agentID, sourceMessageID, text, createdBy string, keepAttachmentIDs []string, attachments ...db.Attachment) (db.Message, error) {
+	return r.SubmitCorrectionWithSource(ctx, agentID, sourceMessageID, text, createdBy, keepAttachmentIDs, db.RunSourceManual, attachments...)
+}
+
+func (r *Runner) SubmitCorrectionWithSource(ctx context.Context, agentID, sourceMessageID, text, createdBy string, keepAttachmentIDs []string, runSource string, attachments ...db.Attachment) (db.Message, error) {
 	if err := r.EnsureLocalExecution(ctx, agentID); err != nil {
 		return db.Message{}, err
+	}
+	runSource = strings.TrimSpace(runSource)
+	if runSource == "" {
+		runSource = db.RunSourceManual
+	}
+	if runSource != db.RunSourceManual && runSource != db.RunSourceConversation {
+		return db.Message{}, fmt.Errorf("invalid correction run source %q", runSource)
 	}
 	agent, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return db.Message{}, err
 	}
 	// CreateCorrectionWithRun predates runs.execution_mode and always creates an
-	// execute run. Refuse this path while the agent is in plan mode rather than
-	// silently widening the run capability.
-	if agent.PlanMode {
+	// execute run. A project correction must not silently widen plan mode, while
+	// an ordinary conversation correction is independently forced to read-only.
+	if agent.PlanMode && runSource != db.RunSourceConversation {
 		return db.Message{}, errors.New("plan-mode corrections require an execution-mode-aware Store API")
 	}
 	contentText, commandText, err := r.expandServerSkillCommand(ctx, agentID, text)
@@ -518,6 +549,10 @@ func (r *Runner) SubmitCorrection(ctx context.Context, agentID, sourceMessageID,
 		return db.Message{}, err
 	}
 	msg, run, err := r.store.CreateCorrectionWithRun(ctx, agentID, sourceMessageID, contentText, commandText, createdBy, keepAttachmentIDs, attachments)
+	if err != nil {
+		return db.Message{}, err
+	}
+	run, err = r.store.BindPendingCorrectionRun(ctx, run.ID, runSource)
 	if err != nil {
 		return db.Message{}, err
 	}
@@ -2246,7 +2281,11 @@ func (r *Runner) executeToolForLoop(ctx context.Context, agentID, runID string, 
 	}
 	risk := tool.Risk(call.Input)
 	if result, denied := planToolDeniedResult(policy, call, risk); denied {
-		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: decisionSourcePlanMode, Scope: "plan"}
+		source, scope := decisionSourcePlanMode, "plan"
+		if policy.IsConversation() {
+			source, scope = decisionSourceReadOnlyCap, "run"
+		}
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: source, Scope: scope}
 		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", result.Output)
 		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": result.Output, "executionMode": policy.ExecutionMode}, resolution)})
 		return result, nil
@@ -2342,7 +2381,11 @@ func (r *Runner) executeTool(ctx context.Context, agentID, runID string, call to
 		return result, nil
 	}
 	if result, denied := planToolDeniedResult(policy, call, risk); denied {
-		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: decisionSourcePlanMode, Scope: "plan"}
+		source, scope := decisionSourcePlanMode, "plan"
+		if policy.IsConversation() {
+			source, scope = decisionSourceReadOnlyCap, "run"
+		}
+		resolution := toolPermissionResolution{Decision: toolPermissionDeny, Reason: result.Output, Warning: result.Output, Source: source, Scope: scope}
 		r.recordImmediateToolResult(ctx, agentID, runID, messageID, call, risk, result, "denied", result.Output)
 		r.publish(Event{Type: "tool.finished", AgentID: agentID, Data: toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, "denied", 0, map[string]any{"warning": result.Output, "executionMode": policy.ExecutionMode}, resolution)})
 		return result, nil

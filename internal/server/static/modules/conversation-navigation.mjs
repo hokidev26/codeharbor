@@ -171,7 +171,7 @@ export function parseNavigationTargetId(targetId) {
   if (parts.length !== 3) return null;
   try {
     const [projectId, worklineId, agentId] = parts.map((part) => decodeURIComponent(part));
-    if (!projectId || !worklineId || !agentId) return null;
+    if (!agentId || Boolean(projectId) !== Boolean(worklineId)) return null;
     return { projectId, worklineId, agentId, targetId: createNavigationTargetId({ projectId, worklineId, agentId }) };
   } catch {
     return null;
@@ -193,11 +193,21 @@ function normalizeProject(value = {}) {
   };
 }
 
+function conversationContext(value = {}) {
+  const context = text(value.context).toLocaleLowerCase();
+  if (["conversation", "standalone"].includes(context)) return "conversation";
+  if (context === "project") return "project";
+  if (Object.hasOwn(value, "projectFlowMode")) return booleanValue(value.projectFlowMode) ? "project" : "conversation";
+  return "project";
+}
+
 function normalizeConversation(value = {}) {
   const projectId = text(value.projectId);
   const worklineId = text(value.worklineId);
-  const agentId = text(value.agentId);
-  if (!projectId || !worklineId || !agentId) return null;
+  const agentId = text(value.agentId || value.id);
+  const context = conversationContext(value);
+  const standalone = context === "conversation";
+  if (!agentId || (!standalone && (!projectId || !worklineId))) return null;
   const conversation = {
     projectId,
     projectName: text(value.projectName) || projectId,
@@ -211,16 +221,19 @@ function normalizeConversation(value = {}) {
     worklineBranch: text(value.worklineBranch),
     worklineUpdatedAt: timestamp(value.worklineUpdatedAt),
     agentId,
-    agentTitle: text(value.agentTitle) || agentId,
-    agentType: text(value.agentType),
-    agentStatus: text(value.agentStatus),
-    agentPinned: booleanValue(value.agentPinned),
-    agentArchivedAt: timestamp(value.agentArchivedAt),
+    agentTitle: text(value.agentTitle || value.title) || agentId,
+    agentType: text(value.agentType || value.type),
+    agentStatus: text(value.agentStatus || value.status),
+    agentPinned: booleanValue(value.agentPinned || value.pinned),
+    agentArchivedAt: timestamp(value.agentArchivedAt || value.archivedAt),
     model: text(value.model),
     permissionMode: text(value.permissionMode),
     cwd: text(value.cwd),
     messageCount: Math.max(0, Number.isFinite(Number(value.messageCount)) ? Math.trunc(Number(value.messageCount)) : 0),
-    lastActivityAt: timestamp(value.lastActivityAt),
+    lastActivityAt: timestamp(value.lastActivityAt || value.updatedAt),
+    context,
+    projectFlowMode: !standalone,
+    standalone,
   };
   return { ...conversation, targetId: createNavigationTargetId(conversation) };
 }
@@ -271,7 +284,7 @@ export function normalizeNavigationPayload(payload = {}) {
     });
 
   conversations.forEach((conversation) => {
-    if (projectIds.has(conversation.projectId)) return;
+    if (conversation.standalone || projectIds.has(conversation.projectId)) return;
     projectIds.add(conversation.projectId);
     projects.push(normalizeProject({
       id: conversation.projectId,
@@ -318,25 +331,26 @@ export function buildNavigationView(payload = {}, options = {}) {
   const normalized = normalizeNavigationPayload(payload);
   const mode = navigationModes.has(options.mode) ? options.mode : "all";
   const query = normalizedQuery(options.query);
+  const projectConversations = normalized.conversations.filter((conversation) => !conversation.standalone);
+  const standaloneConversations = normalized.conversations
+    .filter((conversation) => conversation.standalone && conversationMatchesSearch(conversation, query))
+    .sort(compareConversationList);
   const conversationsByProject = new Map();
-  normalized.conversations.forEach((conversation) => {
+  projectConversations.forEach((conversation) => {
     const items = conversationsByProject.get(conversation.projectId) || [];
     items.push(conversation);
     conversationsByProject.set(conversation.projectId, items);
   });
 
-  const projects = normalized.projects.filter((project) => projectMatchesSearch(project, normalized.conversations, query));
-  const conversations = normalized.conversations
-    .filter((conversation) => conversationMatchesSearch(conversation, query))
-    .sort(compareConversationList);
+  const projects = normalized.projects.filter((project) => projectMatchesSearch(project, projectConversations, query));
   const groups = projects.map((project) => {
-    const projectConversations = conversationsByProject.get(project.id) || [];
+    const conversations = conversationsByProject.get(project.id) || [];
     const projectOwnMatch = includesQuery([project.name, project.gitPath], query);
     return {
       project,
       conversations: !query || projectOwnMatch
-        ? projectConversations
-        : projectConversations.filter((conversation) => conversationMatchesSearch(conversation, query)),
+        ? conversations
+        : conversations.filter((conversation) => conversationMatchesSearch(conversation, query)),
     };
   });
 
@@ -345,8 +359,10 @@ export function buildNavigationView(payload = {}, options = {}) {
     query,
     totalProjectCount: normalized.projects.length,
     totalConversationCount: normalized.conversations.length,
+    totalStandaloneConversationCount: normalized.conversations.filter((conversation) => conversation.standalone).length,
     projects: mode === "conversations" ? [] : projects,
-    conversations: mode === "conversations" ? conversations : [],
+    conversations: mode === "conversations" ? standaloneConversations : [],
+    standaloneConversations: mode === "all" ? standaloneConversations : [],
     groups: mode === "conversations" ? [] : groups,
   };
 }
@@ -405,7 +421,7 @@ function navigationMoreTrigger(kind, id) {
 }
 
 function renderProject(project, activeProjectId, options = {}) {
-  const active = project.id === activeProjectId;
+  const active = options.activeSelectionKind !== "conversation" && project.id === activeProjectId;
   const path = project.gitPath || project.id;
   const displayPath = compactDisplayPath(path);
   const counts = options.taskCounts?.[project.id] || {};
@@ -417,7 +433,7 @@ function renderProject(project, activeProjectId, options = {}) {
   const stateMeta = navigationStateMarkup({ pinned: project.pinned, archivedAt: project.archivedAt });
   const icon = `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <div class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}${stateClass}" role="button" tabindex="0" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-kind="project" data-navigation-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "conversation"}">
+    <div class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}${stateClass}" role="button" tabindex="0" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-kind="project" data-navigation-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "project"}">
       <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span>${stateMeta}</span>
@@ -429,14 +445,16 @@ function renderProject(project, activeProjectId, options = {}) {
 }
 
 function renderConversation(conversation, activeAgentId, nested = false, options = {}) {
-  const active = conversation.agentId === activeAgentId;
+  const active = options.activeSelectionKind !== "project" && conversation.agentId === activeAgentId;
   const taskContext = options.taskContext === true;
   const statusClass = navigationAgentStatusClass(conversation.agentStatus);
   const worklineContext = conversation.worklineBranch || conversation.worklineTitle;
   const projectContext = compactDisplayPath(conversation.projectPath) || conversation.projectName;
-  const context = nested
-    ? worklineContext
-    : [projectContext, worklineContext].filter((value, index, items) => value && items.indexOf(value) === index).join(" / ");
+  const context = conversation.standalone
+    ? ""
+    : nested
+      ? worklineContext
+      : [projectContext, worklineContext].filter((value, index, items) => value && items.indexOf(value) === index).join(" / ");
   const metaParts = [context, conversation.model, conversation.agentStatus];
   if (!taskContext) metaParts.push(t("workspace.navigation.messageCount", { count: conversation.messageCount }));
   const meta = metaParts.filter(Boolean).join(" · ");
@@ -446,7 +464,7 @@ function renderConversation(conversation, activeAgentId, nested = false, options
     ? `<svg viewBox="0 0 20 20"><circle cx="10" cy="6.5" r="3"></circle><path d="M4.5 17c.7-3.5 2.5-5.2 5.5-5.2s4.8 1.7 5.5 5.2"></path></svg>`
     : `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <div class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass} ${stateClass}" role="button" tabindex="0" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-navigation-kind="conversation" data-navigation-id="${escapeNavigationHtml(conversation.agentId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : "conversation"}">
+    <div class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass} ${stateClass}" role="button" tabindex="0" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-navigation-kind="conversation" data-navigation-id="${escapeNavigationHtml(conversation.agentId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : conversation.standalone ? "conversation" : "project"}" data-standalone-conversation="${conversation.standalone ? "true" : "false"}">
       <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title"><span class="navigation-title-text">${escapeNavigationHtml(conversation.agentTitle)}</span>${stateMeta}</span>
@@ -461,21 +479,30 @@ export function renderNavigationHTML(view = {}, options = {}) {
   const activeProjectId = text(options.activeProjectId);
   const activeAgentId = text(options.activeAgentId);
   const taskContext = options.taskContext === true;
+  const activeSelectionKind = taskContext
+    ? "project"
+    : options.activeSelectionKind === "project" || options.activeSelectionKind === "conversation"
+      ? options.activeSelectionKind
+      : activeAgentId ? "conversation" : "project";
   let html = "";
   if (taskContext) {
-    html = (view.projects || []).map((project) => renderProject(project, activeProjectId, { taskContext: true, taskCounts: options.taskCounts })).join("");
+    html = (view.projects || []).map((project) => renderProject(project, activeProjectId, { taskContext: true, taskCounts: options.taskCounts, activeSelectionKind })).join("");
   } else if (mode === "all") {
-    html = (view.groups || []).map((group) => `
-      <section class="navigation-project-group" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="conversation">
-        ${renderProject(group.project, activeProjectId)}
+    const standalone = (view.standaloneConversations || [])
+      .map((conversation) => renderConversation(conversation, activeAgentId, false, { activeSelectionKind }))
+      .join("");
+    const groups = (view.groups || []).map((group) => `
+      <section class="navigation-project-group" data-navigation-project-group="${escapeNavigationHtml(group.project.id)}" data-conversation-count="${escapeNavigationHtml(String(group.conversations.length))}" data-navigation-context="project">
+        ${renderProject(group.project, activeProjectId, { activeSelectionKind })}
         <div class="navigation-project-conversations" data-project-conversations="${escapeNavigationHtml(group.project.id)}">
-          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true)).join("")}
+          ${group.conversations.map((conversation) => renderConversation(conversation, activeAgentId, true, { activeSelectionKind })).join("")}
         </div>
       </section>`).join("");
+    html = standalone + groups;
   } else if (mode === "projects") {
-    html = (view.projects || []).map((project) => renderProject(project, activeProjectId)).join("");
+    html = (view.projects || []).map((project) => renderProject(project, activeProjectId, { activeSelectionKind })).join("");
   } else {
-    html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId, false, { taskContext })).join("");
+    html = (view.conversations || []).map((conversation) => renderConversation(conversation, activeAgentId, false, { taskContext, activeSelectionKind })).join("");
   }
   if (html) return html;
   if (view.query) return `<div class="empty-list">${escapeNavigationHtml(t("workspace.navigation.noResults", { query: view.query }))}</div>`;
@@ -485,6 +512,9 @@ export function renderNavigationHTML(view = {}, options = {}) {
       <span>${escapeNavigationHtml(t("workbench.noProjectsDescription"))}</span>
       <button type="button" data-primary-workbench-target="conversation">${escapeNavigationHtml(t("workbench.goToConversation"))}</button>
     </div>`;
+  }
+  if (mode === "conversations") {
+    return `<div class="empty-list">${escapeNavigationHtml(t("workspace.navigation.noConversations"))}</div>`;
   }
   if (!view.totalProjectCount) {
     return `

@@ -1403,7 +1403,7 @@ export function createModelProviderSettingsController({
       for (const model of providerModelList(provider)) {
         const value = modelOptionValue(provider, model);
         if (seen.has(value)) continue;
-        const available = Boolean(provider.enabled && provider.configured);
+        const available = Boolean(provider.enabled && providerRuntimeSelectable(provider));
         if (!available && !referenced.has(value)) continue;
         seen.add(value);
         records.push({ value, provider: providerLabel(provider), model, available });
@@ -3338,15 +3338,11 @@ export function createModelProviderSettingsController({
     if (state.modelApplying) return;
     const seq = ++state.modelApplySeq;
     const value = String(model || "").trim();
+    const previousAgent = state.agent;
     let agentId = "";
     state.modelApplying = true;
     setModelApplyButtonsBusy(true);
     try {
-      setPreferredModel(value);
-      if ($("modelSelect")) {
-        if (value) $("modelSelect").value = value;
-        renderModelOptions();
-      }
       agentId = state.agent?.id || "";
       if (agentId && value && value !== state.agent.model) {
         const updated = await api(`/api/agents/${agentId}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
@@ -3354,9 +3350,13 @@ export function createModelProviderSettingsController({
         state.agent = updated;
       }
       if (seq !== state.modelApplySeq) return;
+      setPreferredModel(value);
+      renderModelOptions();
       refreshActiveSettingsPanel?.();
       notifyTerminal?.(value ? `[info] ${mt("usingModel", { model: value })}\n` : `[info] ${mt("clearedPreferredModel")}\n`);
     } catch (err) {
+      if (agentId && state.agent?.id === agentId && previousAgent?.id === agentId) state.agent = previousAgent;
+      renderModelOptions();
       if (!agentId || state.agent?.id === agentId) throw err;
     } finally {
       if (seq === state.modelApplySeq) state.modelApplying = false;
@@ -3405,11 +3405,17 @@ export function createModelProviderSettingsController({
     return Boolean(modelVisibilityPreferences().hiddenModels?.[value]);
   }
 
+  function providerRuntimeSelectable(provider = {}) {
+    const signals = [provider.runtimeAvailable, provider.registered]
+      .filter((value) => value !== undefined && value !== null)
+      .map(Boolean);
+    if (signals.length) return signals.every(Boolean);
+    return Boolean(provider.enabled && provider.configured);
+  }
+
   function isModelSelectable(provider, model) {
     const prefs = modelVisibilityPreferences();
-    if (!provider.enabled) return false;
-    const hasFetchedCatalog = provider.discovered === true && provider.modelsSource === "remote";
-    if (!provider.configured && !prefs.showUnconfiguredProviders && !hasFetchedCatalog) return false;
+    if (!provider.enabled || !providerRuntimeSelectable(provider)) return false;
     return !prefs.hiddenModels?.[modelOptionValue(provider, model)];
   }
 
@@ -3435,12 +3441,24 @@ export function createModelProviderSettingsController({
     refreshActiveSettingsPanel?.();
   }
 
+  function selectableModelValues() {
+    return allModelOptions().map((item) => item.value);
+  }
+
   function selectedModelValue() {
-    return $("modelSelect")?.value || state.agent?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+    const values = selectableModelValues();
+    const candidates = [
+      $("modelSelect")?.value,
+      state.agent?.model,
+      getPreferredModel(),
+      state.settings?.agent?.defaultModel,
+      values[0],
+    ].map((value) => String(value || "").trim()).filter(Boolean);
+    return candidates.find((value) => values.includes(value)) || "";
   }
 
   function currentModelValue() {
-    return state.agent?.model || getPreferredModel() || state.settings?.agent?.defaultModel || "";
+    return state.agent?.model || selectedModelValue();
   }
 
   function renderModelOptions() {
@@ -3461,7 +3479,7 @@ export function createModelProviderSettingsController({
     }).join("");
     const currentModel = currentModelValue();
     const currentOption = currentModel && !optionValues.includes(currentModel)
-      ? `<option value="${escapeAttr(currentModel)}" data-configured="false">${escapeHtml(currentModel + mt("currentHidden"))}</option>`
+      ? `<option value="${escapeAttr(currentModel)}" data-configured="false" data-runtime-available="false" disabled>${escapeHtml(currentModel + mt("currentHidden"))}</option>`
       : "";
     select.innerHTML = currentOption + (groups || `<option value="" data-configured="false">${escapeHtml(mt("modelsNotLoaded"))}</option>`);
     if (currentModel) {
@@ -3506,7 +3524,10 @@ export function createModelProviderSettingsController({
       ? provider.modelCapabilities
       : {};
     const modelCapabilities = Object.fromEntries(Object.entries(rawModelCapabilities)
-      .map(([model, value]) => [String(model || "").trim(), { fastMode: Boolean(value?.fastMode) }])
+      .map(([model, value]) => [String(model || "").trim(), {
+        ...(value && typeof value === "object" ? value : {}),
+        fastMode: Boolean(value?.fastMode),
+      }])
       .filter(([model]) => Boolean(model)));
     return {
       name: provider.name || provider.type || "provider",
@@ -3519,6 +3540,8 @@ export function createModelProviderSettingsController({
       modelsSource: String(provider.modelsSource || ""),
       discovered: Boolean(provider.discovered),
       available: Boolean(provider.available),
+      runtimeAvailable: provider.runtimeAvailable === undefined || provider.runtimeAvailable === null ? undefined : Boolean(provider.runtimeAvailable),
+      registered: provider.registered === undefined || provider.registered === null ? undefined : Boolean(provider.registered),
       configured: Boolean(provider.configured),
       enabled: provider.enabled === undefined ? Boolean(provider.configured) : Boolean(provider.enabled),
       origin: String(provider.origin || (isBuiltinProvider(provider) ? "builtin" : "custom")),
@@ -3561,16 +3584,17 @@ export function createModelProviderSettingsController({
   }
 
   function isCurrentModelConfigured(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
-    return Boolean(currentProviderConfig(modelValue)?.configured);
+    const provider = currentProviderConfig(modelValue);
+    return Boolean(provider?.configured && providerRuntimeSelectable(provider));
   }
 
   function updateModelConfiguredState() {
     const select = $("modelSelect");
     if (!select) return;
     const provider = currentProviderConfig(select.value);
-    const configured = Boolean(provider?.configured);
+    const configured = Boolean(provider?.configured && providerRuntimeSelectable(provider));
     select.classList.toggle("model-unconfigured", !configured);
-    select.title = provider?.error || (configured ? mt("modelConfigured") : modelSetupMessage(select.value));
+    select.title = provider?.error || (configured ? mt("modelConfigured") : !providerRuntimeSelectable(provider) ? mt("runtimeUnavailable") : modelSetupMessage(select.value));
   }
 
   function modelSetupMessage(modelValue = $("modelSelect")?.value || state.agent?.model || "") {
@@ -3615,7 +3639,7 @@ export function createModelProviderSettingsController({
     const options = allModelOptions();
     const values = new Set(options.map((item) => item.value));
     const currentOption = currentModel && !values.has(currentModel)
-      ? `<option value="${escapeAttr(currentModel)}">${escapeHtml(currentModel + mt("currentHidden"))}</option>`
+      ? `<option value="${escapeAttr(currentModel)}" disabled>${escapeHtml(currentModel + mt("currentHidden"))}</option>`
       : "";
     const grouped = selectableModelProviders().map((provider) => {
       const models = providerModelList(provider);

@@ -8,6 +8,7 @@ import shellExtraMessages from "./messages-shell-extra.mjs";
 import skillsMessages from "./messages-skills.mjs";
 import {
   applyDocumentLocale,
+  applyStaticTranslations,
   currentUILocale,
   flattenMessageKeys,
   messageCatalogs,
@@ -46,6 +47,9 @@ test("translations interpolate values and fall back to keys", () => {
   assert.equal(t("common.itemCount", { count: 3 }, "en"), "3 items");
   assert.equal(t("memory.noMatches", { query: "demo" }, "en"), "No memories match “demo”.");
   assert.equal(t("mcp.discoveredTools", { count: 3 }, "zh-TW"), "已發現 3 個 MCP 工具。");
+  assert.equal(t("shell.nav.conversation", {}, "zh-TW"), "對話");
+  assert.equal(t("shell.nav.tasks", {}, "zh-CN"), "任务");
+  assert.equal(t("shell.nav.settings", {}, "en"), "Settings");
   assert.equal(t("missing.translation.key", {}, "en"), "missing.translation.key");
 });
 
@@ -99,6 +103,51 @@ test("chat activity timeline has concise, safe copy in every locale", () => {
   }
 
   assert.equal(chatRenderingExtraT("activity.input", {}, "fr-FR"), "输入");
+});
+
+test("versioned i18n instances share locale state with dynamic message packs", async () => {
+  const previous = currentUILocale();
+  const root = { title: "", documentElement: { lang: "", dataset: {} }, querySelectorAll() { return []; } };
+  const versionedI18n = await import("./i18n.mjs?shared-runtime-regression-1");
+  const versionedChatMessages = await import("./messages-chat-rendering-extra.mjs?shared-runtime-regression-1");
+  try {
+    versionedI18n.setUILocale("zh-TW", root);
+    assert.equal(currentUILocale(), "zh-TW");
+    assert.equal(versionedChatMessages.t("run.review"), "任務回顧");
+    assert.equal(versionedChatMessages.t("run.noToolCalls"), "本輪沒有工具呼叫。");
+  } finally {
+    setUILocale(previous, root);
+  }
+});
+
+test("static translation keeps existing copy when a key is missing", () => {
+  const previous = currentUILocale();
+  const missingText = {
+    textContent: "保留原文",
+    getAttribute(name) { return name === "data-i18n" ? "missing.static.copy" : null; },
+  };
+  const attributes = new Map([["data-i18n-title", "missing.static.title"], ["title", "保留標題"]]);
+  const missingTitle = {
+    getAttribute(name) { return attributes.get(name) || null; },
+    setAttribute(name, value) { attributes.set(name, value); },
+  };
+  const root = {
+    title: "",
+    documentElement: { lang: "", dataset: {} },
+    querySelectorAll(selector) {
+      if (selector === "[data-i18n]") return [missingText];
+      if (selector === "[data-i18n-title]") return [missingTitle];
+      return [];
+    },
+  };
+  try {
+    applyDocumentLocale("zh-TW", root);
+    applyStaticTranslations(root);
+    assert.equal(missingText.textContent, "保留原文");
+    assert.equal(attributes.get("title"), "保留標題");
+  } finally {
+    applyDocumentLocale(previous, root);
+  }
 });
 
 test("document locale updates lang and data-ui-locale", () => {

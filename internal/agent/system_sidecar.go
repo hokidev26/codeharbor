@@ -54,7 +54,7 @@ type silentToolState struct {
 
 func (r *Runner) buildTurnSystemControls(ctx context.Context, agent db.Agent, run db.Run, messages []db.Message, continuationIndex int64) turnSystemControls {
 	controls := turnSystemControls{}
-	if r != nil && r.store != nil {
+	if !isConversationRun(run) && r != nil && r.store != nil {
 		snapshot, err := r.store.ReadSpecReminderSnapshot(ctx, agent.ID, specSidecarTaskLimit)
 		if err != nil {
 			slog.Warn("read spec sidecar snapshot failed", "agentId", agent.ID, "runId", run.ID, "error", err)

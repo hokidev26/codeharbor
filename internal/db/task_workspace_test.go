@@ -63,6 +63,47 @@ func TestListTaskWorkspaceIncludesEmptyAgentsAndStatusCounts(t *testing.T) {
 	}
 }
 
+func TestCreateStandaloneConversationIsAtomicAndExcludedFromTaskWorkspace(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "standalone-conversation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	user, err := store.CreateUser(ctx, "conversation-owner", "password-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, workline, agent, err := store.CreateStandaloneConversationForUser(ctx, user.ID, "  Research chat  ", "fake:chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.FlowMode != ProjectFlowModeConversation || project.Name != "Research chat" || project.GitPath != "" {
+		t.Fatalf("unexpected conversation project: %+v", project)
+	}
+	if workline.ProjectID != project.ID || workline.WorktreePath != "" || !workline.IsRoot {
+		t.Fatalf("unexpected conversation workline: %+v", workline)
+	}
+	if agent.WorklineID != workline.ID || agent.Type != "primary" || agent.PermissionMode != "readOnly" || agent.CWD != "" || agent.Model != "fake:chat" {
+		t.Fatalf("unexpected conversation agent: %+v", agent)
+	}
+	allowed, err := store.CanAccessAgent(ctx, user.ID, agent.ID)
+	if err != nil || !allowed {
+		t.Fatalf("conversation owner membership was not created atomically: allowed=%v err=%v", allowed, err)
+	}
+	flowMode, err := store.GetAgentProjectFlowMode(ctx, agent.ID)
+	if err != nil || flowMode != ProjectFlowModeConversation {
+		t.Fatalf("unexpected agent project flow mode %q: %v", flowMode, err)
+	}
+	workspace, err := store.ListTaskWorkspace(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Projects) != 0 || workspace.Summary.ProjectCount != 0 || workspace.Summary.AgentCount != 0 {
+		t.Fatalf("standalone conversation leaked into task workspace: %+v", workspace)
+	}
+}
+
 func TestAssignSpecTaskMovesWithinProjectAndUpdatesRevisions(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "assign-task.db"))

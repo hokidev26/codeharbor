@@ -3,7 +3,7 @@ import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./forma
 import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
-import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1";
+import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1-i18n-shared-1";
 
 const userMessageRoles = new Set(["user", "human"]);
 const maxTokenCount = 1_000_000_000;
@@ -606,8 +606,9 @@ export function renderToolActivityStackHTML(toolCalls = [], options = {}) {
   const tools = allTools;
   const omitted = 0;
   const steps = tools.map((tool) => `${toolActivityVerb(tool.toolName)}${toolActivityTarget(tool) ? ` ${toolActivityTarget(tool)}` : ""}`);
+  const modeClass = options.compact ? "conversation-tool-activity " : "";
   return `
-    <section class="${options.live ? "live-tool-output-stack " : ""}tool-activity-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-tool-activity-stack data-tool-activity-count="${escapeAttr(String(allTools.length))}"${options.live ? " data-live-tool-output-stack" : ""}>
+    <section class="${options.live ? "live-tool-output-stack " : ""}${modeClass}tool-activity-stack chat-flow-stack chat-flow-left" data-chat-alignment="left" data-tool-activity-stack data-tool-activity-count="${escapeAttr(String(allTools.length))}"${options.live ? " data-live-tool-output-stack" : ""}${options.compact ? " data-conversation-run-tool-activity" : ""}>
       <details class="tool-activity-group" open>
         <summary class="tool-activity-summary">${escapeHtml(cr("activity.processTitle", { count: allTools.length }))}</summary>
         <div class="tool-activity-protected">${escapeHtml(cr("activity.processProtected"))}</div>
@@ -1057,6 +1058,7 @@ export function createChatRenderingController({
     const payload = new FormData();
     payload.append("text", text);
     payload.append("keepAttachmentIds", JSON.stringify(keepAttachmentIds));
+    payload.append("context", state.navigationSelectionKind === "project" ? "project" : "conversation");
     files.forEach((file) => payload.append("files", file, file.name || "attachment"));
     await request(`/api/agents/${agentId}/messages/${encodeURIComponent(messageId)}/corrections`, { method: "POST", body: payload });
     state.editingMessageId = "";
@@ -1162,7 +1164,7 @@ export function createChatRenderingController({
     if (state.chatHydrating) return;
     const el = $("messages");
     if (!el) return;
-    const existing = el.querySelector("[data-run-summary-card]");
+    const existing = el.querySelector("[data-run-summary-card], [data-run-outcome-card]");
     // Keep the current review card stable while a refresh is in flight. Rendering
     // the transient loading status here makes context switches visibly flash.
     if (state.runSummaryLoading) return;
@@ -1189,13 +1191,28 @@ export function createChatRenderingController({
     const summary = state.activeRunSummary;
     const run = summary?.run;
     const runId = state.activeRunSummaryRunId || run?.id || "";
-    if (!run && !runId && !state.runSummaryLoading && !state.runSummaryError) return "";
-    if (!run && state.runSummaryLoading && !state.runSummaryError) return "";
-    const status = run?.status || "unknown";
-    const checkpoint = runCheckpointState(run);
-    const toolCalls = state.activeRunToolCallsRunId === runId && Array.isArray(state.activeRunToolCalls)
+    if (!run) {
+      if (!state.runSummaryError || state.runSummaryLoading) return "";
+      return renderRunSummaryLoadErrorHTML();
+    }
+    const toolCalls = activeRunToolCallList(summary, runId);
+    if (!isProjectRunReview(run)) return renderConversationRunOutcomeHTML(run, runId, toolCalls);
+    return renderProjectRunReviewHTML(summary, run, runId, toolCalls);
+  }
+
+  function isProjectRunReview(run) {
+    return state.navigationSelectionKind === "project" && String(run?.source || "").trim() !== "conversation";
+  }
+
+  function activeRunToolCallList(summary, runId) {
+    return state.activeRunToolCallsRunId === runId && Array.isArray(state.activeRunToolCalls)
       ? state.activeRunToolCalls
       : (Array.isArray(summary?.toolCalls) ? summary.toolCalls : []);
+  }
+
+  function renderProjectRunReviewHTML(summary, run, runId, toolCalls) {
+    const status = run?.status || "unknown";
+    const checkpoint = runCheckpointState(run);
     const recentMessages = Array.isArray(summary?.recentMessages) ? summary.recentMessages : [];
     const tokenText = `${formatNumber(summary?.inputTokens || 0)} / ${formatNumber(summary?.outputTokens || 0)}`;
     return `
@@ -1220,7 +1237,7 @@ export function createChatRenderingController({
           ${renderRunMetric(cr("run.metrics.cost"), formatMoney(summary?.costUsd || 0))}
         </div>
         ${renderRunToolCalls(toolCalls)}
-        ${state.activeRunToolCallsHasMore ? `<button class="ghost-btn mini tool-activity-load-more" type="button" data-run-tool-activity-more="${escapeAttr(runId)}">${escapeHtml(cr("activity.loadEarlier"))}</button>` : ""}
+        ${renderEarlierRunToolCallsButton(runId)}
         ${renderRunMessagePreviews(recentMessages)}
         <div class="run-summary-actions">
           <button class="ghost-btn mini" type="button" data-run-summary-open-git>${escapeHtml(cr("run.gitChanges"))}</button>
@@ -1230,6 +1247,55 @@ export function createChatRenderingController({
         </div>
       </section>
     `;
+  }
+
+  function renderConversationRunOutcomeHTML(run, runId, toolCalls) {
+    const status = String(run?.status || "unknown").trim().toLowerCase();
+    if (status === "superseded") return "";
+    const toolActivity = renderToolActivityStackHTML(toolCalls, { compact: true });
+    const loadEarlier = renderEarlierRunToolCallsButton(runId, { compact: true });
+    const notice = renderConversationRunNoticeHTML(run, status);
+    if (!toolActivity && !loadEarlier && !notice) return "";
+    return `
+      <section class="conversation-run-outcome chat-flow-item chat-flow-left ${escapeAttr(runStatusClass(status))}" data-chat-alignment="left" data-chat-report="conversation-run" data-run-outcome-card>
+        ${notice}
+        ${toolActivity}
+        ${loadEarlier}
+      </section>
+    `;
+  }
+
+  function renderConversationRunNoticeHTML(run, status) {
+    if (status === "error" || status === "failed") {
+      const message = String(run?.errorMessage || "").trim() || cr("run.conversationErrorFallback");
+      return `
+        <div class="conversation-run-notice error" role="status">
+          <strong>${escapeHtml(cr("run.conversationErrorTitle"))}</strong>
+          <div class="conversation-run-error-message">${escapeHtml(message)}</div>
+          <span>${escapeHtml(cr("run.conversationHistoryHint"))}</span>
+        </div>
+      `;
+    }
+    if (status === "interrupted") {
+      return `<div class="conversation-run-notice interrupted" role="status"><span>${escapeHtml(cr("run.conversationInterrupted"))}</span></div>`;
+    }
+    return "";
+  }
+
+  function renderRunSummaryLoadErrorHTML() {
+    return `
+      <section class="conversation-run-outcome chat-flow-item chat-flow-left status-warn" data-chat-alignment="left" data-chat-report="run-load-error" data-run-outcome-card>
+        <div class="conversation-run-notice load-error" role="status">
+          <strong>${escapeHtml(cr("run.summaryUnavailableTitle"))}</strong>
+          <span>${escapeHtml(cr("run.summaryUnavailableHint"))}</span>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderEarlierRunToolCallsButton(runId, { compact = false } = {}) {
+    if (!state.activeRunToolCallsHasMore || !runId) return "";
+    return `<button class="ghost-btn mini tool-activity-load-more${compact ? " conversation-tool-activity-more" : ""}" type="button" data-run-tool-activity-more="${escapeAttr(runId)}">${escapeHtml(cr("activity.loadEarlier"))}</button>`;
   }
 
   function renderRunCheckpoint(run, checkpoint = runCheckpointState(run)) {
@@ -1480,13 +1546,14 @@ export function createChatRenderingController({
   }
 
   function isTerminalRunStatus(status) {
-    return ["completed", "error", "interrupted", "superseded"].includes(String(status || ""));
+    return ["completed", "error", "failed", "interrupted", "superseded"].includes(String(status || ""));
   }
 
   function runStatusLabel(status) {
     const value = String(status || "unknown");
     if (value === "completed") return cr("run.status.completed");
     if (value === "error") return cr("run.status.error");
+    if (value === "failed") return cr("run.status.failed");
     if (value === "interrupted") return cr("run.status.interrupted");
     if (value === "superseded") return cr("run.status.superseded");
     if (value === "running") return cr("run.status.running");
@@ -1498,7 +1565,7 @@ export function createChatRenderingController({
   function runStatusClass(status) {
     const value = String(status || "unknown");
     if (value === "completed") return "status-completed";
-    if (value === "error") return "status-error";
+    if (value === "error" || value === "failed") return "status-error";
     if (value === "interrupted" || value === "superseded") return "status-warn";
     return "status-neutral";
   }
@@ -1630,7 +1697,10 @@ export function createChatRenderingController({
 
   function currentLiveToolOutputList() {
     const agentId = state.agent?.id || "";
-    const reviewedIds = state.activeRunToolCallsRunId && Array.isArray(state.activeRunToolCalls)
+    const reviewedRun = state.activeRunSummary?.run;
+    const reviewedStatus = String(reviewedRun?.status || "").trim().toLowerCase();
+    const runToolsHaveVisibleHome = Boolean(reviewedRun) && reviewedStatus !== "superseded";
+    const reviewedIds = runToolsHaveVisibleHome && state.activeRunToolCallsRunId && Array.isArray(state.activeRunToolCalls)
       ? new Set(state.activeRunToolCalls.map((call) => normalizeToolActivity(call).toolUseId).filter(Boolean))
       : new Set();
     return Object.values(state.liveToolOutputs || {})
@@ -1657,7 +1727,7 @@ export function createChatRenderingController({
         el.classList.remove("empty");
         el.innerHTML = html;
       } else {
-        const runSummary = el.querySelector("[data-run-summary-card]");
+        const runSummary = el.querySelector("[data-run-summary-card], [data-run-outcome-card]");
         const approvalStack = el.querySelector("[data-approval-stack]");
         if (runSummary) runSummary.insertAdjacentHTML("beforebegin", html);
         else if (approvalStack) approvalStack.insertAdjacentHTML("beforebegin", html);

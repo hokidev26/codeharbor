@@ -365,6 +365,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/usage/summary", s.usageSummary)
 	r.Get("/api/usage/history", s.usageHistory)
 	r.Get("/api/navigation", s.navigation)
+	r.Post("/api/conversations", s.createConversation)
 	r.Get("/api/task-workspace", s.taskWorkspace)
 	r.Group(func(r chi.Router) {
 		r.Use(s.sensitiveLocalTokenGuard)

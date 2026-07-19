@@ -117,7 +117,7 @@ func (s *Store) ListTaskWorkspace(ctx context.Context) (TaskWorkspace, error) {
 	worklineIndexes := make(map[string]workspaceWorklineIndex)
 	agentIndexes := make(map[string]workspaceAgentIndex)
 
-	projectRows, err := tx.QueryContext(ctx, `SELECT id, name, status, flow_mode, COALESCE(git_path,''), updated_at FROM projects ORDER BY updated_at DESC, id ASC`)
+	projectRows, err := tx.QueryContext(ctx, `SELECT id, name, status, flow_mode, COALESCE(git_path,''), updated_at FROM projects WHERE flow_mode != ? ORDER BY updated_at DESC, id ASC`, ProjectFlowModeConversation)
 	if err != nil {
 		return TaskWorkspace{}, err
 	}

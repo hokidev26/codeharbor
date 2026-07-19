@@ -671,6 +671,67 @@ func TestRemoteAccessGateRendersLoginPageForRemoteIndex(t *testing.T) {
 	}
 }
 
+func TestRemoteAccessGateLocalizesLoginPageFromAcceptLanguage(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodGet, "/", nil)
+	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
+	request.Header.Set("Accept", "text/html")
+	request.Header.Set("Accept-Language", "zh-TW,zh-Hant;q=0.9,en;q=0.8")
+
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 login page, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Language"); got != "zh-TW" {
+		t.Fatalf("expected Traditional Chinese content language, got %q", got)
+	}
+	if got := recorder.Header().Get("Vary"); !strings.Contains(got, "Accept-Language") {
+		t.Fatalf("expected Accept-Language variance, got %q", got)
+	}
+	body := recorder.Body.String()
+	for _, fragment := range []string{
+		`<html lang="zh-TW">`,
+		`<title>Autoto 遠端存取保護</title>`,
+		`<span class="connection-state">等待驗證</span>`,
+		`<h1 id="remoteAccessTitle">安全解鎖 Autoto</h1>`,
+		`<label class="password-label" for="remoteAccessPassword">存取密碼</label>`,
+		`placeholder="請輸入存取密碼" aria-label="存取密碼"`,
+		`<span>解鎖 Autoto</span>`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected Traditional Chinese login fragment %q, got %s", fragment, body)
+		}
+	}
+	for _, simplified := range []string{"远程访问保护", "等待验证", "安全解锁", "访问密码", "请输入访问密码"} {
+		if strings.Contains(body, simplified) {
+			t.Fatalf("Traditional Chinese login page leaked Simplified Chinese %q: %s", simplified, body)
+		}
+	}
+}
+
+func TestRemoteAccessLoginKeepsTraditionalLocaleAfterPasswordFailure(t *testing.T) {
+	app := New(config.Config{Security: config.SecurityConfig{AccessPassword: "secret"}}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodPost, remoteAccessPath, strings.NewReader("password=wrong"))
+	request.Host = "demo.trycloudflare.com"
+	markRemoteHTTPS(request)
+	request.Header.Set("Accept-Language", "zh-Hant-TW,zh;q=0.9")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	app.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected password rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if recorder.Header().Get("Content-Language") != "zh-TW" || !strings.Contains(body, "密碼不正確，請重試。") || strings.Contains(body, "密码不正确") {
+		t.Fatalf("expected Traditional Chinese password failure page, got headers=%v body=%s", recorder.Header(), body)
+	}
+}
+
 func TestRemoteAccessLoginPageOmitsHostConfiguredModeAndSelector(t *testing.T) {
 	app := New(config.Config{Security: config.SecurityConfig{
 		AccessPassword:          "secret",

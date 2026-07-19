@@ -458,7 +458,7 @@ func (s *Server) handleRemoteAccessGate(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if shouldRenderRemoteAccessPage(r) {
-		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusUnauthorized, "")
 		return true
 	}
 	message := "remote access requires a configured credential"
@@ -493,13 +493,14 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		s.handleRemoteAccessLogout(w, r)
 		return
 	}
+	loginCopy := remoteLoginCopyForAcceptLanguage(r.Header.Get("Accept-Language"))
 	if r.Method != http.MethodPost {
 		if r.Method == http.MethodGet {
 			if s.remoteAccessGateRequired(r) && remotePlainHTTP(r) {
-				s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "远程访问必须使用 HTTPS；请通过 HTTPS 地址重新打开此页面。")
+				s.writeRemoteAccessLoginPage(w, r, http.StatusForbidden, loginCopy.HTTPSRequiredMessage)
 				return
 			}
-			s.writeRemoteAccessLoginPage(w, http.StatusOK, "")
+			s.writeRemoteAccessLoginPage(w, r, http.StatusOK, "")
 			return
 		}
 		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
@@ -507,19 +508,19 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !s.sameOriginRequest(r) {
-		s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "跨站登录请求已被拒绝。")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusForbidden, loginCopy.CrossSiteDeniedMessage)
 		return
 	}
 	if s.remoteAccessGateRequired(r) && remotePlainHTTP(r) {
-		s.writeRemoteAccessLoginPage(w, http.StatusForbidden, "远程访问必须使用 HTTPS；请通过 HTTPS 地址重新打开此页面。")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusForbidden, loginCopy.HTTPSRequiredMessage)
 		return
 	}
 	if locked, until := s.remoteAccessLocked(r); locked {
-		s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, s.remoteAccessLockMessage(until))
+		s.writeRemoteAccessLoginPage(w, r, http.StatusTooManyRequests, s.remoteAccessLockMessageForCopy(until, loginCopy))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		s.writeRemoteAccessLoginPage(w, http.StatusBadRequest, "无法读取密码表单。")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusBadRequest, loginCopy.FormUnreadableMessage)
 		return
 	}
 
@@ -533,10 +534,10 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 		s.configMutationMu.Unlock()
 		lockedUntil := s.recordRemoteAccessFailure(r)
 		if !lockedUntil.IsZero() {
-			s.writeRemoteAccessLoginPage(w, http.StatusTooManyRequests, s.remoteAccessLockMessage(lockedUntil))
+			s.writeRemoteAccessLoginPage(w, r, http.StatusTooManyRequests, s.remoteAccessLockMessageForCopy(lockedUntil, loginCopy))
 			return
 		}
-		s.writeRemoteAccessLoginPage(w, http.StatusUnauthorized, "密码不正确，请重试。")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusUnauthorized, loginCopy.IncorrectPasswordMessage)
 		return
 	}
 	// The remote client only proves possession of the password. Session authority
@@ -545,7 +546,7 @@ func (s *Server) handleRemoteAccessLogin(w http.ResponseWriter, r *http.Request)
 	token, err := s.newRemoteAccessSessionForConfig(configuredRemoteAccessMode(cfg), cfg)
 	s.configMutationMu.Unlock()
 	if err != nil {
-		s.writeRemoteAccessLoginPage(w, http.StatusInternalServerError, "无法建立安全会话，请稍后重试。")
+		s.writeRemoteAccessLoginPage(w, r, http.StatusInternalServerError, loginCopy.SessionFailedMessage)
 		return
 	}
 	s.clearRemoteAccessFailures(r)
@@ -633,12 +634,16 @@ func (s *Server) clearRemoteAccessFailures(r *http.Request) {
 }
 
 func (s *Server) remoteAccessLockMessage(until time.Time) string {
+	return s.remoteAccessLockMessageForCopy(until, remoteLoginCopyForLocale(remoteLoginLocaleChineseSimplified))
+}
+
+func (s *Server) remoteAccessLockMessageForCopy(until time.Time, loginCopy remoteLoginCopy) string {
 	remaining := until.Sub(s.now())
 	if remaining <= time.Minute {
-		return "密码错误次数过多，请稍后重试。"
+		return loginCopy.LockRetrySoonMessage
 	}
 	minutes := int((remaining + time.Minute - 1) / time.Minute)
-	return fmt.Sprintf("密码错误次数过多，请约 %d 分钟后重试。", minutes)
+	return fmt.Sprintf(loginCopy.LockRetryMinutesMessage, minutes)
 }
 
 func (s *Server) pruneRemoteAccessFailuresLocked(now time.Time) {
@@ -849,19 +854,22 @@ func remotePlainHTTP(r *http.Request) bool {
 	return !requestIsHTTPS(r)
 }
 
-func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, message string) {
+func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, r *http.Request, status int, message string) {
+	loginCopy := remoteLoginCopyForAcceptLanguage(r.Header.Get("Accept-Language"))
 	passwordConfigured, _ := s.credentialConfigured()
 	messageHTML := ""
 	if message != "" {
 		messageHTML = fmt.Sprintf(`<div class="alert" role="alert">%s</div>`, html.EscapeString(message))
 	} else if !passwordConfigured {
-		messageHTML = `<div class="alert" role="alert">远程访问已触发保护，但还没有配置 <code>AUTOTO_ACCESS_PASSWORD</code>。请先停止裸露隧道，设置密码或使用 Cloudflare Access 后再重试。</div>`
+		messageHTML = fmt.Sprintf(`<div class="alert" role="alert">%s<code>AUTOTO_ACCESS_PASSWORD</code>%s</div>`, html.EscapeString(loginCopy.UnconfiguredPasswordNoticeBefore), html.EscapeString(loginCopy.UnconfiguredPasswordNoticeAfter))
 	}
-	formHTML := `<button class="submit" type="submit"><span>解锁 Autoto</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></button>`
+	formHTML := fmt.Sprintf(`<button class="submit" type="submit"><span>%s</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></button>`, html.EscapeString(loginCopy.SubmitLabel))
 	if !passwordConfigured {
-		formHTML = `<button class="submit" type="submit" disabled><span>等待配置访问密码</span></button>`
+		formHTML = fmt.Sprintf(`<button class="submit" type="submit" disabled><span>%s</span></button>`, html.EscapeString(loginCopy.DisabledSubmitLabel))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Language", loginCopy.LanguageTag)
+	w.Header().Set("Vary", "Accept-Language")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -869,11 +877,11 @@ func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, m
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `<!doctype html>
-<html lang="zh-CN">
+<html lang="%s">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Autoto 远程访问保护</title>
+  <title>%s</title>
   <style>
     :root { color-scheme: light; --page:#f4f6fb; --card:#ffffff; --line:#e2e6ef; --line-strong:#d4dae6; --text:#202634; --muted:#747e90; --accent:#5369f3; --accent-light:#6678f5; --radius:8px; --radius-sm:calc(var(--radius) * .6); --radius-md:calc(var(--radius) * .8); --radius-lg:var(--radius); --radius-xl:calc(var(--radius) * 1.4); }
     * { box-sizing: border-box; }
@@ -933,25 +941,25 @@ func (s *Server) writeRemoteAccessLoginPage(w http.ResponseWriter, status int, m
     <div class="card-content">
       <div class="brand-row">
         <span class="brand-identity"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12.5"></circle><path d="M10.5 17.5c1.6 2 3.4 3 5.5 3s3.9-1 5.5-3"></path><path d="M11.5 12.5h.01M20.5 12.5h.01"></path></svg></span><span class="brand-name">AUTOTO</span></span>
-        <span class="connection-state">等待验证</span>
+        <span class="connection-state">%s</span>
       </div>
       <header>
-        <h1 id="remoteAccessTitle">安全解锁 Autoto</h1>
+        <h1 id="remoteAccessTitle">%s</h1>
       </header>
       %s
       <form method="post" action="/auth/remote-access" autocomplete="off">
-        <label class="password-label" for="remoteAccessPassword">访问密码</label>
+        <label class="password-label" for="remoteAccessPassword">%s</label>
         <div class="password-field">
 
           <span class="password-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg></span>
-          <input id="remoteAccessPassword" name="password" type="password" inputmode="text" autocomplete="current-password" placeholder="请输入访问密码" aria-label="访问密码" autofocus %s />
+          <input id="remoteAccessPassword" name="password" type="password" inputmode="text" autocomplete="current-password" placeholder="%s" aria-label="%s" autofocus %s />
         </div>
         %s
       </form>
     </div>
   </main>
 </body>
-</html>`, messageHTML, disabledAttr(!passwordConfigured), formHTML)
+</html>`, html.EscapeString(loginCopy.LanguageTag), html.EscapeString(loginCopy.PageTitle), html.EscapeString(loginCopy.ConnectionState), html.EscapeString(loginCopy.Heading), messageHTML, html.EscapeString(loginCopy.PasswordLabel), html.EscapeString(loginCopy.PasswordPlaceholder), html.EscapeString(loginCopy.PasswordLabel), disabledAttr(!passwordConfigured), formHTML)
 }
 
 func disabledAttr(disabled bool) string {

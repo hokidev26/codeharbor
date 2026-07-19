@@ -144,6 +144,13 @@ type remoteLoginCopy struct {
 	FullPolicyTitle                  string
 	FullPolicyDescription            string
 	Footer                           string
+	HTTPSRequiredMessage             string
+	CrossSiteDeniedMessage           string
+	FormUnreadableMessage            string
+	IncorrectPasswordMessage         string
+	SessionFailedMessage             string
+	LockRetrySoonMessage             string
+	LockRetryMinutesMessage          string
 }
 
 func remoteLoginCopyForAcceptLanguage(header string) remoteLoginCopy {
@@ -159,7 +166,10 @@ func remoteLoginCopyForLocale(locale remoteLoginLocale) remoteLoginCopy {
 			UnconfiguredPasswordNoticeBefore: "遠端存取已觸發保護，但尚未設定 ", UnconfiguredPasswordNoticeAfter: "。請先停止裸露隧道，設定密碼或使用 Cloudflare Access 後再重試。",
 			RestrictedPolicyTitle: "執行主機已設為受限權限", RestrictedPolicyDescription: "登入後僅可存取專案目錄，最高 acceptEdits；如需變更，請在執行 Autoto 的主機透過 localhost 開啟設定。",
 			FullPolicyTitle: "執行主機已設為完整權限", FullPolicyDescription: "登入後可存取主機目錄、終端與 bypassPermissions；此模式只能在執行 Autoto 的主機本機變更。",
-			Footer: "本機 localhost 存取不受影響",
+			Footer:               "本機 localhost 存取不受影響",
+			HTTPSRequiredMessage: "遠端存取必須使用 HTTPS；請透過 HTTPS 網址重新開啟此頁面。", CrossSiteDeniedMessage: "跨網站登入請求已遭拒絕。",
+			FormUnreadableMessage: "無法讀取密碼表單。", IncorrectPasswordMessage: "密碼不正確，請重試。", SessionFailedMessage: "無法建立安全工作階段，請稍後重試。",
+			LockRetrySoonMessage: "密碼錯誤次數過多，請稍後重試。", LockRetryMinutesMessage: "密碼錯誤次數過多，請約 %d 分鐘後重試。",
 		}
 	case remoteLoginLocaleEnglish:
 		return remoteLoginCopy{
@@ -168,7 +178,10 @@ func remoteLoginCopyForLocale(locale remoteLoginLocale) remoteLoginCopy {
 			UnconfiguredPasswordNoticeBefore: "Remote access protection is active, but ", UnconfiguredPasswordNoticeAfter: " is not configured. Stop the exposed tunnel first, then set a password or use Cloudflare Access before retrying.",
 			RestrictedPolicyTitle: "This host uses restricted access", RestrictedPolicyDescription: "After signing in, you can access only the project directory, up to acceptEdits. To change this, open settings through localhost on the host running Autoto.",
 			FullPolicyTitle: "This host uses full access", FullPolicyDescription: "After signing in, you can access host directories, the terminal, and bypassPermissions. This mode can be changed only locally on the host running Autoto.",
-			Footer: "Local localhost access is unaffected",
+			Footer:               "Local localhost access is unaffected",
+			HTTPSRequiredMessage: "Remote access requires HTTPS. Reopen this page using an HTTPS address.", CrossSiteDeniedMessage: "The cross-site sign-in request was denied.",
+			FormUnreadableMessage: "The password form could not be read.", IncorrectPasswordMessage: "The password is incorrect. Try again.", SessionFailedMessage: "A secure session could not be created. Try again later.",
+			LockRetrySoonMessage: "Too many incorrect password attempts. Try again later.", LockRetryMinutesMessage: "Too many incorrect password attempts. Try again in about %d minutes.",
 		}
 	default:
 		return remoteLoginCopy{
@@ -177,7 +190,10 @@ func remoteLoginCopyForLocale(locale remoteLoginLocale) remoteLoginCopy {
 			UnconfiguredPasswordNoticeBefore: "远程访问已触发保护，但还没有配置 ", UnconfiguredPasswordNoticeAfter: "。请先停止裸露隧道，设置密码或使用 Cloudflare Access 后再重试。",
 			RestrictedPolicyTitle: "运行主机已设为受限权限", RestrictedPolicyDescription: "登录后仅可访问项目目录，最高 acceptEdits；如需更改，请在运行 Autoto 的主机通过 localhost 打开设置。",
 			FullPolicyTitle: "运行主机已设为完整权限", FullPolicyDescription: "登录后可访问主机目录、终端与 bypassPermissions；此模式只能在运行 Autoto 的主机本地更改。",
-			Footer: "本机 localhost 访问不受影响",
+			Footer:               "本机 localhost 访问不受影响",
+			HTTPSRequiredMessage: "远程访问必须使用 HTTPS；请通过 HTTPS 地址重新打开此页面。", CrossSiteDeniedMessage: "跨站登录请求已被拒绝。",
+			FormUnreadableMessage: "无法读取密码表单。", IncorrectPasswordMessage: "密码不正确，请重试。", SessionFailedMessage: "无法建立安全会话，请稍后重试。",
+			LockRetrySoonMessage: "密码错误次数过多，请稍后重试。", LockRetryMinutesMessage: "密码错误次数过多，请约 %d 分钟后重试。",
 		}
 	}
 }

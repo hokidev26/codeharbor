@@ -13,6 +13,41 @@ import (
 	"autoto/internal/db"
 )
 
+func TestMessageContextPermissionCapsStayNarrow(t *testing.T) {
+	tests := []struct {
+		context    string
+		wantCap    string
+		wantSource string
+		wantErr    bool
+	}{
+		{context: "conversation", wantCap: "readOnly", wantSource: db.RunSourceConversation},
+		{context: "project", wantCap: "", wantSource: db.RunSourceManual},
+		{context: "", wantCap: "", wantSource: db.RunSourceManual},
+		{context: "unknown", wantErr: true},
+	}
+	for _, test := range tests {
+		got, err := messageContextPermissionModeCap(test.context)
+		if test.wantErr {
+			if err == nil {
+				t.Fatalf("messageContextPermissionModeCap(%q) expected an error", test.context)
+			}
+			continue
+		}
+		if err != nil || got != test.wantCap {
+			t.Fatalf("messageContextPermissionModeCap(%q) = %q, %v; want %q", test.context, got, err, test.wantCap)
+		}
+		if source := messageContextRunSource(test.context); source != test.wantSource {
+			t.Fatalf("messageContextRunSource(%q) = %q; want %q", test.context, source, test.wantSource)
+		}
+	}
+	if got := narrowPermissionModeCaps("acceptEdits", "readOnly"); got != "readOnly" {
+		t.Fatalf("conversation cap must narrow remote/project permissions, got %q", got)
+	}
+	if got := narrowPermissionModeCaps("", "acceptEdits"); got != "acceptEdits" {
+		t.Fatalf("remote cap must remain effective, got %q", got)
+	}
+}
+
 func TestAgentCollectionsAndCreationRespectMembership(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "agents.db"))

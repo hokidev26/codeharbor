@@ -39,6 +39,14 @@ func (r *Runner) captureRunCheckpoint(ctx context.Context, agent db.Agent, runID
 	if r == nil || r.store == nil || strings.TrimSpace(runID) == "" {
 		return
 	}
+	run, err := r.store.GetRunByID(ctx, runID)
+	if err != nil {
+		slog.Warn("load run before git checkpoint failed", "runId", runID, "error", err)
+		return
+	}
+	if isConversationRun(run) {
+		return
+	}
 	repoRoot, ok := gitRepoRoot(ctx, agent.CWD)
 	if !ok {
 		slog.Warn("run git checkpoint unavailable", "runId", runID, "reason", "repository root could not be resolved")

@@ -55,7 +55,11 @@ function initialLocalePreference() {
   return "auto";
 }
 
-let activeLocale = resolveUILocale(initialLocalePreference());
+const localeRuntimeKey = Symbol.for("autoto.i18n.runtime");
+const existingLocaleRuntime = globalThis[localeRuntimeKey];
+const localeRuntime = existingLocaleRuntime && typeof existingLocaleRuntime === "object" ? existingLocaleRuntime : {};
+if (!uiLocales.includes(localeRuntime.activeLocale)) localeRuntime.activeLocale = resolveUILocale(initialLocalePreference());
+globalThis[localeRuntimeKey] = localeRuntime;
 
 function lookup(catalog, key) {
   return String(key || "").split(".").reduce((value, part) => value && typeof value === "object" ? value[part] : undefined, catalog);
@@ -77,24 +81,24 @@ export function resolveUILocale(value = "auto") {
 }
 
 export function currentUILocale() {
-  return activeLocale;
+  return localeRuntime.activeLocale;
 }
 
-export function t(key, params = {}, locale = activeLocale) {
+export function t(key, params = {}, locale = localeRuntime.activeLocale) {
   const resolved = resolveUILocale(locale);
   const message = lookup(messageCatalogs[resolved], key) ?? lookup(messageCatalogs["zh-CN"], key) ?? key;
   return interpolate(message, params);
 }
 
-export function applyDocumentLocale(locale = activeLocale, root = globalThis.document) {
-  activeLocale = resolveUILocale(locale);
+export function applyDocumentLocale(locale = localeRuntime.activeLocale, root = globalThis.document) {
+  localeRuntime.activeLocale = resolveUILocale(locale);
   const element = root?.documentElement;
   if (element) {
-    element.lang = activeLocale === "zh-TW" ? "zh-Hant-TW" : activeLocale === "zh-CN" ? "zh-Hans-CN" : "en";
-    element.dataset.uiLocale = activeLocale;
+    element.lang = localeRuntime.activeLocale === "zh-TW" ? "zh-Hant-TW" : localeRuntime.activeLocale === "zh-CN" ? "zh-Hans-CN" : "en";
+    element.dataset.uiLocale = localeRuntime.activeLocale;
   }
   if (root && "title" in root) root.title = t("app.title");
-  return activeLocale;
+  return localeRuntime.activeLocale;
 }
 
 function nodesWithAttribute(root, attribute) {
@@ -107,26 +111,30 @@ function nodesWithAttribute(root, attribute) {
 function translateAttribute(root, marker, attribute) {
   nodesWithAttribute(root, marker).forEach((node) => {
     const key = node.getAttribute(marker);
-    if (key) node.setAttribute(attribute, t(key));
+    if (!key) return;
+    const translated = t(key);
+    if (translated !== key) node.setAttribute(attribute, translated);
   });
 }
 
 export function applyStaticTranslations(root = globalThis.document) {
-  if (!root) return activeLocale;
+  if (!root) return localeRuntime.activeLocale;
   nodesWithAttribute(root, "data-i18n").forEach((node) => {
     const key = node.getAttribute("data-i18n");
-    if (key) node.textContent = t(key);
+    if (!key) return;
+    const translated = t(key);
+    if (translated !== key) node.textContent = translated;
   });
   translateAttribute(root, "data-i18n-title", "title");
   translateAttribute(root, "data-i18n-placeholder", "placeholder");
   translateAttribute(root, "data-i18n-aria-label", "aria-label");
-  return activeLocale;
+  return localeRuntime.activeLocale;
 }
 
 export function setUILocale(locale, root = globalThis.document) {
   applyDocumentLocale(locale, root);
   applyStaticTranslations(root);
-  return activeLocale;
+  return localeRuntime.activeLocale;
 }
 
 export function flattenMessageKeys(catalog) {

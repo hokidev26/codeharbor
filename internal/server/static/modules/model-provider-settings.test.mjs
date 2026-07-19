@@ -607,6 +607,8 @@ test("已获取模型在 Provider 页面可见并进入全局模型选择器", (
       modelsSource: "remote",
       discovered: true,
       available: false,
+      runtimeAvailable: true,
+      registered: true,
       configured: false,
       enabled: true,
       origin: "custom",
@@ -659,6 +661,38 @@ test("未发现的未配置默认模型不会进入全局模型选择器", () =>
   });
   const options = controller.renderAgentModelOptions("");
   assert.doesNotMatch(options, /relay:fallback-model/);
+});
+
+test("运行时不可用或未注册的 Provider 只保留当前模型占位，不进入首选与新聊天选择", () => {
+  const previousDocument = globalThis.document;
+  const modelSelect = { value: "offline:stale-model" };
+  globalThis.document = { getElementById(id) { return id === "modelSelect" ? modelSelect : null; } };
+  try {
+    const controller = createModelProviderSettingsController({
+      state: {
+        settings: { providers: [] },
+        modelCatalog: {
+          providers: [
+            { name: "offline", type: "openai-compatible", models: ["stale-model"], configured: true, enabled: true, runtimeAvailable: false, registered: false },
+            { name: "live", type: "openai", models: ["ready-model"], configured: true, enabled: true, runtimeAvailable: true, registered: true },
+          ],
+        },
+        agent: { id: "agent-1", model: "offline:stale-model" },
+      },
+      getPreferredModelPreference: () => "offline:stale-model",
+    });
+
+    const options = controller.renderAgentModelOptions("offline:stale-model");
+    assert.match(options, /value="offline:stale-model" disabled/);
+    assert.match(options, /当前不可用|currently unavailable/i);
+    assert.doesNotMatch(options, /<optgroup[^>]*>[^]*offline:stale-model/);
+    assert.match(options, /live:ready-model/);
+    assert.equal(controller.selectedModelValue(), "live:ready-model");
+    assert.equal(controller.isCurrentModelConfigured("offline:stale-model"), false);
+    assert.equal(controller.isCurrentModelConfigured("live:ready-model"), true);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test("供应商控制台按分类和搜索过滤，并保留兼容 relay 入口", () => {

@@ -43,6 +43,47 @@ func TestPlanPolicyOnlyExposesCoreReadAllowlist(t *testing.T) {
 	}
 }
 
+func TestConversationPolicyOnlyExposesPublicResearchTools(t *testing.T) {
+	registry := tools.NewRegistry()
+	tools.RegisterCore(registry)
+	runner := &Runner{tools: registry}
+	policy := PolicyContext{ExecutionMode: ExecutionModeExecute, PermissionMode: "readOnly", Conversation: true}
+	snapshot, err := runner.snapshotToolsForPolicy(context.Background(), tools.ResolutionContext{AgentID: "agent-1", CWD: "/project"}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(snapshot.specs))
+	for _, spec := range snapshot.specs {
+		names = append(names, spec.Name)
+	}
+	want := []string{"WebFetch", "WebSearch"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("unexpected conversation tool surface: got=%v want=%v", names, want)
+	}
+	if len(snapshot.tools) != len(want) {
+		t.Fatalf("conversation snapshot retained project tools: %v", snapshot.tools)
+	}
+	for _, name := range want {
+		if _, ok := snapshot.tools[name]; !ok {
+			t.Fatalf("conversation snapshot omitted %s", name)
+		}
+	}
+	for _, denied := range []struct {
+		name string
+		risk tools.Risk
+	}{
+		{name: "Read", risk: tools.RiskRead},
+		{name: "Glob", risk: tools.RiskRead},
+		{name: "Bash", risk: tools.RiskExec},
+		{name: "MCPListTools", risk: tools.RiskRead},
+	} {
+		result, blocked := planToolDeniedResult(policy, tools.Call{Name: denied.name}, denied.risk)
+		if !blocked || !result.IsError || !strings.Contains(result.Output, "conversation context") {
+			t.Fatalf("conversation gateway allowed %s/%s: %+v blocked=%v", denied.name, denied.risk, result, blocked)
+		}
+	}
+}
+
 func TestPipelineToolsOnlyAppearForReadOnlyOrPlanPolicies(t *testing.T) {
 	registry := tools.NewRegistry()
 	tools.RegisterCore(registry)

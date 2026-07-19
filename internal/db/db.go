@@ -66,6 +66,11 @@ type MessageDraft struct {
 	UpdatedAt   string `json:"updatedAt"`
 }
 
+const (
+	ProjectFlowModeWorkspace    = "workspace"
+	ProjectFlowModeConversation = "conversation"
+)
+
 type Project struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
@@ -143,6 +148,7 @@ type Agent struct {
 }
 
 type NavigationConversation struct {
+	Context           string `json:"context"`
 	ProjectID         string `json:"projectId"`
 	ProjectName       string `json:"projectName"`
 	ProjectPath       string `json:"projectPath"`
@@ -253,6 +259,9 @@ type Run struct {
 const (
 	RunExecutionModePlan    = "plan"
 	RunExecutionModeExecute = "execute"
+
+	RunSourceManual       = "manual"
+	RunSourceConversation = "conversation"
 
 	RunCheckpointNone        = "none"
 	RunCheckpointTracking    = "tracking"
@@ -1635,7 +1644,7 @@ func (s *Store) CreateRun(ctx context.Context, run Run) (Run, error) {
 		run.CheckpointState = RunCheckpointNone
 	}
 	if run.Source == "" {
-		run.Source = "manual"
+		run.Source = RunSourceManual
 	}
 	if run.ExecutionMode == "" {
 		run.ExecutionMode = RunExecutionModeExecute
@@ -2263,6 +2272,7 @@ func (s *Store) ListNavigationConversationsWithOptions(ctx context.Context, incl
 SELECT
   p.id,
   p.name,
+  p.flow_mode,
   COALESCE(p.git_path, ''),
   p.updated_at,
   COALESCE(p.pinned, 0),
@@ -2301,10 +2311,12 @@ ORDER BY CASE WHEN p.archived_at IS NULL THEN 0 ELSE 1 END ASC,
 	conversations := make([]NavigationConversation, 0)
 	for rows.Next() {
 		var conversation NavigationConversation
+		var projectFlowMode string
 		var projectPinned, agentPinned int
 		if err := rows.Scan(
 			&conversation.ProjectID,
 			&conversation.ProjectName,
+			&projectFlowMode,
 			&conversation.ProjectPath,
 			&conversation.ProjectUpdatedAt,
 			&projectPinned,
@@ -2328,6 +2340,11 @@ ORDER BY CASE WHEN p.archived_at IS NULL THEN 0 ELSE 1 END ASC,
 		); err != nil {
 			return nil, err
 		}
+		if projectFlowMode == ProjectFlowModeConversation {
+			conversation.Context = ProjectFlowModeConversation
+		} else {
+			conversation.Context = "project"
+		}
 		conversation.ProjectPinned = projectPinned != 0
 		conversation.AgentPinned = agentPinned != 0
 		conversations = append(conversations, conversation)
@@ -2349,12 +2366,76 @@ func (s *Store) CreateProjectForUser(ctx context.Context, userID, name, descript
 	return s.createProject(ctx, userID, name, description, gitPath, defaultModel, permissionMode)
 }
 
+// CreateStandaloneConversation atomically creates the hidden project container,
+// root workline, and read-only primary Agent used by a filesystem-free chat.
+func (s *Store) CreateStandaloneConversation(ctx context.Context, title, model string) (Project, Workline, Agent, error) {
+	return s.createStandaloneConversation(ctx, "", title, model)
+}
+
+// CreateStandaloneConversationForUser additionally makes the creating user the
+// owner in the same transaction as the conversation hierarchy.
+func (s *Store) CreateStandaloneConversationForUser(ctx context.Context, userID, title, model string) (Project, Workline, Agent, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return Project{}, Workline{}, Agent{}, errors.New("user is required")
+	}
+	return s.createStandaloneConversation(ctx, userID, title, model)
+}
+
+func (s *Store) createStandaloneConversation(ctx context.Context, ownerID, title, model string) (Project, Workline, Agent, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "New conversation"
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return Project{}, Workline{}, Agent{}, errors.New("model is required")
+	}
+	now := Now()
+	project := Project{ID: NewID(), Name: title, Status: "active", FlowMode: ProjectFlowModeConversation, CreatedAt: now, UpdatedAt: now}
+	workline := Workline{ID: NewID(), ProjectID: project.ID, Title: "conversation", Status: "active", Role: "root", IsRoot: true, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: title, Model: model, PermissionMode: "readOnly", ExecutionDeviceID: "local", Status: "idle", CreatedAt: now, UpdatedAt: now}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Project{}, Workline{}, Agent{}, err
+	}
+	defer tx.Rollback()
+	if ownerID != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = ?`, ownerID).Scan(&count); err != nil {
+			return Project{}, Workline{}, Agent{}, err
+		}
+		if count != 1 {
+			return Project{}, Workline{}, Agent{}, sql.ErrNoRows
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projects (id, name, description, status, flow_mode, git_path, created_at, updated_at) VALUES (?, ?, '', ?, ?, '', ?, ?)`, project.ID, project.Name, project.Status, project.FlowMode, project.CreatedAt, project.UpdatedAt); err != nil {
+		return Project{}, Workline{}, Agent{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO worklines (id, project_id, title, status, role, worktree_path, is_root, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '', 1, ?, ?)`, workline.ID, workline.ProjectID, workline.Title, workline.Status, workline.Role, workline.CreatedAt, workline.UpdatedAt); err != nil {
+		return Project{}, Workline{}, Agent{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (id, workline_id, type, title, model, permission_mode, execution_device_id, status, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'readOnly', 'local', 'idle', '', ?, ?)`, agent.ID, agent.WorklineID, agent.Type, agent.Title, agent.Model, agent.CreatedAt, agent.UpdatedAt); err != nil {
+		return Project{}, Workline{}, Agent{}, err
+	}
+	if ownerID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_members (project_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)`, project.ID, ownerID, now); err != nil {
+			return Project{}, Workline{}, Agent{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Project{}, Workline{}, Agent{}, err
+	}
+	return project, workline, agent, nil
+}
+
 func (s *Store) createProject(ctx context.Context, ownerID, name, description, gitPath string, defaultModel, permissionMode string) (Project, Workline, Agent, error) {
 	if name == "" {
 		return Project{}, Workline{}, Agent{}, errors.New("name is required")
 	}
 	now := Now()
-	project := Project{ID: NewID(), Name: name, Description: description, Status: "active", FlowMode: "workspace", GitPath: gitPath, CreatedAt: now, UpdatedAt: now}
+	project := Project{ID: NewID(), Name: name, Description: description, Status: "active", FlowMode: ProjectFlowModeWorkspace, GitPath: gitPath, CreatedAt: now, UpdatedAt: now}
 	workline := Workline{ID: NewID(), ProjectID: project.ID, Title: "main", Status: "active", Role: "root", WorktreePath: gitPath, IsRoot: true, CreatedAt: now, UpdatedAt: now}
 	agent := Agent{ID: NewID(), WorklineID: workline.ID, Type: "primary", Title: name, Model: defaultModel, PermissionMode: permissionMode, ExecutionDeviceID: "local", Status: "idle", CWD: gitPath, CreatedAt: now, UpdatedAt: now}
 
@@ -2555,6 +2636,12 @@ func (s *Store) GetAgent(ctx context.Context, id string) (Agent, error) {
 	return scanAgent(func(dest ...any) error {
 		return s.db.QueryRowContext(ctx, agentSelectSQL+` WHERE id = ?`, id).Scan(dest...)
 	})
+}
+
+func (s *Store) GetAgentProjectFlowMode(ctx context.Context, agentID string) (string, error) {
+	var flowMode string
+	err := s.db.QueryRowContext(ctx, `SELECT p.flow_mode FROM agents a JOIN worklines w ON w.id = a.workline_id JOIN projects p ON p.id = w.project_id WHERE a.id = ?`, strings.TrimSpace(agentID)).Scan(&flowMode)
+	return flowMode, err
 }
 
 func (s *Store) UpdateAgentTitle(ctx context.Context, id, title string) (Agent, error) {
@@ -2882,6 +2969,71 @@ func (s *Store) CreateCorrectionWithRun(ctx context.Context, agentID, sourceMess
 	message.RunID = run.ID
 	message.Attachments = attachmentMetadata(storedAttachments)
 	return message, run, nil
+}
+
+// BindPendingCorrectionRun upgrades the legacy correction transaction with the
+// same execution-generation and capability snapshots used by ordinary runs. It
+// must complete before the correction loop is scheduled.
+func (s *Store) BindPendingCorrectionRun(ctx context.Context, runID, source string) (Run, error) {
+	runID = strings.TrimSpace(runID)
+	source = strings.TrimSpace(source)
+	if runID == "" {
+		return Run{}, errors.New("run id is required")
+	}
+	if source == "" {
+		source = RunSourceManual
+	}
+	if source != RunSourceManual && source != RunSourceConversation {
+		return Run{}, errors.New("invalid correction run source")
+	}
+	permissionModeCap := ""
+	if source == RunSourceConversation {
+		permissionModeCap = "readOnly"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Rollback()
+	var agentID, status string
+	var existingGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT agent_id, status, COALESCE(execution_generation,0) FROM runs WHERE id = ?`, runID).Scan(&agentID, &status, &existingGeneration); err != nil {
+		return Run{}, err
+	}
+	if status != "pending" || existingGeneration != 0 {
+		return Run{}, fmt.Errorf("%w: correction run is already bound or no longer pending", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET execution_generation = COALESCE(execution_generation,0) + 1 WHERE id = ?`, agentID)
+	if err != nil {
+		return Run{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Run{}, err
+	} else if affected != 1 {
+		return Run{}, sql.ErrNoRows
+	}
+	var executionGeneration, agentGeneration int64
+	var executionDeviceID string
+	if err := tx.QueryRowContext(ctx, `SELECT execution_generation, COALESCE(entity_generation,1), COALESCE(execution_device_id,'local') FROM agents WHERE id = ?`, agentID).Scan(&executionGeneration, &agentGeneration, &executionDeviceID); err != nil {
+		return Run{}, err
+	}
+	policyGeneration := int64(1)
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(policy_generation,1) FROM workflow_preferences WHERE id = 'default'`).Scan(&policyGeneration); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Run{}, err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE runs SET source = ?, permission_mode_cap = ?, execution_generation = ?, trigger_type = 'manual', execution_device_id = ?, execution_mode = 'execute', policy_generation_snapshot = ?, agent_generation_snapshot = ?, auto_continuation_mode = 'off', tool_catalog_digest = '', workspace_fingerprint = '', updated_at = ? WHERE id = ? AND status = 'pending' AND COALESCE(execution_generation,0) = 0`, source, permissionModeCap, executionGeneration, executionDeviceID, policyGeneration, agentGeneration, Now(), runID)
+	if err != nil {
+		return Run{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Run{}, err
+	} else if affected != 1 {
+		return Run{}, fmt.Errorf("%w: correction run binding changed concurrently", ErrConflict)
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, err
+	}
+	return s.GetRunByID(ctx, runID)
 }
 
 func (s *Store) ListMessages(ctx context.Context, agentID string) ([]Message, error) {

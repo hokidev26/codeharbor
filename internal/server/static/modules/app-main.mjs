@@ -5,8 +5,8 @@ import { createArchiveSettingsController } from "./archive-settings.mjs?v=archiv
 import { createBackgroundTasksController } from "./background-tasks.mjs";
 import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
-import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1";
-import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1";
+import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1-project-context-1";
+import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1";
 import {
   addRecentConversation,
   buildNavigationView,
@@ -17,7 +17,7 @@ import {
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1-project-context-1";
 import {
   basename,
   canonicalLocalPath,
@@ -25,11 +25,11 @@ import {
   normalizePath,
   normalizeRecentDirectories,
   shortPath,
-} from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1";
+} from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1";
-import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1";
+import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
 import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1-autoto-themes-1";
@@ -58,7 +58,7 @@ import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
 import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-1";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1";
 import { createUsageHistoryController } from "./usage-history.mjs";
 import { createWorkspaceSettingsController } from "./workspace-settings.mjs?v=plan-mode-1";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
@@ -94,6 +94,7 @@ const state = {
   navigationLoadSeq: 0,
   navigationMode: "all",
   navigationMenuTarget: null,
+  navigationSelectionKind: "conversation",
   navigationTransitionTitle: "",
   recentConversations: [],
   project: null,
@@ -234,6 +235,7 @@ const state = {
   modelApplySeq: 0,
   agentModelSettings: null,
   projectCreating: false,
+  standaloneConversationCreating: false,
   projectCreateSeq: 0,
   projectSelectSeq: 0,
   initializing: false,
@@ -1062,7 +1064,7 @@ function restoreAuthorizedAgentTransports() {
   if (state.remoteAccessFailClosed || !state.agent?.id || state.agentStreamStatus !== "idle") return false;
   backgroundTasks.setAgent(state.agent.id);
   connectWS();
-  if (terminalAccessAllowed(state) && !terminalSocketUsable()) connectTerminal();
+  if (projectOperationContextActive() && terminalAccessAllowed(state) && !terminalSocketUsable()) connectTerminal();
   return true;
 }
 
@@ -2757,6 +2759,31 @@ function clearMessageViewportBusy() {
   delete el.dataset.switchingLabel;
 }
 
+function projectOperationContextActive() {
+  return state.navigationSelectionKind === "project" && Boolean(state.project?.id && state.agent?.id);
+}
+
+function syncProjectOperationContext() {
+  const active = projectOperationContextActive();
+  const body = document.body;
+  const wasActive = body?.classList.contains("project-operation-context") || false;
+  body?.classList.toggle("project-operation-context", active);
+  if (body) body.dataset.navigationContext = active ? "project" : "conversation";
+  (document.querySelectorAll?.("[data-project-context-only]") || []).forEach((node) => {
+    node.setAttribute("aria-hidden", active ? "false" : "true");
+  });
+  const permissionMode = $("permissionMode");
+  if (permissionMode) permissionMode.disabled = !active;
+  if (wasActive && !active) {
+    toggleTerminal(true);
+    closeWorkspace();
+    closeGitModal();
+    backgroundTasks.closeTray("conversation-context");
+  }
+  renderTerminalButtonState();
+  return active;
+}
+
 function permissionLabel(value) {
   const labels = {
     readOnly: t("chat.permission.readOnly"),
@@ -2886,10 +2913,11 @@ function updateSecurityModeUI() {
     badge.classList.toggle("tunnel", connection.remote);
     badge.dataset.connectionMode = connection.remote ? (connection.restricted ? "tunnel-restricted" : "tunnel-full") : "local";
   }
+  const terminalUnavailable = terminalLocked || !projectOperationContextActive();
   [$("toggleTerminalBtn"), $("workbenchTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn")].forEach((button) => {
     if (!button) return;
     if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.title || "";
-    button.disabled = terminalLocked;
+    button.disabled = terminalUnavailable;
     button.title = terminalLocked ? am("remoteTerminalDisabledTitle") : button.dataset.defaultTitle;
   });
   enforcePermissionSelectCap();
@@ -3109,9 +3137,17 @@ function updateWorkspaceMetaPills() {
     el.innerHTML = "";
     return;
   }
+  const model = currentWorkspaceModel();
+  if (!projectOperationContextActive()) {
+    el.innerHTML = `
+      <span class="workspace-pill">${escapeHtml(`${t("shell.filters.conversations")} · ${t("chat.permission.readOnly")}`)}</span>
+      <span class="workspace-pill" title="${escapeAttr(model)}">${escapeHtml(t("workspace.main.modelLabel", { model }))}</span>
+    `;
+    el.classList.remove("hidden");
+    return;
+  }
   const cwd = canonicalLocalPath(state.agent?.cwd || state.project?.gitPath || "");
   const permission = effectivePermissionForDisplay(state.agent?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
-  const model = currentWorkspaceModel();
   const securityText = connectionModeSummary().label;
   el.innerHTML = `
     <span class="workspace-pill" title="${escapeAttr(cwd)}">${escapeHtml(t("workspace.main.directoryLabel", { path: shortPath(cwd) }))}</span>
@@ -3131,12 +3167,12 @@ function loadRecentConversations() {
 }
 
 function rememberCurrentConversation() {
-  if (!state.project?.id || !state.workline?.id || !state.agent?.id) return;
-  state.recentConversations = addRecentConversation(state.recentConversations, {
-    projectId: state.project.id,
-    worklineId: state.workline.id,
-    agentId: state.agent.id,
-  });
+  if (!state.agent?.id) return;
+  const navigationConversation = state.navigationConversations.find((item) => item.agentId === state.agent.id);
+  const target = navigationConversation?.targetId || (state.project?.id && state.workline?.id
+    ? { projectId: state.project.id, worklineId: state.workline.id, agentId: state.agent.id }
+    : { projectId: "", worklineId: "", agentId: state.agent.id });
+  state.recentConversations = addRecentConversation(state.recentConversations, target);
   try {
     localStorage.setItem(recentConversationsKey, JSON.stringify(state.recentConversations));
   } catch {}
@@ -3264,8 +3300,45 @@ async function loadProjects() {
     state.projects = navigation.projects;
     state.navigationConversations = navigation.conversations;
     renderProjects();
+    return navigation;
   } catch (err) {
     if (seq === state.navigationLoadSeq) throw err;
+  }
+}
+
+function setStandaloneConversationCreationBusy(busy) {
+  document.querySelectorAll("[data-create-conversation]").forEach((button) => {
+    button.disabled = Boolean(busy);
+    button.classList.toggle("is-busy", Boolean(busy));
+    if (busy) button.setAttribute("aria-busy", "true");
+    else button.removeAttribute("aria-busy");
+  });
+}
+
+async function createStandaloneConversation() {
+  if (state.standaloneConversationCreating) return null;
+  saveCurrentChatDraft();
+  hideSlashCommandPalette();
+  closeMobileSidebar();
+  state.standaloneConversationCreating = true;
+  setStandaloneConversationCreationBusy(true);
+  try {
+    const model = selectedModelValue();
+    const created = await api("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: t("shell.newConversation"), ...(model ? { model } : {}) }),
+    });
+    const agentId = String(created?.agent?.id || created?.agentId || created?.id || "").trim();
+    if (!agentId) throw new Error(t("shell.conversationCreateInvalid"));
+    await loadProjects();
+    const conversation = state.navigationConversations.find((item) => item.agentId === agentId)
+      || { agentId, agentTitle: created?.agent?.title || created?.title || agentId, standalone: true, context: "conversation" };
+    await selectNavigationConversation(conversation);
+    showToast(t("shell.conversationCreated"), "success", { force: true });
+    return state.agent;
+  } finally {
+    state.standaloneConversationCreating = false;
+    setStandaloneConversationCreationBusy(false);
   }
 }
 
@@ -3326,6 +3399,7 @@ function renderProjects() {
   el.innerHTML = renderNavigationHTML(view, {
     activeProjectId: state.project?.id || "",
     activeAgentId: state.agent?.id || "",
+    activeSelectionKind: state.navigationSelectionKind,
     taskContext,
     taskCounts,
   });
@@ -3389,6 +3463,7 @@ async function createProjectFromDirectory(path, options = {}) {
     if (created.project?.id && !state.projects.some((project) => project.id === created.project.id)) {
       state.projects = [created.project, ...state.projects];
     }
+    state.navigationSelectionKind = "project";
     state.project = created.project;
     state.workline = created.workline;
     state.agent = created.agent;
@@ -3417,11 +3492,13 @@ function beginNavigationSelection(project, options = {}) {
   state.projectCreateSeq++;
   const seq = ++state.projectSelectSeq;
   const previousTitle = conversationHeaderTitle();
+  state.navigationSelectionKind = options.selectionKind === "project" ? "project" : "conversation";
   state.navigationTransitionTitle = options.preserveConversationView ? previousTitle : "";
   disconnectAgentTransports();
   state.project = project || null;
   state.workline = null;
   state.agent = null;
+  syncProjectOperationContext();
   state.workState = null;
   state.titleEditing = false;
   state.titleSaving = false;
@@ -3457,7 +3534,7 @@ async function selectProject(id, options = {}) {
       && state.project.id !== id
       && state.agent?.id,
   );
-  const seq = beginNavigationSelection(project, { preserveConversationView });
+  const seq = beginNavigationSelection(project, { preserveConversationView, selectionKind: "project" });
   if (!state.project) {
     state.chatHydrating = false;
     updateWorkspaceMetaPills();
@@ -3521,25 +3598,37 @@ async function selectProject(id, options = {}) {
 }
 
 async function selectNavigationConversation(target, options = {}) {
+  const supplied = target && typeof target === "object" ? target : null;
   const parsed = typeof target === "string" ? parseNavigationTargetId(target) : parseNavigationTargetId(target?.targetId || "");
-  if (!parsed) throw new Error(am("invalidConversationTarget"));
-  const navigationConversation = state.navigationConversations.find((item) => item.targetId === parsed.targetId) || null;
-  const project = state.projects.find((item) => item.id === parsed.projectId) || (navigationConversation ? {
+  const navigationConversation = supplied?.agentId
+    ? supplied
+    : parsed ? state.navigationConversations.find((item) => item.targetId === parsed.targetId) || null : null;
+  const agentId = String(navigationConversation?.agentId || parsed?.agentId || "").trim();
+  if (!agentId) throw new Error(am("invalidConversationTarget"));
+  const standalone = navigationConversation?.standalone === true
+    || navigationConversation?.context === "conversation"
+    || navigationConversation?.projectFlowMode === false;
+  const projectId = String(navigationConversation?.projectId || parsed?.projectId || "").trim();
+  const worklineId = String(navigationConversation?.worklineId || parsed?.worklineId || "").trim();
+  const project = standalone ? null : state.projects.find((item) => item.id === projectId) || (navigationConversation ? {
     id: navigationConversation.projectId,
     name: navigationConversation.projectName,
     gitPath: navigationConversation.projectPath,
     updatedAt: navigationConversation.projectUpdatedAt,
   } : null);
   const preserveConversationView = Boolean(state.agent?.id);
-  const seq = beginNavigationSelection(project, { preserveConversationView });
-  if (!state.project) {
+  const selectionKind = standalone ? "conversation" : "project";
+  const seq = beginNavigationSelection(project, { preserveConversationView, selectionKind });
+  if (!standalone && !state.project) {
     state.chatHydrating = false;
     showEmptyWorkspaceState();
     throw new Error(am("projectNoLongerExists"));
   }
 
   if (!preserveConversationView) {
-    $("currentTitle").textContent = navigationConversation?.projectName || state.project.name;
+    $("currentTitle").textContent = standalone
+      ? navigationConversation?.agentTitle || t("shell.newConversation")
+      : navigationConversation?.projectName || state.project.name;
   }
   updateWorkspaceMetaPills();
   // Keep the previous title and conversation in place while the next one hydrates.
@@ -3547,24 +3636,34 @@ async function selectNavigationConversation(target, options = {}) {
   markMessageViewportBusy();
 
   try {
-    const [worklines, agents] = await Promise.all([
-      api(`/api/projects/${encodeURIComponent(parsed.projectId)}/worklines`),
-      api(`/api/worklines/${encodeURIComponent(parsed.worklineId)}/agents`),
-    ]);
-    if (seq !== state.projectSelectSeq || state.project?.id !== parsed.projectId) return;
-    state.projectWorklines = Array.isArray(worklines) ? worklines : [];
-    state.workline = state.projectWorklines.find((item) => item.id === parsed.worklineId) || null;
-    state.worklineAgents = Array.isArray(agents) ? agents : [];
-    state.agent = state.worklineAgents.find((item) => item.id === parsed.agentId) || null;
-    if (!state.workline || !state.agent) {
+    if (standalone) {
+      const agent = await api(`/api/agents/${encodeURIComponent(agentId)}`);
+      if (seq !== state.projectSelectSeq) return;
+      state.project = null;
+      state.workline = null;
+      state.projectWorklines = [];
+      state.worklineAgents = [];
+      state.agent = agent;
+    } else {
+      const [worklines, agents] = await Promise.all([
+        api(`/api/projects/${encodeURIComponent(projectId)}/worklines`),
+        api(`/api/worklines/${encodeURIComponent(worklineId)}/agents`),
+      ]);
+      if (seq !== state.projectSelectSeq || state.project?.id !== projectId) return;
+      state.projectWorklines = Array.isArray(worklines) ? worklines : [];
+      state.workline = state.projectWorklines.find((item) => item.id === worklineId) || null;
+      state.worklineAgents = Array.isArray(agents) ? agents : [];
+      state.agent = state.worklineAgents.find((item) => item.id === agentId) || null;
+    }
+    if (!state.agent || (!standalone && !state.workline)) {
       state.chatHydrating = false;
       clearMessageViewportBusy();
-      $("currentTitle").textContent = state.project.name;
+      if (state.project) $("currentTitle").textContent = state.project.name;
       updateWorkspaceMetaPills();
       showEmptyWorkspaceState({
         title: am("conversationUnavailable"),
         text: am("conversationUnavailableDescription"),
-        action: am("chooseAnotherFolder"),
+        action: standalone ? t("shell.newConversation") : am("chooseAnotherFolder"),
         icon: "◇",
       });
       throw new Error(am("worklineOrAgentMissing"));
@@ -3574,7 +3673,9 @@ async function selectNavigationConversation(target, options = {}) {
     clearMessageViewportBusy();
     renderProjects();
   } catch (err) {
-    if (seq === state.projectSelectSeq && state.project?.id === parsed.projectId) {
+    const stillSelected = seq === state.projectSelectSeq
+      && (standalone ? !state.project : state.project?.id === projectId);
+    if (stillSelected) {
       state.chatHydrating = false;
       clearMessageViewportBusy();
       throw err;
@@ -3592,7 +3693,7 @@ async function openTaskWorkspaceAgent(agent, project) {
     target = state.navigationConversations.find((conversation) => conversation.projectId === projectId && conversation.agentId === agentId);
   }
   if (!target) throw new Error(t("taskWorkspace.selectAgentFirst"));
-  await selectNavigationConversation(target.targetId, { preserveSidebar: true });
+  await selectNavigationConversation(target.targetId, { preserveSidebar: true, selectionKind: "project" });
   taskWorkspace.setContext({ projectId, agentId, scope: "agent" });
   await specBoard.load();
   projectKanban.render();
@@ -3604,8 +3705,9 @@ async function enterAgent() {
   closeConversationDetails();
   const agentId = state.agent.id;
   state.navigationTransitionTitle = "";
+  const projectContext = syncProjectOperationContext();
   backgroundTasks.setAgent(agentId);
-  setWorkspaceExplorerAgent(state.agent);
+  setWorkspaceExplorerAgent(projectContext ? state.agent : null);
   projectKanban.setAgent(state.agent);
   taskWorkspace.setContext({ projectId: state.project?.id || "", agentId });
   renderWorkbenchShell();
@@ -3623,8 +3725,12 @@ async function enterAgent() {
   state.chatHydrating = true;
   clearRunSummary({ preserveView: true });
   clearPlanState(agentId);
-  connectTerminal();
-  loadGitStatus({ silent: true }).then(renderWorkbenchShell).catch(() => {});
+  if (projectContext) {
+    connectTerminal();
+    loadGitStatus({ silent: true }).then(renderWorkbenchShell).catch(() => {});
+  } else {
+    resetGitWorkflowState();
+  }
   let effectiveSkillsError = null;
   const effectiveSkillsPromise = refreshEffectiveSkillsPolicy().catch((error) => {
     effectiveSkillsError = error;
@@ -3842,17 +3948,22 @@ async function saveAgentSettings() {
     return;
   }
   let agentId = "";
+  let previousAgent = null;
+  let modelPatchInFlight = false;
   state.agentSaving = true;
   try {
-    const model = $("modelSelect").value.trim();
-    if (model) setPreferredModel(model);
+    const selectableModel = selectedModelValue();
+    const rawModel = String($("modelSelect")?.value || "").trim();
+    const model = state.agent && rawModel === state.agent.model ? rawModel : selectableModel;
     if (!state.agent) {
+      if (selectableModel) setPreferredModel(selectableModel);
       renderModelOptions();
       refreshActiveSettingsPanel();
       notifyTerminal(model ? `[info] ${am("modelPreferenceSaved", { model })}\n` : `[info] ${am("noModelSelectedTerminal")}\n`);
       return;
     }
     agentId = state.agent.id;
+    previousAgent = state.agent;
     const id = agentId;
     const permissionMode = $("permissionMode").value;
     const reasoningEffort = selectedReasoningEffort(model);
@@ -3863,7 +3974,9 @@ async function saveAgentSettings() {
       return true;
     };
     if (model && model !== state.agent.model) {
+      modelPatchInFlight = true;
       if (!await applyAgentPatch("model", { model })) return;
+      modelPatchInFlight = false;
     }
     const storedReasoningEffort = String(state.agent.reasoningEffort || "").trim().toLowerCase();
     if ((storedReasoningEffort && storedReasoningEffort !== reasoningEffort) || (!storedReasoningEffort && reasoningEffort !== "auto")) {
@@ -3873,10 +3986,18 @@ async function saveAgentSettings() {
       if (!await applyAgentPatch("permission-mode", { permissionMode })) return;
     }
     if (state.agent?.id !== id) return;
+    if (selectableModel && model === selectableModel) setPreferredModel(selectableModel);
     await enterAgent();
     if (state.agent?.id !== id) return;
     notifyTerminal(`Saved settings: ${state.agent.model}, ${state.agent.permissionMode}\n`);
   } catch (err) {
+    if (modelPatchInFlight && previousAgent && state.agent?.id === previousAgent.id) {
+      state.agent = previousAgent;
+      renderModelOptions();
+      refreshReasoningEffortControl();
+      refreshFastModeControl();
+      updateWorkspaceMetaPills();
+    }
     if (!agentId || state.agent?.id === agentId) throw err;
   } finally {
     state.agentSaving = false;
@@ -3954,6 +4075,9 @@ $("globalThemeToggleBtn")?.addEventListener("click", () => {
   setAppearancePreference("themePreset", nextPreset);
 });
 $("refreshBtn").addEventListener("click", () => refreshPrimaryMode().catch(showError));
+document.querySelectorAll("[data-create-conversation]").forEach((button) => {
+  button.addEventListener("click", () => createStandaloneConversation().catch(showError));
+});
 $("newTaskBtn")?.addEventListener("click", () => focusTaskCreation().catch(showError));
 $("currentTitle")?.addEventListener("click", () => beginConversationTitleEdit("conversation"));
 $("editConversationTitleBtn")?.addEventListener("click", () => beginConversationTitleEdit("conversation"));
@@ -4012,7 +4136,9 @@ $("mobileWorkbenchBtn")?.addEventListener("click", () => {
 });
 $("mobileSidebarCloseBtn")?.addEventListener("click", closeMobileSidebar);
 $("mobileSidebarBackdrop").addEventListener("click", closeMobileSidebar);
-$("mobileTerminalBtn").addEventListener("click", toggleMobileTerminal);
+$("mobileTerminalBtn").addEventListener("click", () => {
+  if (projectOperationContextActive()) toggleMobileTerminal();
+});
 $("mobileSearchBtn").addEventListener("click", focusMobileSearch);
 $("mobileDrawerSearchBtn")?.addEventListener("click", focusMobileSearch);
 $("mobileSidebarSettingsBtn")?.addEventListener("click", () => {
@@ -4120,7 +4246,6 @@ $("newFolderNameInput").addEventListener("keydown", (event) => {
   }
 });
 $("favoriteDirectoryBtn").addEventListener("click", favoriteCurrentDirectory);
-$("toggleHiddenFoldersBtn").addEventListener("click", () => notifyTerminal(`[info] ${am("hiddenFoldersNotShown")}\n`));
 $("goDirectoryBtn").addEventListener("click", () => browseDirectories($("manualDirectoryPath").value.trim()).catch(showError));
 $("manualDirectoryPath").addEventListener("keydown", (event) => {
   if (isComposingInput(event)) return;
@@ -4168,7 +4293,9 @@ window.addEventListener("autoto:auth-changed", () => {
   state.project = null;
   state.workline = null;
   state.agent = null;
+  state.navigationSelectionKind = "conversation";
   state.workState = null;
+  syncProjectOperationContext();
   state.projectWorklines = [];
   state.worklineAgents = [];
   state.chatHydrating = false;
@@ -4203,10 +4330,12 @@ $("reasoningEffort")?.addEventListener("change", (event) => {
   saveReasoningEffort(event.target.value).catch(showError);
 });
 $("permissionMode").addEventListener("change", () => {
+  if (!projectOperationContextActive()) return;
   updatePermissionModeDisplay();
   saveAgentSettings().catch(showError);
 });
 function toggleTerminalDock(collapsed) {
+  if (!projectOperationContextActive()) return false;
   if (collapsed !== true) {
     backgroundTasks.closeTray("terminal-open");
     closeConversationDetails();

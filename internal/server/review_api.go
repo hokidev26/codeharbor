@@ -518,6 +518,10 @@ func (s *Server) reviewModeForMessage(ctx context.Context, agentID, raw string) 
 // submitReviewRun freezes the requested mode directly on the new Run. The
 // Agent's persisted default is never changed, including transiently.
 func (s *Server) submitReviewRun(ctx context.Context, agentID, text, createdBy, mode, permissionModeCap string, attachments []db.Attachment) (db.Message, error) {
+	return s.submitReviewRunWithSource(ctx, agentID, text, createdBy, mode, permissionModeCap, db.RunSourceManual, attachments)
+}
+
+func (s *Server) submitReviewRunWithSource(ctx context.Context, agentID, text, createdBy, mode, permissionModeCap, runSource string, attachments []db.Attachment) (db.Message, error) {
 	if s.runner == nil {
 		return db.Message{}, errors.New("agent runner is not initialized")
 	}
@@ -533,7 +537,7 @@ func (s *Server) submitReviewRun(ctx context.Context, agentID, text, createdBy, 
 	if strings.TrimSpace(createdBy) == "local-api" {
 		createdBy = "api"
 	}
-	return s.runner.SubmitUserMessageWithModeAndPermissionCap(ctx, agentID, text, createdBy, executionMode, permissionModeCap, attachments...)
+	return s.runner.SubmitUserMessageWithModePermissionCapAndSource(ctx, agentID, text, createdBy, executionMode, permissionModeCap, runSource, attachments...)
 }
 
 // approvedPlanRunner is intentionally narrow: it must create a durable

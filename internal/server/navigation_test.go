@@ -74,7 +74,7 @@ INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permissi
 	}
 	conversation := response.Conversations[0]
 	allowedKeys := map[string]bool{
-		"projectId": true, "projectName": true, "projectPath": true, "projectUpdatedAt": true, "projectPinned": true,
+		"context": true, "projectId": true, "projectName": true, "projectPath": true, "projectUpdatedAt": true, "projectPinned": true,
 		"worklineId": true, "worklineTitle": true, "worklineRole": true, "worklineBranch": true, "worklineUpdatedAt": true,
 		"agentId": true, "agentTitle": true, "agentType": true, "agentStatus": true, "agentPinned": true, "model": true, "permissionMode": true,
 		"cwd": true, "messageCount": true, "lastActivityAt": true,
@@ -93,6 +93,80 @@ INSERT INTO agents (id, workline_id, type, title, model, system_prompt, permissi
 	second := response.Conversations[1]
 	if string(second["projectId"]) != `"project-chat"` || string(second["agentId"]) != `"agent-review"` || string(second["agentStatus"]) != `"running"` {
 		t.Fatalf("expected the second agent to remain grouped under the same project: %+v", second)
+	}
+}
+
+func TestNavigationHidesStandaloneConversationContainersAndKeepsSafeContext(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "standalone-navigation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	workspaceProject, _, _, err := store.CreateProject(ctx, "Workspace", "", t.TempDir(), "fake:workspace", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationProject, _, conversationAgent, err := store.CreateStandaloneConversation(ctx, "Standalone", "fake:chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/navigation", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response navigationResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Projects) != 1 || response.Projects[0].ID != workspaceProject.ID {
+		t.Fatalf("conversation container leaked into project navigation: %+v", response.Projects)
+	}
+	var standalone *db.NavigationConversation
+	for index := range response.Conversations {
+		if response.Conversations[index].AgentID == conversationAgent.ID {
+			standalone = &response.Conversations[index]
+			break
+		}
+	}
+	if standalone == nil || standalone.ProjectID != conversationProject.ID || standalone.Context != db.ProjectFlowModeConversation || standalone.CWD != "" {
+		t.Fatalf("standalone navigation record missing safe conversation context: %+v", standalone)
+	}
+}
+
+func TestRestrictedRemoteNavigationAllowsFilesystemFreeConversations(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := db.Open(ctx, filepath.Join(root, "remote-conversation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, conversationAgent, err := store.CreateStandaloneConversation(ctx, "Remote chat", "fake:chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := config.HashAccessPassword("Correct-Horse-1!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{
+		Paths:    config.PathsConfig{HomeDir: root, DefaultProjectDir: filepath.Join(root, "projects")},
+		Security: config.SecurityConfig{AccessPasswordHash: hash, DefaultRemoteAccessMode: remoteAccessModeRestricted, CredentialRevision: 1},
+	}, store, nil, nil)
+	cookies := loginRemoteAccess(t, app, remoteAccessModeRestricted)
+	request := newTestRequest(http.MethodGet, "/api/navigation", nil)
+	request.Host = "remote.example.test"
+	markRemoteHTTPS(request)
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), conversationAgent.ID) || !strings.Contains(recorder.Body.String(), `"context":"conversation"`) {
+		t.Fatalf("restricted remote navigation hid filesystem-free conversation: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -203,6 +277,14 @@ func TestNavigationRequiresMembershipWhenUsersExist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstConversationProject, _, firstConversationAgent, err := store.CreateStandaloneConversationForUser(ctx, first.ID, "First chat", "fake:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConversationProject, _, secondConversationAgent, err := store.CreateStandaloneConversationForUser(ctx, second.ID, "Second chat", "fake:test")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	unauthenticated := httptest.NewRecorder()
 	app.Routes().ServeHTTP(unauthenticated, newTestRequest(http.MethodGet, "/api/navigation", nil))
@@ -218,14 +300,23 @@ func TestNavigationRequiresMembershipWhenUsersExist(t *testing.T) {
 		t.Fatalf("expected member navigation 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{firstProject.ID, firstAgent.ID} {
+	for _, expected := range []string{firstProject.ID, firstAgent.ID, firstConversationProject.ID, firstConversationAgent.ID} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("member navigation omitted %q: %s", expected, body)
 		}
 	}
-	for _, forbidden := range []string{secondProject.ID, secondAgent.ID} {
+	for _, forbidden := range []string{secondProject.ID, secondAgent.ID, secondConversationProject.ID, secondConversationAgent.ID} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("member navigation leaked %q: %s", forbidden, body)
+		}
+	}
+	var memberNavigation navigationResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &memberNavigation); err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range memberNavigation.Projects {
+		if project.ID == firstConversationProject.ID {
+			t.Fatalf("owned conversation container leaked into project array: %+v", memberNavigation.Projects)
 		}
 	}
 

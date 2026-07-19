@@ -732,6 +732,85 @@ func TestRunnerLoadsProjectInstructions(t *testing.T) {
 	}
 }
 
+func TestRunnerConversationRunSkipsProjectWorkspaceContext(t *testing.T) {
+	ctx := context.Background()
+	projectDir := newCheckpointTestRepo(t)
+	if err := writeTestFile(projectDir, "AGENTS.md", "This project-only instruction must not enter ordinary chat."); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "AGENTS.md"}, {"commit", "-m", "add project instructions"}} {
+		if _, err := runCheckpointGit(ctx, projectDir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, createdAgent := newAgentTestStore(t, projectDir, "bypassPermissions")
+	defer store.Close()
+	if _, err := store.CreateSpecTask(ctx, db.SpecTask{AgentID: createdAgent.ID, Text: "PROJECT SPEC TASK MUST NOT ENTER ORDINARY CHAT", Status: "doing"}); err != nil {
+		t.Fatal(err)
+	}
+	trigger, err := store.AddMessage(ctx, db.Message{AgentID: createdAgent.ID, Role: "user", ContentText: "chat about public information"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{turns: [][]providers.Event{{{Type: "text", Text: "conversation reply"}, {Type: "done", Done: true, StopReason: "end_turn"}}}}
+	runner := newAgentTestRunner(store, provider, config.AgentConfig{MaxTurns: 2})
+	runRequest, err := runner.prepareContinuationRun(ctx, db.Run{
+		AgentID:           createdAgent.ID,
+		TriggerMessageID:  trigger.ID,
+		Status:            "pending",
+		Source:            db.RunSourceConversation,
+		PermissionModeCap: "readOnly",
+		ExecutionMode:     db.RunExecutionModeExecute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, runRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignMessageRun(ctx, createdAgent.ID, trigger.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner.runWithRun(ctx, createdAgent.ID, run.ID, trigger.ID)
+
+	if provider.requestCount() != 1 {
+		t.Fatalf("expected one conversation provider request, got %d", provider.requestCount())
+	}
+	request := provider.request(0)
+	if !strings.Contains(request.SystemPrompt, conversationSystemBoundary) {
+		t.Fatalf("conversation boundary missing from system prompt: %q", request.SystemPrompt)
+	}
+	for _, forbidden := range []string{"Project instructions loaded by Autoto", "This project-only instruction must not enter ordinary chat."} {
+		if strings.Contains(request.SystemPrompt, forbidden) {
+			t.Fatalf("conversation prompt leaked project instruction %q: %q", forbidden, request.SystemPrompt)
+		}
+	}
+	if requestHasSystemText(request, "PROJECT SPEC TASK MUST NOT ENTER ORDINARY CHAT") {
+		t.Fatalf("conversation request leaked project Dynamic Spec controls: %+v", request.Messages)
+	}
+	toolNames := make([]string, 0, len(request.Tools))
+	for _, spec := range request.Tools {
+		toolNames = append(toolNames, spec.Name)
+	}
+	if strings.Join(toolNames, ",") != "WebFetch,WebSearch" {
+		t.Fatalf("conversation exposed non-research tools: %v", toolNames)
+	}
+	storedRun, err := store.GetRun(ctx, createdAgent.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.Source != db.RunSourceConversation || storedRun.PermissionModeCap != "readOnly" || storedRun.ExecutionMode != db.RunExecutionModeExecute {
+		t.Fatalf("conversation capability boundary changed: %+v", storedRun)
+	}
+	if storedRun.CheckpointState != db.RunCheckpointNone || storedRun.BaseHead != "" || storedRun.CheckpointRepoRoot != "" || storedRun.GitSnapshotAt != "" {
+		t.Fatalf("conversation run must not create a git checkpoint: %+v", storedRun)
+	}
+	if storedRun.ToolCatalogDigest != "" || storedRun.WorkspaceFingerprint != "" || storedRun.AutoContinuationMode != continuationModeOff {
+		t.Fatalf("conversation run must not freeze project workspace state: %+v", storedRun)
+	}
+}
+
 func TestRunnerMemoryInjectionUsesRunTriggerMessage(t *testing.T) {
 	ctx := context.Background()
 	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")

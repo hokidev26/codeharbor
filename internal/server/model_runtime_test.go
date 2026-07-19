@@ -299,7 +299,10 @@ func TestAgentFastModeRequiresModelCapabilityAndDisablesOnModelSwitch(t *testing
 	registry := providers.NewRegistry()
 	registry.Register(fakeModelProvider{name: "codex", modelCapabilities: map[string]providers.ModelCapabilities{"gpt-fast": {FastMode: true}}})
 	registry.Register(fakeModelProvider{name: "basic"})
-	app := New(config.Config{}, store, nil, nil, registry)
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{
+		{Name: "codex", Type: "openai-compatible", APIKeyOptional: true},
+		{Name: "basic", Type: "openai-compatible", APIKeyOptional: true},
+	}}}, store, nil, nil, registry)
 	handler := modelRuntimeTestHandler(app)
 
 	enabled := modelRuntimeRequest(handler, http.MethodPatch, "/agents/"+agent.ID+"/fast-mode", `{"fastMode":true,"model":"codex:gpt-fast","entityGeneration":1}`)

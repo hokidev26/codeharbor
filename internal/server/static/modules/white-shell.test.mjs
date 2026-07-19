@@ -191,13 +191,29 @@ test("project switching preserves the current view until the next Agent is ready
   const selectBody = appMain.slice(selectStart, selectEnd);
 
   assert.match(selectBody, /const preserveConversationView = Boolean\([\s\S]*?state\.agent\?\.id/);
-  assert.match(selectBody, /beginNavigationSelection\(project, \{ preserveConversationView \}\)/);
+  assert.match(selectBody, /beginNavigationSelection\(project, \{ preserveConversationView, selectionKind: "project" \}\)/);
   assert.match(selectBody, /markMessageViewportBusy\(\{ contextSwitch: true, label: am\("projectLoadingTitle"\) \}\)/);
   assert.match(selectBody, /await enterAgent\(\);[\s\S]*?clearMessageViewportBusy\(\);/);
   assert.match(appMain, /function beginNavigationSelection\(project, options = \{\}\)[\s\S]*?if \(!options\.preserveConversationView\) renderConversationHeaderIdentity\(\);/);
   assert.match(appMain, /function markMessageViewportBusy\(options = \{\}\)[\s\S]*?dataset\.contextSwitching = "true"/);
   assert.match(styles, /\.messages\[data-context-switching="true"\]::before/);
   assert.match(styles, /\.messages\[data-context-switching="true"\]::after/);
+});
+
+test("boot locale localizes the initial project loader before app hydration", async () => {
+  const [html, app] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+  ]);
+
+  assert.match(app, /function normalizeBootLocale|const normalizeBootLocale/);
+  assert.match(app, /navigator\?\.languages/);
+  assert.match(app, /new Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.locale/);
+  assert.match(app, /const activeBootLocale = applyBootLocale\(\)/);
+  assert.match(app, /workspace\.main\.loadingProjectTitle/);
+  assert.match(app, /workspace\.main\.loadingProjectDescription/);
+  assert.match(app, /正在載入專案/);
+  assert.match(html, /app\.js\?v=[^"\n]*boot-locale-1/);
 });
 
 test("static entry points share throughput and usage-history cache stamps", async () => {
@@ -282,11 +298,12 @@ test("network proxy settings remove duplicate agent management while keeping the
 });
 
 test("folder picker uses stable SVG actions and directory icons instead of font glyphs", async () => {
-  const [html, directoryBrowser, styles, appMain] = await Promise.all([
+  const [html, directoryBrowser, styles, appMain, app] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(directoryBrowserURL, "utf8"),
     readFile(stylesURL, "utf8"),
     readFile(appMainURL, "utf8"),
+    readFile(appURL, "utf8"),
   ]);
   const toolbar = html.slice(html.indexOf('<div class="folder-toolbar"'), html.indexOf('<div id="newFolderInline"'));
   const newFolderButton = toolbar.slice(toolbar.indexOf('id="newFolderBtn"'), toolbar.indexOf('</button>', toolbar.indexOf('id="newFolderBtn"')));
@@ -296,18 +313,23 @@ test("folder picker uses stable SVG actions and directory icons instead of font 
   assert.match(newFolderButton, /<svg[^>]*viewBox="0 0 24 24"/);
   assert.match(newFolderButton, /data-i18n="folder\.newFolder">新建文件夹<\/span>/);
   assert.doesNotMatch(toolbar, /▱＋/);
+  assert.doesNotMatch(toolbar, /toggleHiddenFoldersBtn|folder\.hiddenUnavailable/);
+  assert.doesNotMatch(appMain, /toggleHiddenFoldersBtn|hiddenFoldersNotShown/);
   assert.match(directoryBrowser, /const directoryFolderIcon = `[\s\S]*class="directory-folder-svg"/);
   assert.match(directoryBrowser, /class="directory-icon" aria-hidden="true">\$\{directoryFolderIcon\}/);
   assert.doesNotMatch(directoryBrowser, /class="directory-icon">▱/);
-  assert.match(directoryBrowser, /shortcut\.name === "Root"/);
-  assert.match(directoryBrowser, /folder-root-section/);
-  assert.match(directoryBrowser, /folder-root-card/);
-  assert.match(styles, /\.folder-root-card\s*\{/);
+  assert.match(directoryBrowser, /filter\(\(shortcut\) => shortcut\.name !== "Root"\)/);
+  assert.doesNotMatch(directoryBrowser, /folder-root-section|folder-root-card|rootHTML/);
+  assert.doesNotMatch(styles, /\.folder-root-card\s*\{/);
   assert.match(directoryBrowser, /trigger\?\.setAttribute\("aria-expanded", "true"\)/);
   assert.match(directoryBrowser, /trigger\?\.setAttribute\("aria-expanded", "false"\)/);
   assert.match(styles, /\.folder-tool-btn-labeled \{/);
   assert.match(styles, /\.directory-folder-stroke \{/);
-  assert.match(appMain, /directory-browser\.mjs\?v=folder-picker-remote-2/);
+  assert.match(appMain, /directory-browser\.mjs\?v=[^"\n]*root-shortcut-removed-1/);
+  assert.match(appMain, /messages-app-main-extra\.mjs\?v=[^"\n]*hidden-toggle-removed-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*hidden-toggle-removed-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*hidden-toggle-removed-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*root-shortcut-removed-1/);
   assert.equal((html.match(/folder-picker-remote-2/g) || []).length, 2);
 });
 
@@ -328,6 +350,27 @@ test("conversation sidebar keeps navigation content and moves its existing actio
   assert.match(html, /id="recentSidebarDirectories"/);
   assert.match(html, /id="globalThemeToggleBtn"/);
   assert.match(html, /id="globalHealthText"/);
+});
+
+test("standalone conversation entry uses its dedicated API and keeps folder actions separate", async () => {
+  const [html, appMain] = await Promise.all([readFile(indexURL, "utf8"), readFile(appMainURL, "utf8")]);
+  const desktop = html.match(/<button id="newProjectBtn"[^>]*>/)?.[0] || "";
+  const mobile = html.match(/<button id="mobileNewConversationBtn"[^>]*>/)?.[0] || "";
+  const folder = html.match(/<button id="mobileChooseDirectoryBtn"[^>]*>/)?.[0] || "";
+  assert.match(desktop, /data-create-conversation/);
+  assert.match(mobile, /data-create-conversation/);
+  assert.doesNotMatch(`${desktop}${mobile}`, /data-open-directory-shortcut/);
+  assert.match(folder, /data-open-directory-shortcut="current"/);
+  assert.match(appMain, /async function createStandaloneConversation/);
+  assert.match(appMain, /if \(state\.standaloneConversationCreating\) return null/);
+  assert.match(appMain, /api\("\/api\/conversations", \{[\s\S]*?method: "POST"/);
+  assert.match(appMain, /title: t\("shell\.newConversation"\)/);
+  assert.match(appMain, /const model = selectedModelValue\(\)/);
+  assert.match(appMain, /await loadProjects\(\)[\s\S]*?await selectNavigationConversation\(conversation\)/);
+  assert.match(appMain, /api\(`\/api\/agents\/\$\{encodeURIComponent\(agentId\)\}`\)/);
+  assert.match(appMain, /modelPatchInFlight = true[\s\S]*?applyAgentPatch\("model", \{ model \}\)[\s\S]*?modelPatchInFlight = false/);
+  assert.match(appMain, /if \(modelPatchInFlight && previousAgent[\s\S]*?state\.agent = previousAgent[\s\S]*?renderModelOptions\(\)[\s\S]*?refreshReasoningEffortControl\(\)/);
+  assert.match(html, /app\.js\?v=[^"\n]*standalone-conversation-1/);
 });
 
 test("conversation navigation exposes archive, pin, and accessible context-menu controls", async () => {
@@ -377,8 +420,12 @@ test("conversation and task modes expose separate creation boundaries", async ()
   assert.match(styles, /\.navigation-boundary-empty\s*\{/);
 });
 
-test("composer toolbar exposes only model, effort, and Fast while preserving hidden compatibility controls", async () => {
-  const html = await readFile(indexURL, "utf8");
+test("composer operation controls are exposed only in project context", async () => {
+  const [html, styles, appMain] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+  ]);
   const formStart = html.indexOf('<form id="messageForm"');
   const formEnd = html.indexOf("</form>", formStart);
   const composer = html.slice(formStart, formEnd);
@@ -393,11 +440,17 @@ test("composer toolbar exposes only model, effort, and Fast while preserving hid
   assert.ok(composer.indexOf('id="permissionMode"') < inputIndex);
   assert.match(composer, /class="composer-field composer-model-field"/);
   assert.match(composer, /class="composer-field composer-effort-field"/);
-  assert.match(composer, /class="composer-field composer-message-mode-field hidden" aria-hidden="true"/);
-  assert.match(composer, /class="composer-field composer-permission-field hidden" aria-hidden="true"/);
+  assert.match(composer, /class="composer-field composer-message-mode-field" data-project-context-only aria-hidden="true"/);
+  assert.match(composer, /class="composer-field composer-permission-field" data-project-context-only aria-hidden="true"/);
   assert.match(composer, /class="permission-safety-indicator hidden"[^>]*aria-hidden="true"/);
   assert.match(composer, /id="permissionRiskBadge" class="permission-risk-badge hidden" aria-hidden="true"/);
-  assert.match(composer, /class="composer-actions hidden" aria-hidden="true"/);
+  assert.match(composer, /class="composer-actions" data-project-context-only aria-hidden="true"/);
+  assert.match(styles, /body\.white-shell\.theme-light:not\(\.project-operation-context\) \[data-project-context-only\]\s*\{[^}]*display:\s*none !important/);
+  assert.match(styles, /body\.white-shell\.theme-light:not\(\.project-operation-context\) :is\(\.composer-actions, \.composer-message-mode-field, \.composer-permission-field\) \{ display: none !important; \}/);
+  assert.doesNotMatch(styles, /\.composer-field-label,\s*\.composer-actions,[\s\S]{0,180}\.composer-permission-field\s*\{ display: none !important; \}/);
+  assert.match(appMain, /navigationSelectionKind:\s*"conversation"/);
+  assert.match(appMain, /function syncProjectOperationContext\(\)/);
+  assert.match(appMain, /selectionKind:\s*"project"/);
   assert.doesNotMatch(html, /id="currentMeta"/);
   assert.doesNotMatch(html, /id="wsBadge"/);
   assert.ok(composer.indexOf('id="messageText"') > toolbarIndex);
@@ -712,6 +765,41 @@ test("narrow composer switches atomically to a fixed unframed icon rail", async 
   assert.match(uiShell, /trigger\.setAttribute\("aria-label", fieldLabel \? `\$\{fieldLabel\}：\$\{optionText\}` : optionText\)/);
 });
 
+test("mobile sidebar closes safely during desktop startup and cache updates propagate", async () => {
+  const [html, app, appMain, uiShell] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(uiShellURL, "utf8"),
+  ]);
+  assert.match(html, /app\.js\?v=[^"\n]*mobile-viewport-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*mobile-viewport-1/);
+  assert.match(appMain, /ui-shell\.mjs\?v=[^"\n]*mobile-viewport-1/);
+  assert.equal((uiShell.match(/const mobileViewport/g) || []).length, 1);
+
+  const bodyClasses = new Set(["mobile-sidebar-open"]);
+  const fakeDocument = {
+    body: {
+      classList: {
+        contains(name) { return bodyClasses.has(name); },
+        remove(name) { bodyClasses.delete(name); },
+      },
+    },
+    getElementById() { return null; },
+  };
+  const fakeWindow = { matchMedia() { return { matches: false }; } };
+  const restoreDocument = replaceGlobal("document", fakeDocument);
+  const restoreWindow = replaceGlobal("window", fakeWindow);
+  try {
+    const controller = createUIShellController({ state: {}, resizeTerminal() {} });
+    assert.doesNotThrow(() => controller.closeMobileSidebar({ restoreFocus: false }));
+    assert.equal(bodyClasses.has("mobile-sidebar-open"), false);
+  } finally {
+    restoreWindow();
+    restoreDocument();
+  }
+});
+
 test("sidebar resize width clamps pointer values and keeps a stable preference key", () => {
   assert.equal(sidebarWidthPreferenceKey, "autoto.ui.sessionSidebarWidth");
   assert.equal(normalizeSidebarWidth(undefined), defaultSidebarWidth);
@@ -977,6 +1065,7 @@ test("mobile shell refresh keeps the new home, drawer, settings index, and model
   const marker = "/* Mobile shell refresh: home, drawer, settings, and composer selection sheets. */";
   const refreshedStyles = styles.slice(styles.indexOf(marker));
   assert.ok(refreshedStyles.startsWith(marker));
+  assert.match(styles, /\.mobile-topbar,\s*\.mobile-backdrop,\s*\.mobile-drawer-header,\s*\.mobile-drawer-primary-actions,\s*\.mobile-sidebar-account-summary,\s*\.mobile-sidebar-quick-actions,\s*\.mobile-drawer-footer,\s*\.mobile-conversation-welcome,\s*\.composer-status\s*\{\s*display:\s*none;/);
   assert.match(refreshedStyles, /\.mobile-select-sheet-backdrop\s*\{[\s\S]*?align-items:\s*flex-end/);
   assert.match(refreshedStyles, /@media \(max-width:\s*767px\)[\s\S]*?\.mobile-page-title\s*\{[\s\S]*?text-align:\s*center/);
   assert.match(refreshedStyles, /\.chat-panel:has\(\.messages\.empty:not\(\[data-initial-chat-state="loading"\]\)\) \.mobile-conversation-welcome\s*\{\s*display:\s*flex/);
@@ -1069,7 +1158,13 @@ test("about settings use the legacy version layout and real update status", () =
 });
 
 test("legacy font stack and static shell translations are wired", async () => {
-  const [html, styles] = await Promise.all([readFile(indexURL, "utf8"), readFile(stylesURL, "utf8")]);
+  const [html, styles, app, appMain, chatRendering] = await Promise.all([
+    readFile(indexURL, "utf8"),
+    readFile(stylesURL, "utf8"),
+    readFile(appURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+    readFile(chatRenderingURL, "utf8"),
+  ]);
   assert.match(styles, /--ui-font:\s*-apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif/);
   assert.match(styles, /font:\s*14px\/1\.45 var\(--ui-font\)/);
   assert.match(styles, /\.legacy-settings-category\s*\{[\s\S]*?font-weight:\s*600/);
@@ -1084,6 +1179,11 @@ test("legacy font stack and static shell translations are wired", async () => {
   assert.match(html, /data-i18n="shell\.nav\.conversation"/);
   assert.match(html, /data-i18n-placeholder="chat\.messagePlaceholder"/);
   assert.match(html, /data-i18n-aria-label="settings\.categories"/);
+  assert.match(html, /app\.js\?v=[^"\n]*i18n-shared-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*i18n-shared-1/);
+  assert.match(appMain, /i18n\.mjs\?v=[^"\n]*i18n-shared-1/);
+  assert.match(appMain, /chat-rendering\.mjs\?v=[^"\n]*i18n-shared-1/);
+  assert.match(chatRendering, /messages-chat-rendering-extra\.mjs\?v=[^"\n]*i18n-shared-1/);
 });
 
 test("static shell controls localize without marking runtime-owned content", async () => {

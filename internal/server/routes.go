@@ -183,6 +183,65 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "workline": workline, "agent": agent})
 }
 
+type createConversationRequest struct {
+	Title string `json:"title"`
+	Model string `json:"model"`
+}
+
+func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
+	var req createConversationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "New conversation"
+	}
+	if err := validateAPIText("title", title, 200, true, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = strings.TrimSpace(s.configSnapshot().Agent.DefaultModel)
+	}
+	if err := validateAPIText("model", model, 512, true, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, _, err := s.resolveExecutableModel(model); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.store == nil {
+		writeError(w, http.StatusInternalServerError, "conversation store is unavailable")
+		return
+	}
+	hasUsers, err := s.store.HasUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var project db.Project
+	var workline db.Workline
+	var agent db.Agent
+	if hasUsers {
+		user, ok := s.requireUser(w, r)
+		if !ok {
+			return
+		}
+		project, workline, agent, err = s.store.CreateStandaloneConversationForUser(r.Context(), user.ID, title, model)
+	} else {
+		project, workline, agent, err = s.store.CreateStandaloneConversation(r.Context(), title, model)
+	}
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"project": project, "workline": workline, "agent": agent})
+}
+
 func (s *Server) patchProjectNavigationState(w http.ResponseWriter, r *http.Request) {
 	var req navigationStatePatchRequest
 	if err := decodeJSON(r, &req); err != nil {

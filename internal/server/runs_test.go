@@ -124,6 +124,63 @@ func TestRunRoutesExposeSummaryAndPendingApprovals(t *testing.T) {
 	}
 }
 
+func TestRunSummaryRedactsAndUTF8BoundsPublicErrorsWithoutMutatingDB(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "run-summary-errors.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runError := "token=TOP_SECRET_RUN " + strings.Repeat("界", 2_000)
+	checkpointError := "api_key=TOP_SECRET_CHECKPOINT " + strings.Repeat("界", 2_000)
+	run, err := store.CreateRun(ctx, db.Run{AgentID: agent.ID, Status: "error", ErrorMessage: runError, CheckpointError: checkpointError})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolError := "authorization: Bearer TOP_SECRET_TOOL " + strings.Repeat("界", 2_000)
+	call, err := store.AddToolCall(ctx, db.ToolCall{AgentID: agent.ID, RunID: run.ID, ToolUseID: "failed-tool", ToolName: "Read", Status: "error", ErrorMessage: toolError})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(config.Config{}, store, nil, nil)
+	recorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(recorder, newTestRequest(http.MethodGet, "/api/agents/"+agent.ID+"/runs/"+run.ID, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !json.Valid(recorder.Body.Bytes()) {
+		t.Fatalf("run summary response is not valid UTF-8 JSON: %q", recorder.Body.Bytes())
+	}
+	body := recorder.Body.String()
+	for _, secret := range []string{"TOP_SECRET_RUN", "TOP_SECRET_CHECKPOINT", "TOP_SECRET_TOOL"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("run summary leaked %q: %s", secret, body)
+		}
+	}
+	var summary db.RunSummary
+	if err := json.NewDecoder(recorder.Body).Decode(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Run.ErrorMessage) > activityErrorMessageBytes || len(summary.Run.CheckpointError) > activityErrorMessageBytes || len(summary.ToolCalls) != 1 || len(summary.ToolCalls[0].ErrorMessage) > activityErrorMessageBytes {
+		t.Fatalf("public run errors were not bounded: %+v", summary)
+	}
+	storedRun, err := store.GetRun(ctx, agent.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedCall, err := store.GetToolCallByUseID(ctx, agent.ID, call.ToolUseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.ErrorMessage != runError || storedRun.CheckpointError != checkpointError || storedCall.ErrorMessage != toolError {
+		t.Fatalf("public projection mutated DB values: run=%+v tool=%+v", storedRun, storedCall)
+	}
+}
+
 func TestRunToolCallsActivityViewBoundsPayloads(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))

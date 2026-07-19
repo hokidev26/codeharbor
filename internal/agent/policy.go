@@ -32,6 +32,13 @@ var planToolAllowlist = map[string]struct{}{
 	"EndPipeline":   {},
 }
 
+var conversationResearchToolNames = []string{"WebFetch", "WebSearch"}
+
+var conversationToolAllowlist = map[string]struct{}{
+	"WebFetch":  {},
+	"WebSearch": {},
+}
+
 // PolicyContext is the single source of run capability decisions used by both
 // looped and direct tool execution. It keeps a direct ExecuteTool caller from
 // bypassing the mode that restricted the run itself.
@@ -42,10 +49,15 @@ type PolicyContext struct {
 	PermissionMode    string
 	ExecutionMode     ExecutionMode
 	ExecutionDeviceID string
+	Conversation      bool
 }
 
 func (p PolicyContext) IsPlan() bool {
 	return p.ExecutionMode == ExecutionModePlan
+}
+
+func (p PolicyContext) IsConversation() bool {
+	return p.Conversation
 }
 
 func (p PolicyContext) allowsToolOutputPipeline() bool {
@@ -53,6 +65,15 @@ func (p PolicyContext) allowsToolOutputPipeline() bool {
 }
 
 func (p PolicyContext) permitsTool(name string, risk tools.Risk) (bool, string) {
+	if p.IsConversation() {
+		if risk != tools.RiskRead {
+			return false, fmt.Sprintf("conversation context denies %s-risk tool %s", risk, name)
+		}
+		if _, ok := conversationToolAllowlist[name]; !ok {
+			return false, fmt.Sprintf("conversation context only allows public WebFetch and WebSearch research tools; %s is denied", name)
+		}
+		return true, ""
+	}
 	if tools.IsToolOutputPipelineControl(name) && !p.allowsToolOutputPipeline() {
 		return false, fmt.Sprintf("tool output pipeline is only available in readOnly permission mode or plan execution mode; %s is denied", name)
 	}
@@ -69,6 +90,10 @@ func (p PolicyContext) permitsTool(name string, risk tools.Risk) (bool, string) 
 }
 
 func (p PolicyContext) filtersTool(name string) bool {
+	if p.IsConversation() {
+		_, allowed := conversationToolAllowlist[name]
+		return !allowed
+	}
 	if p.IsPlan() {
 		_, allowed := planToolAllowlist[name]
 		return !allowed
@@ -88,6 +113,7 @@ func (r *Runner) policyContext(ctx context.Context, agentID, runID string) (db.A
 		return db.Agent{}, PolicyContext{}, fmt.Errorf("%w: agent %s targets device %s", ErrRemoteExecutionUnavailable, agent.ID, deviceID)
 	}
 	mode := executionModeForAgent(agent)
+	conversation := false
 	if strings.TrimSpace(runID) != "" {
 		run, err := r.store.GetRun(ctx, agentID, runID)
 		if err != nil {
@@ -95,6 +121,7 @@ func (r *Runner) policyContext(ctx context.Context, agentID, runID string) (db.A
 		}
 		agent.PermissionMode = permissionModeWithCap(agent.PermissionMode, run.PermissionModeCap)
 		mode = executionModeForRun(run)
+		conversation = isConversationRun(run)
 	}
 	return agent, PolicyContext{
 		AgentID:           agent.ID,
@@ -103,6 +130,7 @@ func (r *Runner) policyContext(ctx context.Context, agentID, runID string) (db.A
 		PermissionMode:    agent.PermissionMode,
 		ExecutionMode:     mode,
 		ExecutionDeviceID: normalizedExecutionDeviceID(agent.ExecutionDeviceID),
+		Conversation:      conversation,
 	}, nil
 }
 
@@ -111,6 +139,10 @@ func executionModeForAgent(agent db.Agent) ExecutionMode {
 		return ExecutionModePlan
 	}
 	return ExecutionModeExecute
+}
+
+func isConversationRun(run db.Run) bool {
+	return strings.TrimSpace(run.Source) == db.RunSourceConversation
 }
 
 // executionModeForRun reads the durable runs.execution_mode capability. A
@@ -134,7 +166,13 @@ func runExecutionModeForAgent(agent db.Agent) string {
 }
 
 func (r *Runner) snapshotToolsForPolicy(ctx context.Context, scope tools.ResolutionContext, policy PolicyContext) (runToolSnapshot, error) {
-	snapshot, err := r.snapshotTools(ctx, scope)
+	var snapshot runToolSnapshot
+	var err error
+	if policy.IsConversation() {
+		snapshot, err = r.snapshotConversationTools()
+	} else {
+		snapshot, err = r.snapshotTools(ctx, scope)
+	}
 	if err != nil {
 		return snapshot, err
 	}
@@ -145,10 +183,30 @@ func (r *Runner) snapshotToolsForPolicy(ctx context.Context, scope tools.Resolut
 		}
 		specs = append(specs, spec)
 	}
-	// Keep the full immutable snapshot for the final execution gateway. Only the
-	// specs are exposed to the model; any hidden request is classified and denied
-	// below instead of becoming an ambiguous "tool not found" response.
+	// Keep the immutable snapshot for the final execution gateway. Conversation
+	// runs receive only the two built-in public-web tools and never enumerate
+	// project-scoped dynamic tools.
 	return runToolSnapshot{tools: snapshot.tools, specs: specs}, nil
+}
+
+func (r *Runner) snapshotConversationTools() (runToolSnapshot, error) {
+	byName := make(map[string]tools.Tool, len(conversationResearchToolNames))
+	specs := make([]providers.ToolSpec, 0, len(conversationResearchToolNames))
+	if r == nil || r.tools == nil {
+		return runToolSnapshot{tools: byName, specs: specs}, nil
+	}
+	for _, name := range conversationResearchToolNames {
+		tool, ok := r.tools.Get(name)
+		if !ok || tool == nil {
+			continue
+		}
+		if strings.TrimSpace(tool.Name()) != name {
+			return runToolSnapshot{}, fmt.Errorf("conversation research tool name mismatch: %s", name)
+		}
+		byName[name] = tool
+		specs = append(specs, providers.ToolSpec{Name: name, Description: tool.Description(), Schema: toolInputSchema(tool.Schema())})
+	}
+	return runToolSnapshot{tools: byName, specs: specs}, nil
 }
 
 func planToolDeniedResult(policy PolicyContext, call tools.Call, risk tools.Risk) (tools.Result, bool) {

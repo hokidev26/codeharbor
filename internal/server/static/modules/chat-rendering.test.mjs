@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { t as chatRenderingExtraText } from "./messages-chat-rendering-extra.mjs";
 import {
   chatMessagePresentation,
   createChatRenderingController,
@@ -39,6 +40,7 @@ function renderSnapshot(messages, stateOverrides = {}, applyOptions = {}) {
   };
   const state = {
     agent: { id: "agent-1", cwd: "/work/project" },
+    navigationSelectionKind: "conversation",
     currentMessages: [],
     messageCopyTexts: [],
     liveToolOutputs: {},
@@ -142,9 +144,10 @@ test("task reports, tool output, approvals, and errors expose left-aligned bound
     pendingToolApprovals: {
       approval1: { agentId: "agent-1", toolUseId: "approval1", toolName: "Bash", command: "pwd", risk: "exec" },
     },
+    navigationSelectionKind: "project",
     activeRunSummaryRunId: "run-1",
     activeRunSummary: {
-      run: { id: "run-1", status: "error", checkpointState: "none", createdAt: "2026-02-03T00:00:00Z", completedAt: "2026-02-03T00:01:00Z" },
+      run: { id: "run-1", source: "manual", status: "error", checkpointState: "none", createdAt: "2026-02-03T00:00:00Z", completedAt: "2026-02-03T00:01:00Z" },
       toolCalls: [],
       recentMessages: [],
     },
@@ -159,6 +162,158 @@ test("task reports, tool output, approvals, and errors expose left-aligned bound
   assert.match(html, /data-chat-report="tool-approval"/);
   assert.doesNotMatch(html, /<run error>/);
   assert.match(html, /&lt;run error&gt;/);
+});
+
+test("ordinary completed conversations without tools render no Run review", () => {
+  const { html } = renderSnapshot([{ role: "assistant", contentText: "done" }], {
+    activeRunSummaryRunId: "run-ordinary-success",
+    activeRunSummary: {
+      run: { id: "run-ordinary-success", source: "conversation", status: "completed", createdAt: "2026-02-03T00:00:00Z", completedAt: "2026-02-03T00:01:00Z" },
+      toolCalls: [],
+      recentMessages: [],
+    },
+  });
+
+  assert.doesNotMatch(html, /data-run-summary-card|data-chat-report="run-summary"|data-chat-report="conversation-run"/);
+  assert.doesNotMatch(html, /run-summary-metrics|data-run-summary-copy|data-run-summary-refresh/);
+  assert.match(html, />done</);
+});
+
+test("ordinary legacy manual runs keep a compact tool activity stack and load-earlier entry", () => {
+  const tool = { agentId: "agent-1", runId: "run-manual", toolUseId: "read-manual", toolName: "Read", status: "completed", inputJson: { file_path: "legacy.txt" } };
+  const { html } = renderSnapshot([], {
+    activeRunSummaryRunId: "run-manual",
+    activeRunSummary: {
+      run: { id: "run-manual", source: "manual", status: "completed" },
+      toolCalls: [tool],
+      recentMessages: [],
+    },
+    activeRunToolCallsRunId: "run-manual",
+    activeRunToolCalls: [tool],
+    activeRunToolCallsHasMore: true,
+    liveToolOutputs: { "read-manual": tool },
+  });
+
+  assert.match(html, /data-chat-report="conversation-run"/);
+  assert.match(html, /data-conversation-run-tool-activity/);
+  assert.match(html, /conversation-tool-activity/);
+  assert.match(html, /legacy\.txt/);
+  assert.match(html, /data-run-tool-activity-more="run-manual"/);
+  assert.equal((html.match(/data-tool-use-id="read-manual"/g) || []).length, 1, "review de-duplication must leave one visible tool card");
+  assert.doesNotMatch(html, /run-summary-metrics|run-summary-checkpoint|data-run-summary-copy|data-run-summary-refresh|data-run-summary-open-git|data-run-summary-rollback/);
+});
+
+test("ordinary error and failed runs render escaped, visually bounded, history-recoverable notices", () => {
+  for (const status of ["error", "failed"]) {
+    const hostile = `<img src=x onerror=boom>${"failure ".repeat(100)}`;
+    const { html } = renderSnapshot([], {
+      activeRunSummaryRunId: `run-${status}`,
+      activeRunSummary: {
+        run: { id: `run-${status}`, source: "conversation", status, errorMessage: hostile },
+        toolCalls: [],
+        recentMessages: [],
+      },
+    });
+
+    assert.match(html, /data-chat-report="conversation-run"/);
+    assert.match(html, /conversation-run-notice error/);
+    assert.match(html, /conversation-run-error-message/);
+    assert.match(html, /错误已保留在对话历史中/);
+    assert.match(html, /&lt;img src=x onerror=boom&gt;/);
+    assert.doesNotMatch(html, /<img|data-run-id|run-summary-metrics|data-run-summary-copy|data-run-summary-refresh/);
+  }
+});
+
+test("ordinary interrupted runs are weakly noted while superseded runs stay hidden", () => {
+  const interrupted = renderSnapshot([], {
+    activeRunSummaryRunId: "run-interrupted",
+    activeRunSummary: { run: { id: "run-interrupted", source: "conversation", status: "interrupted" }, toolCalls: [], recentMessages: [] },
+  });
+  assert.match(interrupted.html, /conversation-run-notice interrupted/);
+  assert.match(interrupted.html, /已有消息和工具记录仍保留/);
+
+  const superseded = renderSnapshot([], {
+    activeRunSummaryRunId: "run-superseded",
+    activeRunSummary: { run: { id: "run-superseded", source: "conversation", status: "superseded" }, toolCalls: [], recentMessages: [] },
+  });
+  assert.doesNotMatch(superseded.html, /data-run-summary-card|conversation-run-notice|run-summary-card/);
+});
+
+test("only project navigation with a non-conversation source renders the complete project Run review", () => {
+  const project = renderSnapshot([], {
+    navigationSelectionKind: "project",
+    activeRunSummaryRunId: "run-project",
+    activeRunSummary: {
+      run: { id: "run-project", source: "project", status: "completed", checkpointState: "none", createdAt: "2026-02-03T00:00:00Z", completedAt: "2026-02-03T00:01:00Z" },
+      toolCalls: [],
+      recentMessages: [],
+    },
+  });
+  assert.match(project.html, /data-chat-report="run-summary"/);
+  assert.match(project.html, /run-summary-metrics/);
+  assert.match(project.html, /run-summary-checkpoint/);
+  assert.match(project.html, /run-project/);
+  assert.match(project.html, /data-run-summary-open-git/);
+  assert.match(project.html, /data-run-summary-rollback/);
+  assert.match(project.html, /data-run-summary-copy/);
+  assert.match(project.html, /data-run-summary-refresh/);
+
+  const conversationSource = renderSnapshot([], {
+    navigationSelectionKind: "project",
+    activeRunSummaryRunId: "run-conversation-source",
+    activeRunSummary: {
+      run: { id: "run-conversation-source", source: "conversation", status: "completed" },
+      toolCalls: [],
+      recentMessages: [],
+    },
+  });
+  assert.doesNotMatch(conversationSource.html, /data-run-summary-card|run-summary-metrics|run-summary-checkpoint|data-run-summary-copy|data-run-summary-refresh/);
+});
+
+test("Run summary API failures render a lightweight notice instead of a project review card", async () => {
+  const messagesElement = fakeMessagesElement();
+  const previousDocument = globalThis.document;
+  globalThis.document = { getElementById: (id) => id === "messages" ? messagesElement : null };
+  try {
+    const state = {
+      agent: { id: "agent-1" },
+      navigationSelectionKind: "project",
+      currentMessages: [{ role: "assistant", contentText: "history remains" }],
+      messageCopyTexts: [],
+      liveToolOutputs: {},
+      pendingToolApprovals: {},
+      activeRunSummary: null,
+      activeRunSummaryRunId: "",
+      runSummaryLoading: false,
+      runSummaryError: "",
+    };
+    const controller = createChatRenderingController({
+      state,
+      apiRequest: async (url) => {
+        if (url.includes("/tool-calls?")) return { toolCalls: [], hasMore: false };
+        throw new Error(`<summary error>`);
+      },
+      attachmentIcon: () => "file", attachmentKind: () => "file", copyToClipboard: async () => true,
+      notifyTerminal: () => {}, selectedModelValue: () => "", shortPath: (value) => value, showError: () => {}, showToast: () => {},
+    });
+
+    await assert.rejects(controller.loadRunSummary("run-load-failed"), /<summary error>/);
+    assert.match(messagesElement.innerHTML, /data-chat-report="run-load-error"/);
+    assert.match(messagesElement.innerHTML, /conversation-run-notice load-error/);
+    assert.match(messagesElement.innerHTML, /暂时无法加载本轮详情/);
+    assert.doesNotMatch(messagesElement.innerHTML, /run-summary-card|run-summary-metrics|run-summary-checkpoint|data-run-summary-copy|data-run-summary-refresh|<summary error>|&lt;summary error&gt;/);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("ordinary Run outcome copy is localized in Simplified Chinese, Traditional Chinese, and English", () => {
+  assert.equal(chatRenderingExtraText("run.conversationErrorTitle", {}, "zh-CN"), "本轮回复失败");
+  assert.equal(chatRenderingExtraText("run.conversationErrorTitle", {}, "zh-TW"), "本輪回覆失敗");
+  assert.equal(chatRenderingExtraText("run.conversationErrorTitle", {}, "en"), "This response failed");
+  assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "zh-CN"), /对话消息仍可查看/);
+  assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "zh-TW"), /對話訊息仍可查看/);
+  assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "en"), /Conversation messages are still available/);
 });
 
 test("plan cards render pending review data safely and react to live plan events", () => {
@@ -739,11 +894,12 @@ test("live tool events retain all tools and preserve streamed Bash output after 
 
 test("run review loading keeps the existing card stable without transient loading labels", () => {
   const summary = {
-    run: { id: "run-1", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:01:00Z" },
+    run: { id: "run-1", source: "project", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:01:00Z" },
     toolCalls: [],
     recentMessages: [],
   };
   const existing = renderSnapshot([{ role: "assistant", contentText: "reply" }], {
+    navigationSelectionKind: "project",
     activeRunSummary: summary,
     activeRunSummaryRunId: "run-1",
     runSummaryLoading: true,

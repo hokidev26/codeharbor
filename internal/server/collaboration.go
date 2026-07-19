@@ -85,6 +85,7 @@ func (s *Server) deleteMessageDraft(w http.ResponseWriter, r *http.Request) {
 type correctionRequest struct {
 	Text              string   `json:"text"`
 	KeepAttachmentIDs []string `json:"keepAttachmentIds"`
+	Context           string   `json:"context,omitempty"`
 }
 
 func (s *Server) createCorrection(w http.ResponseWriter, r *http.Request) {
@@ -92,16 +93,16 @@ func (s *Server) createCorrection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "agent runner is not initialized")
 		return
 	}
-	var text string
+	var text, messageContext string
 	var keepAttachmentIDs []string
 	var attachments []db.Attachment
 	var err error
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
-		text, keepAttachmentIDs, attachments, err = parseMultipartCorrection(w, r)
+		text, keepAttachmentIDs, attachments, messageContext, err = parseMultipartCorrection(w, r)
 	} else {
 		var req correctionRequest
 		err = decodeJSON(r, &req)
-		text, keepAttachmentIDs = req.Text, req.KeepAttachmentIDs
+		text, keepAttachmentIDs, messageContext = req.Text, req.KeepAttachmentIDs, req.Context
 	}
 	if err != nil {
 		var uploadErr attachmentUploadError
@@ -112,6 +113,12 @@ func (s *Server) createCorrection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	agentID := chi.URLParam(r, "id")
+	_, runSource, err := s.messageRunBoundary(r.Context(), agentID, messageContext)
+	if err != nil {
+		writeError(w, statusFromMessageBoundaryError(err), err.Error())
+		return
+	}
 	createdBy := ""
 	if user, ok, err := s.currentUser(r); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -119,11 +126,11 @@ func (s *Server) createCorrection(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		createdBy = user.ID
 	}
-	if err := s.enforceRemotePermissionCap(r, chi.URLParam(r, "id")); err != nil {
+	if err := s.enforceRemotePermissionCap(r, agentID); err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
 	}
-	message, err := s.runner.SubmitCorrection(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "messageId"), text, createdBy, keepAttachmentIDs, attachments...)
+	message, err := s.runner.SubmitCorrectionWithSource(r.Context(), agentID, chi.URLParam(r, "messageId"), text, createdBy, keepAttachmentIDs, runSource, attachments...)
 	if err != nil {
 		writeError(w, statusFromError(err), err.Error())
 		return
@@ -131,7 +138,7 @@ func (s *Server) createCorrection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, message)
 }
 
-func parseMultipartCorrection(w http.ResponseWriter, r *http.Request) (string, []string, []db.Attachment, error) {
+func parseMultipartCorrection(w http.ResponseWriter, r *http.Request) (string, []string, []db.Attachment, string, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxMessageUploadBytes)
 	defer func() {
 		if r.MultipartForm != nil {
@@ -139,12 +146,12 @@ func parseMultipartCorrection(w http.ResponseWriter, r *http.Request) (string, [
 		}
 	}()
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
-		return "", nil, nil, attachmentUploadError{Status: http.StatusBadRequest, Message: fmt.Sprintf("附件上传解析失败：%v", err)}
+		return "", nil, nil, "", attachmentUploadError{Status: http.StatusBadRequest, Message: fmt.Sprintf("附件上传解析失败：%v", err)}
 	}
 	var keepAttachmentIDs []string
 	if raw := strings.TrimSpace(r.FormValue("keepAttachmentIds")); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &keepAttachmentIDs); err != nil {
-			return "", nil, nil, errors.New("keepAttachmentIds must be a JSON array")
+			return "", nil, nil, "", errors.New("keepAttachmentIds must be a JSON array")
 		}
 	}
 	files := multipartFiles(r.MultipartForm)
@@ -155,21 +162,21 @@ func parseMultipartCorrection(w http.ResponseWriter, r *http.Request) (string, [
 			continue
 		}
 		if header.Size > maxAttachmentBytes {
-			return "", nil, nil, attachmentUploadError{Status: http.StatusRequestEntityTooLarge, Message: fmt.Sprintf("%s 超过 10 MB 限制", sanitizeAttachmentFilename(header.Filename))}
+			return "", nil, nil, "", attachmentUploadError{Status: http.StatusRequestEntityTooLarge, Message: fmt.Sprintf("%s 超过 10 MB 限制", sanitizeAttachmentFilename(header.Filename))}
 		}
 		total += header.Size
 		if total > maxMessageUploadBytes {
-			return "", nil, nil, attachmentUploadError{Status: http.StatusRequestEntityTooLarge, Message: "单条消息附件总大小超过 25 MB"}
+			return "", nil, nil, "", attachmentUploadError{Status: http.StatusRequestEntityTooLarge, Message: "单条消息附件总大小超过 25 MB"}
 		}
 		attachment, err := buildAttachmentFromPart(header)
 		if err != nil {
-			return "", nil, nil, err
+			return "", nil, nil, "", err
 		}
 		attachments = append(attachments, attachment)
 	}
 	text := strings.TrimSpace(r.FormValue("text"))
 	if text == "" && len(keepAttachmentIDs) == 0 && len(attachments) == 0 {
-		return "", nil, nil, attachmentUploadError{Status: http.StatusBadRequest, Message: "text, files, or keepAttachmentIds is required"}
+		return "", nil, nil, "", attachmentUploadError{Status: http.StatusBadRequest, Message: "text, files, or keepAttachmentIds is required"}
 	}
-	return text, keepAttachmentIDs, attachments, nil
+	return text, keepAttachmentIDs, attachments, strings.TrimSpace(r.FormValue("context")), nil
 }

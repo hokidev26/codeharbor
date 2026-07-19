@@ -51,8 +51,14 @@ func (s *Server) navigation(w http.ResponseWriter, r *http.Request) {
 		}
 		conversations = filtered
 	}
+	visibleProjects := make([]db.Project, 0, len(projects))
+	for _, project := range projects {
+		if project.FlowMode != db.ProjectFlowModeConversation {
+			visibleProjects = append(visibleProjects, project)
+		}
+	}
 	writeJSON(w, http.StatusOK, navigationResponse{
-		Projects:      s.filterProjectsForRequest(r, projects),
+		Projects:      s.filterProjectsForRequest(r, visibleProjects),
 		Conversations: s.filterNavigationConversationsForRequest(r, conversations),
 	})
 }

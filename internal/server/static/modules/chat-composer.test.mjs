@@ -16,6 +16,7 @@ const {
   normalizeMessageMode,
   normalizeReasoningEffort,
   reasoningEffortValuesForCapabilities,
+  reasoningEffortValuesForModel,
   resizeMessageInputElement,
   slashCommandsForEffectivePolicy,
   truncateChatDraft,
@@ -96,6 +97,14 @@ test("reasoning effort normalizes legacy and unknown values against backend capa
   assert.deepEqual(reasoningEffortValuesForCapabilities({ reasoningEffort: ["low", "xhigh"] }), ["auto", "low", "xhigh"]);
   assert.equal(normalizeReasoningEffort("xhigh", ["auto", "low", "xhigh"]), "xhigh");
   assert.equal(normalizeReasoningEffort("xhigh", ["auto", "low", "high"]), "auto");
+});
+
+test("codex gpt-5.5 exposes the same five reasoning efforts in every navigation context", () => {
+  const provider = { name: "codex", capabilities: { reasoningEffort: true } };
+  assert.deepEqual(reasoningEffortValuesForModel(provider, "codex:gpt-5.5"), ["auto", "low", "medium", "high", "xhigh"]);
+  for (const navigationSelectionKind of ["conversation", "project"]) {
+    assert.deepEqual(reasoningEffortValuesForModel({ ...provider, navigationSelectionKind }, "codex:gpt-5.5"), ["auto", "low", "medium", "high", "xhigh"]);
+  }
 });
 
 test("Fast mode support comes from the selected model capability only", () => {
@@ -494,7 +503,7 @@ test("message textarea Enter submission preserves IME and Shift+Enter behavior",
   }
 });
 
-test("Composer sends its per-message Plan or Execute mode with JSON requests", async () => {
+test("Composer sends project controls and caps ordinary conversations to execute-only context", async () => {
   const previousDocument = globalThis.document;
   const previousGetComputedStyle = globalThis.getComputedStyle;
   const input = {
@@ -515,6 +524,7 @@ test("Composer sends its per-message Plan or Execute mode with JSON requests", a
   try {
     const state = {
       agent: { id: "agent-1", planMode: false },
+      navigationSelectionKind: "project",
       pendingAttachments: [],
       promptHistory: [],
       serverSkills: [],
@@ -540,7 +550,13 @@ test("Composer sends its per-message Plan or Execute mode with JSON requests", a
 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].path, "/api/agents/agent-1/messages");
-    assert.deepEqual(JSON.parse(requests[0].options.body), { text: "Review the auth flow", mode: "plan" });
+    assert.deepEqual(JSON.parse(requests[0].options.body), { text: "Review the auth flow", mode: "plan", context: "project" });
+
+    state.navigationSelectionKind = "conversation";
+    input.value = "Summarize the documentation";
+    await controller.sendMessage({ preventDefault() {} });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(JSON.parse(requests[1].options.body), { text: "Summarize the documentation", mode: "execute", context: "conversation" });
   } finally {
     globalThis.document = previousDocument;
     globalThis.getComputedStyle = previousGetComputedStyle;

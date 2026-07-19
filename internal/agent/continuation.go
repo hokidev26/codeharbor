@@ -23,9 +23,19 @@ const (
 	continuationReasonSegmentTurns    = "segment_turn_limit"
 	continuationReasonBackgroundTask  = "background_task_wait"
 	continuationReasonProviderError   = "provider_error"
+
+	conversationSystemBoundary = "General conversation context is active. Respond as a conversational and research assistant, not as a project workspace agent. Do not inspect, search, read, modify, execute, or otherwise interact with local project or workspace resources. Only the explicitly provided conversation, attachments, and public-web research tools may be used."
 )
 
 var errContinuationStoreUnavailable = errors.New("continuation store APIs are unavailable")
+
+func mergeConversationSystemBoundary(systemPrompt string) string {
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		return conversationSystemBoundary
+	}
+	return systemPrompt + "\n\n" + conversationSystemBoundary
+}
 
 type ContinuationSettings struct {
 	Mode             string `json:"mode"`
@@ -258,7 +268,7 @@ func (r *Runner) prepareContinuationRun(ctx context.Context, run db.Run) (db.Run
 		run.ID = db.NewID()
 	}
 	r.freezeContinuationLimits(run.ID, limits)
-	if run.ExecutionMode == db.RunExecutionModePlan {
+	if run.ExecutionMode == db.RunExecutionModePlan || isConversationRun(run) {
 		run.AutoContinuationMode = continuationModeOff
 	} else if strings.TrimSpace(run.AutoContinuationMode) == "" {
 		run.AutoContinuationMode = limits.mode
@@ -277,6 +287,9 @@ func (r *Runner) prepareContinuationRun(ctx context.Context, run db.Run) (db.Run
 	}
 	if strings.TrimSpace(run.DeadlineAt) == "" {
 		run.DeadlineAt = time.Now().Add(limits.maxDuration).UTC().Format(time.RFC3339Nano)
+	}
+	if isConversationRun(run) {
+		return run, nil
 	}
 	if snapshot, configured, err := r.currentPlanSnapshot(ctx, run.AgentID); err != nil {
 		// A regular execute run may still run in a non-Git workspace. It must
@@ -325,10 +338,10 @@ func (r *Runner) runContinuous(ctx context.Context, agentID, runID string) error
 	if runID == "" {
 		state.limits.mode = continuationModeOff
 	}
-	if state.run.ExecutionMode == db.RunExecutionModePlan {
+	if state.run.ExecutionMode == db.RunExecutionModePlan || isConversationRun(state.run) {
 		state.limits.mode = continuationModeOff
 	}
-	if state.run.CheckpointState == db.RunCheckpointNone && state.run.ContinuationCount == 0 {
+	if !isConversationRun(state.run) && state.run.CheckpointState == db.RunCheckpointNone && state.run.ContinuationCount == 0 {
 		agent, policy, policyErr := r.policyContext(ctx, agentID, runID)
 		if policyErr != nil {
 			return policyErr
@@ -456,10 +469,14 @@ func (r *Runner) runContinuationSegment(ctx context.Context, state continuationR
 	if err != nil {
 		return segmentOutcome{}, err
 	}
-	projectInstructions := loadProjectInstructions(agent.CWD)
-	if strings.TrimSpace(projectInstructions.Text) != "" {
-		agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
-		r.publish(Event{Type: "project.instructions_loaded", AgentID: agentID, Data: mergeEventData(projectInstructions.eventData(), runID)})
+	if isConversationRun(run) {
+		agent.SystemPrompt = mergeConversationSystemBoundary(agent.SystemPrompt)
+	} else {
+		projectInstructions := loadProjectInstructions(agent.CWD)
+		if strings.TrimSpace(projectInstructions.Text) != "" {
+			agent.SystemPrompt = mergeProjectInstructions(agent.SystemPrompt, projectInstructions)
+			r.publish(Event{Type: "project.instructions_loaded", AgentID: agentID, Data: mergeEventData(projectInstructions.eventData(), runID)})
+		}
 	}
 	messages, err := r.store.ListMessagesWithAttachmentData(ctx, agentID)
 	if err != nil {
@@ -813,43 +830,52 @@ func (r *Runner) validateContinuationBoundary(ctx context.Context, run db.Run, c
 	if normalizedExecutionDeviceID(agent.ExecutionDeviceID) != normalizedExecutionDeviceID(run.ExecutionDeviceID) {
 		return errors.New("execution device changed")
 	}
-	if snapshot, configured, snapshotErr := r.currentPlanSnapshot(ctx, run.AgentID); snapshotErr != nil {
-		if continuation {
-			return fmt.Errorf("load continuation safety snapshot: %w", snapshotErr)
+	if isConversationRun(run) {
+		if run.ExecutionMode != db.RunExecutionModeExecute || run.PermissionModeCap != "readOnly" {
+			return errors.New("conversation run capability boundary changed")
 		}
-	} else if configured {
-		if continuation && (strings.TrimSpace(run.ToolCatalogDigest) == "" || strings.TrimSpace(run.WorkspaceFingerprint) == "") {
-			return errors.New("continuation snapshot is missing")
+		if run.AutoContinuationMode != continuationModeOff && continuation {
+			return errors.New("conversation runs cannot continue automatically")
 		}
-		if strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "" {
-			if snapshot.PolicyGenerationSnapshot != run.PolicyGenerationSnapshot || snapshot.AgentGenerationSnapshot != run.AgentGenerationSnapshot {
-				return errors.New("continuation generation snapshot changed")
+	} else {
+		if snapshot, configured, snapshotErr := r.currentPlanSnapshot(ctx, run.AgentID); snapshotErr != nil {
+			if continuation {
+				return fmt.Errorf("load continuation safety snapshot: %w", snapshotErr)
 			}
-			if snapshot.ToolCatalogDigest != run.ToolCatalogDigest {
-				return errors.New("tool catalog snapshot changed or is missing")
+		} else if configured {
+			if continuation && (strings.TrimSpace(run.ToolCatalogDigest) == "" || strings.TrimSpace(run.WorkspaceFingerprint) == "") {
+				return errors.New("continuation snapshot is missing")
 			}
-			if snapshot.WorkspaceFingerprint != run.WorkspaceFingerprint {
-				return errors.New("workspace fingerprint changed or is missing")
+			if strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "" {
+				if snapshot.PolicyGenerationSnapshot != run.PolicyGenerationSnapshot || snapshot.AgentGenerationSnapshot != run.AgentGenerationSnapshot {
+					return errors.New("continuation generation snapshot changed")
+				}
+				if snapshot.ToolCatalogDigest != run.ToolCatalogDigest {
+					return errors.New("tool catalog snapshot changed or is missing")
+				}
+				if snapshot.WorkspaceFingerprint != run.WorkspaceFingerprint {
+					return errors.New("workspace fingerprint changed or is missing")
+				}
 			}
+		} else if continuation && (strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "") {
+			return errors.New("continuation snapshot provider is unavailable")
 		}
-	} else if continuation && (strings.TrimSpace(run.ToolCatalogDigest) != "" || strings.TrimSpace(run.WorkspaceFingerprint) != "") {
-		return errors.New("continuation snapshot provider is unavailable")
-	}
-	if strings.TrimSpace(run.PlanID) != "" {
-		plan, planErr := r.store.GetPlanByID(ctx, run.PlanID)
-		if planErr != nil {
-			return fmt.Errorf("load approved plan: %w", planErr)
+		if strings.TrimSpace(run.PlanID) != "" {
+			plan, planErr := r.store.GetPlanByID(ctx, run.PlanID)
+			if planErr != nil {
+				return fmt.Errorf("load approved plan: %w", planErr)
+			}
+			if plan.AgentID != run.AgentID || plan.Status != db.PlanStatusExecuting || !samePlanSnapshot(plan, db.PlanSnapshot{
+				PolicyGenerationSnapshot: run.PolicyGenerationSnapshot,
+				AgentGenerationSnapshot:  run.AgentGenerationSnapshot,
+				ToolCatalogDigest:        run.ToolCatalogDigest,
+				WorkspaceFingerprint:     run.WorkspaceFingerprint,
+			}) {
+				return errors.New("approved plan snapshot or execution state changed")
+			}
+		} else if run.ExecutionMode == db.RunExecutionModePlan && continuation {
+			return errors.New("plan draft runs cannot continue")
 		}
-		if plan.AgentID != run.AgentID || plan.Status != db.PlanStatusExecuting || !samePlanSnapshot(plan, db.PlanSnapshot{
-			PolicyGenerationSnapshot: run.PolicyGenerationSnapshot,
-			AgentGenerationSnapshot:  run.AgentGenerationSnapshot,
-			ToolCatalogDigest:        run.ToolCatalogDigest,
-			WorkspaceFingerprint:     run.WorkspaceFingerprint,
-		}) {
-			return errors.New("approved plan snapshot or execution state changed")
-		}
-	} else if run.ExecutionMode == db.RunExecutionModePlan && continuation {
-		return errors.New("plan draft runs cannot continue")
 	}
 	switch run.CheckpointState {
 	case db.RunCheckpointNone, db.RunCheckpointTracking, db.RunCheckpointReady:
