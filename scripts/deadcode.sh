@@ -16,10 +16,6 @@ trap 'rm -f "$output_file" "$allowed_file" "$actual_file" "$allowed_sorted_file"
 # Exact, reviewed exceptions. Keys deliberately include the source file so
 # identically named package entry points cannot hide a newly unreachable symbol.
 readonly -a allowed_findings=(
-  "internal/agent/loop.go::toolFinishedEventData"
-  "internal/agent/loop.go::approvalEventData"
-  "internal/agent/loop.go::shellCommandIsComplex"
-  "internal/agent/loop.go::Runner.toolSpecs"
   "internal/automation/manager.go::New"
   "internal/channels/types.go::WithAPIBase"
   "internal/channels/types.go::WithHTTPClient"
@@ -38,7 +34,6 @@ readonly -a allowed_findings=(
   "internal/config/defaults.go::getenvBool"
   "internal/config/defaults.go::getenvBoolFallback"
   "internal/db/background_tasks.go::parseBackgroundTaskTime"
-  "internal/db/skills_store.go::validStoredSkillFindings"
   "internal/db/store.go::WrapNotFound"
   "internal/db/learned_features.go::sortedKeys"
   "internal/devices/action.go::Catalog"

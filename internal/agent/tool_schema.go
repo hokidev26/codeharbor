@@ -3,24 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"reflect"
-	"sort"
 	"strings"
-
-	"autoto/internal/providers"
 )
-
-func (r *Runner) toolSpecs() []providers.ToolSpec {
-	if r.tools == nil {
-		return nil
-	}
-	registered := r.tools.List()
-	sort.Slice(registered, func(i, j int) bool { return registered[i].Name() < registered[j].Name() })
-	out := make([]providers.ToolSpec, 0, len(registered))
-	for _, tool := range registered {
-		out = append(out, providers.ToolSpec{Name: tool.Name(), Description: tool.Description(), Schema: toolInputSchema(tool.Schema())})
-	}
-	return out
-}
 
 func toolInputSchema(input any) map[string]any {
 	if schema, ok := nativeToolInputSchema(input); ok {

@@ -56,10 +56,6 @@ func toolStartedEventDataWithResolution(call tools.Call, risk tools.Risk, execut
 		ToEventData()
 }
 
-func toolFinishedEventData(call tools.Call, risk tools.Risk, executionDeviceID, runID string, result tools.Result, status string, durationMS int64, extra map[string]any) map[string]any {
-	return toolFinishedEventDataWithResolution(call, risk, executionDeviceID, runID, result, status, durationMS, extra, toolPermissionResolution{Source: decisionSourceDefaultPolicy})
-}
-
 func toolFinishedEventDataWithResolution(call tools.Call, risk tools.Risk, executionDeviceID, runID string, result tools.Result, status string, durationMS int64, extra map[string]any, resolution toolPermissionResolution) map[string]any {
 	return NewToolEventMetaBuilder(call, risk, executionDeviceID, runID).
 		Decision(resolution.Decision, resolution.Source, resolution.RuleID, resolution.Scope).
@@ -288,10 +284,6 @@ func boundedToolResultPreview(output string) (string, bool) {
 		end--
 	}
 	return output[:end], true
-}
-
-func approvalEventData(agent db.Agent, call tools.Call, risk tools.Risk, warning, reason string, expiresAt time.Time) map[string]any {
-	return approvalEventDataWithResolution(agent, call, risk, warning, reason, expiresAt, 0, 0, toolPermissionResolution{Decision: toolPermissionAsk, Source: decisionSourceDefaultPolicy})
 }
 
 func toolCommand(toolName string, input json.RawMessage) string {

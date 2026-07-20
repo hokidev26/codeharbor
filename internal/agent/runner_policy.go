@@ -253,15 +253,6 @@ func isWhitelistedExecCommand(command string) bool {
 	}
 }
 
-func shellCommandIsComplex(command string) bool {
-	for _, token := range []string{"|", ">", "<", ";", "&&", "||", "$(", "`", "\n"} {
-		if strings.Contains(command, token) {
-			return true
-		}
-	}
-	return false
-}
-
 func normalizeShellCommand(command string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
 }

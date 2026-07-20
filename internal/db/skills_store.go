@@ -211,11 +211,6 @@ func failClosedSkillRevalidation(ctx context.Context, tx *sql.Tx, skill Skill, m
 	return insertSkillAuditEvents(ctx, tx, canonical, &skill, "scanner_revalidation")
 }
 
-func validStoredSkillFindings(raw json.RawMessage) bool {
-	_, ok := storedSkillFindingsVerdict(raw)
-	return ok
-}
-
 func storedSkillFindingsVerdict(raw json.RawMessage) (string, bool) {
 	var findings []skills.Finding
 	encoded := strings.TrimSpace(string(raw))
