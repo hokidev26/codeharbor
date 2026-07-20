@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	agentpkg "autoto/internal/agent"
 )

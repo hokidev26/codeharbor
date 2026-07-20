@@ -766,7 +766,7 @@ GET /api/licenses
 github.com/go-chi/chi/v5               MIT
 github.com/google/uuid                 BSD-3-Clause
 modernc.org/sqlite                     BSD-3-Clause
-nhooyr.io/websocket                    ISC
+github.com/coder/websocket             ISC
 github.com/openai/openai-go/v3         Apache-2.0
 github.com/anthropics/anthropic-sdk-go MIT
 github.com/creack/pty                  MIT

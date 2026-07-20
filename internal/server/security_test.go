@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5/middleware"
-	"nhooyr.io/websocket"
 
 	agentpkg "autoto/internal/agent"
 	"autoto/internal/compat"

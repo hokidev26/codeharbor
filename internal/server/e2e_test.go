@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	agentpkg "autoto/internal/agent"
 	"autoto/internal/config"

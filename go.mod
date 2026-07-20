@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.2
+	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/creack/pty v1.1.24
 	github.com/go-chi/chi/v5 v5.2.3
@@ -14,7 +15,6 @@ require (
 	golang.org/x/text v0.28.0
 	modernc.org/sqlite v1.40.1
 	mvdan.cc/sh/v3 v3.13.1
-	nhooyr.io/websocket v1.8.17
 )
 
 require (

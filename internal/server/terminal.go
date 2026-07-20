@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/creack/pty"
-	"nhooyr.io/websocket"
 )
 
 type terminalMessage struct {

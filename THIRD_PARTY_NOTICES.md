@@ -11,7 +11,7 @@ Before formal distribution, regenerate a complete notice using a license scanner
 | `github.com/go-chi/chi/v5` | MIT | HTTP router |
 | `github.com/google/uuid` | BSD-3-Clause | UUID generation |
 | `modernc.org/sqlite` | BSD-3-Clause | Pure-Go SQLite driver |
-| `nhooyr.io/websocket` | ISC | WebSocket implementation |
+| `github.com/coder/websocket` | ISC | WebSocket implementation |
 | `github.com/openai/openai-go/v3` | Apache-2.0 | OpenAI official Go SDK |
 | `github.com/anthropics/anthropic-sdk-go` | MIT | Anthropic official Go SDK |
 | `github.com/creack/pty` | MIT | PTY support |
