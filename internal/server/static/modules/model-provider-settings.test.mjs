@@ -76,6 +76,7 @@ import {
   renderProviderConsolePage,
 } from "./model-provider-components.mjs";
 import { setUILocale } from "./i18n.mjs";
+import { getRegionalPreferences, setRegionalPreferences } from "./locale-registry.mjs";
 
 const labels = {
   noCodexCredentials: "No accounts",
@@ -175,7 +176,12 @@ function render(accounts, now = Date.parse("2026-01-01T00:00:00Z"), options = {}
   return renderCodexAccountManagementTable(accounts, { translate, now, ...options });
 }
 
-test("Codex account table renders complete account data and escapes HTML", () => {
+test("Codex account table renders complete account data and escapes HTML", (t) => {
+  // Pin the regional number locale so compact token counts render
+  // deterministically regardless of the host environment's default locale.
+  const previousRegional = getRegionalPreferences();
+  setRegionalPreferences({ locale: "en-US" });
+  t.after(() => setRegionalPreferences(previousRegional));
   const html = render([{
     id: "codex_fixture",
     alias: `Primary <script>alert(1)</script>`,
@@ -203,10 +209,10 @@ test("Codex account table renders complete account data and escapes HTML", () =>
   assert.match(html, />25%<\/strong>/);
   assert.doesNotMatch(html, /828 requests|(?:117M|1\.2億|1\.2亿) tokens|\$145\.19/);
   assert.match(html, /3 requests/);
-  assert.match(html, /1200 tokens/);
+  assert.match(html, /1\.2K tokens/);
   assert.match(html, /\$0\.1200/);
   assert.match(html, /20 requests/);
-  assert.match(html, /6000 tokens/);
+  assert.match(html, /6K tokens/);
   assert.match(html, /\$1\.50/);
   assert.match(html, /codex-usage-window-badge is-5h">5h/);
   assert.match(html, /codex-usage-window-badge is-7d">7d/);
