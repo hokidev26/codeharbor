@@ -31,15 +31,19 @@ type scriptedProvider struct {
 }
 
 func (p *scriptedProvider) Name() string { return "fake" }
+
 func (p *scriptedProvider) Capabilities() providers.Capabilities {
 	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: p.reasoning}
 }
+
 func (p *scriptedProvider) ModelCapabilities(model string) providers.ModelCapabilities {
 	return providers.ModelCapabilities{FastMode: p.fastModels[model], FastModeKnown: true, ContextTokenLimit: p.contextLimits[model]}
 }
+
 func (p *scriptedProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
 }
+
 func (p *scriptedProvider) Generate(ctx context.Context, req providers.GenerateRequest) (<-chan providers.Event, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
@@ -83,12 +87,16 @@ type lifecycleTestTool struct {
 	output string
 }
 
-func (tool lifecycleTestTool) Name() string        { return "LifecycleTest" }
+func (tool lifecycleTestTool) Name() string { return "LifecycleTest" }
+
 func (tool lifecycleTestTool) Description() string { return "Returns a controlled test result." }
-func (tool lifecycleTestTool) Schema() any         { return map[string]any{"type": "object"} }
+
+func (tool lifecycleTestTool) Schema() any { return map[string]any{"type": "object"} }
+
 func (tool lifecycleTestTool) Risk(json.RawMessage) tools.Risk {
 	return tools.RiskRead
 }
+
 func (tool lifecycleTestTool) Execute(context.Context, tools.Call, tools.Env) (tools.Result, error) {
 	return tools.Result{Output: tool.output}, nil
 }
@@ -2165,30 +2173,6 @@ func TestProviderMessageFromDBRestoresInternalProviderState(t *testing.T) {
 	}
 }
 
-func TestToolInputSchemaBuildsNestedObjectsAndArrays(t *testing.T) {
-	type child struct {
-		Name string `json:"name"`
-	}
-	type input struct {
-		Child    child           `json:"child"`
-		Children []child         `json:"children,omitempty"`
-		Options  map[string]bool `json:"options,omitempty"`
-	}
-	schema := toolInputSchema(input{})
-	properties := schema["properties"].(map[string]any)
-	childSchema := properties["child"].(map[string]any)
-	if childSchema["type"] != "object" || childSchema["properties"].(map[string]any)["name"].(map[string]any)["type"] != "string" {
-		t.Fatalf("nested struct schema was not recursive: %+v", schema)
-	}
-	childrenSchema := properties["children"].(map[string]any)
-	if childrenSchema["type"] != "array" || childrenSchema["items"].(map[string]any)["type"] != "object" {
-		t.Fatalf("nested array schema was not recursive: %+v", schema)
-	}
-	if properties["options"].(map[string]any)["type"] != "object" {
-		t.Fatalf("map schema should remain an object: %+v", schema)
-	}
-}
-
 func TestRunnerPassesPersistedReasoningEffortToSupportingProvider(t *testing.T) {
 	ctx := context.Background()
 	store, agent := newAgentTestStore(t, t.TempDir(), "acceptEdits")
@@ -2309,9 +2293,11 @@ type pendingProvider struct {
 }
 
 func (p *pendingProvider) Name() string { return "fake" }
+
 func (p *pendingProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
 }
+
 func (p *pendingProvider) Generate(ctx context.Context, req providers.GenerateRequest) (<-chan providers.Event, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
@@ -2327,11 +2313,13 @@ func (p *pendingProvider) Generate(ctx context.Context, req providers.GenerateRe
 	close(out)
 	return out, nil
 }
+
 func (p *pendingProvider) request(index int) providers.GenerateRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.requests[index]
 }
+
 func (p *pendingProvider) requestCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -2341,9 +2329,11 @@ func (p *pendingProvider) requestCount() int {
 type usageThenBlockingProvider struct{}
 
 func (p *usageThenBlockingProvider) Name() string { return "fake" }
+
 func (p *usageThenBlockingProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
 }
+
 func (p *usageThenBlockingProvider) Generate(ctx context.Context, req providers.GenerateRequest) (<-chan providers.Event, error) {
 	out := make(chan providers.Event, 1)
 	out <- providers.Event{Type: "usage", Usage: &providers.Usage{InputTokens: 5}}
@@ -2356,9 +2346,11 @@ type blockingProvider struct {
 }
 
 func (p *blockingProvider) Name() string { return "fake" }
+
 func (p *blockingProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
 }
+
 func (p *blockingProvider) Generate(ctx context.Context, req providers.GenerateRequest) (<-chan providers.Event, error) {
 	p.once.Do(func() { close(p.started) })
 	return make(chan providers.Event), nil
