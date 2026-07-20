@@ -1,4 +1,5 @@
 import { defaultProfilePrefs } from "./preferences-data.mjs";
+import { normalizeAvatarDataUrl } from "./profile-avatar.mjs?v=profile-avatar-1";
 
 export const accountPreferencesImportVersion = 1;
 export const accountPreferenceFields = Object.freeze(["profile", "preferredModel", "modelVisibility"]);
@@ -16,10 +17,11 @@ export function normalizeAccountProfile(value = {}) {
   const displayName = String(source.displayName || "").trim().slice(0, 80);
   const roleLabel = String(source.roleLabel || defaultProfilePrefs.roleLabel).trim().slice(0, 80) || defaultProfilePrefs.roleLabel;
   const avatarInitials = String(source.avatarInitials || defaultProfilePrefs.avatarInitials).trim().slice(0, 4).toUpperCase() || defaultProfilePrefs.avatarInitials;
+  const avatarDataUrl = normalizeAvatarDataUrl(source.avatarDataUrl);
   const gitName = String(source.gitName || "").trim().slice(0, 120);
   const gitEmail = String(source.gitEmail || "").trim().slice(0, 160);
   const workspaceLabel = String(source.workspaceLabel || defaultProfilePrefs.workspaceLabel).trim().slice(0, 80) || defaultProfilePrefs.workspaceLabel;
-  return { displayName, roleLabel, avatarInitials, gitName, gitEmail, workspaceLabel };
+  return { displayName, roleLabel, avatarInitials, avatarDataUrl, gitName, gitEmail, workspaceLabel };
 }
 
 export function normalizeModelVisibility(value = {}) {

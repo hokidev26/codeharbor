@@ -29,6 +29,7 @@ test("normalizes remote access state and recognizes environment credentials", ()
     allowRemoteNativePicker: false,
     revision: 0,
   });
+  assert.equal(normalizeRemoteAccess({ policy: { allowFullAccess: true, defaultMode: "restricted" } }).policy.defaultMode, "full");
   assert.equal(isEnvironmentCredential("environment"), true);
   assert.equal(isEnvironmentCredential("env"), true);
   assert.equal(isEnvironmentCredential("stored"), false);
@@ -46,6 +47,12 @@ test("policy and password payloads carry currentPassword only when supplied", ()
     allowFullAccess: true,
     defaultMode: "full",
     allowRemoteNativePicker: true,
+    revision: 1,
+  });
+  assert.deepEqual(policyPayload(baseAccess, { allowFullAccess: true, defaultMode: "restricted" }), {
+    allowFullAccess: true,
+    defaultMode: "full",
+    allowRemoteNativePicker: false,
     revision: 1,
   });
   assert.deepEqual(passwordPayload("generate"), { strategy: "generate" });
@@ -85,6 +92,52 @@ test("normalizes and controls a temporary tunnel through the security endpoint",
     ["/api/security/remote-access/tunnel", "POST"],
     ["/api/security/remote-access/tunnel", "DELETE"],
   ]);
+});
+
+test("temporary tunnel start button keeps its label and width hook while starting", async () => {
+  const previousDocument = globalThis.document;
+  let clickHandler = null;
+  let resolveRequest = null;
+  const attributes = new Map();
+  const button = {
+    dataset: { remoteTunnelAction: "start", remoteTunnelBusyLabel: "启动中…" },
+    textContent: "一键启动",
+    disabled: false,
+    addEventListener(type, handler) { if (type === "click") clickHandler = handler; },
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    removeAttribute(name) { attributes.delete(name); },
+  };
+  globalThis.document = {
+    getElementById(id) { return id === "startRemoteTunnelBtn" ? button : null; },
+  };
+  try {
+    const state = {
+      remoteAccess: {
+        ...localAccess,
+        tunnel: { available: true, status: "idle", publicUrl: "", error: "", startedAt: "" },
+      },
+    };
+    const controller = createRemoteAccessSettingsController({
+      state,
+      request: async () => new Promise((resolve) => { resolveRequest = resolve; }),
+    });
+    controller.bind();
+    assert.equal(typeof clickHandler, "function");
+
+    const pending = clickHandler({ currentTarget: button });
+    await Promise.resolve();
+    assert.equal(button.textContent, "启动中…");
+    assert.equal(button.disabled, true);
+    assert.equal(attributes.get("aria-busy"), "true");
+
+    resolveRequest({ available: true, status: "running", publicUrl: "https://example.trycloudflare.com" });
+    await pending;
+    assert.equal(button.textContent, "一键启动");
+    assert.equal(button.disabled, false);
+    assert.equal(attributes.has("aria-busy"), false);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test("saves host-local policy with revision", async () => {
@@ -142,7 +195,8 @@ test("generates and consumes a one-time password locally without retaining it in
 test("renders remote security settings read-only and host-local settings editable", () => {
   const restricted = createRemoteAccessSettingsController({ state: { remoteAccess: baseAccess } });
   const restrictedHTML = restricted.render();
-  assert.match(restrictedHTML, /id="remoteAccessDefaultMode"[^>]*disabled/);
+  assert.doesNotMatch(restrictedHTML, /id="remoteAccessDefaultMode"/);
+  assert.match(restrictedHTML, /id="remoteAccessAllowFullAccess"[^>]*disabled/);
   assert.match(restrictedHTML, /id="remoteAccessNativePicker"[^>]*disabled/);
   assert.match(restrictedHTML, /data-remote-policy-submit[^>]*disabled/);
   assert.match(restrictedHTML, /data-remote-generate-submit[^>]*disabled/);
@@ -156,15 +210,18 @@ test("renders remote security settings read-only and host-local settings editabl
     },
   };
   const fullRemoteHTML = createRemoteAccessSettingsController({ state: fullRemoteState }).render();
-  assert.match(fullRemoteHTML, /id="remoteAccessDefaultMode"[^>]*disabled/);
+  assert.doesNotMatch(fullRemoteHTML, /id="remoteAccessDefaultMode"/);
+  assert.match(fullRemoteHTML, /id="remoteAccessAllowFullAccess"[^>]*disabled/);
   assert.match(fullRemoteHTML, /data-remote-policy-submit[^>]*disabled/);
 
   const localHTML = createRemoteAccessSettingsController({ state: { remoteAccess: localAccess } }).render();
-  assert.doesNotMatch(localHTML, /remoteAccessAllowFull/);
-  assert.match(localHTML, /<option value="full"[^>]*>远程操控（所有操作权限）<\/option>/);
+  assert.match(localHTML, /class="settings-action-btn remote-access-tunnel-action primary"[^>]*data-remote-tunnel-busy-label="启动中…"/);
+  assert.match(localHTML, /id="remoteAccessAllowFullAccess"[^>]*role="switch"/);
+  assert.doesNotMatch(localHTML, /id="remoteAccessAllowFullAccess"[^>]*\schecked(?:\s|>)/);
+  assert.doesNotMatch(localHTML, /id="remoteAccessDefaultMode"/);
+  assert.doesNotMatch(localHTML, /<option value="full"/);
   for (const pattern of [
-    /<select id="remoteAccessDefaultMode"[^>]*>/,
-    /<option value="full"[^>]*>/,
+    /<input id="remoteAccessAllowFullAccess"[^>]*>/,
     /<input id="remoteAccessNativePicker"[^>]*>/,
     /<button class="settings-action-btn primary" type="submit" data-remote-policy-submit[^>]*>/,
   ]) {
@@ -172,6 +229,14 @@ test("renders remote security settings read-only and host-local settings editabl
     assert.ok(tag);
     assert.equal(tag.includes("disabled"), false);
   }
+
+  const allowedButRestricted = createRemoteAccessSettingsController({
+    state: { remoteAccess: { ...localAccess, policy: { ...localAccess.policy, allowFullAccess: true, defaultMode: "restricted" } } },
+  }).render();
+  assert.match(allowedButRestricted, /id="remoteAccessAllowFullAccess"[^>]*\schecked(?:\s|>)/);
+  assert.match(allowedButRestricted, /已开启；新会话将直接使用完整权限/);
+  assert.doesNotMatch(allowedButRestricted, /id="remoteAccessDefaultMode"/);
+  assert.doesNotMatch(allowedButRestricted, /但新会话默认仍为受限/);
 
   const environmentLocal = createRemoteAccessSettingsController({
     state: { remoteAccess: { ...localAccess, credential: { configured: true, source: "environment" } } },

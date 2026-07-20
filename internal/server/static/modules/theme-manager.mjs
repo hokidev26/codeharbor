@@ -1,4 +1,4 @@
-import { appearanceThemeForPreset, normalizeAppearanceThemePreset } from "./preferences-data.mjs";
+import { appearanceThemeForPreset, normalizeAppearanceThemePreset } from "./preferences-data.mjs?v=global-background-1-theme-v2-1";
 
 const packageThemeIDPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const themeStylesheetLinkID = "autotoThemeStylesheet";
@@ -25,6 +25,13 @@ export function normalizeThemeRecord(value = {}) {
     revision,
     stylesheetUrl,
     previewUrl: safeThemeURL(value.previewUrl),
+    capabilities: {
+      background: value.capabilities?.globalBackground === true || value.capabilities?.homeBackground === true || value.capabilities?.background === true || value.supportsBackground === true,
+      globalBackground: value.capabilities?.globalBackground === true,
+      homeBackground: value.capabilities?.homeBackground === true,
+      icons: value.capabilities?.icons === true || value.supportsIcons === true,
+    },
+    iconVariables: value.iconVariables && typeof value.iconVariables === "object" ? Object.keys(value.iconVariables).slice(0, 32) : [],
     deletable: source === "local" && value.deletable !== false,
   };
 }
@@ -288,6 +295,8 @@ export class ThemeManager {
       delete body.dataset.autotoTheme;
       delete body.dataset.themeRevision;
       delete body.dataset.themeSource;
+      delete body.dataset.themeGlobalBackground;
+      delete body.dataset.themeIcons;
     }
     body?.classList?.toggle?.("theme-light", true);
     body?.classList?.toggle?.("theme-dark", appearanceThemeForPreset(normalizedPreset) === "dark");
@@ -348,6 +357,8 @@ export class ThemeManager {
       body.dataset.themeRevision = theme.revision;
       body.dataset.themeSource = theme.source;
       body.dataset.themePreset = theme.colorScheme;
+      body.dataset.themeGlobalBackground = theme.capabilities.globalBackground ? "true" : "false";
+      body.dataset.themeIcons = theme.capabilities.icons ? "true" : "false";
     }
     body?.classList?.toggle?.("theme-light", true);
     body?.classList?.toggle?.("theme-dark", theme.colorScheme === "dark");
@@ -364,4 +375,191 @@ export class ThemeManager {
 
 export function createThemeManager(options) {
   return new ThemeManager(options);
+}
+
+const backgroundURLPattern = /^\/appearance\/backgrounds\/[a-f0-9]{64}\/[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
+
+export function safeAppearanceBackgroundURL(value) {
+  const url = String(value || "").trim();
+  return backgroundURLPattern.test(url) ? url : "";
+}
+
+export function normalizeAppearanceBackgroundRecord(value = {}) {
+  const source = value?.background && typeof value.background === "object" ? value.background : value;
+  const requestedMode = String(source?.mode || source?.backgroundMode || "").toLowerCase();
+  const position = (candidate, fallback) => {
+    const number = Number(candidate);
+    return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : fallback;
+  };
+  return {
+    mode: ["theme", "custom", "none"].includes(requestedMode) ? requestedMode : "theme",
+    url: safeAppearanceBackgroundURL(source?.url || source?.backgroundUrl || source?.imageUrl),
+    revision: String(source?.revision || "").trim().toLowerCase().slice(0, 64),
+    filename: String(source?.filename || "").trim().slice(0, 120),
+    contentType: String(source?.contentType || "").trim().slice(0, 80),
+    size: Math.max(0, Math.round(Number(source?.size) || 0)),
+    dim: Math.max(0, Math.min(75, Math.round(Number.isFinite(Number(source?.dim ?? source?.backgroundDim)) ? Number(source?.dim ?? source?.backgroundDim) : 18))),
+    positionX: position(source?.positionX ?? source?.backgroundPositionX, 50),
+    positionY: position(source?.positionY ?? source?.backgroundPositionY, 50),
+    width: Math.max(0, Math.round(Number(source?.width || source?.naturalWidth) || 0)),
+    height: Math.max(0, Math.round(Number(source?.height || source?.naturalHeight) || 0)),
+  };
+}
+
+export class AppearanceBackgroundManager {
+  constructor({ api, documentRef = globalThis.document, windowRef = globalThis.window, showToast } = {}) {
+    if (typeof api !== "function") throw new TypeError("AppearanceBackgroundManager requires an api function");
+    this.api = api;
+    this.document = documentRef;
+    this.window = windowRef || globalThis;
+    this.showToast = showToast;
+    this.listeners = new Set();
+    this.sequence = 0;
+    this.state = { status: "idle", background: normalizeAppearanceBackgroundRecord({}), error: "" };
+    this.preferenceAdapter = null;
+  }
+
+  setPreferenceAdapter(adapter = {}) { this.preferenceAdapter = adapter; }
+  snapshot() { return { ...this.state, background: { ...this.state.background } }; }
+  subscribe(listener) { if (typeof listener !== "function") return () => {}; this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  emit() { const snapshot = this.snapshot(); for (const listener of this.listeners) { try { listener(snapshot); } catch {} } }
+  update(patch) { this.state = { ...this.state, ...patch }; this.emit(); }
+
+  currentPreferences(overrides = {}) {
+    return normalizeAppearanceBackgroundRecord({
+      ...(this.preferenceAdapter?.currentAppearancePreferences?.() || {}),
+      ...overrides,
+    });
+  }
+
+  mergeAsset(asset, preferences = {}) {
+    const prefs = this.currentPreferences(preferences);
+    const metadata = normalizeAppearanceBackgroundRecord(asset);
+    const url = metadata.url || prefs.url;
+    return normalizeAppearanceBackgroundRecord({
+      ...metadata,
+      ...prefs,
+      url,
+      width: metadata.width || prefs.width,
+      height: metadata.height || prefs.height,
+      size: metadata.size || prefs.size,
+      revision: metadata.revision || prefs.revision,
+      filename: metadata.filename || prefs.filename,
+      contentType: metadata.contentType || prefs.contentType,
+      mode: prefs.mode === "custom" && !url ? "theme" : prefs.mode,
+    });
+  }
+
+  async load(preferences = {}) {
+    const sequence = ++this.sequence;
+    this.update({ status: "loading", error: "" });
+    try {
+      const payload = await this.api("/api/appearance/background");
+      const background = this.mergeAsset(payload?.background || {}, preferences);
+      if (sequence !== this.sequence) return background;
+      await this.apply(background, { sequence });
+      return background;
+    } catch (error) {
+      if (sequence === this.sequence) this.update({ status: "error", error: String(error?.message || error || "Background request failed") });
+      throw error;
+    }
+  }
+
+  async upload(file, { mode = "custom", dim, positionX, positionY } = {}) {
+    if (!file) throw new Error("Background image is required");
+    const sequence = ++this.sequence;
+    const form = new FormData();
+    form.set("file", file);
+    const payload = await this.api("/api/appearance/background", { method: "POST", body: form });
+    const background = this.mergeAsset(payload?.background || {}, {
+      mode: mode === "none" ? "none" : "custom",
+      dim,
+      positionX,
+      positionY,
+    });
+    if (sequence !== this.sequence) return background;
+    await this.apply(background, { sequence });
+    return background;
+  }
+
+  async remove() {
+    const sequence = ++this.sequence;
+    await this.api("/api/appearance/background", { method: "DELETE" });
+    const background = normalizeAppearanceBackgroundRecord({
+      mode: "theme",
+      url: "",
+      dim: this.state.background.dim,
+      positionX: this.state.background.positionX,
+      positionY: this.state.background.positionY,
+    });
+    if (sequence !== this.sequence) return background;
+    await this.apply(background, { sequence });
+    return background;
+  }
+
+  async saveOptions(next = {}) {
+    const background = normalizeAppearanceBackgroundRecord({ ...this.state.background, ...next });
+    await this.apply(background);
+    return background;
+  }
+
+  createPreloadImage() {
+    if (typeof this.window?.Image === "function") return new this.window.Image();
+    return this.document?.createElement?.("img") || null;
+  }
+
+  async preload(url) {
+    const image = this.createPreloadImage();
+    if (!image) throw new Error("Image preloading is unavailable");
+    image.decoding = "async";
+    image.alt = "";
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        image.onload = null;
+        image.onerror = null;
+        if (error) reject(error);
+        else resolve();
+      };
+      image.onload = () => {
+        const decoded = typeof image.decode === "function" ? image.decode() : Promise.resolve();
+        Promise.resolve(decoded).then(() => finish()).catch((error) => finish(error || new Error("Background image decode failed")));
+      };
+      image.onerror = () => finish(new Error("Background image failed to load"));
+      image.src = url;
+      if (image.complete) {
+        if (Number(image.naturalWidth) > 0) image.onload();
+        else image.onerror();
+      }
+    });
+    return image;
+  }
+
+  async apply(background = this.state.background, { sequence = ++this.sequence } = {}) {
+    const normalized = normalizeAppearanceBackgroundRecord(background);
+    let image = null;
+    if (normalized.mode === "custom" && normalized.url) image = await this.preload(normalized.url);
+    if (sequence !== this.sequence) return false;
+    const applied = normalizeAppearanceBackgroundRecord({
+      ...normalized,
+      width: normalized.width || Number(image?.naturalWidth) || 0,
+      height: normalized.height || Number(image?.naturalHeight) || 0,
+    });
+    const body = this.document?.body;
+    if (body?.dataset) {
+      body.dataset.backgroundMode = applied.mode;
+      body.dataset.backgroundReady = applied.mode === "custom" && applied.url ? "true" : "false";
+    }
+    body?.style?.setProperty?.("--autoto-custom-background-image", applied.mode === "custom" && applied.url ? `url(${JSON.stringify(applied.url)})` : "none");
+    body?.style?.setProperty?.("--autoto-background-dim", `${applied.dim}%`);
+    body?.style?.setProperty?.("--autoto-background-position", `${applied.positionX}% ${applied.positionY}%`);
+    this.update({ status: "ready", background: applied, error: "" });
+    return true;
+  }
+}
+
+export function createAppearanceBackgroundManager(options) {
+  return new AppearanceBackgroundManager(options);
 }

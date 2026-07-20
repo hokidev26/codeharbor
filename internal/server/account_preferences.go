@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"io"
 	"net/http"
 	"strings"
@@ -14,7 +17,12 @@ import (
 	"autoto/internal/db"
 )
 
-const accountPreferencesRequestBytes int64 = 256 << 10
+const (
+	accountPreferencesRequestBytes           int64 = 256 << 10
+	accountPreferencesMaxAvatarBytes               = 96 << 10
+	accountPreferencesMaxAvatarDataURLLength       = 140_000
+	accountPreferencesMaxAvatarDimension           = 512
+)
 
 const accountPreferencesInstanceID = "default"
 
@@ -22,6 +30,7 @@ type accountPreferencesProfile struct {
 	DisplayName    string `json:"displayName"`
 	RoleLabel      string `json:"roleLabel"`
 	AvatarInitials string `json:"avatarInitials"`
+	AvatarDataURL  string `json:"avatarDataUrl"`
 	GitName        string `json:"gitName"`
 	GitEmail       string `json:"gitEmail"`
 	WorkspaceLabel string `json:"workspaceLabel"`
@@ -317,7 +326,42 @@ func normalizeAccountPreferencesProfile(profile accountPreferencesProfile) (acco
 	if utf8.RuneCountInString(profile.AvatarInitials) > 4 {
 		return accountPreferencesProfile{}, errors.New("profile.avatarInitials exceeds 4 characters after normalization")
 	}
+	avatarDataURL, err := normalizeAccountAvatarDataURL(profile.AvatarDataURL)
+	if err != nil {
+		return accountPreferencesProfile{}, err
+	}
+	profile.AvatarDataURL = avatarDataURL
 	return profile, nil
+}
+
+func normalizeAccountAvatarDataURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	const prefix = "data:image/jpeg;base64,"
+	if len(value) > accountPreferencesMaxAvatarDataURLLength || !strings.HasPrefix(value, prefix) {
+		return "", errors.New("profile.avatarDataUrl must be a compressed JPEG data URL")
+	}
+	encoded := strings.TrimPrefix(value, prefix)
+	if encoded == "" || len(encoded)%4 != 0 {
+		return "", errors.New("profile.avatarDataUrl contains invalid base64")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", errors.New("profile.avatarDataUrl contains invalid base64")
+	}
+	if len(decoded) == 0 || len(decoded) > accountPreferencesMaxAvatarBytes {
+		return "", errors.New("profile.avatarDataUrl exceeds the compressed size limit")
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(decoded))
+	if err != nil || format != "jpeg" {
+		return "", errors.New("profile.avatarDataUrl must contain a valid JPEG image")
+	}
+	if config.Width <= 0 || config.Height <= 0 || config.Width > accountPreferencesMaxAvatarDimension || config.Height > accountPreferencesMaxAvatarDimension {
+		return "", errors.New("profile.avatarDataUrl exceeds the image dimensions limit")
+	}
+	return value, nil
 }
 
 func normalizePreferredModel(value string) (string, error) {

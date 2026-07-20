@@ -13,11 +13,17 @@ import { nativeDirectoryPickerAllowed } from "./directory-browser.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs";
 import {
+  collapsedSidebarWidth,
   compactComposerModelLabel,
   createUIShellController,
   defaultSidebarWidth,
+  globalRailCollapsedPreferenceKey,
+  globalRailCollapsedWidth,
+  globalRailExpandedWidth,
   maxSidebarWidth,
+  sessionSidebarCollapsedPreferenceKey,
   minSidebarWidth,
+  normalizeCollapsedPreference,
   normalizeSidebarWidth,
   orderPermissionMenuOptions,
   permissionMenuPrimaryValues,
@@ -139,6 +145,9 @@ test("white shell adds the global rail before the conversation sidebar with the 
   assert.match(scheduleButton?.markup || "", /M8 3v4M16 3v4M4 9h16/);
   assert.match(appMain, /querySelectorAll\("\[data-global-rail-target\]"\)/);
   assert.match(appMain, /activateGlobalRailTarget\(node\.dataset\.globalRailTarget\)/);
+  assert.match(html, /id="globalRailCollapseBtn"[^>]*aria-expanded="true"[^>]*data-i18n-title="shell\.collapseGlobalNavigation"/);
+  assert.match(html, /id="globalRailAvatar"[^>]*data-global-rail-target="profile"/);
+  assert.match(html, /id="sessionSidebarCollapseBtn"[^>]*aria-expanded="true"[^>]*data-i18n-title="shell\.collapseSessionSidebar"/);
 
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(ids).size, ids.length, "white shell must not introduce duplicate IDs");
@@ -504,7 +513,7 @@ test("conversation, task, and schedule modes expose separate creation boundaries
 
   assert.match(html, /id="sessionSidebar" class="sidebar"/);
   assert.match(html, /id="sessionSidebarTitle" class="session-sidebar-title"/);
-  assert.match(html, /id="newProjectBtn" class="icon-btn session-sidebar-action"[^>]*data-create-navigation-item/);
+  assert.match(html, /id="newProjectBtn" class="[^"]*session-sidebar-action[^"]*"[^>]*data-create-navigation-item/);
   assert.match(html, /id="mobileNewScheduleBtn" class="mobile-drawer-primary-action hidden"/);
   assert.match(html, /id="mobileScheduleModeBtn" class="mobile-drawer-secondary-action"/);
   assert.match(html, /id="schedulePanel" class="schedule-workspace-panel hidden"/);
@@ -514,7 +523,8 @@ test("conversation, task, and schedule modes expose separate creation boundaries
   assert.match(html, /id="navigationFilters" class="[^"]*conversation-mode-only/);
   assert.match(html, /recent-directories-sidebar conversation-mode-only/);
   assert.match(appMain, /const scheduleContext = state\.activeWorkbench === "schedules"/);
-  assert.match(appMain, /const effectiveNavigationMode = taskContext \? "projects" : state\.navigationMode/);
+  assert.match(appMain, /const baseNavigationMode = taskContext \? "projects" : state\.navigationMode/);
+  assert.match(appMain, /const effectiveNavigationMode = !taskContext && compactSessionSidebar \? "all" : baseNavigationMode/);
   assert.match(appMain, /if \(scheduleContext\)[\s\S]*?scheduleWorkspace\.renderNavigation/);
   assert.match(appMain, /renderNavigationHTML\(view, \{[\s\S]*?taskContext,/);
   assert.match(appMain, /newTaskBtn"\)\?\.addEventListener\("click", \(\) => focusTaskCreation\(\)\.catch\(showError\)\)/);
@@ -672,20 +682,29 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.match(styles, /body\.white-shell\.theme-light \.navigation-project-group \+ \.navigation-project-group\s*\{[\s\S]*?margin-top:\s*2px/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\)\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)[\s\S]*?grid-auto-rows:\s*max-content[\s\S]*?justify-content:\s*start[\s\S]*?row-gap:\s*14px[\s\S]*?padding:\s*14px 16px 14px/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\s*\{[^}]*justify-self:\s*stretch[^}]*width:\s*100%[^}]*max-width:\s*100%[^}]*white-space:\s*normal/);
-  assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*justify-self:\s*start[^}]*align-self:\s*start[^}]*width:\s*100%[^}]*min-width:\s*126px[^}]*max-width:\s*100%[^}]*height:\s*fit-content[^}]*margin:\s*0 0 14px[^}]*background:\s*var\(--ws-primary-soft\)[^}]*color:\s*var\(--ws-text\)/);
+  assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*justify-self:\s*start[^}]*align-self:\s*start[^}]*width:\s*100%[^}]*min-width:\s*126px[^}]*max-width:\s*100%[^}]*height:\s*fit-content[^}]*margin:\s*0;[^}]*background:\s*var\(--ws-primary-soft\)[^}]*color:\s*var\(--ws-text\)/);
   assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\] \.message-head-actions\s*\{[^}]*position:\s*absolute[^}]*display:\s*flex/);
-  assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\] \.message-copy-btn\s*\{[^}]*width:\s*22px[^}]*font-size:\s*0/);
+  assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\] \.message-copy-btn\s*\{[^}]*width:\s*20px[^}]*font-size:\s*0/);
   assert.match(styles, /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\s*\{[^}]*width:\s*fit-content[^}]*max-width:\s*92%[^}]*margin-left:\s*0/);
   assert.match(styles, /\[class~="message"\]\[class~="user"\]\[class~="chat-flow-left"\]\[class~="message-editing"\]\s*\{[^}]*justify-self:\s*stretch[^}]*width:\s*100%[^}]*max-width:\s*100%[^}]*background:\s*var\(--ws-card\)/);
   assert.match(styles, /\[class~="message"\]:not\(\[class~="live-assistant-message"\]\) \.message-head\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto max-content/);
   assert.match(styles, /\[class~="message"\]:not\(\[class~="live-assistant-message"\]\) \.message-time\s*\{[^}]*grid-column:\s*3[^}]*justify-self:\s*end/);
   assert.match(styles, /\.message-editing \.message-correction-text\s*\{[\s\S]*?border-radius:\s*7px[\s\S]*?background:\s*var\(--ws-input\)/);
   assert.match(styles, /body\.white-shell\.theme-light \.messages:not\(\.empty\) > \[class~="run-summary-card"\]\s*\{[\s\S]*?justify-self:\s*stretch[\s\S]*?width:\s*100%/);
+  assert.match(styles, /\.project-run-failure\s*\{[^}]*width:\s*100%[^}]*max-width:\s*100%/);
+  assert.match(styles, /\.run-summary-failure-alert\s*\{[^}]*font-size:\s*12px/);
   assert.match(finalDesktopComposer, /\[class~="toolbar-model-pill"\],[\s\S]*?\[class~="model-tool-btn"\]\[class~="icon-only"\]\s*\{[\s\S]*?border-radius:\s*6px/);
   assert.match(finalDesktopComposer, /textarea#messageText\s*\{[\s\S]*?border-radius:\s*7px/);
   assert.match(finalDesktopComposer, /#sendMessageBtn\s*\{[\s\S]*?border-radius:\s*7px/);
   assert.match(styles, /\.sidebar-resize-handle\s*\{[\s\S]*?cursor:\s*col-resize/);
-  assert.match(html, /id="sidebarResizeHandle"[^>]*role="separator"[^>]*aria-valuemin="220"[^>]*aria-valuemax="420"/);
+  assert.match(html, /id="sidebarResizeHandle"[^>]*role="separator"[^>]*aria-valuemin="184"[^>]*aria-valuemax="420"/);
+  assert.match(html, /id="sessionSidebarCompactTitle" class="session-sidebar-compact-title"/);
+  assert.match(styles, /--global-rail-layout-width:\s*68px/);
+  assert.match(styles, /\.app-shell\.global-rail-collapsed\s*\{[\s\S]*?--global-rail-layout-width:\s*48px/);
+  assert.match(styles, /\.app-shell\.session-sidebar-collapsed\s*\{[\s\S]*?--session-sidebar-layout-width:\s*184px/);
+  assert.match(styles, /\.app-shell\.session-sidebar-collapsed \.navigation-conversation-row[\s\S]*?min-height:\s*48px/);
+  assert.match(navigation, /data-theme-icon-slot="sidebar-project"/);
+  assert.match(navigation, /data-theme-icon-slot="sidebar-conversation"/);
   assert.match(appMain, /bindSidebarResizer\(\)/);
   assert.match(styles, /\.sidebar-search-wrap\.hidden\s*\{[\s\S]*?display:\s*block !important/);
   assert.match(html, /id="messages" class="messages empty" data-initial-chat-state="loading" aria-busy="true"/);
@@ -1152,8 +1171,154 @@ test("sidebar resizer restores, drags, keys, persists, and cleans up", () => {
   }
 });
 
+test("dual rail collapse compacts both rails, preserves independent sidebar restore, and stays desktop-only", () => {
+  assert.equal(globalRailExpandedWidth, 68);
+  assert.equal(globalRailCollapsedWidth, 48);
+  assert.equal(collapsedSidebarWidth, 184);
+  assert.equal(normalizeCollapsedPreference("true"), true);
+  assert.equal(normalizeCollapsedPreference("false"), false);
+  assert.equal(normalizeCollapsedPreference("unexpected", true), true);
+
+  const makeClassList = (initial = []) => {
+    const names = new Set(initial);
+    return {
+      add(...values) { values.forEach((value) => names.add(value)); },
+      remove(...values) { values.forEach((value) => names.delete(value)); },
+      contains(value) { return names.has(value); },
+      toggle(value, force) {
+        const next = force === undefined ? !names.has(value) : Boolean(force);
+        if (next) names.add(value); else names.delete(value);
+        return next;
+      },
+    };
+  };
+  const makeNode = ({ classes = [], attributes = {} } = {}) => {
+    const listeners = new Map();
+    const values = new Map(Object.entries(attributes));
+    const node = {
+      classList: makeClassList(classes),
+      style: { setProperty(name, value) { values.set(`style:${name}`, value); } },
+      addEventListener(name, handler) { listeners.set(name, handler); },
+      removeEventListener(name) { listeners.delete(name); },
+      dispatch(name, event = {}) { listeners.get(name)?.(event); },
+      setAttribute(name, value) { values.set(name, String(value)); },
+      getAttribute(name) { return values.has(name) ? values.get(name) : null; },
+      removeAttribute(name) { values.delete(name); },
+      get styleValues() { return values; },
+    };
+    return node;
+  };
+  const storage = new MemoryStorage([
+    [sidebarWidthPreferenceKey, "342"],
+    [globalRailCollapsedPreferenceKey, "true"],
+    [sessionSidebarCollapsedPreferenceKey, "true"],
+  ]);
+  const shell = makeNode();
+  const globalRail = makeNode();
+  const sidebar = makeNode();
+  const globalCollapseButton = makeNode();
+  const sessionCollapseButton = makeNode();
+  const separator = makeNode({ attributes: { tabindex: "0" } });
+  separator.getBoundingClientRect = () => ({ left: 398, width: 6 });
+  separator.setPointerCapture = () => {};
+  separator.releasePointerCapture = () => {};
+  const projects = { classList: makeClassList(), clientHeight: 200, clientWidth: 240, scrollHeight: 200, scrollWidth: 240, scrollLeft: 0, scrollTop: 0 };
+  const messages = { classList: makeClassList(), clientHeight: 200, clientWidth: 240, scrollHeight: 200, scrollWidth: 240, scrollLeft: 0, scrollTop: 0 };
+  const bodyClasses = makeClassList();
+  const nodes = {
+    appShell: shell,
+    globalRailCollapseBtn: globalCollapseButton,
+    messages,
+    projects,
+    sessionSidebarCollapseBtn: sessionCollapseButton,
+    sidebarResizeHandle: separator,
+  };
+  const fakeDocument = {
+    body: { classList: bodyClasses },
+    documentElement: { clientWidth: 1280 },
+    getElementById(id) { return nodes[id] || null; },
+    querySelector(selector) {
+      if (selector === ".sidebar") return sidebar;
+      if (selector === ".global-rail") return globalRail;
+      if (selector === ".agent-list-section") return projects;
+      return null;
+    },
+  };
+  let mobile = false;
+  const windowListeners = new Map();
+  const fakeWindow = {
+    matchMedia() { return { matches: mobile }; },
+    addEventListener(name, handler) { windowListeners.set(name, handler); },
+    removeEventListener(name) { windowListeners.delete(name); },
+  };
+  const restoreDocument = replaceGlobal("document", fakeDocument);
+  const restoreWindow = replaceGlobal("window", fakeWindow);
+  const restoreRAF = replaceGlobal("requestAnimationFrame", (callback) => callback());
+  try {
+    const controller = createUIShellController({ state: {}, resizeTerminal() {} });
+    const cleanup = controller.bindSidebarResizer({ storage });
+    assert.equal(shell.classList.contains("global-rail-collapsed"), true);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), true);
+    assert.equal(globalCollapseButton.getAttribute("aria-expanded"), "false");
+    assert.equal(sessionCollapseButton.getAttribute("aria-expanded"), "false");
+    assert.equal(separator.getAttribute("tabindex"), "0");
+    assert.equal(shell.styleValues.get("style:--session-sidebar-width"), "184px");
+    assert.equal(storage.getItem(globalRailCollapsedPreferenceKey), "true");
+    assert.equal(storage.getItem(sessionSidebarCollapsedPreferenceKey), "true");
+
+    globalCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(shell.classList.contains("global-rail-collapsed"), false);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), false);
+    assert.equal(shell.styleValues.get("style:--session-sidebar-width"), "342px");
+    assert.equal(storage.getItem(globalRailCollapsedPreferenceKey), "false");
+    assert.equal(storage.getItem(sessionSidebarCollapsedPreferenceKey), "false");
+
+    sessionCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(shell.classList.contains("global-rail-collapsed"), false);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), true);
+    assert.equal(shell.styleValues.get("style:--session-sidebar-width"), "184px");
+    assert.equal(storage.getItem(sessionSidebarCollapsedPreferenceKey), "true");
+    sessionCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), false);
+    assert.equal(shell.styleValues.get("style:--session-sidebar-width"), "342px");
+    assert.equal(storage.getItem(sessionSidebarCollapsedPreferenceKey), "false");
+
+    globalCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(shell.classList.contains("global-rail-collapsed"), true);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), true);
+    assert.equal(shell.styleValues.get("style:--session-sidebar-width"), "184px");
+    globalCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(shell.classList.contains("global-rail-collapsed"), false);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), false);
+
+    mobile = true;
+    windowListeners.get("resize")?.();
+    assert.equal(shell.classList.contains("global-rail-collapsed"), false);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), false);
+    globalCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    sessionCollapseButton.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+    assert.equal(storage.getItem(globalRailCollapsedPreferenceKey), "false");
+    assert.equal(storage.getItem(sessionSidebarCollapsedPreferenceKey), "false");
+
+    mobile = false;
+    windowListeners.get("resize")?.();
+    assert.equal(shell.classList.contains("global-rail-collapsed"), false);
+    assert.equal(shell.classList.contains("session-sidebar-collapsed"), false);
+    cleanup();
+    assert.equal(windowListeners.size, 0);
+  } finally {
+    restoreRAF();
+    restoreWindow();
+    restoreDocument();
+  }
+});
+
 test("legacy chat alignment keeps the composer untouched and flattens the transcript", async () => {
-  const [styles, chatRendering] = await Promise.all([readFile(stylesURL, "utf8"), readFile(chatRenderingURL, "utf8")]);
+  const [styles, chatRendering, appMain] = await Promise.all([
+    readFile(stylesURL, "utf8"),
+    readFile(chatRenderingURL, "utf8"),
+    readFile(appMainURL, "utf8"),
+  ]);
   const marker = "/* Legacy chat transcript alignment. Intentionally excludes every composer/input selector. */";
   const legacyStart = styles.indexOf(marker);
   const legacyEnd = styles.indexOf("/* Codex account management", legacyStart);
@@ -1166,6 +1331,15 @@ test("legacy chat alignment keeps the composer untouched and flattens the transc
   assert.doesNotMatch(legacyChatStyles, /\.composer-/);
   assert.doesNotMatch(legacyChatStyles, /\.message-input/);
   assert.match(chatRendering, /empty-conversation-state[^\n]*message\.empty/);
+  assert.match(chatRendering, /normalizeMessageProfileIdentity\(state\.profile\)/);
+  assert.match(chatRendering, /data-user-profile-avatar/);
+  assert.match(chatRendering, /data-user-profile-name/);
+  assert.match(appMain, /state\.profile = snapshot\.profile;[\s\S]*?refreshUserMessageIdentity\(\);/);
+  assert.match(styles, /\[class~="user"\]\[class~="chat-flow-left"\] \.message-avatar\s*\{[\s\S]*?width:\s*24px;/);
+  assert.match(styles, /\[class~="user"\]\[class~="chat-flow-left"\] \.message-role\s*\{[\s\S]*?font-size:\s*13px;/);
+  assert.match(chatRendering, /normalizeAvatarDataUrl\(source\.avatarDataUrl\)/);
+  assert.match(chatRendering, /message-avatar-image/);
+  assert.match(styles, /\.profile-avatar-image\s*\{[\s\S]*?object-fit:\s*cover;/);
 });
 
 test("settings dialog mounts the shadcn shell without dropping legacy entry points", async () => {
@@ -1292,6 +1466,7 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.doesNotMatch(enterBody, /disconnectAgentTransports|selectNavigationConversation|beginNavigationSelection/);
   assert.match(appMain, /function exitSettingsShell\(\)[\s\S]*?restoreInlineProperties\(session\.appShellStyle\)[\s\S]*?originalParent\.insertBefore\(modal, originalNextSibling\)/);
   assert.match(appMain, /closeSettingsModal\(\{ restoreWorkbench: false, restoreFocus: false \}\)/);
+  assert.match(appMain, /function closeSettingsModal[\s\S]*?discardProviderConsoleDraft\(\);/);
   assert.match(html, /class="settings-sidebar legacy-settings-topbar"[^>]*data-i18n-aria-label="settings\.directory"/);
   assert.match(html, /id="closeSettingsModalBtn"[^>]*data-i18n-title="settings\.backToChat"[^>]*data-i18n-aria-label="settings\.backToChat"/);
   assert.match(html, /class="settings-page-scroll"[^>]*role="region"[^>]*data-i18n-aria-label="settings\.details"/);
@@ -1302,6 +1477,24 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.match(html, /app\.js\?v=[^"\n]*settings-icons-1/);
   assert.match(app, /app-main\.mjs\?v=[^"\n]*settings-icons-1/);
   assert.match(appMain, /settings-data\.mjs\?v=[^"\n]*settings-icons-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*default-openai-responses-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*default-openai-responses-1/);
+  assert.match(appMain, /model-provider-settings\.mjs\?v=[^"\n]*default-openai-responses-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*provider-draft-session-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*provider-draft-session-1/);
+  assert.match(appMain, /model-provider-settings\.mjs\?v=[^"\n]*provider-draft-session-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*remote-full-toggle-3/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*remote-full-toggle-3/);
+  assert.match(appMain, /remote-access-settings\.mjs\?v=[^"\n]*remote-full-toggle-3/);
+  assert.match(html, /styles\.css\?v=[^"\n]*profile-message-identity-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*profile-message-identity-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*profile-message-identity-1/);
+  assert.match(appMain, /chat-rendering\.mjs\?v=[^"\n]*profile-message-identity-1/);
+  assert.match(html, /styles\.css\?v=[^"\n]*profile-avatar-1/);
+  assert.match(html, /app\.js\?v=[^"\n]*profile-avatar-1/);
+  assert.match(app, /app-main\.mjs\?v=[^"\n]*profile-avatar-1/);
+  assert.match(appMain, /account-preferences\.mjs\?v=profile-avatar-1/);
+  assert.match(appMain, /local-preferences-settings\.mjs\?v=[^"\n]*profile-avatar-1/);
   assert.match(settingsStyles, /\.settings-nav-icon \.settings-icon-svg\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;/);
   assert.match(settingsStyles, /\[aria-current="page"\] \.settings-nav-icon\s*\{[^}]*background:\s*transparent;[^}]*color:\s*var\(--settings-primary\);[^}]*box-shadow:\s*none;/);
   assert.match(html, /styles\.css\?v=[^"\n]*settings-active-icon-frame-removed-1/);
@@ -1533,7 +1726,7 @@ test("initial shell and default appearance use the versioned light theme", async
   assert.equal(defaultAppearancePrefs.themePreset, "light");
   assert.equal(defaultAppearancePrefs.theme, "light");
   assert.equal(defaultAppearancePrefs.styleVersion, appearanceStyleVersion);
-  assert.equal(appearanceStyleVersion, 4);
+  assert.equal(appearanceStyleVersion, 5);
   assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
 });
 
@@ -1570,11 +1763,16 @@ test("unversioned dark appearance migrates once to light and explicit versioned 
     const controller = createController({ activeSettingsPanel: "" });
     const migrated = controller.loadAppearancePreferences();
     assert.deepEqual(migrated, {
-      styleVersion: 4,
+      styleVersion: 5,
       themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "compact",
+      backgroundMode: "theme",
+      backgroundUrl: "",
+      backgroundDim: 18,
+      backgroundPositionX: 50,
+      backgroundPositionY: 50,
       terminalDefaultOpen: true,
       showEventLog: false,
     });
@@ -1583,7 +1781,7 @@ test("unversioned dark appearance migrates once to light and explicit versioned 
     controller.saveAppearancePreferences({ ...migrated, themePreset: "dark" });
     assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).themePreset, "dark");
     assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).theme, "dark");
-    assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).styleVersion, 4);
+    assert.equal(JSON.parse(storage.getItem(appearancePrefsKey)).styleVersion, 5);
   });
 });
 
@@ -1602,20 +1800,30 @@ test("appearance backup import and export normalize the new schema without rejec
 
     assert.equal(imported, 1);
     assert.deepEqual(JSON.parse(storage.getItem(appearancePrefsKey)), {
-      styleVersion: 4,
+      styleVersion: 5,
       themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "comfortable",
+      backgroundMode: "theme",
+      backgroundUrl: "",
+      backgroundDim: 18,
+      backgroundPositionX: 50,
+      backgroundPositionY: 50,
       terminalDefaultOpen: false,
       showEventLog: true,
     });
     assert.deepEqual(controller.createLocalPreferencesBackup().preferences[appearancePrefsKey], {
-      styleVersion: 4,
+      styleVersion: 5,
       themeRef: { kind: "preset", id: "light" },
       themePreset: "light",
       theme: "light",
       density: "comfortable",
+      backgroundMode: "theme",
+      backgroundUrl: "",
+      backgroundDim: 18,
+      backgroundPositionX: 50,
+      backgroundPositionY: 50,
       terminalDefaultOpen: false,
       showEventLog: true,
     });

@@ -1,12 +1,19 @@
-import { $, escapeAttr, escapeHtml } from "./dom.mjs";
-import { formatNumber } from "./formatters.mjs";
-import { resolveUILocale, t } from "./i18n.mjs?v=apple-theme-1-autoto-themes-1";
-import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1";
+import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { formatBytes, formatNumber } from "./formatters.mjs";
+import { resolveUILocale, t } from "./i18n.mjs?v=apple-theme-1-autoto-themes-1-global-background-1-theme-v2-1";
+import { defaultIMGatewayPrefs, defaultSearchPrefs } from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1-global-background-1";
+import {
+  avatarDataUrlByteLength,
+  compressProfileAvatar,
+  normalizeAvatarDataUrl,
+  profileAvatarErrorCodes,
+} from "./profile-avatar.mjs?v=profile-avatar-1";
 
 export function createLocalPreferencesSettingsController({
   state,
   copyText,
   currentAppearancePreferences,
+  backgroundManager,
   currentIMGatewayPreferences,
   currentNotificationPreferences,
   currentProfilePreferences,
@@ -28,35 +35,64 @@ export function createLocalPreferencesSettingsController({
   saveProfilePreferences,
   saveRegionalPreferences,
   saveSearchPreferences,
+  saveAppearancePreferences,
   searchPrefsExport,
   searchProviderLabel,
   renderThemeLibrarySection,
   bindThemeLibraryActions,
+  refreshActiveSettingsPanel,
   setAppearancePreference,
   setNotificationPreference,
   showError,
   showToast,
 } = {}) {
+  let avatarDraftDirty = false;
+  let avatarDraftDataUrl = "";
+  let avatarDraftBytes = 0;
+
+  function activeAvatarDataUrl(profile) {
+    return avatarDraftDirty ? avatarDraftDataUrl : normalizeAvatarDataUrl(profile?.avatarDataUrl);
+  }
+
+  function avatarMarkup(profile) {
+    const dataUrl = activeAvatarDataUrl(profile);
+    return dataUrl
+      ? `<img class="profile-avatar-image" src="${escapeAttr(dataUrl)}" alt="" aria-hidden="true" />`
+      : escapeHtml(profile?.avatarInitials || "AT");
+  }
+
+  function avatarStatusText(profile) {
+    if (avatarDraftDirty && avatarDraftDataUrl) return t("profile.avatarCompressed", { size: formatBytes(avatarDraftBytes || avatarDataUrlByteLength(avatarDraftDataUrl)) });
+    if (avatarDraftDirty) return t("profile.avatarRemoved");
+    if (normalizeAvatarDataUrl(profile?.avatarDataUrl)) return t("profile.avatarSaved");
+    return t("profile.avatarUploadHint");
+  }
+
   function renderProfileSettingsContent() {
     const profile = currentProfilePreferences();
     const gitConfigured = Boolean(profile.gitName && profile.gitEmail);
+    const avatarDataUrl = activeAvatarDataUrl(profile);
     return `
     <div class="settings-live-page profile-page">
       <section class="settings-hero-card profile-hero-card settings-page-section settings-card">
         <div class="profile-hero-main settings-card-header">
-          <div class="profile-avatar-preview">${escapeHtml(profile.avatarInitials)}</div>
-          <div>
+          <div id="profileAvatarPreview" class="profile-avatar-preview">${avatarMarkup(profile)}</div>
+          <div class="profile-hero-copy">
             <div class="settings-hero-kicker">${escapeHtml(t("profile.heroKicker"))}</div>
             <div class="settings-hero-title settings-card-title">${escapeHtml(profileDisplayName())}</div>
             <p class="settings-card-description">${escapeHtml(profile.roleLabel)} · ${escapeHtml(profile.workspaceLabel)}</p>
+            <div id="profileAvatarStatus" class="profile-avatar-status" aria-live="polite">${escapeHtml(avatarStatusText(profile))}</div>
           </div>
         </div>
-        <div class="settings-action-row settings-toolbar">
+        <div class="settings-action-row settings-toolbar profile-avatar-toolbar">
+          <input id="profileAvatarFile" class="hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" />
+          <button id="chooseProfileAvatarBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.uploadAvatar"))}</button>
+          ${avatarDataUrl ? `<button id="removeProfileAvatarBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.removeAvatar"))}</button>` : ""}
           <button id="resetProfilePrefsBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("profile.reset"))}</button>
         </div>
       </section>
       <div class="settings-status-strip settings-stat-grid">
-        <div class="settings-stat-card"><strong>${escapeHtml(profile.avatarInitials)}</strong><span>${escapeHtml(t("profile.avatarInitials"))}</span></div>
+        <div class="settings-stat-card"><strong>${avatarDataUrl ? escapeHtml(t("profile.avatarImage")) : escapeHtml(profile.avatarInitials)}</strong><span>${escapeHtml(t("profile.avatarLabel"))}</span></div>
         <div class="settings-stat-card"><strong>${escapeHtml(gitConfigured ? t("profile.filled") : t("profile.notFilled"))}</strong><span>${escapeHtml(t("profile.gitIdentity"))}</span></div>
         <div class="settings-stat-card"><strong>${escapeHtml(t("profile.localBrowser"))}</strong><span>${escapeHtml(t("profile.saveLocation"))}</span></div>
       </div>
@@ -114,21 +150,88 @@ export function createLocalPreferencesSettingsController({
 
   function bindProfileSettingsActions() {
     $("profileSettingsForm")?.addEventListener("submit", (event) => saveProfileSettingsFromPanel(event).catch(showError));
-    $("resetProfilePrefsBtn")?.addEventListener("click", resetProfilePreferences);
+    $("resetProfilePrefsBtn")?.addEventListener("click", resetProfileSettings);
+    $("chooseProfileAvatarBtn")?.addEventListener("click", () => $("profileAvatarFile")?.click());
+    $("removeProfileAvatarBtn")?.addEventListener("click", removeProfileAvatar);
+    $("profileAvatarFile")?.addEventListener("change", (event) => handleProfileAvatarFile(event).catch(showError));
     $("copyProfileGitEnvBtn")?.addEventListener("click", () => copyText(profileGitEnvExample()));
   }
 
   async function saveProfileSettingsFromPanel(event) {
     event.preventDefault();
+    const current = currentProfilePreferences();
+    const avatarDataUrl = avatarDraftDirty ? avatarDraftDataUrl : normalizeAvatarDataUrl(current.avatarDataUrl);
     saveProfilePreferences({
       displayName: $("profileDisplayName")?.value || "",
       avatarInitials: $("profileAvatarInitials")?.value || "",
+      avatarDataUrl,
       roleLabel: $("profileRoleLabel")?.value || "",
       workspaceLabel: $("profileWorkspaceLabel")?.value || "",
       gitName: $("profileGitName")?.value || "",
       gitEmail: $("profileGitEmail")?.value || "",
     }, { notify: true });
+    avatarDraftDirty = false;
+    avatarDraftDataUrl = "";
+    avatarDraftBytes = 0;
     notifyTerminal?.(`[info] ${t("profile.savedTerminal")}\n`);
+  }
+
+  function resetProfileSettings() {
+    avatarDraftDirty = false;
+    avatarDraftDataUrl = "";
+    avatarDraftBytes = 0;
+    return resetProfilePreferences();
+  }
+
+  function removeProfileAvatar() {
+    avatarDraftDirty = true;
+    avatarDraftDataUrl = "";
+    avatarDraftBytes = 0;
+    refreshProfileAvatarPreview();
+  }
+
+  async function handleProfileAvatarFile(event) {
+    const file = event?.target?.files?.[0];
+    if (!file) return;
+    const chooseButton = $("chooseProfileAvatarBtn");
+    setButtonBusy(chooseButton, true, t("profile.avatarCompressing"));
+    try {
+      const result = await compressProfileAvatar(file);
+      avatarDraftDirty = true;
+      avatarDraftDataUrl = result.dataUrl;
+      avatarDraftBytes = result.bytes;
+      refreshProfileAvatarPreview();
+    } catch (error) {
+      const key = error?.code === profileAvatarErrorCodes.unsupportedType
+        ? "profile.avatarUnsupported"
+        : (error?.code === profileAvatarErrorCodes.tooLarge ? "profile.avatarTooLarge" : "profile.avatarInvalid");
+      showToast?.(t(key), "warn", { force: true });
+    } finally {
+      setButtonBusy(chooseButton, false);
+      if (event?.target) event.target.value = "";
+    }
+  }
+
+  function refreshProfileAvatarPreview() {
+    const profile = currentProfilePreferences();
+    const preview = $("profileAvatarPreview");
+    if (preview) preview.innerHTML = avatarMarkup(profile);
+    const status = $("profileAvatarStatus");
+    if (status) status.textContent = avatarStatusText(profile);
+    const toolbar = $("profileAvatarPreview")?.closest?.(".profile-page")?.querySelector?.(".profile-avatar-toolbar");
+    if (toolbar && avatarDraftDirty) {
+      const removeButton = $("removeProfileAvatarBtn");
+      if (!removeButton && avatarDraftDataUrl) {
+        const button = globalThis.document?.createElement?.("button");
+        if (!button) return;
+        button.id = "removeProfileAvatarBtn";
+        button.className = "settings-action-btn subtle";
+        button.type = "button";
+        button.textContent = t("profile.removeAvatar");
+        button.addEventListener("click", removeProfileAvatar);
+        toolbar.insertBefore(button, $("resetProfilePrefsBtn"));
+      }
+    }
   }
   function renderNetworkSearchSettingsContent() {
     const prefs = currentSearchPreferences();
@@ -538,6 +641,50 @@ export function createLocalPreferencesSettingsController({
     };
     await saveServerNotificationSettings?.(payload);
   }
+  function appearanceBackgroundQuality(background = {}, activeUrl = "") {
+    if (!activeUrl) return t("appearance.backgroundQualityHint");
+    const width = Math.max(0, Number(background.width) || 0);
+    const height = Math.max(0, Number(background.height) || 0);
+    const size = Math.max(0, Number(background.size) || 0);
+    if (!width || !height) return t("appearance.backgroundQualityHint");
+    const pixelRatio = Math.max(1, Number(globalThis.devicePixelRatio) || 1);
+    const requiredWidth = Math.max(1, Math.round((Number(globalThis.innerWidth) || width) * pixelRatio));
+    const requiredHeight = Math.max(1, Math.round((Number(globalThis.innerHeight) || height) * pixelRatio));
+    const details = `${formatNumber(width)} × ${formatNumber(height)}${size ? ` · ${formatBytes(size)}` : ""}`;
+    return width < requiredWidth || height < requiredHeight
+      ? t("appearance.backgroundQualityLow", { details })
+      : t("appearance.backgroundQualityDetails", { details });
+  }
+
+  function renderAppearanceBackgroundSection() {
+    const prefs = currentAppearancePreferences();
+    const background = backgroundManager?.snapshot?.()?.background || {};
+    const activeUrl = background.url || prefs.backgroundUrl || "";
+    const mode = prefs.backgroundMode || background.mode || "theme";
+    const dim = Number.isFinite(Number(background.dim)) ? background.dim : (prefs.backgroundDim ?? 18);
+    const positionX = background.positionX ?? prefs.backgroundPositionX ?? 50;
+    const positionY = background.positionY ?? prefs.backgroundPositionY ?? 50;
+    const quality = appearanceBackgroundQuality(background, activeUrl);
+    return `<section class="compact-settings-section appearance-background-section">
+      <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.backgroundTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.backgroundMeta"))}</p></div>
+      <div class="compact-settings-section-controls appearance-background-controls">
+        <div class="appearance-background-toolbar">
+          <input id="appearanceBackgroundFile" class="hidden" type="file" accept="image/jpeg,image/png,image/webp" />
+          <button id="appearanceBackgroundUploadBtn" class="settings-action-btn primary" type="button">${escapeHtml(activeUrl ? t("appearance.backgroundReplace") : t("appearance.backgroundUpload"))}</button>
+          <button id="appearanceBackgroundRemoveBtn" class="settings-action-btn subtle" type="button" ${activeUrl ? "" : "disabled"}>${escapeHtml(t("appearance.backgroundRemove"))}</button>
+          <span class="appearance-background-status" role="status">${escapeHtml(activeUrl ? t("appearance.backgroundReady") : t("appearance.backgroundNone"))}</span>
+        </div>
+        <div class="appearance-background-options">
+          <label class="settings-form-field"><span>${escapeHtml(t("appearance.backgroundMode"))}</span><select id="appearanceBackgroundMode" class="settings-field"><option value="theme" ${mode === "theme" ? "selected" : ""}>${escapeHtml(t("appearance.backgroundModeTheme"))}</option><option value="custom" ${mode === "custom" ? "selected" : ""}>${escapeHtml(t("appearance.backgroundModeCustom"))}</option><option value="none" ${mode === "none" ? "selected" : ""}>${escapeHtml(t("appearance.backgroundModeNone"))}</option></select></label>
+          <label class="settings-form-field"><span>${escapeHtml(t("appearance.backgroundDim"))} <output id="appearanceBackgroundDimValue">${dim}%</output></span><input id="appearanceBackgroundDim" type="range" min="0" max="75" step="1" value="${dim}" /></label>
+          <label class="settings-form-field"><span>${escapeHtml(t("appearance.backgroundPositionX"))} <output id="appearanceBackgroundPositionXValue">${positionX}%</output></span><input id="appearanceBackgroundPositionX" type="range" min="0" max="100" step="1" value="${positionX}" /></label>
+          <label class="settings-form-field"><span>${escapeHtml(t("appearance.backgroundPositionY"))} <output id="appearanceBackgroundPositionYValue">${positionY}%</output></span><input id="appearanceBackgroundPositionY" type="range" min="0" max="100" step="1" value="${positionY}" /></label>
+        </div>
+        <small class="appearance-background-quality" data-settings-help-copy>${escapeHtml(quality)}</small>
+      </div>
+    </section>`;
+  }
+
   function renderAppearanceSettingsContent() {
     const prefs = currentAppearancePreferences();
     const regional = currentRegionalPreferences?.() || { locale: "auto", timezone: "auto" };
@@ -560,6 +707,7 @@ export function createLocalPreferencesSettingsController({
         <div class="compact-settings-section-controls"><div class="appearance-theme-grid compact-settings-choice-grid four-column" role="radiogroup" aria-label="${escapeAttr(t("appearance.themeSectionTitle"))}">${renderThemePresetChoice("light", t("appearance.themeLight"), t("appearance.themeLightDesc"), prefs.themeRef?.kind !== "package" && prefs.themePreset === "light")}${renderThemePresetChoice("dark", t("appearance.themeDark"), t("appearance.themeDarkDesc"), prefs.themeRef?.kind !== "package" && prefs.themePreset === "dark")}${renderThemePresetChoice("cyber", t("appearance.themeCyber"), t("appearance.themeCyberDesc"), prefs.themeRef?.kind !== "package" && prefs.themePreset === "cyber")}${renderThemePresetChoice("cream", t("appearance.themeCream"), t("appearance.themeCreamDesc"), prefs.themeRef?.kind !== "package" && prefs.themePreset === "cream")}${renderThemePresetChoice("apple", t("appearance.themeApple"), t("appearance.themeAppleDesc"), prefs.themeRef?.kind !== "package" && prefs.themePreset === "apple")}</div></div>
       </section>
       ${renderThemeLibrarySection?.() || ""}
+      ${renderAppearanceBackgroundSection()}
       <section class="compact-settings-section">
         <div class="compact-settings-section-copy"><h2>${escapeHtml(t("appearance.densitySectionTitle"))}</h2><p data-settings-help-copy>${escapeHtml(t("appearance.densitySectionMeta"))}</p></div>
         <div class="compact-settings-section-controls"><div class="appearance-choice-grid compact-settings-choice-grid two-column" role="radiogroup">${renderAppearanceChoice("density", "comfortable", t("appearance.densityComfortable"), t("appearance.densityComfortableDesc"), prefs.density === "comfortable")}${renderAppearanceChoice("density", "compact", t("appearance.densityCompact"), t("appearance.densityCompactDesc"), prefs.density === "compact")}</div></div>
@@ -616,6 +764,65 @@ export function createLocalPreferencesSettingsController({
     return value === "compact" ? t("appearance.densityCompactLabel") : t("appearance.densityComfortableLabel");
   }
 
+  function bindAppearanceBackgroundActions() {
+    const fileInput = $("appearanceBackgroundFile");
+    const persistBackground = (patch, { notify = true } = {}) => {
+      const next = { ...currentAppearancePreferences(), ...patch };
+      if (typeof saveAppearancePreferences === "function") return saveAppearancePreferences(next, { notify });
+      Object.entries(patch).forEach(([field, value]) => setAppearancePreference?.(field, value));
+      return next;
+    };
+    const previewBackground = (patch) => backgroundManager?.saveOptions?.(patch).catch?.(showError);
+
+    $("appearanceBackgroundUploadBtn")?.addEventListener("click", () => fileInput?.click());
+    $("appearanceBackgroundRemoveBtn")?.addEventListener("click", () => backgroundManager?.remove?.().then(() => {
+      persistBackground({ backgroundMode: "theme", backgroundUrl: "" });
+      refreshAppearanceSettings?.();
+    }).catch(showError));
+    fileInput?.addEventListener("change", (event) => {
+      const file = event.currentTarget.files?.[0];
+      if (!file) return;
+      backgroundManager?.upload?.(file, {
+        mode: "custom",
+        dim: $("appearanceBackgroundDim")?.value,
+        positionX: $("appearanceBackgroundPositionX")?.value,
+        positionY: $("appearanceBackgroundPositionY")?.value,
+      }).then((background) => {
+        persistBackground({
+          backgroundMode: "custom",
+          backgroundUrl: background.url,
+          backgroundDim: background.dim,
+          backgroundPositionX: background.positionX,
+          backgroundPositionY: background.positionY,
+        });
+        refreshAppearanceSettings?.();
+      }).catch(showError).finally(() => { event.currentTarget.value = ""; });
+    });
+    $("appearanceBackgroundMode")?.addEventListener("change", (event) => {
+      const mode = event.currentTarget.value;
+      persistBackground({ backgroundMode: mode });
+      previewBackground({ mode });
+    });
+    ["Dim", "PositionX", "PositionY"].forEach((suffix) => {
+      const field = $("appearanceBackground" + suffix);
+      const output = $("appearanceBackground" + suffix + "Value");
+      const preferenceField = "background" + suffix;
+      const managerField = suffix.charAt(0).toLowerCase() + suffix.slice(1);
+      field?.addEventListener("input", (event) => {
+        const value = Number(event.currentTarget.value) || 0;
+        if (output) output.textContent = `${value}%`;
+        previewBackground({ [managerField]: value });
+      });
+      field?.addEventListener("change", (event) => {
+        persistBackground({ [preferenceField]: Number(event.currentTarget.value) || 0 }, { notify: false });
+      });
+    });
+  }
+
+  function refreshAppearanceSettings() {
+    refreshActiveSettingsPanel?.();
+  }
+
   function bindAppearanceSettingsActions() {
     $("appearanceLanguageSelect")?.addEventListener("change", (event) => {
       saveRegionalPreferences?.({
@@ -631,6 +838,7 @@ export function createLocalPreferencesSettingsController({
       node.addEventListener("change", () => setAppearancePreference(node.dataset.appearanceToggle, node.checked));
     });
     bindThemeLibraryActions?.();
+    bindAppearanceBackgroundActions();
   }
 
   return {

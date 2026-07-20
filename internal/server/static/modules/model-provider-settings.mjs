@@ -1,8 +1,8 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { api, apiDownload } from "./runtime.mjs";
 import { formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs";
-import { remoteAccessContext } from "./remote-access-capabilities.mjs";
+import { t } from "./i18n.mjs?v=provider-draft-session-1";
+import { fullAccessAllowed, remoteAccessContext } from "./remote-access-capabilities.mjs";
 import {
   createProviderDraft,
   isAnthropicAccountProvider,
@@ -19,7 +19,7 @@ import {
   removeProviderVisibilityPreferences,
   renderProviderConsolePage,
   setProviderModelHidden,
-} from "./model-provider-components.mjs?v=provider-card-clean-3-provider-create-page-2-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-model-configs-1-provider-reference-1";
+} from "./model-provider-components.mjs?v=provider-card-clean-3-provider-create-page-2-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-model-configs-1-provider-reference-1-default-openai-responses-1-provider-draft-session-1";
 
 const providerConsoleInteractiveSelector = "button, input, select, textarea, a, details, summary, [role=\"switch\"], [contenteditable=\"true\"]";
 const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
@@ -28,6 +28,10 @@ const codexBrowserLoginActiveStatuses = new Set(["starting", "pending", "exchang
 const maxCodexImportFiles = 50;
 const maxCodexImportFileBytes = 2 << 20;
 const maxCodexImportBatchBytes = 8 << 20;
+
+export function providerSensitiveDraftAccessAllowed(state = {}, locationLike = globalThis.location) {
+  return !remoteAccessContext(state, locationLike) || fullAccessAllowed(state, locationLike);
+}
 
 export function validateProviderNameValue(value, { existingNames = [], mode = "create", originalName = "" } = {}) {
   const name = String(value || "").trim();
@@ -1971,13 +1975,25 @@ export function createModelProviderSettingsController({
     providerConsoleState().result = message ? { message: String(message), tone } : null;
   }
 
+  function requireProviderSensitiveDraftAccess() {
+    if (providerSensitiveDraftAccessAllowed(state)) return true;
+    const message = ct("messages.sensitiveAccessRequiresFullSession");
+    setProviderConsoleResult(message, "attention");
+    notifyTerminal?.(`[warn] ${message}\n`);
+    refreshProviderConsole();
+    return false;
+  }
+
   function renderProviderSettingsContent() {
     const consoleState = providerConsoleState();
     if (consoleState.view === "codex") return renderCodexConsolePage();
     if (consoleState.view === "anthropic") return renderAnthropicConsolePage();
     return renderProviderConsolePage({
       providers: modelProvidersForUI(),
-      consoleState,
+      consoleState: {
+        ...consoleState,
+        sensitiveAccessAllowed: providerSensitiveDraftAccessAllowed(state),
+      },
     });
   }
 
@@ -2825,6 +2841,21 @@ export function createModelProviderSettingsController({
     if (restoreFocus) restoreProviderConsoleLayerFocus();
   }
 
+  function discardProviderConsoleDraft() {
+    const consoleState = providerConsoleState();
+    consoleState.testOpen = false;
+    consoleState.test = { prompt: "", result: null };
+    consoleState.modal = "";
+    consoleState.drawer = "";
+    consoleState.mode = "";
+    consoleState.type = "";
+    consoleState.providerName = "";
+    consoleState.draft = null;
+    consoleState.dirty = false;
+    consoleState.nameTouched = false;
+    consoleState.nameError = "";
+  }
+
   function closeProviderConsoleLayer() {
     const consoleState = providerConsoleState();
     if (consoleState.testOpen) {
@@ -2839,12 +2870,7 @@ export function createModelProviderSettingsController({
       return true;
     }
     if (consoleState.drawer) {
-      consoleState.drawer = "";
-      consoleState.mode = "";
-      consoleState.type = "";
-      consoleState.providerName = "";
-      consoleState.draft = null;
-      consoleState.dirty = false;
+      discardProviderConsoleDraft();
       refreshProviderConsole({ restoreFocus: true });
       return true;
     }
@@ -2931,7 +2957,7 @@ export function createModelProviderSettingsController({
     refreshProviderConsole({ focusCreate: true });
   }
 
-  function openProviderConsoleType(type = "openai-compatible") {
+  function openProviderConsoleType(type = "openai") {
     const draft = createProviderDraft(type);
     if (type === "codex") {
       openCodexConsolePage(draft);
@@ -3086,9 +3112,12 @@ export function createModelProviderSettingsController({
   async function discoverConsoleProviderModels(form) {
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
+    consoleState.draft = rawDraft;
+    consoleState.dirty = true;
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
     updateProviderNameValidation(form);
     validateConsoleDraft(draft, { requireModel: false });
+    if (!requireProviderSensitiveDraftAccess()) return false;
     if (!consoleDraftCanDiscoverModels(draft)) {
       const message = ct("messages.currentDraftTestNeedsApiKey");
       setProviderConsoleResult(message, "attention");
@@ -3171,8 +3200,10 @@ export function createModelProviderSettingsController({
       refreshProviderConsole({ focusTest: true });
       return;
     }
-    if (!draft.name || providerConsoleBusy(`message-test:${draft.name}`)) return;
     consoleState.draft = draft;
+    consoleState.dirty = true;
+    if (!requireProviderSensitiveDraftAccess()) return false;
+    if (!draft.name || providerConsoleBusy(`message-test:${draft.name}`)) return;
     consoleState.test = { ...(consoleState.test || {}), prompt, result: null };
     await runProviderConsoleBusy(`message-test:${draft.name}`, async () => {
       try {
@@ -3204,9 +3235,12 @@ export function createModelProviderSettingsController({
   async function testConsoleProvider(form) {
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
+    consoleState.draft = rawDraft;
+    consoleState.dirty = true;
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
     updateProviderNameValidation(form);
     validateConsoleDraft(draft);
+    if (!requireProviderSensitiveDraftAccess()) return false;
     if (!draft.name || providerConsoleBusy(`test:${draft.name}`)) return;
     consoleState.draft = draft;
     await runProviderConsoleBusy(`test:${draft.name}`, async () => {
@@ -3227,9 +3261,12 @@ export function createModelProviderSettingsController({
   async function saveConsoleProvider(form) {
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
+    consoleState.draft = rawDraft;
+    consoleState.dirty = true;
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
     updateProviderNameValidation(form);
     validateConsoleDraft(draft);
+    if (!requireProviderSensitiveDraftAccess()) return false;
     if (providerConsoleBusy(`save:${draft.name}`)) return;
     consoleState.draft = draft;
     await runProviderConsoleBusy(`save:${draft.name}`, async () => {
@@ -3241,10 +3278,21 @@ export function createModelProviderSettingsController({
         const configRequest = providerConsoleRequest("config", { name: originalName }, consoleDraftRequestValues({ ...providerConfigPayload(draft), pathName: originalName }));
         await requestAPI(configRequest.path, configRequest.options);
         saved = true;
+        const retainedAPIKey = !draft.clearApiKey && draft.apiKeyDraft ? String(draft.apiKey || "") : "";
+        const apiKeyConfigured = !draft.clearApiKey && Boolean(retainedAPIKey || draft.apiKeyConfigured);
+        const apiKeyPersisted = !draft.clearApiKey && Boolean(retainedAPIKey || draft.apiKeyPersisted);
+        consoleState.mode = "edit";
+        consoleState.type = draft.type;
         consoleState.providerName = draft.name;
         consoleState.draft = {
           ...draft,
-          apiKey: "",
+          apiKey: retainedAPIKey,
+          apiKeyDraft: Boolean(retainedAPIKey),
+          apiKeyConfigured,
+          apiKeyPersisted,
+          apiKeyLastFive: retainedAPIKey ? retainedAPIKey.slice(-5) : (draft.clearApiKey ? "" : draft.apiKeyLastFive),
+          apiKeySource: retainedAPIKey ? "stored" : (draft.clearApiKey ? "none" : draft.apiKeySource),
+          clearApiKey: false,
           proxyUrl: redactedProviderProxyURL(draft.proxyUrl),
           proxyUrlDraft: false,
           requestHeaders: (Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []).map((header) => ({
@@ -4290,5 +4338,6 @@ export function createModelProviderSettingsController({
     saveConsoleProvider,
     deleteConsoleProvider,
     discoverConsoleProviderModels,
+    discardProviderConsoleDraft,
   };
 }

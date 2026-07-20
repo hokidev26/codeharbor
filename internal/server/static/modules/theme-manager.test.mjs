@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createAppearanceBackgroundManager,
   createThemeManager,
+  normalizeAppearanceBackgroundRecord,
   normalizeThemeCatalog,
+  safeAppearanceBackgroundURL,
   setThemePageContext,
 } from "./theme-manager.mjs";
 
@@ -66,6 +69,7 @@ const catalog = {
     revision: "rev-1",
     stylesheetUrl: "/themes/argentina-spain-final/rev-1/theme.css",
     previewUrl: "/themes/argentina-spain-final/rev-1/preview.png",
+    capabilities: { globalBackground: true, homeBackground: true, icons: true },
     deletable: false,
   }],
 };
@@ -107,6 +111,8 @@ test("theme manager loads a package stylesheet before persisting it", async () =
 
   assert.equal(body.dataset.autotoTheme, "argentina-spain-final");
   assert.equal(body.dataset.themeRevision, "rev-1");
+  assert.equal(body.dataset.themeGlobalBackground, "true");
+  assert.equal(body.dataset.themeIcons, "true");
   assert.equal(body.classList.contains("theme-dark"), true);
   assert.deepEqual(prefs.themeRef, {
     kind: "package",
@@ -179,6 +185,8 @@ test("switching back to a preset cancels an in-flight package activation", async
 
   assert.equal(await activation, null);
   assert.equal(body.dataset.autotoTheme, undefined);
+  assert.equal(body.dataset.themeGlobalBackground, undefined);
+  assert.equal(body.dataset.themeIcons, undefined);
   assert.deepEqual(prefs.themeRef, { kind: "preset", id: "light" });
 });
 
@@ -188,4 +196,135 @@ test("theme page context is explicit and removable", () => {
   assert.equal(body.dataset.themePage, "home-empty");
   setThemePageContext("", documentRef);
   assert.equal(body.dataset.themePage, undefined);
+});
+
+function fakeBackgroundEnvironment({ naturalWidth = 3840, naturalHeight = 2160 } = {}) {
+  const styleValues = new Map();
+  const body = {
+    dataset: {},
+    style: { setProperty(name, value) { styleValues.set(name, value); } },
+  };
+  class FakeImage {
+    constructor() {
+      this.complete = false;
+      this.naturalWidth = 0;
+      this.naturalHeight = 0;
+    }
+    set src(value) {
+      this.value = value;
+      this.complete = true;
+      this.naturalWidth = naturalWidth;
+      this.naturalHeight = naturalHeight;
+      queueMicrotask(() => this.onload?.());
+    }
+    decode() { return Promise.resolve(); }
+  }
+  return {
+    body,
+    styleValues,
+    documentRef: { body },
+    windowRef: { Image: FakeImage },
+  };
+}
+
+const backgroundRevision = "a".repeat(64);
+const backgroundURL = `/appearance/backgrounds/${backgroundRevision}/wallpaper.png`;
+
+test("appearance background records accept only revision-scoped image URLs", () => {
+  assert.equal(safeAppearanceBackgroundURL(backgroundURL), backgroundURL);
+  assert.equal(safeAppearanceBackgroundURL("https://example.test/wallpaper.png"), "");
+  assert.equal(safeAppearanceBackgroundURL(`/appearance/backgrounds/${backgroundRevision}/../wallpaper.png`), "");
+  assert.deepEqual(normalizeAppearanceBackgroundRecord({
+    mode: "custom",
+    url: backgroundURL,
+    dim: 27,
+    positionX: 18,
+    positionY: 82,
+    width: 5120,
+    height: 2880,
+  }), {
+    mode: "custom",
+    url: backgroundURL,
+    revision: "",
+    filename: "",
+    contentType: "",
+    size: 0,
+    dim: 27,
+    positionX: 18,
+    positionY: 82,
+    width: 5120,
+    height: 2880,
+  });
+});
+
+test("appearance background manager loads metadata, preloads original pixels, and applies positioning", async () => {
+  const { documentRef, windowRef, body, styleValues } = fakeBackgroundEnvironment();
+  const manager = createAppearanceBackgroundManager({
+    api: async (path) => {
+      assert.equal(path, "/api/appearance/background");
+      return { background: {
+        url: backgroundURL,
+        revision: backgroundRevision,
+        filename: "wallpaper.png",
+        contentType: "image/png",
+        size: 123456,
+        width: 5120,
+        height: 2880,
+      } };
+    },
+    documentRef,
+    windowRef,
+  });
+  manager.setPreferenceAdapter({
+    currentAppearancePreferences: () => ({
+      backgroundMode: "custom",
+      backgroundUrl: backgroundURL,
+      backgroundDim: 24,
+      backgroundPositionX: 35,
+      backgroundPositionY: 65,
+    }),
+  });
+
+  const background = await manager.load();
+  assert.equal(background.mode, "custom");
+  assert.equal(background.url, backgroundURL);
+  assert.equal(background.width, 5120);
+  assert.equal(background.height, 2880);
+  assert.equal(body.dataset.backgroundMode, "custom");
+  assert.equal(body.dataset.backgroundReady, "true");
+  assert.equal(styleValues.get("--autoto-custom-background-image"), `url(${JSON.stringify(backgroundURL)})`);
+  assert.equal(styleValues.get("--autoto-background-dim"), "24%");
+  assert.equal(styleValues.get("--autoto-background-position"), "35% 65%");
+});
+
+test("removing an appearance background clears stale persisted URLs from manager state", async () => {
+  const { documentRef, windowRef, body, styleValues } = fakeBackgroundEnvironment();
+  const requests = [];
+  const manager = createAppearanceBackgroundManager({
+    api: async (path, options = {}) => {
+      requests.push([path, options.method || "GET"]);
+      return null;
+    },
+    documentRef,
+    windowRef,
+  });
+  manager.setPreferenceAdapter({
+    currentAppearancePreferences: () => ({
+      backgroundMode: "custom",
+      backgroundUrl: backgroundURL,
+      backgroundDim: 30,
+      backgroundPositionX: 42,
+      backgroundPositionY: 58,
+    }),
+  });
+  await manager.apply({ mode: "custom", url: backgroundURL, dim: 30, positionX: 42, positionY: 58 });
+
+  const removed = await manager.remove();
+  assert.deepEqual(requests.at(-1), ["/api/appearance/background", "DELETE"]);
+  assert.equal(removed.mode, "theme");
+  assert.equal(removed.url, "");
+  assert.equal(manager.snapshot().background.url, "");
+  assert.equal(body.dataset.backgroundMode, "theme");
+  assert.equal(body.dataset.backgroundReady, "false");
+  assert.equal(styleValues.get("--autoto-custom-background-image"), "none");
 });

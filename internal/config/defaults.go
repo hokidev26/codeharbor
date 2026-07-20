@@ -18,15 +18,16 @@ const Version = "0.1.0-dev"
 const CurrentConfigVersion = 1
 
 type Config struct {
-	SchemaVersion int             `json:"version"`
-	Server        ServerConfig    `json:"server"`
-	Gateway       GatewayConfig   `json:"gateway"`
-	Paths         PathsConfig     `json:"paths"`
-	Agent         AgentConfig     `json:"agent"`
-	Auth          AuthConfig      `json:"auth"`
-	Security      SecurityConfig  `json:"security"`
-	Providers     ProvidersConfig `json:"providers"`
-	Backends      BackendsConfig  `json:"backends"`
+	SchemaVersion     int                     `json:"version"`
+	Server            ServerConfig            `json:"server"`
+	Gateway           GatewayConfig           `json:"gateway"`
+	Paths             PathsConfig             `json:"paths"`
+	Agent             AgentConfig             `json:"agent"`
+	ContextManagement ContextManagementConfig `json:"contextManagement"`
+	Auth              AuthConfig              `json:"auth"`
+	Security          SecurityConfig          `json:"security"`
+	Providers         ProvidersConfig         `json:"providers"`
+	Backends          BackendsConfig          `json:"backends"`
 }
 
 type ServerConfig struct {
@@ -46,6 +47,19 @@ type PathsConfig struct {
 	HomeDir           string `json:"homeDir"`
 	DatabasePath      string `json:"databasePath"`
 	DefaultProjectDir string `json:"defaultProjectDir"`
+}
+
+type ContextManagementWindowConfig struct {
+	PruneStart   int `json:"pruneStart"`
+	CompactStart int `json:"compactStart"`
+}
+
+type ContextManagementConfig struct {
+	CompactKeepTurns int                           `json:"compactKeepTurns"`
+	MaxPrunePercent  int                           `json:"maxPrunePercent"`
+	MinPrunePercent  int                           `json:"minPrunePercent"`
+	Standard         ContextManagementWindowConfig `json:"standard"`
+	Large            ContextManagementWindowConfig `json:"large"`
 }
 
 type AgentConfig struct {
@@ -221,6 +235,13 @@ func defaultWithReport(report *compat.Report) (Config, error) {
 			HomeDir:           appHome,
 			DatabasePath:      filepath.Join(appHome, "autoto.db"),
 			DefaultProjectDir: filepath.Join(home, "projects"),
+		},
+		ContextManagement: ContextManagementConfig{
+			CompactKeepTurns: 2,
+			MaxPrunePercent:  80,
+			MinPrunePercent:  30,
+			Standard:         ContextManagementWindowConfig{PruneStart: 95, CompactStart: 99},
+			Large:            ContextManagementWindowConfig{PruneStart: 95, CompactStart: 99},
 		},
 		Agent: AgentConfig{
 			DefaultModel:             defaultModel,
@@ -534,6 +555,7 @@ func normalizeConfig(cfg Config) Config {
 func normalizeConfigWithReport(cfg Config, report *compat.Report) Config {
 	cfg = migrateConfig(cfg)
 	cfg.Gateway = normalizeGatewayConfig(cfg.Gateway)
+	cfg.ContextManagement = normalizeContextManagementConfig(cfg.ContextManagement)
 	cfg.Agent = normalizeAgentConfig(cfg.Agent)
 	cfg.Auth.OAuthApp = cfg.Auth.OAuthApp.Normalized()
 	cfg.Security = normalizeSecurityConfig(cfg.Security)
@@ -573,6 +595,85 @@ func normalizeGatewayConfig(gateway GatewayConfig) GatewayConfig {
 		gateway.MaxRequestBytes = 64 << 20
 	}
 	return gateway
+}
+
+func normalizeContextManagementConfig(value ContextManagementConfig) ContextManagementConfig {
+	if value.CompactKeepTurns <= 0 {
+		value.CompactKeepTurns = 2
+	}
+	if value.CompactKeepTurns > 100 {
+		value.CompactKeepTurns = 100
+	}
+	if value.MaxPrunePercent <= 0 {
+		value.MaxPrunePercent = 80
+	}
+	if value.MaxPrunePercent > 100 {
+		value.MaxPrunePercent = 100
+	}
+	if value.MinPrunePercent <= 0 {
+		value.MinPrunePercent = 30
+	}
+	if value.MinPrunePercent > value.MaxPrunePercent {
+		value.MinPrunePercent = value.MaxPrunePercent
+	}
+	normalizeWindow := func(window ContextManagementWindowConfig) ContextManagementWindowConfig {
+		if window.PruneStart <= 0 {
+			window.PruneStart = 95
+		}
+		if window.PruneStart > 100 {
+			window.PruneStart = 100
+		}
+		if window.CompactStart <= 0 {
+			window.CompactStart = 99
+		}
+		if window.CompactStart > 100 {
+			window.CompactStart = 100
+		}
+		return window
+	}
+	value.Standard = normalizeWindow(value.Standard)
+	value.Large = normalizeWindow(value.Large)
+	return value
+}
+
+func (c ContextManagementConfig) Normalized() ContextManagementConfig {
+	return normalizeContextManagementConfig(c)
+}
+
+func (c ContextManagementConfig) Validate() error {
+	if c.CompactKeepTurns < 1 || c.CompactKeepTurns > 100 {
+		return errors.New("compactKeepTurns must be between 1 and 100")
+	}
+	if c.MinPrunePercent < 1 || c.MinPrunePercent > 100 {
+		return errors.New("minPrunePercent must be between 1 and 100")
+	}
+	if c.MaxPrunePercent < 1 || c.MaxPrunePercent > 100 {
+		return errors.New("maxPrunePercent must be between 1 and 100")
+	}
+	if c.MinPrunePercent > c.MaxPrunePercent {
+		return errors.New("minPrunePercent must not exceed maxPrunePercent")
+	}
+	validateWindow := func(name string, window ContextManagementWindowConfig) error {
+		if window.PruneStart < 1 || window.PruneStart > 100 {
+			return fmt.Errorf("%s.pruneStart must be between 1 and 100", name)
+		}
+		if window.CompactStart < 1 || window.CompactStart > 100 {
+			return fmt.Errorf("%s.compactStart must be between 1 and 100", name)
+		}
+		return nil
+	}
+	if err := validateWindow("standard", c.Standard); err != nil {
+		return err
+	}
+	return validateWindow("large", c.Large)
+}
+
+func (c ContextManagementConfig) WindowForLimit(limit int) ContextManagementWindowConfig {
+	c = normalizeContextManagementConfig(c)
+	if limit > 600000 {
+		return c.Large
+	}
+	return c.Standard
 }
 
 func normalizeAgentConfig(agent AgentConfig) AgentConfig {
@@ -1117,6 +1218,7 @@ func writeConfigAtomically(path string, data []byte) error {
 
 func sanitizeConfigForDisk(cfg Config) Config {
 	cfg = migrateConfig(cfg)
+	cfg.ContextManagement = normalizeContextManagementConfig(cfg.ContextManagement)
 	cfg.Agent = normalizeAgentConfig(cfg.Agent)
 	cfg.Auth.OAuthApp = cfg.Auth.OAuthApp.Normalized()
 	cfg.Security = normalizeSecurityConfig(cfg.Security)

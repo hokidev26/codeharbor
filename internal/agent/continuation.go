@@ -526,12 +526,12 @@ func (r *Runner) runContinuationSegment(ctx context.Context, state continuationR
 			return outcome, nil
 		}
 		controls := r.buildTurnSystemControls(ctx, agent, run, messages, continuationIndex)
+		controls.pipeline = r.toolOutputPipelineControl(agentID, runID)
 		providerMessages, updatedAgent, err := r.managedContextForTurn(ctx, agent, messages, toolSpecs, controls)
 		if err != nil {
 			return segmentOutcome{}, err
 		}
 		agent = updatedAgent
-		providerMessages = r.appendToolOutputPipelineControl(providerMessages, agentID, runID)
 		result, turnErr := r.runModelTurn(ctx, agentID, runID, provider, model, agent.SystemPrompt, providerMessages, toolSpecs, r.reasoningEffort(agent.ReasoningEffort), agent.FastMode)
 		outcome.turns++
 		outcome.inputTokens += maxInt64(result.Usage.InputTokens, 0)

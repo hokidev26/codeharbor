@@ -85,6 +85,55 @@ func TestUpdateAgentContextSummaryRoundTrips(t *testing.T) {
 	}
 }
 
+func TestAgentContextPreferencesAndLogicalClear(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _, agent, err := store.CreateProject(ctx, "Demo", "", t.TempDir(), "openai:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AddMessage(ctx, Message{AgentID: agent.ID, Role: "user", ContentText: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.AddMessage(ctx, Message{AgentID: agent.ID, Role: "assistant", ContentText: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAgentContextSummary(ctx, agent.ID, "summary", first.ID, 50); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PruneEnabled {
+		t.Fatal("summary updates must not force prune_enabled")
+	}
+	current, err = store.UpdateAgentPruneEnabled(ctx, agent.ID, true)
+	if err != nil || !current.PruneEnabled {
+		t.Fatalf("failed to enable pruning: %+v %v", current, err)
+	}
+	cleared, err := store.ClearAgentContext(ctx, agent.ID, current.EntityGeneration, latest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ContextSummary != "" || cleared.PruneBoundaryMessageID != latest.ID || cleared.PrunedPercent != 100 || !cleared.PruneEnabled {
+		t.Fatalf("unexpected logical clear result: %+v", cleared)
+	}
+	if _, err := store.ClearAgentContext(ctx, agent.ID, current.EntityGeneration, latest.ID); !IsConflict(err) {
+		t.Fatalf("expected stale generation conflict, got %v", err)
+	}
+	messages, err := store.ListMessages(ctx, agent.ID)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("logical clear changed durable messages: %d %v", len(messages), err)
+	}
+}
+
 func TestListProjectsReturnsEmptySlice(t *testing.T) {
 	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

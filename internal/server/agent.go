@@ -381,7 +381,7 @@ func (s *Server) getAgentLiveSnapshot(w http.ResponseWriter, r *http.Request) {
 		BackgroundTasks:       backgroundTasks,
 		RecentBackgroundTasks: recentBackgroundTasks(backgroundTasks, 8),
 		Continuation:          continuation,
-		Context:               s.agentContextStatus(snapshot.Agent),
+		Context:               s.agentContextStatusForRequest(r.Context(), snapshot.Agent),
 		WorkState:             workState,
 		Stream:                watermark,
 	})
@@ -452,15 +452,35 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type agentContextStatus struct {
-	HasSummary             bool `json:"hasSummary"`
-	PrunedPercent          int  `json:"prunedPercent"`
-	MessageCount           int  `json:"messageCount"`
-	CanCompact             bool `json:"canCompact"`
-	SummaryModelConfigured bool `json:"summaryModelConfigured"`
+	HasSummary             bool                        `json:"hasSummary"`
+	PrunedPercent          int                         `json:"prunedPercent"`
+	MessageCount           int                         `json:"messageCount"`
+	CanCompact             bool                        `json:"canCompact"`
+	CanClear               bool                        `json:"canClear"`
+	SummaryModelConfigured bool                        `json:"summaryModelConfigured"`
+	EstimatedTokens        int                         `json:"estimatedTokens"`
+	LimitTokens            int                         `json:"limitTokens"`
+	UsagePercent           int                         `json:"usagePercent"`
+	WindowClass            agentpkg.ContextWindowClass `json:"windowClass"`
+	Thresholds             agentpkg.ContextThresholds  `json:"thresholds"`
+	LatestMessageID        string                      `json:"latestMessageId,omitempty"`
+	PruneEnabled           bool                        `json:"pruneEnabled"`
+	Estimated              bool                        `json:"estimated"`
 }
 
 type compactAgentContextRequest struct {
+	EntityGeneration        strictInt64 `json:"entityGeneration"`
+	ExpectedLatestMessageID string      `json:"expectedLatestMessageId,omitempty"`
+}
+
+type agentContextPreferencesRequest struct {
+	PruneEnabled     strictBool  `json:"pruneEnabled"`
 	EntityGeneration strictInt64 `json:"entityGeneration"`
+}
+
+type clearAgentContextRequest struct {
+	EntityGeneration        strictInt64  `json:"entityGeneration"`
+	ExpectedLatestMessageID strictString `json:"expectedLatestMessageId"`
 }
 
 type compactAgentContextResponse struct {
@@ -469,20 +489,118 @@ type compactAgentContextResponse struct {
 	CompactedMessageCount int                `json:"compactedMessageCount"`
 }
 
-func (s *Server) agentContextStatus(agent db.Agent) agentContextStatus {
-	summaryModelConfigured := false
+func (s *Server) agentContextStatusForRequest(ctx context.Context, agent db.Agent) agentContextStatus {
+	summaryModelConfigured := s != nil && s.runner != nil && strings.TrimSpace(s.runner.SummaryModel()) != ""
+	status := agentpkg.ContextTokenStatus{MessageCount: agent.MessageCount, PruneEnabled: agent.PruneEnabled, HasSummary: strings.TrimSpace(agent.ContextSummary) != ""}
 	if s != nil && s.runner != nil {
-		summaryModelConfigured = strings.TrimSpace(s.runner.SummaryModel()) != ""
+		if estimated, _, err := s.runner.ContextStatus(ctx, agent.ID); err == nil {
+			status = estimated
+		}
 	}
-	compactedMessageCount := (agent.MessageCount*agent.PrunedPercent + 50) / 100
-	uncompactedMessageCount := agent.MessageCount - compactedMessageCount
 	return agentContextStatus{
-		HasSummary:             strings.TrimSpace(agent.ContextSummary) != "",
-		PrunedPercent:          agent.PrunedPercent,
-		MessageCount:           agent.MessageCount,
-		CanCompact:             strings.TrimSpace(agent.Status) != "running" && uncompactedMessageCount > 8,
-		SummaryModelConfigured: summaryModelConfigured,
+		HasSummary: status.HasSummary, PrunedPercent: agent.PrunedPercent, MessageCount: status.MessageCount,
+		CanCompact: status.CanCompact, CanClear: status.CanClear, SummaryModelConfigured: summaryModelConfigured,
+		EstimatedTokens: status.EstimatedTokens, LimitTokens: status.LimitTokens, UsagePercent: status.UsagePercent,
+		WindowClass: status.WindowClass, Thresholds: status.Thresholds, LatestMessageID: status.LatestMessageID,
+		PruneEnabled: status.PruneEnabled, Estimated: status.Estimated,
 	}
+}
+
+func (s *Server) getAgentContext(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent context store is unavailable")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if !s.requireAgentAccess(w, r, agentID) {
+		return
+	}
+	agent, err := s.store.GetAgent(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"context": s.agentContextStatusForRequest(r.Context(), agent), "entityGeneration": agent.EntityGeneration})
+}
+
+func (s *Server) patchAgentContextPreferences(w http.ResponseWriter, r *http.Request) {
+	var req agentContextPreferencesRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.PruneEnabled.set {
+		writeError(w, http.StatusBadRequest, "pruneEnabled is required")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if !s.requireAgentAccess(w, r, agentID) {
+		return
+	}
+	current, err := s.store.GetAgent(r.Context(), agentID)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	if req.EntityGeneration.set && req.EntityGeneration.value != current.EntityGeneration {
+		writeError(w, http.StatusConflict, "agent context preferences changed; refresh and try again")
+		return
+	}
+	updated, err := s.store.UpdateAgentPruneEnabled(r.Context(), agentID, req.PruneEnabled.value, current.EntityGeneration)
+	if err != nil {
+		writeError(w, statusFromError(err), err.Error())
+		return
+	}
+	s.publishContextUpdated(r.Context(), agentID, updated)
+	writeJSON(w, http.StatusOK, map[string]any{"context": s.agentContextStatusForRequest(r.Context(), updated), "agent": updated})
+}
+
+func (s *Server) clearAgentContext(w http.ResponseWriter, r *http.Request) {
+	var req clearAgentContextRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.EntityGeneration.set || req.EntityGeneration.value <= 0 || !req.ExpectedLatestMessageID.set || strings.TrimSpace(req.ExpectedLatestMessageID.value) == "" {
+		writeError(w, http.StatusBadRequest, "entityGeneration and expectedLatestMessageId are required")
+		return
+	}
+	if s.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent runner is unavailable")
+		return
+	}
+	agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if !s.requireAgentAccess(w, r, agentID) {
+		return
+	}
+	updated, err := s.runner.ClearAgentContext(r.Context(), agentID, req.EntityGeneration.value, req.ExpectedLatestMessageID.value)
+	if err != nil {
+		if errors.Is(err, agentpkg.ErrAgentBusy) || errors.Is(err, db.ErrConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+		} else {
+			writeError(w, statusFromError(err), err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"context": s.agentContextStatusForRequest(r.Context(), updated), "cleared": true})
+}
+
+func (s *Server) publishContextUpdated(ctx context.Context, agentID string, agent db.Agent) {
+	if s == nil || s.hub == nil {
+		return
+	}
+	// The hub event is additive and intentionally carries only state metadata;
+	// context summaries never enter the event payload.
+	data := map[string]any{"entityGeneration": agent.EntityGeneration, "prunedPercent": agent.PrunedPercent, "pruneEnabled": agent.PruneEnabled, "messageCount": agent.MessageCount}
+	if s.runner != nil && s.store != nil {
+		if messages, err := s.store.ListMessages(ctx, agentID); err == nil {
+			status := s.runner.ContextStatusForEvent(agent, messages)
+			for key, value := range status {
+				data[key] = value
+			}
+		}
+	}
+	s.hub.Publish(agentpkg.Event{Type: "context.updated", AgentID: agentID, Data: data})
 }
 
 func (s *Server) compactAgentContext(w http.ResponseWriter, r *http.Request) {
@@ -504,7 +622,10 @@ func (s *Server) compactAgentContext(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, updated, err := s.runner.CompactAgentContext(r.Context(), agentID, req.EntityGeneration.value)
+	if !s.requireAgentAccess(w, r, agentID) {
+		return
+	}
+	result, updated, err := s.runner.CompactAgentContext(r.Context(), agentID, req.EntityGeneration.value, req.ExpectedLatestMessageID)
 	if err != nil {
 		switch {
 		case errors.Is(err, agentpkg.ErrAgentBusy), errors.Is(err, db.ErrConflict):
@@ -517,7 +638,7 @@ func (s *Server) compactAgentContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, compactAgentContextResponse{
-		Context:               s.agentContextStatus(updated),
+		Context:               s.agentContextStatusForRequest(r.Context(), updated),
 		Compacted:             result.Compacted,
 		CompactedMessageCount: result.CompactedMessageCount,
 	})

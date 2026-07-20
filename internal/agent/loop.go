@@ -25,12 +25,14 @@ import (
 )
 
 type Runner struct {
-	store              *db.Store
-	providers          *providers.Registry
-	tools              *tools.Registry
-	toolOutputPipeline tools.ToolOutputPipelineService
-	hub                *Hub
-	cfg                config.AgentConfig
+	store               *db.Store
+	providers           *providers.Registry
+	tools               *tools.Registry
+	toolOutputPipeline  tools.ToolOutputPipelineService
+	hub                 *Hub
+	cfg                 config.AgentConfig
+	contextManagementMu sync.RWMutex
+	contextManagement   config.ContextManagementConfig
 
 	modelSettingsMu sync.RWMutex
 	defaultModel    string
@@ -192,7 +194,7 @@ var (
 )
 
 func NewRunner(store *db.Store, providers *providers.Registry, toolRegistry *tools.Registry, hub *Hub, cfg config.AgentConfig) *Runner {
-	runner := &Runner{store: store, providers: providers, tools: toolRegistry, toolOutputPipeline: toolpipeline.NewManager(), hub: hub, cfg: cfg, continuationConfig: cfg, continuationRunLimits: make(map[string]continuationLimits), defaultReasoningEffort: "auto", running: make(map[string]*activeRun), compacting: make(map[string]struct{}), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
+	runner := &Runner{store: store, providers: providers, tools: toolRegistry, toolOutputPipeline: toolpipeline.NewManager(), hub: hub, cfg: cfg, contextManagement: (config.ContextManagementConfig{}).Normalized(), continuationConfig: cfg, continuationRunLimits: make(map[string]continuationLimits), defaultReasoningEffort: "auto", running: make(map[string]*activeRun), compacting: make(map[string]struct{}), approvals: make(map[string]*pendingApproval), sessionGrants: make(map[string]map[string]sessionGrant)}
 	runner.SetAgentModelSettings(cfg)
 	if store != nil {
 		if settings, err := store.GetRuntimeSettings(context.Background()); err == nil {
@@ -748,7 +750,7 @@ type ContextCompactionResult struct {
 	PrunedPercent         int
 }
 
-func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expectedEntityGeneration int64) (ContextCompactionResult, db.Agent, error) {
+func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expectedEntityGeneration int64, expectedLatestMessageID ...string) (ContextCompactionResult, db.Agent, error) {
 	if r == nil || r.store == nil {
 		return ContextCompactionResult{}, db.Agent{}, errors.New("agent context store is unavailable")
 	}
@@ -772,8 +774,17 @@ func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expect
 	if err != nil {
 		return ContextCompactionResult{}, db.Agent{}, err
 	}
+	agent = contextAgentForMessages(agent, messages)
+	if len(expectedLatestMessageID) > 1 {
+		return ContextCompactionResult{}, db.Agent{}, errors.New("expected latest message id accepts at most one value")
+	}
+	if len(expectedLatestMessageID) == 1 && strings.TrimSpace(expectedLatestMessageID[0]) != "" {
+		if err := validateContextExpectedLatest(messages, expectedLatestMessageID[0]); err != nil {
+			return ContextCompactionResult{}, db.Agent{}, err
+		}
+	}
 	result := ContextCompactionResult{MessageCount: len(messages), PrunedPercent: agent.PrunedPercent}
-	candidates := selectSummaryCandidates(messages, agent.PruneBoundaryMessageID, contextKeepRecentMessages)
+	candidates := selectManualContextCandidates(messages, agent.PruneBoundaryMessageID, r.ContextManagementConfig())
 	if len(candidates) == 0 {
 		return result, agent, nil
 	}
@@ -786,6 +797,15 @@ func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expect
 	}
 	boundaryID := candidates[len(candidates)-1].ID
 	compactedMessageCount, prunedPercent := contextPrunedProgress(messages, boundaryID)
+	if len(expectedLatestMessageID) == 1 && strings.TrimSpace(expectedLatestMessageID[0]) != "" {
+		latestMessages, err := r.store.ListMessages(ctx, agentID)
+		if err != nil {
+			return ContextCompactionResult{}, db.Agent{}, err
+		}
+		if err := validateContextExpectedLatest(latestMessages, expectedLatestMessageID[0]); err != nil {
+			return ContextCompactionResult{}, db.Agent{}, err
+		}
+	}
 	if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
 		return ContextCompactionResult{}, db.Agent{}, err
 	}
@@ -795,6 +815,9 @@ func (r *Runner) CompactAgentContext(ctx context.Context, agentID string, expect
 	result.Compacted = true
 	result.CompactedMessageCount = compactedMessageCount
 	result.PrunedPercent = prunedPercent
+	data := r.contextUpdatedData(agent, messages, nil)
+	data["compacted"] = true
+	r.publish(Event{Type: "context.updated", AgentID: agent.ID, Data: data})
 	return result, agent, nil
 }
 
@@ -1246,24 +1269,60 @@ func mergeMemorySystemContext(systemPrompt, memoryContext string) string {
 }
 
 func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, messages []db.Message, toolSpecs []providers.ToolSpec, controls turnSystemControls) ([]providers.Message, db.Agent, error) {
-	providerMessages := providerMessagesForContext(agent, messages)
+	cfg := r.ContextManagementConfig()
+	agent = contextAgentForMessages(agent, messages)
+	providerMessages, eligible := providerMessagesForContextPlan(agent, messages, cfg.CompactKeepTurns)
 	limit := r.contextTokenLimit(agent.Model)
 	preferredControls := controls.preferredMessages()
 	preferredRequest := appendProviderMessages(providerMessages, preferredControls)
+	initialEstimate := estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs)
+	window := cfg.WindowForLimit(limit)
+
+	// Progressive pruning is opt-in and only applies when its threshold is
+	// strictly below compaction. Compaction itself remains an automatic safety
+	// action, even when the reversible prune switch is off.
+	if agent.PruneEnabled && window.PruneStart < window.CompactStart && initialEstimate*100 >= limit*window.PruneStart {
+		desiredReduction := initialEstimate - (limit*window.PruneStart)/100
+		providerMessages = progressivelyPruneContextToolPayloads(providerMessages, eligible, cfg, desiredReduction)
+		preferredRequest = appendProviderMessages(providerMessages, preferredControls)
+	}
+
+	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs)*100 >= limit*window.CompactStart {
+		candidates := selectContextTurnCandidates(messages, agent.PruneBoundaryMessageID, cfg.CompactKeepTurns)
+		if len(candidates) > 0 {
+			if summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates)); summary != "" {
+				boundaryID := contextCandidateBoundary(candidates)
+				_, prunedPercent := contextPrunedProgress(messages, boundaryID)
+				if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
+					return nil, agent, err
+				}
+				agent.ContextSummary, agent.PruneBoundaryMessageID, agent.PrunedPercent = summary, boundaryID, prunedPercent
+				data := r.contextUpdatedData(agent, messages, toolSpecs)
+				data["compacted"] = true
+				r.publish(Event{Type: "context.updated", AgentID: agent.ID, Data: data})
+				providerMessages, eligible = providerMessagesForContextPlan(agent, messages, cfg.CompactKeepTurns)
+				preferredRequest = appendProviderMessages(providerMessages, preferredControls)
+			}
+		}
+	}
 	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
 		return preferredRequest, agent, nil
 	}
+
+	// Hard-window safety remains active regardless of the user-facing prune
+	// preference. It first shrinks oversized tool payloads, then falls back to
+	// a complete-turn summary if the request still cannot fit.
 	providerMessages = compactOversizedContextToolInputs(providerMessages)
 	preferredRequest = appendProviderMessages(providerMessages, preferredControls)
 	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
 		return preferredRequest, agent, nil
 	}
 
-	candidates := selectSummaryCandidates(messages, agent.PruneBoundaryMessageID, contextKeepRecentMessages)
+	candidates := selectContextTurnCandidates(messages, agent.PruneBoundaryMessageID, cfg.CompactKeepTurns)
 	if len(candidates) > 0 {
 		summary := strings.TrimSpace(r.summarizeOldestMessages(ctx, agent, candidates))
 		if summary != "" {
-			boundaryID := candidates[len(candidates)-1].ID
+			boundaryID := contextCandidateBoundary(candidates)
 			_, prunedPercent := contextPrunedProgress(messages, boundaryID)
 			if err := r.store.UpdateAgentContextSummary(ctx, agent.ID, summary, boundaryID, prunedPercent); err != nil {
 				return nil, agent, err
@@ -1271,7 +1330,10 @@ func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, mess
 			agent.ContextSummary = summary
 			agent.PruneBoundaryMessageID = boundaryID
 			agent.PrunedPercent = prunedPercent
-			providerMessages = providerMessagesForContext(agent, messages)
+			data := r.contextUpdatedData(agent, messages, toolSpecs)
+			data["compacted"] = true
+			r.publish(Event{Type: "context.updated", AgentID: agent.ID, Data: data})
+			providerMessages, _ = providerMessagesForContextPlan(agent, messages, cfg.CompactKeepTurns)
 			preferredRequest = appendProviderMessages(providerMessages, preferredControls)
 			if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
 				return preferredRequest, agent, nil
@@ -1308,20 +1370,34 @@ func (r *Runner) contextTokenLimit(model string) int {
 }
 
 func providerMessagesForContext(agent db.Agent, messages []db.Message) []providers.Message {
-	start := messagesStartAfterBoundary(messages, agent.PruneBoundaryMessageID)
+	out, _ := providerMessagesForContextPlan(agent, messages, 2)
+	return out
+}
+
+func providerMessagesForContextWithKeep(agent db.Agent, messages []db.Message, keepTurns int) []providers.Message {
+	out, _ := providerMessagesForContextPlan(agent, messages, keepTurns)
+	return out
+}
+
+func providerMessagesForContextPlan(agent db.Agent, messages []db.Message, keepTurns int) ([]providers.Message, []bool) {
+	agent = contextAgentForMessages(agent, messages)
+	start, _ := contextBoundaryStart(messages, agent.PruneBoundaryMessageID)
 	out := make([]providers.Message, 0, len(messages)-start+1)
+	eligible := make([]bool, 0, len(messages)-start+1)
 	if summary := strings.TrimSpace(agent.ContextSummary); summary != "" {
 		out = append(out, summaryProviderMessage(summary))
+		eligible = append(eligible, false)
 	}
-	compactBefore := len(messages) - contextKeepRecentMessages
+	compactBefore := contextRecentTurnsStart(messages, start, keepTurns)
 	for i := start; i < len(messages); i++ {
-		message := providerMessageFromDBForContext(messages[i], i < compactBefore)
+		message := providerMessageFromDBForContext(messages[i], false)
 		if strings.TrimSpace(message.Content) == "" && len(message.Blocks) == 0 {
 			continue
 		}
 		out = append(out, message)
+		eligible = append(eligible, i < compactBefore)
 	}
-	return out
+	return out, eligible
 }
 
 func prepareProviderMessagesForCapabilities(messages []providers.Message, capabilities providers.Capabilities) []providers.Message {
@@ -1373,15 +1449,8 @@ func prepareProviderMessagesForCapabilities(messages []providers.Message, capabi
 }
 
 func messagesStartAfterBoundary(messages []db.Message, boundaryID string) int {
-	if strings.TrimSpace(boundaryID) == "" {
-		return 0
-	}
-	for i, message := range messages {
-		if message.ID == boundaryID {
-			return i + 1
-		}
-	}
-	return 0
+	start, _ := contextBoundaryStart(messages, boundaryID)
+	return start
 }
 
 func contextPrunedProgress(messages []db.Message, boundaryID string) (int, int) {
@@ -1567,24 +1636,6 @@ func contextMessageContent(blocks []providers.ContentBlock) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func selectSummaryCandidates(messages []db.Message, boundaryID string, keepRecent int) []db.Message {
-	if keepRecent <= 0 {
-		keepRecent = contextKeepRecentMessages
-	}
-	start := messagesStartAfterBoundary(messages, boundaryID)
-	if len(messages)-start <= keepRecent {
-		return nil
-	}
-	end := len(messages) - keepRecent
-	for end < len(messages) && strings.TrimSpace(messages[end].ParentToolID) != "" {
-		end++
-	}
-	if end <= start {
-		return nil
-	}
-	return messages[start:end]
-}
-
 func estimateRequestTokens(systemPrompt string, messages []providers.Message, toolSpecs []providers.ToolSpec) int {
 	total := estimateTextTokens(systemPrompt)
 	if len(toolSpecs) > 0 {
@@ -1617,11 +1668,19 @@ func estimateBlockTokens(block providers.ContentBlock) int {
 }
 
 func estimateTextTokens(text string) int {
-	count := len([]rune(text))
-	if count == 0 {
+	asciiRunes := 0
+	nonASCII := 0
+	for _, runeValue := range text {
+		if runeValue <= 0x7f {
+			asciiRunes++
+		} else {
+			nonASCII++
+		}
+	}
+	if asciiRunes == 0 && nonASCII == 0 {
 		return 0
 	}
-	return (count + 3) / 4
+	return (asciiRunes+3)/4 + nonASCII
 }
 
 func (r *Runner) summarizeOldestMessages(ctx context.Context, agent db.Agent, candidates []db.Message) string {
@@ -1836,10 +1895,17 @@ func (r *Runner) runModelTurnAttempt(ctx context.Context, agentID, runID string,
 		modelCapabilities := modelProvider.ModelCapabilities(model)
 		fastModeAllowed = !modelCapabilities.FastModeKnown || modelCapabilities.FastMode
 	}
-	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: prepareProviderMessagesForCapabilities(messages, capabilities), Tools: toolSpecs, ReasoningEffort: reasoningEffort, FastMode: fastModeAllowed, Scenario: providers.CallScenarioInternal}
+	requestMessages := prepareProviderMessagesForCapabilities(messages, capabilities)
+	requestTools := toolSpecs
 	if !capabilities.Tools {
-		request.Tools = nil
+		requestTools = nil
 	}
+	if limit := r.contextTokenLimit(model); limit > 0 {
+		if estimated := estimateRequestTokens(systemPrompt, requestMessages, requestTools); estimated > limit {
+			return modelTurnResult{}, errorsContextBudget(limit, estimated), false
+		}
+	}
+	request := providers.GenerateRequest{Model: model, SystemPrompt: systemPrompt, Messages: requestMessages, Tools: requestTools, ReasoningEffort: reasoningEffort, FastMode: fastModeAllowed, Scenario: providers.CallScenarioInternal}
 	if capabilities.Reasoning {
 		request.ReasoningEffort = agentReasoningEffort(ctx, r.store, agentID)
 	}

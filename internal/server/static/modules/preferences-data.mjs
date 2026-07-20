@@ -109,6 +109,7 @@ export const defaultProfilePrefs = {
   displayName: "",
   roleLabel: "Local developer",
   avatarInitials: "AT",
+  avatarDataUrl: "",
   gitName: "",
   gitEmail: "",
   workspaceLabel: "Autoto Local",
@@ -178,8 +179,36 @@ export const defaultNotificationPrefs = {
   duration: "normal",
 };
 
-export const appearanceStyleVersion = 4;
+export const appearanceStyleVersion = 5;
 export const appearanceThemePresets = Object.freeze(["light", "dark", "cyber", "cream", "apple"]);
+export const appearanceBackgroundModes = Object.freeze(["theme", "custom", "none"]);
+
+export function normalizeAppearanceBackgroundMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  return appearanceBackgroundModes.includes(mode) ? mode : "theme";
+}
+
+export function normalizeAppearanceBackgroundPosition(value, fallback = 50) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return Math.max(0, Math.min(100, Number(fallback) || 50));
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+export function normalizeAppearanceBackgroundURL(value) {
+  const url = String(value || "").trim();
+  return /^\/appearance\/backgrounds\/[a-f0-9]{64}\/[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(url) ? url : "";
+}
+
+export function normalizeAppearanceBackground(value = {}) {
+  const source = value?.background && typeof value.background === "object" ? value.background : value;
+  return {
+    mode: normalizeAppearanceBackgroundMode(source?.backgroundMode || source?.mode),
+    url: normalizeAppearanceBackgroundURL(source?.backgroundUrl || source?.url),
+    dim: Math.max(0, Math.min(75, Number.isFinite(Number(source?.backgroundDim ?? source?.dim)) ? Math.round(Number(source?.backgroundDim ?? source?.dim)) : 18)),
+    positionX: normalizeAppearanceBackgroundPosition(source?.backgroundPositionX ?? source?.positionX),
+    positionY: normalizeAppearanceBackgroundPosition(source?.backgroundPositionY ?? source?.positionY),
+  };
+}
 export const appearanceThemePresetTheme = Object.freeze({
   light: "light",
   dark: "dark",
@@ -205,7 +234,7 @@ export function normalizeAppearanceThemeRef(value, fallbackPreset = "light") {
     const preset = normalizeAppearanceThemePreset(id);
     return { kind: "preset", id: preset || fallback };
   }
-  if (kind === "package" && /^[a-z0-9](?:[a-z0-9_-]{0,62})$/.test(id)) {
+  if (kind === "package" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) && id.length <= 63) {
     const revision = String(value?.revision || "").trim().slice(0, 128);
     const colorScheme = value?.colorScheme === "dark" ? "dark" : "light";
     return { kind: "package", id, revision, colorScheme };
@@ -226,6 +255,11 @@ export const defaultAppearancePrefs = {
   themePreset: "light",
   theme: "light",
   density: "comfortable",
+  backgroundMode: "theme",
+  backgroundUrl: "",
+  backgroundDim: 18,
+  backgroundPositionX: 50,
+  backgroundPositionY: 50,
   terminalDefaultOpen: false,
   showEventLog: true,
 };

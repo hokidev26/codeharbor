@@ -17,6 +17,7 @@ import (
 
 	agentpkg "autoto/internal/agent"
 	"autoto/internal/anthropicauth"
+	"autoto/internal/appearanceassets"
 	"autoto/internal/audit"
 	"autoto/internal/automation"
 	"autoto/internal/codexauth"
@@ -127,6 +128,7 @@ type Server struct {
 	connections               *integrations.ConnectionService
 	plugins                   PluginService
 	themeStore                *themes.Store
+	appearanceAssets          *appearanceassets.Store
 	reviewer                  *review.Service
 	audit                     audit.Recorder
 	integrationClient         *http.Client
@@ -174,10 +176,16 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		} else {
 			server.themeStore = themeStore
 		}
+		if appearanceStore, err := appearanceassets.New(cfg.Paths.HomeDir); err != nil {
+			slog.Warn("initialize appearance background store", "error", err)
+		} else {
+			server.appearanceAssets = appearanceStore
+		}
 	}
 	server.SetReviewService(NewReviewService(providerRegistry, cfg.Agent.ReviewModel))
 	if runner != nil {
 		runner.SetPlanSnapshotProvider(server.currentPlanSnapshot)
+		runner.SetContextManagementConfig(cfg.ContextManagement)
 	}
 	return server
 }
@@ -278,6 +286,10 @@ func (s *Server) SetThemeStore(store *themes.Store) {
 	s.themeStore = store
 }
 
+func (s *Server) SetAppearanceAssetStore(store *appearanceassets.Store) {
+	s.appearanceAssets = store
+}
+
 // NewReviewService constructs the isolated, tool-free reviewer used by plan
 // runs. It deliberately receives only the provider registry and review model.
 func NewReviewService(registry *providers.Registry, model string) *review.Service {
@@ -344,6 +356,7 @@ func (s *Server) Routes() http.Handler {
 	s.mountUI(r)
 	s.mountOAuthApp(r)
 	s.mountThemeRoutes(r)
+	s.mountAppearanceAssetRoutes(r)
 
 	r.Get("/api/health", s.health)
 	r.Get("/api/auth/status", s.authStatus)
@@ -536,7 +549,10 @@ func (s *Server) Routes() http.Handler {
 	agentRoutes := func(r chi.Router) {
 		r.Get("/{id}", s.getAgent)
 		r.Get("/{id}/live-snapshot", s.getAgentLiveSnapshot)
+		r.Get("/{id}/context", s.getAgentContext)
+		r.With(s.fullRemoteAccessGuard).Patch("/{id}/context/preferences", s.patchAgentContextPreferences)
 		r.With(s.fullRemoteAccessGuard).Post("/{id}/context/compact", s.compactAgentContext)
+		r.With(s.fullRemoteAccessGuard).Post("/{id}/context/clear", s.clearAgentContext)
 		r.Patch("/{id}/title", s.updateAgentTitle)
 		r.Patch("/{id}/cwd", s.updateAgentCWD)
 		r.Patch("/{id}/model", s.updateAgentModel)
@@ -596,6 +612,7 @@ func (s *Server) Routes() http.Handler {
 	r.With(s.fullRemoteAccessGuard).Delete("/api/model-aggregates/{name}", s.deleteModelAggregate)
 	r.With(s.fullRemoteAccessGuard).Patch("/api/runtime/model-settings", s.updateRuntimeModelSettings)
 	r.With(s.fullRemoteAccessGuard).Patch("/api/runtime/agent-model-settings", s.updateAgentModelSettings)
+	r.With(s.fullRemoteAccessGuard).Patch("/api/runtime/context-settings", s.updateRuntimeContextSettings)
 	r.Patch("/api/agents/{id}/reasoning-effort", s.updateAgentReasoningEffort)
 	r.Get("/api/client/identity", s.clientIdentity)
 	r.With(s.fullRemoteAccessGuard).Post("/api/client/identity/rotate", s.rotateClientIdentity)

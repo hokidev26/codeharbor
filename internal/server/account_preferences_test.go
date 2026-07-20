@@ -1,8 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -65,11 +70,25 @@ func decodeAccountPreferencesResponse(t *testing.T, recorder *httptest.ResponseR
 	return response
 }
 
+func testAvatarDataURL(width, height int) string {
+	var buffer bytes.Buffer
+	picture := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			picture.Set(x, y, color.RGBA{R: uint8(x % 255), G: uint8(y % 255), B: 120, A: 255})
+		}
+	}
+	if err := jpeg.Encode(&buffer, picture, &jpeg.Options{Quality: 80}); err != nil {
+		panic(err)
+	}
+	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buffer.Bytes())
+}
+
 func accountPreferencesPatchBody(revision int64, displayName string) string {
 	body, _ := json.Marshal(map[string]any{
 		"expectedRevision": revision,
 		"profile": map[string]any{
-			"displayName": displayName, "roleLabel": " Developer ", "avatarInitials": "ab",
+			"displayName": displayName, "roleLabel": " Developer ", "avatarInitials": "ab", "avatarDataUrl": testAvatarDataURL(2, 2),
 			"gitName": " Example ", "gitEmail": " example@example.test ", "workspaceLabel": " Workspace ",
 		},
 		"preferredModel": "provider:model",
@@ -84,7 +103,7 @@ func accountPreferencesImportBody(displayName string) string {
 	body, _ := json.Marshal(map[string]any{
 		"version": 1,
 		"profile": map[string]any{
-			"displayName": displayName, "roleLabel": "Imported", "avatarInitials": "im",
+			"displayName": displayName, "roleLabel": "Imported", "avatarInitials": "im", "avatarDataUrl": testAvatarDataURL(2, 2),
 			"gitName": "Importer", "gitEmail": "import@example.test", "workspaceLabel": "Imported workspace",
 		},
 		"preferredModel": "provider:imported",
@@ -133,7 +152,7 @@ func TestAccountPreferencesDefaultPatchConflictAndImportOnce(t *testing.T) {
 			t.Fatalf("PATCH returned %d: %s", patch.Code, patch.Body.String())
 		}
 		updated := decodeAccountPreferencesResponse(t, patch)
-		if updated.Revision <= initial.Revision || updated.Profile.DisplayName != "Alice" || updated.Profile.AvatarInitials != "AB" || updated.Profile.RoleLabel != "Developer" || updated.PreferredModel != "provider:model" || !updated.ModelVisibility.HiddenModels["provider:hidden"] || !updated.ModelVisibility.ShowUnconfiguredProviders {
+		if updated.Revision <= initial.Revision || updated.Profile.DisplayName != "Alice" || updated.Profile.AvatarInitials != "AB" || updated.Profile.AvatarDataURL != testAvatarDataURL(2, 2) || updated.Profile.RoleLabel != "Developer" || updated.PreferredModel != "provider:model" || !updated.ModelVisibility.HiddenModels["provider:hidden"] || !updated.ModelVisibility.ShowUnconfiguredProviders {
 			t.Fatalf("unexpected patched preferences: %+v", updated)
 		}
 
@@ -172,6 +191,47 @@ func TestAccountPreferencesDefaultPatchConflictAndImportOnce(t *testing.T) {
 			t.Fatalf("second import overwrote the first: first=%+v second=%+v", firstResponse, secondResponse)
 		}
 	})
+}
+
+func TestAccountPreferencesAvatarValidation(t *testing.T) {
+	app, _ := newAccountPreferencesTestServer(t)
+	get := accountPreferencesRequest(t, app, http.MethodGet, "/api/preferences", "", withLocalPreferencesToken(app))
+	initial := decodeAccountPreferencesResponse(t, get)
+	valid := testAvatarDataURL(2, 2)
+	invalidBodies := map[string]string{
+		"wrong mime":              `data:image/png;base64,AAAA`,
+		"bad base64":              `data:image/jpeg;base64,not-valid`,
+		"oversized encoded value": "data:image/jpeg;base64," + strings.Repeat("A", accountPreferencesMaxAvatarDataURLLength),
+		"oversized decoded value": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, accountPreferencesMaxAvatarBytes+1)),
+		"oversized dimensions":    testAvatarDataURL(accountPreferencesMaxAvatarDimension+1, 1),
+	}
+	for name, avatarDataURL := range invalidBodies {
+		t.Run(name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{
+				"expectedRevision": initial.Revision,
+				"profile": map[string]any{
+					"avatarInitials": "AV", "avatarDataUrl": avatarDataURL,
+				},
+			})
+			response := accountPreferencesRequest(t, app, http.MethodPatch, "/api/preferences", string(body), withLocalPreferencesToken(app))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("invalid avatar returned %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"expectedRevision": initial.Revision,
+		"profile":          map[string]any{"displayName": "Photo", "avatarInitials": "PH", "avatarDataUrl": valid},
+	})
+	response := accountPreferencesRequest(t, app, http.MethodPatch, "/api/preferences", string(body), withLocalPreferencesToken(app))
+	if response.Code != http.StatusOK {
+		t.Fatalf("valid avatar returned %d: %s", response.Code, response.Body.String())
+	}
+	updated := decodeAccountPreferencesResponse(t, response)
+	if updated.Profile.AvatarDataURL != valid {
+		t.Fatalf("valid avatar was not persisted: %q", updated.Profile.AvatarDataURL)
+	}
 }
 
 func TestAccountPreferencesNoUserAuthenticationMatrix(t *testing.T) {

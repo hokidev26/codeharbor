@@ -42,6 +42,18 @@ func remoteAccessTestServer(t *testing.T) *Server {
 	return app
 }
 
+func TestConfiguredRemoteAccessModeFollowsFullAccessSwitch(t *testing.T) {
+	cfg := config.Config{Security: config.SecurityConfig{AllowRemoteFullAccess: true, DefaultRemoteAccessMode: remoteAccessModeRestricted}}
+	if got := configuredRemoteAccessMode(cfg); got != remoteAccessModeFull {
+		t.Fatalf("full access switch should select full mode, got %q", got)
+	}
+	cfg.Security.AllowRemoteFullAccess = false
+	cfg.Security.DefaultRemoteAccessMode = remoteAccessModeFull
+	if got := configuredRemoteAccessMode(cfg); got != remoteAccessModeRestricted {
+		t.Fatalf("disabled full access switch should select restricted mode, got %q", got)
+	}
+}
+
 func loginRemoteAccess(t *testing.T, app *Server, mode string) []*http.Cookie {
 	t.Helper()
 	if mode != remoteAccessModeRestricted && mode != remoteAccessModeFull {
@@ -238,14 +250,14 @@ func TestConcurrentConfigMutationsPreserveProviderContinuationAndSecurity(t *tes
 	if got.Agent.AutoContinuationMode != "off" || got.Agent.MaxTotalTurns != 7 {
 		t.Fatalf("concurrent mutations lost continuation settings: %+v", got.Agent)
 	}
-	if !got.Security.AllowRemoteFullAccess || !got.Security.AllowRemoteNativePicker || got.Security.CredentialRevision != 2 {
+	if !got.Security.AllowRemoteFullAccess || got.Security.DefaultRemoteAccessMode != remoteAccessModeFull || !got.Security.AllowRemoteNativePicker || got.Security.CredentialRevision != 2 {
 		t.Fatalf("concurrent mutations lost security policy: %+v", got.Security)
 	}
 	persisted, _, err := config.LoadWithReport(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(persisted.Providers.Instances) != wantProviderCount || persisted.Agent.MaxTotalTurns != 7 || !persisted.Security.AllowRemoteFullAccess || !persisted.Security.AllowRemoteNativePicker {
+	if len(persisted.Providers.Instances) != wantProviderCount || persisted.Agent.MaxTotalTurns != 7 || !persisted.Security.AllowRemoteFullAccess || persisted.Security.DefaultRemoteAccessMode != remoteAccessModeFull || !persisted.Security.AllowRemoteNativePicker {
 		t.Fatalf("persisted config lost a concurrent mutation: %+v", persisted)
 	}
 }
@@ -524,8 +536,8 @@ func TestEnvironmentAccessPasswordCanBeRotatedLocally(t *testing.T) {
 	settings.Header.Set(localTokenHeader, app.localToken)
 	settingsRecorder := httptest.NewRecorder()
 	app.Routes().ServeHTTP(settingsRecorder, settings)
-	if settingsRecorder.Code != http.StatusOK || !strings.Contains(settingsRecorder.Body.String(), `"source":"config"`) {
-		t.Fatalf("expected config-backed credential after rotation, got %d: %s", settingsRecorder.Code, settingsRecorder.Body.String())
+	if settingsRecorder.Code != http.StatusOK || !strings.Contains(settingsRecorder.Body.String(), `"source":"config"`) || !strings.Contains(settingsRecorder.Body.String(), `"defaultMode":"full"`) {
+		t.Fatalf("expected config-backed credential and switch-derived full mode after rotation, got %d: %s", settingsRecorder.Code, settingsRecorder.Body.String())
 	}
 }
 

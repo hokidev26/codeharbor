@@ -1,9 +1,20 @@
 import { $ } from "./dom.mjs";
 
 export const sidebarWidthPreferenceKey = "autoto.ui.sessionSidebarWidth";
+export const globalRailCollapsedPreferenceKey = "autoto.ui.globalRailCollapsed";
+export const sessionSidebarCollapsedPreferenceKey = "autoto.ui.sessionSidebarCollapsed";
+export const legacySidebarCollapsedPreferenceKey = "autoto.ui.sidebarCollapsed";
 export const defaultSidebarWidth = 296;
-export const minSidebarWidth = 220;
+export const minSidebarWidth = 184;
+export const compactSidebarWidth = 184;
+export const compactSidebarEnterWidth = 196;
+export const compactSidebarExitWidth = 216;
+export const narrowSidebarMinWidth = 197;
+export const narrowSidebarMaxWidth = 219;
 export const maxSidebarWidth = 420;
+export const globalRailExpandedWidth = 68;
+export const globalRailCollapsedWidth = 48;
+export const collapsedSidebarWidth = compactSidebarWidth;
 export const permissionMenuPrimaryValues = Object.freeze(["default", "acceptEdits", "bypassPermissions"]);
 export const permissionMenuSecondaryValues = Object.freeze(["readOnly", "dontAsk"]);
 
@@ -60,11 +71,20 @@ const permissionMenuIconMarkup = Object.freeze({
   dontAsk: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11V6.5a1.5 1.5 0 0 1 3 0V10"></path><path d="M11 10V5.5a1.5 1.5 0 0 1 3 0V10"></path><path d="M14 10V7a1.5 1.5 0 0 1 3 0v5"></path><path d="M8 10.5 6.7 9.2a1.7 1.7 0 0 0-2.4 2.4l4.2 5.1A5 5 0 0 0 12.4 19H14a5 5 0 0 0 5-5v-3.5a1.5 1.5 0 0 0-3 0"></path></svg>',
 });
 
-export function normalizeSidebarWidth(value, fallback = defaultSidebarWidth) {
+export function normalizeSidebarWidth(value, fallback = defaultSidebarWidth, { compact = false } = {}) {
   const parsed = Number.parseFloat(value);
   const normalizedFallback = Number.isFinite(Number(fallback)) ? Number(fallback) : defaultSidebarWidth;
   if (!Number.isFinite(parsed)) return Math.min(maxSidebarWidth, Math.max(minSidebarWidth, Math.round(normalizedFallback)));
-  return Math.min(maxSidebarWidth, Math.max(minSidebarWidth, Math.round(parsed)));
+  const rounded = Math.round(parsed);
+  if (compact && rounded <= compactSidebarEnterWidth) return compactSidebarWidth;
+  return Math.min(maxSidebarWidth, Math.max(minSidebarWidth, rounded));
+}
+
+export function normalizeCollapsedPreference(value, fallback = false) {
+  if (value === true || value === 1 || value === "1" || value === "true") return true;
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  if (value === null || value === undefined || value === "") return Boolean(fallback);
+  return Boolean(fallback);
 }
 
 export function sidebarWidthFromPointer(clientX, sidebarLeft) {
@@ -90,14 +110,17 @@ export function createUIShellController({
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
   openModelSettings = () => {},
+  manageContext = null,
   compactContext = () => {},
   getContextStatus = () => ({}),
   renderProjects,
+  onLayoutChange = renderProjects,
   resizeTerminal,
   showError,
   translate = (key) => key,
 } = {}) {
   let settingsDialogFocusReturn = null;
+  const manageContextAction = typeof manageContext === "function" ? manageContext : compactContext;
   const mobileViewport = () => window.matchMedia?.("(max-width: 767px)")?.matches
     ?? (globalThis.innerWidth || document.documentElement.clientWidth) <= 767;
 
@@ -557,9 +580,10 @@ export function createUIShellController({
     const contextActionSpec = () => {
       const status = getContextStatus?.() || {};
       const prunedPercent = Math.max(0, Math.min(100, Number(status.prunedPercent) || 0));
+      const canManage = Boolean(state?.agent?.id);
       const canCompact = Boolean(status.canCompact) && String(state?.agent?.status || "") !== "running";
       return {
-        disabled: !canCompact,
+        disabled: !canManage,
         detail: canCompact
           ? (status.hasSummary ? translate("chat.contextCompactedDetail", { percent: prunedPercent }) : translate("chat.contextCompactReady"))
           : translate("chat.contextCompactUnavailable"),
@@ -610,7 +634,7 @@ export function createUIShellController({
       const compactSpec = contextActionSpec();
       menu.appendChild(createDesktopAction(translate("chat.compactContext"), compactSpec.detail, () => {
         close({ focus: true });
-        Promise.resolve(compactContext()).catch(showError);
+        Promise.resolve(manageContextAction({ focusAction: "compact" })).catch(showError);
       }, compactSpec));
       menu.appendChild(createDesktopAction(translate("chat.manageModels"), "", () => {
         close({ focus: true });
@@ -650,7 +674,7 @@ export function createUIShellController({
         const compactSpec = contextActionSpec();
         actions.appendChild(createMobileAction(translate("chat.compactContext"), compactSpec.detail, () => {
           close({ focus: true });
-          Promise.resolve(compactContext()).catch(showError);
+          Promise.resolve(manageContextAction({ focusAction: "compact" })).catch(showError);
         }, compactSpec));
         actions.appendChild(createMobileAction(translate("chat.manageModels"), "", () => {
           close({ focus: true });
@@ -773,66 +797,175 @@ export function createUIShellController({
   function bindSidebarResizer({ storage = globalThis.localStorage } = {}) {
     const shell = $("appShell");
     const sidebar = document.querySelector?.(".sidebar");
+    const globalRail = document.querySelector?.(".global-rail");
     const separator = $("sidebarResizeHandle");
+    const globalCollapseButton = $("globalRailCollapseBtn");
+    const sessionCollapseButton = $("sessionSidebarCollapseBtn");
     if (!shell || !sidebar || !separator) return () => {};
 
     let width = defaultSidebarWidth;
+    let globalRailCollapsed = false;
+    let sessionSidebarCollapsed = false;
     let dragging = false;
+    const originalSeparatorTabIndex = separator.getAttribute?.("tabindex");
 
-    const persist = () => {
+    const desktopLayout = () => {
+      const media = window.matchMedia?.("(max-width: 767px)");
+      if (media) return !media.matches;
+      return (globalThis.innerWidth || document.documentElement?.clientWidth || 1024) > 767;
+    };
+    const toggleClass = (node, name, force) => node?.classList?.toggle?.(name, Boolean(force));
+    const collapseKey = (global) => global
+      ? (globalRailCollapsed ? "shell.expandGlobalNavigation" : "shell.collapseGlobalNavigation")
+      : (sessionSidebarCollapsed ? "shell.expandSessionSidebar" : "shell.collapseSessionSidebar");
+    const syncCollapseControl = (button, global) => {
+      if (!button) return;
+      const key = collapseKey(global);
+      const label = translate(key);
+      button.setAttribute("aria-expanded", (global ? !globalRailCollapsed : !sessionSidebarCollapsed) ? "true" : "false");
+      button.setAttribute("title", label);
+      button.setAttribute("aria-label", label);
+      button.setAttribute(`data-i18n-title`, key);
+      button.setAttribute(`data-i18n-aria-label`, key);
+    };
+    const syncCollapseControls = () => {
+      syncCollapseControl(globalCollapseButton, true);
+      syncCollapseControl(sessionCollapseButton, false);
+    };
+    const persistWidth = () => {
       try {
         storage?.setItem(sidebarWidthPreferenceKey, String(width));
       } catch {
         // Browser storage is optional; layout resizing still works in memory.
       }
     };
-    const apply = (nextWidth, { save = false } = {}) => {
-      width = normalizeSidebarWidth(nextWidth);
-      shell.style.setProperty("--session-sidebar-width", `${width}px`);
-      separator.setAttribute("aria-valuenow", String(width));
-      if (save) persist();
-      globalThis.requestAnimationFrame?.(() => resizeTerminal?.());
-      return width;
+    const persistCollapseState = () => {
+      try {
+        storage?.setItem(globalRailCollapsedPreferenceKey, globalRailCollapsed ? "true" : "false");
+        storage?.setItem(sessionSidebarCollapsedPreferenceKey, sessionSidebarCollapsed ? "true" : "false");
+      } catch {
+        // Browser storage is optional; collapse state still works in memory.
+      }
+    };
+    const requestTerminalResize = () => {
+      if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(() => resizeTerminal?.());
+      else resizeTerminal?.();
+    };
+    const sidebarMode = () => sessionSidebarCollapsed ? "compact" : width <= narrowSidebarMaxWidth ? "narrow" : "expanded";
+    const applyLayoutState = ({ saveWidth = false, saveCollapse = false } = {}) => {
+      const desktop = desktopLayout();
+      const mode = desktop ? sidebarMode() : "expanded";
+      const effectiveWidth = mode === "compact" ? compactSidebarWidth : width;
+      shell.style?.setProperty?.("--session-sidebar-width", `${effectiveWidth}px`);
+      separator.setAttribute?.("aria-valuenow", String(effectiveWidth));
+      toggleClass(shell, "global-rail-collapsed", desktop && globalRailCollapsed);
+      toggleClass(shell, "session-sidebar-collapsed", desktop && mode === "compact");
+      toggleClass(shell, "session-sidebar-narrow", desktop && mode === "narrow");
+      toggleClass(globalRail, "global-rail-collapsed", desktop && globalRailCollapsed);
+      toggleClass(sidebar, "session-sidebar-collapsed", desktop && mode === "compact");
+      toggleClass(sidebar, "session-sidebar-narrow", desktop && mode === "narrow");
+      separator.removeAttribute?.("aria-hidden");
+      if (originalSeparatorTabIndex == null) separator.removeAttribute?.("tabindex");
+      else separator.setAttribute?.("tabindex", originalSeparatorTabIndex);
+      syncCollapseControls();
+      if (saveWidth && mode !== "compact") persistWidth();
+      if (saveCollapse) persistCollapseState();
+      requestTerminalResize();
+      onLayoutChange?.({ sessionSidebarMode: mode, sessionSidebarWidth: effectiveWidth, globalRailCollapsed: desktop && globalRailCollapsed });
+      return effectiveWidth;
+    };
+    const applyWidth = (nextWidth, { save = false, dragging = false } = {}) => {
+      const candidate = normalizeSidebarWidth(nextWidth);
+      if (dragging) {
+        if (sessionSidebarCollapsed && candidate > compactSidebarExitWidth) sessionSidebarCollapsed = false;
+        else if (!sessionSidebarCollapsed && candidate <= compactSidebarEnterWidth) sessionSidebarCollapsed = true;
+      }
+      if (!sessionSidebarCollapsed) width = candidate;
+      return applyLayoutState({ saveWidth: save, saveCollapse: save });
+    };
+    const applyCollapseState = ({ save = false } = {}) => applyLayoutState({ saveCollapse: save });
+    const toggleGlobalRail = () => {
+      if (!desktopLayout()) return false;
+      const expandAll = globalRailCollapsed && sessionSidebarCollapsed;
+      globalRailCollapsed = !expandAll;
+      sessionSidebarCollapsed = !expandAll;
+      applyCollapseState({ save: true });
+      return globalRailCollapsed;
+    };
+    const toggleSessionSidebar = () => {
+      if (!desktopLayout()) return false;
+      if (sessionSidebarCollapsed) {
+        sessionSidebarCollapsed = false;
+        applyCollapseState({ save: true });
+        return false;
+      }
+      finishDrag();
+      sessionSidebarCollapsed = true;
+      applyCollapseState({ save: true });
+      return true;
     };
     try {
-      width = normalizeSidebarWidth(storage?.getItem(sidebarWidthPreferenceKey));
+      const storedWidth = normalizeSidebarWidth(storage?.getItem(sidebarWidthPreferenceKey));
+      const compactFromWidth = storedWidth <= compactSidebarEnterWidth;
+      width = compactFromWidth ? defaultSidebarWidth : storedWidth;
+      globalRailCollapsed = normalizeCollapsedPreference(storage?.getItem(globalRailCollapsedPreferenceKey));
+      const legacyCollapsed = normalizeCollapsedPreference(storage?.getItem(legacySidebarCollapsedPreferenceKey), false);
+      const storedSessionCollapsed = storage?.getItem(sessionSidebarCollapsedPreferenceKey);
+      sessionSidebarCollapsed = storedSessionCollapsed == null
+        ? legacyCollapsed || compactFromWidth
+        : normalizeCollapsedPreference(storedSessionCollapsed) || compactFromWidth;
+      if (storedSessionCollapsed == null && storage?.setItem) storage.setItem(sessionSidebarCollapsedPreferenceKey, sessionSidebarCollapsed ? "true" : "false");
     } catch {
       width = defaultSidebarWidth;
+      globalRailCollapsed = false;
+      sessionSidebarCollapsed = false;
     }
-    apply(width);
+    applyLayoutState();
 
-    const desktopLayout = () => !window.matchMedia?.("(max-width: 767px)")?.matches;
     const finishDrag = (event) => {
       if (!dragging) return;
       dragging = false;
-      separator.classList.remove("is-dragging");
-      document.body.classList.remove("sidebar-resizing");
+      separator.classList?.remove?.("is-dragging");
+      document.body?.classList?.remove?.("sidebar-resizing");
       separator.releasePointerCapture?.(event?.pointerId);
-      persist();
+      if (!sessionSidebarCollapsed) persistWidth();
+      persistCollapseState();
+      applyLayoutState();
     };
     const handlePointerMove = (event) => {
       if (!dragging) return;
-      apply(sidebarWidthFromPointer(event.clientX, sidebar.getBoundingClientRect().left));
+      applyWidth(sidebarWidthFromPointer(event.clientX, sidebar.getBoundingClientRect().left), { dragging: true });
       event.preventDefault();
     };
     const handlePointerDown = (event) => {
       if (!desktopLayout() || (event.button !== undefined && event.button !== 0)) return;
       dragging = true;
-      separator.classList.add("is-dragging");
-      document.body.classList.add("sidebar-resizing");
+      separator.classList?.add?.("is-dragging");
+      document.body?.classList?.add?.("sidebar-resizing");
       separator.setPointerCapture?.(event.pointerId);
       handlePointerMove(event);
     };
     const handleKeyDown = (event) => {
       if (!desktopLayout()) return;
       const step = event.shiftKey ? 24 : 8;
-      let nextWidth;
-      if (event.key === "ArrowLeft") nextWidth = width - step;
-      else if (event.key === "ArrowRight") nextWidth = width + step;
-      else if (event.key === "Home") nextWidth = minSidebarWidth;
-      else if (event.key === "End") nextWidth = maxSidebarWidth;
-      else return;
-      apply(nextWidth, { save: true });
+      if (event.key === "Home") {
+        sessionSidebarCollapsed = true;
+        applyLayoutState({ saveCollapse: true });
+      } else if (event.key === "End") {
+        sessionSidebarCollapsed = false;
+        width = maxSidebarWidth;
+        applyLayoutState({ saveWidth: true, saveCollapse: true });
+      } else if (sessionSidebarCollapsed && event.key === "ArrowRight") {
+        sessionSidebarCollapsed = false;
+        width = 220;
+        applyLayoutState({ saveWidth: true, saveCollapse: true });
+      } else if (sessionSidebarCollapsed && event.key === "ArrowLeft") {
+        applyLayoutState();
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        applyWidth(width + (event.key === "ArrowLeft" ? -step : step), { save: true, dragging: true });
+      } else {
+        return;
+      }
       event.preventDefault();
     };
     const wheelTargetCanScroll = (node, event) => {
@@ -859,21 +992,44 @@ export function createUIShellController({
       const sidebarSide = Number(event.clientX) < separatorCenter;
       const candidates = sidebarSide
         ? [$("projects"), document.querySelector?.(".agent-list-section")]
-        : document.body.classList.contains("workbench-mode")
+        : document.body?.classList?.contains?.("workbench-mode")
           ? [$("taskWorkspaceOverview"), $("projectKanbanBody")]
           : [$("messages")];
       if (!candidates.some((node) => wheelTargetCanScroll(node, event))) return;
       event.preventDefault();
     };
-    const resetWidth = () => apply(defaultSidebarWidth, { save: true });
+    const resetWidth = () => {
+      if (!desktopLayout()) return;
+      sessionSidebarCollapsed = false;
+      width = defaultSidebarWidth;
+      applyLayoutState({ saveWidth: true, saveCollapse: true });
+    };
+    const handleGlobalCollapseClick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleGlobalRail();
+    };
+    const handleSessionCollapseClick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSessionSidebar();
+    };
+    const handleViewportChange = () => {
+      if (!desktopLayout()) finishDrag();
+      applyCollapseState();
+    };
 
     separator.addEventListener("pointerdown", handlePointerDown);
     separator.addEventListener("keydown", handleKeyDown);
     separator.addEventListener("wheel", handleWheel, { passive: false });
     separator.addEventListener("dblclick", resetWidth);
+    globalCollapseButton?.addEventListener?.("click", handleGlobalCollapseClick);
+    sessionCollapseButton?.addEventListener?.("click", handleSessionCollapseClick);
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", finishDrag);
     window.addEventListener("pointercancel", finishDrag);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("orientationchange", handleViewportChange);
 
     return () => {
       finishDrag();
@@ -881,9 +1037,13 @@ export function createUIShellController({
       separator.removeEventListener("keydown", handleKeyDown);
       separator.removeEventListener("wheel", handleWheel);
       separator.removeEventListener("dblclick", resetWidth);
+      globalCollapseButton?.removeEventListener?.("click", handleGlobalCollapseClick);
+      sessionCollapseButton?.removeEventListener?.("click", handleSessionCollapseClick);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", finishDrag);
       window.removeEventListener("pointercancel", finishDrag);
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("orientationchange", handleViewportChange);
     };
   }
 

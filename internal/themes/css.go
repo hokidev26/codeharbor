@@ -79,16 +79,51 @@ func GenerateCSS(theme Theme) (string, error) {
 		builder.WriteString("  --autoto-accent-gradient: var(--autoto-color-primary);\n")
 	}
 	builder.WriteString("  --autoto-theme-home-overlay: linear-gradient(145deg, color-mix(in srgb, var(--autoto-color-canvas) 82%, transparent), color-mix(in srgb, var(--autoto-color-danger) 34%, transparent), color-mix(in srgb, var(--autoto-color-terminal) 78%, transparent));\n")
-	builder.WriteString("  --autoto-theme-home-position: center;\n")
-	if manifest.HomeBackground != nil {
+	builder.WriteString("  --autoto-theme-global-image: none;\n")
+	builder.WriteString("  --autoto-theme-global-position: 50% 50%;\n")
+	builder.WriteString("  --autoto-theme-global-fallback-opacity: 0;\n")
+	builder.WriteString("  --autoto-theme-home-position: 50% 50%;\n")
+	if manifest.SchemaVersion == SchemaVersionV2 && manifest.Backgrounds != nil {
+		if asset := manifest.Backgrounds.Global; asset != nil {
+			x, y := backgroundPosition(asset)
+			fmt.Fprintf(&builder, "  --autoto-theme-global-image: url(\"/themes/%s/%s/%s\");\n", manifest.ID, theme.Revision, escapeResourcePath(asset.Path))
+			fmt.Fprintf(&builder, "  --autoto-theme-global-position: %d%% %d%%;\n", x, y)
+			fmt.Fprintf(&builder, "  --autoto-theme-global-fallback-opacity: %s;\n", strconv.FormatFloat(asset.FallbackOpacity, 'f', -1, 64))
+		}
+	}
+	if manifest.SchemaVersion == SchemaVersionV2 && manifest.Backgrounds != nil && manifest.Backgrounds.Home != nil {
+		asset := manifest.Backgrounds.Home
+		x, y := backgroundPosition(asset)
+		fmt.Fprintf(&builder, "  --autoto-theme-home-image: url(\"/themes/%s/%s/%s\");\n", manifest.ID, theme.Revision, escapeResourcePath(asset.Path))
+		fmt.Fprintf(&builder, "  --autoto-theme-home-position: %d%% %d%%;\n", x, y)
+	} else if manifest.HomeBackground != nil {
 		fmt.Fprintf(&builder, "  --autoto-theme-home-image: url(\"/themes/%s/%s/%s\");\n", manifest.ID, theme.Revision, escapeResourcePath(manifest.HomeBackground.Path))
 		builder.WriteString("  --autoto-home-background: var(--autoto-theme-home-image);\n")
 	} else {
 		builder.WriteString("  --autoto-theme-home-image: radial-gradient(circle at 18% 16%, var(--autoto-color-primary), transparent 34%), radial-gradient(circle at 82% 18%, var(--autoto-color-secondary), transparent 26%), linear-gradient(145deg, var(--autoto-color-canvas) 0 46%, var(--autoto-color-danger) 72%, var(--autoto-color-terminal) 100%);\n")
-		builder.WriteString("  --autoto-home-background: var(--autoto-theme-home-image);\n")
+	}
+	builder.WriteString("  --autoto-home-background: var(--autoto-theme-home-image);\n")
+	for _, slot := range AllowedIconSlots {
+		fmt.Fprintf(&builder, "  --autoto-icon-%s: none;\n", slot)
+		fmt.Fprintf(&builder, "  --autoto-icon-%s-fallback-opacity: 1;\n", slot)
+		if resource := manifest.Icons[slot]; resource != "" {
+			fmt.Fprintf(&builder, "  --autoto-icon-%s: url(\"/themes/%s/%s/%s\");\n", slot, manifest.ID, theme.Revision, escapeResourcePath(resource))
+			fmt.Fprintf(&builder, "  --autoto-icon-%s-fallback-opacity: 0;\n", slot)
+		}
 	}
 	builder.WriteString("}\n")
 	return builder.String(), nil
+}
+
+func backgroundPosition(asset *BackgroundAsset) (int, int) {
+	x, y := 50, 50
+	if asset != nil && asset.PositionX != nil {
+		x = *asset.PositionX
+	}
+	if asset != nil && asset.PositionY != nil {
+		y = *asset.PositionY
+	}
+	return x, y
 }
 
 func writeMaterialCSS(builder *strings.Builder, name string, material Material) {

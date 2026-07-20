@@ -56,6 +56,32 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestContextManagementDefaultsNormalizeAndPersist(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.ContextManagement
+	if got.CompactKeepTurns != 2 || got.MinPrunePercent != 30 || got.MaxPrunePercent != 80 || got.Standard.PruneStart != 95 || got.Standard.CompactStart != 99 || got.Large.PruneStart != 95 || got.Large.CompactStart != 99 {
+		t.Fatalf("unexpected context management defaults: %+v", got)
+	}
+	if got.WindowForLimit(600000) != got.Standard || got.WindowForLimit(600001) != got.Large {
+		t.Fatalf("unexpected context window classification: %+v", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg.ContextManagement = ContextManagementConfig{CompactKeepTurns: 0, MinPrunePercent: 90, MaxPrunePercent: 40, Standard: ContextManagementWindowConfig{PruneStart: 101, CompactStart: 1}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ContextManagement.CompactKeepTurns != 2 || loaded.ContextManagement.MinPrunePercent != 40 || loaded.ContextManagement.MaxPrunePercent != 40 || loaded.ContextManagement.Standard.PruneStart != 100 || loaded.ContextManagement.Standard.CompactStart != 1 {
+		t.Fatalf("unexpected normalized persisted context settings: %+v", loaded.ContextManagement)
+	}
+}
+
 func TestDefaultConfigHomeUsesPrivatePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not expose Unix permission bits")

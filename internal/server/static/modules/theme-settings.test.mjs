@@ -23,6 +23,7 @@ function managerSnapshot() {
         revision: "one",
         stylesheetUrl: "/themes/argentina-spain-final/one/theme.css",
         previewUrl: "/themes/argentina-spain-final/one/preview.png",
+        capabilities: { background: true, globalBackground: true, homeBackground: true, icons: true },
         deletable: false,
       },
       {
@@ -36,6 +37,7 @@ function managerSnapshot() {
         revision: "two",
         stylesheetUrl: "/themes/local-glass/two/theme.css",
         previewUrl: "",
+        capabilities: { globalBackground: false, homeBackground: false, icons: false },
         deletable: true,
       },
     ],
@@ -59,12 +61,20 @@ test("theme settings render bundled and local cards with management controls", (
   assert.match(markup, /theme-package-card active/);
   assert.match(markup, /data-theme-delete="local-glass"/);
   assert.doesNotMatch(markup, /data-theme-delete="argentina-spain-final"/);
+  assert.match(markup, /theme-capability supported" data-theme-capability="background"/);
+  assert.match(markup, /theme-capability supported" data-theme-capability="icons"/);
+  assert.match(markup, /theme-capability fallback" data-theme-capability="background"/);
+  assert.match(markup, /theme-capability fallback" data-theme-capability="icons"/);
 });
 
 test("theme runtime keeps artwork on explicit home state only", async () => {
   const styles = await readFile(new URL("../theme-runtime.css", import.meta.url), "utf8");
   assert.match(styles, /data-autoto-theme/);
+  assert.match(styles, /data-theme-global-background="true"/);
   assert.match(styles, /data-theme-page="home-empty"/);
+  assert.match(styles, /:not\(\[data-background-mode="custom"\]\):not\(\[data-background-mode="none"\]\)\[data-theme-page="home-empty"\]/);
+  assert.match(styles, /data-theme-icon-slot="rail-home"/);
+  assert.match(styles, /data-theme-icon-slot="sidebar-conversation"/);
   assert.doesNotMatch(styles, /\.messages\.empty\s*\{[^}]*background-image/s);
   assert.match(styles, /prefers-reduced-transparency/);
   assert.match(styles, /forced-colors: active/);

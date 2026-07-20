@@ -244,6 +244,8 @@ test("project groups contain every conversation once and preserve recent orderin
   assert.doesNotMatch(projectContextHTML, /navigation-conversation-row nested active/);
   assert.match(projectContextHTML, /data-navigation-context="project"/);
   assert.match(html, /navigation-project-title"><span class="project-kind-badge">PROJECT<\/span><span class="project-name">Alpha<\/span><\/span>/);
+  assert.match(html, /navigation-project-row[^>]*title="Alpha"/);
+  assert.match(html, /navigation-conversation-row nested[^>]*title="Writer"/);
   assert.doesNotMatch(html, /project-agent-count|AGENT 2/);
   assert.match(html, /navigation-conversation-row nested[^\"]*status-idle/);
   assert.match(html, /data-agent-status="idle"/);

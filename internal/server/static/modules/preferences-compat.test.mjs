@@ -186,6 +186,7 @@ test("backup export uses Autoto format and import accepts legacy CodeHarbor form
       displayName: "Imported user",
       roleLabel: "Local developer",
       avatarInitials: "CH",
+      avatarDataUrl: "",
       gitName: "",
       gitEmail: "",
       workspaceLabel: "Autoto Local",
@@ -195,6 +196,23 @@ test("backup export uses Autoto format and import accepts legacy CodeHarbor form
     assert.equal(backup.kind, localPreferenceBackupKind);
     assert.ok(Object.keys(backup.preferences).every((key) => key.startsWith("autoto.")));
   });
+});
+
+test("profile settings expose compressed avatar upload controls and a safe preview", () => {
+  const controller = createLocalPreferencesSettingsController({
+    currentProfilePreferences: () => normalizeAccountProfile({
+      displayName: "Photo user",
+      avatarInitials: "PU",
+      avatarDataUrl: "data:image/jpeg;base64,AAAA",
+    }),
+    profileDisplayName: () => "Photo user",
+  });
+  const html = controller.renderProfileSettingsContent();
+  assert.match(html, /id="profileAvatarFile"[^>]*type="file"/);
+  assert.match(html, /accept="image\/jpeg,image\/png,image\/webp,image\/gif"/);
+  assert.match(html, /id="chooseProfileAvatarBtn"/);
+  assert.match(html, /id="removeProfileAvatarBtn"/);
+  assert.match(html, /class="profile-avatar-image" src="data:image\/jpeg;base64,AAAA"/);
 });
 
 test("v2 backup exports account snapshot and imports both v1 and v2 account fields through the service", async () => {
@@ -363,14 +381,19 @@ test("regional preferences default to auto and import legacy field names", () =>
 });
 
 test("appearance presets default to light and migrate version 2 and unversioned preferences", () => {
-  assert.equal(appearanceStyleVersion, 4);
+  assert.equal(appearanceStyleVersion, 5);
   assert.deepEqual(appearanceThemePresets, ["light", "dark", "cyber", "cream", "apple"]);
   assert.deepEqual(defaultAppearancePrefs, {
-    styleVersion: 4,
+    styleVersion: 5,
     themeRef: { kind: "preset", id: "light" },
     themePreset: "light",
     theme: "light",
     density: "comfortable",
+    backgroundMode: "theme",
+    backgroundUrl: "",
+    backgroundDim: 18,
+    backgroundPositionX: 50,
+    backgroundPositionY: 50,
     terminalDefaultOpen: false,
     showEventLog: true,
   });
@@ -470,11 +493,16 @@ test("appearance backup retains the normalized theme preset", () => {
     }));
 
     assert.deepEqual(JSON.parse(localStorage.getItem(appearancePrefsKey)), {
-      styleVersion: 4,
+      styleVersion: 5,
       themeRef: { kind: "preset", id: "apple" },
       themePreset: "apple",
       theme: "light",
       density: "compact",
+      backgroundMode: "theme",
+      backgroundUrl: "",
+      backgroundDim: 18,
+      backgroundPositionX: 50,
+      backgroundPositionY: 50,
       terminalDefaultOpen: false,
       showEventLog: true,
     });
@@ -500,6 +528,7 @@ test("appearance settings render a flat compact form with five accessible preset
   const settings = createLocalPreferencesSettingsController({
     currentAppearancePreferences: () => ({ ...defaultAppearancePrefs, themePreset: "apple" }),
     currentRegionalPreferences: () => ({ locale: "en-US", timezone: "auto" }),
+    backgroundManager: { snapshot: () => ({ background: { mode: "theme", url: "", dim: 18, positionX: 50, positionY: 50 } }) },
   });
   const markup = settings.renderAppearanceSettingsContent();
   const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
@@ -514,6 +543,11 @@ test("appearance settings render a flat compact form with five accessible preset
     assert.match(markup, new RegExp(`theme-preset-preview-${preset}`));
   }
   assert.match(markup, /theme-preset-preview-apple[\s\S]*?aria-checked="true"|aria-checked="true"[\s\S]*?theme-preset-preview-apple/);
+  assert.match(markup, /id="appearanceBackgroundFile"[^>]*accept="image\/jpeg,image\/png,image\/webp"/);
+  assert.match(markup, /id="appearanceBackgroundMode"/);
+  assert.match(markup, /id="appearanceBackgroundDim"[^>]*type="range"/);
+  assert.match(markup, /id="appearanceBackgroundPositionX"[^>]*type="range"/);
+  assert.match(markup, /id="appearanceBackgroundPositionY"[^>]*type="range"/);
   assert.match(styles, /data-theme-preset="cyber"[\s\S]*?--ws-primary: #a7ff32/);
   assert.match(styles, /data-theme-preset="cream"[\s\S]*?--ws-canvas: #fff9ee/);
   assert.match(styles, /data-theme-preset="apple"[\s\S]*?--ws-primary: #007aff/);

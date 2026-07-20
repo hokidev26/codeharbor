@@ -26,6 +26,7 @@ type turnSystemControls struct {
 	spec         *specSidecarCandidate
 	progress     *providers.Message
 	continuation *providers.Message
+	pipeline     *providers.Message
 }
 
 type specSidecarCandidate struct {
@@ -83,14 +84,18 @@ func silentProgressControlAllowed(agent db.Agent, run db.Run) bool {
 }
 
 func (controls turnSystemControls) requiredMessages() []providers.Message {
-	if controls.continuation == nil {
-		return nil
+	out := make([]providers.Message, 0, 2)
+	if controls.continuation != nil {
+		out = append(out, *controls.continuation)
 	}
-	return []providers.Message{*controls.continuation}
+	if controls.pipeline != nil {
+		out = append(out, *controls.pipeline)
+	}
+	return out
 }
 
 func (controls turnSystemControls) preferredMessages() []providers.Message {
-	out := make([]providers.Message, 0, 3)
+	out := make([]providers.Message, 0, 4)
 	if controls.spec != nil {
 		if message, ok := controls.spec.messageWithinTokenBudget(specSidecarMaxBytes); ok {
 			out = append(out, message)
@@ -101,6 +106,9 @@ func (controls turnSystemControls) preferredMessages() []providers.Message {
 	}
 	if controls.continuation != nil {
 		out = append(out, *controls.continuation)
+	}
+	if controls.pipeline != nil {
+		out = append(out, *controls.pipeline)
 	}
 	return out
 }
@@ -114,11 +122,9 @@ func fitTurnSystemControls(systemPrompt string, conversation []providers.Message
 		return nil, errorsContextBudget(limit, baseTokens)
 	}
 
-	var continuation []providers.Message
-	if controls.continuation != nil {
-		continuation = []providers.Message{*controls.continuation}
-		withContinuation := appendProviderMessages(conversation, continuation)
-		estimated := estimateRequestTokens(systemPrompt, withContinuation, toolSpecs)
+	required := controls.requiredMessages()
+	if len(required) > 0 {
+		estimated := estimateRequestTokens(systemPrompt, appendProviderMessages(conversation, required), toolSpecs)
 		if estimated > limit {
 			return nil, errorsContextBudget(limit, estimated)
 		}
@@ -127,15 +133,15 @@ func fitTurnSystemControls(systemPrompt string, conversation []providers.Message
 	var progress []providers.Message
 	if controls.progress != nil {
 		candidate := []providers.Message{*controls.progress}
-		candidate = append(candidate, continuation...)
+		candidate = append(candidate, required...)
 		if estimateRequestTokens(systemPrompt, appendProviderMessages(conversation, candidate), toolSpecs) <= limit {
 			progress = []providers.Message{*controls.progress}
 		}
 	}
 
-	withoutSpec := make([]providers.Message, 0, len(progress)+len(continuation))
+	withoutSpec := make([]providers.Message, 0, len(progress)+len(required))
 	withoutSpec = append(withoutSpec, progress...)
-	withoutSpec = append(withoutSpec, continuation...)
+	withoutSpec = append(withoutSpec, required...)
 	usedTokens := estimateRequestTokens(systemPrompt, appendProviderMessages(conversation, withoutSpec), toolSpecs)
 
 	var spec []providers.Message
@@ -145,10 +151,10 @@ func fitTurnSystemControls(systemPrompt string, conversation []providers.Message
 		}
 	}
 
-	fitted := make([]providers.Message, 0, len(spec)+len(progress)+len(continuation))
+	fitted := make([]providers.Message, 0, len(spec)+len(progress)+len(required))
 	fitted = append(fitted, spec...)
 	fitted = append(fitted, progress...)
-	fitted = append(fitted, continuation...)
+	fitted = append(fitted, required...)
 	finalTokens := estimateRequestTokens(systemPrompt, appendProviderMessages(conversation, fitted), toolSpecs)
 	if finalTokens > limit {
 		return nil, errorsContextBudget(limit, finalTokens)

@@ -109,6 +109,8 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"agent":                        cfg.Agent,
 		"agentModelSettingsEndpoint":   "/api/runtime/agent-model-settings",
 		"continuationSettingsEndpoint": "/api/runtime/continuation-settings",
+		"contextSettingsEndpoint":      "/api/runtime/context-settings",
+		"contextManagement":            cfg.ContextManagement,
 		"providers":                    providerResponses,
 		"runtimeSettings":              runtimeSettings,
 		"tierOrder":                    subscriptionTierOrderSnapshot(),

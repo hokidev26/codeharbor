@@ -10,6 +10,7 @@ import {
   isAgentToolActivity,
   normalizeAgentPlan,
   normalizeAgentTaskActivity,
+  normalizeMessageProfileIdentity,
   normalizeToolActivity,
   normalizeTurnUsage,
   renderAgentTaskActivityCardHTML,
@@ -152,6 +153,28 @@ test("chatMessagePresentation keeps user semantics while aligning messages left"
   assert.equal(persistedToolResult.normalizedRole, "tool");
 });
 
+test("message profile identity normalizes current profile fields with safe fallbacks", () => {
+  assert.deepEqual(normalizeMessageProfileIdentity({
+    displayName: "  ererer  ",
+    workspaceLabel: "Workspace",
+    avatarInitials: "xy",
+  }), {
+    displayName: "ererer",
+    avatarInitials: "XY",
+    avatarDataUrl: "",
+  });
+  assert.deepEqual(normalizeMessageProfileIdentity({ displayName: "", workspaceLabel: "Local space", avatarInitials: "" }), {
+    displayName: "Local space",
+    avatarInitials: "AT",
+    avatarDataUrl: "",
+  });
+  assert.deepEqual(normalizeMessageProfileIdentity(null), {
+    displayName: "Autoto User",
+    avatarInitials: "AT",
+    avatarDataUrl: "",
+  });
+});
+
 test("chat hydration batches message snapshots until the final forced render", () => {
   const deferred = renderSnapshot([{ role: "assistant", contentText: "ready" }], { chatHydrating: true });
   assert.equal(deferred.html, "");
@@ -228,23 +251,116 @@ test("tool activity lookup requires the stable run and tool identity across acti
   assert.equal(findToolActivityByIdentity([live, persisted], "run-1", "missing"), null);
 });
 
-test("message rendering aligns user, assistant, legacy, and streaming messages left", () => {
+test("message rendering aligns messages left and uses the current profile for user identities", () => {
   const { html, state } = renderSnapshot([
     { role: "user", contentText: "hello", createdAt: "2026-02-03T04:05:06Z" },
+    { role: "HUMAN", contentText: "human alias" },
     { role: "assistant", contentText: "reply" },
     { role: "tool", contentText: "legacy result" },
     { role: "assistant", contentText: "streaming", streaming: true },
-  ]);
+  ], {
+    profile: { displayName: "er<erer", workspaceLabel: "Workspace", avatarInitials: "xy" },
+  });
 
   assert.match(html, /class="message user chat-message chat-flow-item chat-flow-left" data-chat-alignment="left"/);
-  assert.equal((html.match(/data-chat-alignment="left" data-message-role=/g) || []).length, 4);
+  assert.equal((html.match(/data-chat-alignment="left" data-message-role=/g) || []).length, 5);
+  assert.match(html, /class="message user chat-message chat-flow-item chat-flow-left"[^>]*data-message-role="human"/);
   assert.match(html, /class="message assistant chat-message chat-flow-item chat-flow-left"[^>]*data-message-role="tool"/);
-  assert.match(html, /class="message-avatar" aria-hidden="true">U<\/span>/);
+  assert.equal((html.match(/data-user-profile-avatar>XY<\/span>/g) || []).length, 2);
+  assert.equal((html.match(/data-user-profile-name>er&lt;erer<\/span>/g) || []).length, 2);
+  assert.doesNotMatch(html, /er<erer/);
+  assert.match(html, /class="message-avatar" aria-hidden="true">A<\/span>/);
   assert.match(html, /<time class="message-time" datetime="2026-02-03T04:05:06Z" title="[^"]+">[^<]+<\/time>/);
   assert.ok(html.indexOf('class="message-meta"') < html.indexOf('class="message-head-actions"'));
   assert.ok(html.indexOf('class="message-head-actions"') < html.indexOf('class="message-time"'));
-  assert.equal((html.match(/data-copy-message=/g) || []).length, 4);
-  assert.deepEqual(state.messageCopyTexts, ["hello", "reply", "legacy result", "streaming"]);
+  assert.equal((html.match(/data-copy-message=/g) || []).length, 5);
+  assert.deepEqual(state.messageCopyTexts, ["hello", "human alias", "reply", "legacy result", "streaming"]);
+});
+
+test("message rendering uses a normalized profile JPEG when one is available", () => {
+  const { html } = renderSnapshot([{ role: "user", contentText: "photo" }], {
+    profile: { displayName: "Photo user", avatarInitials: "PU", avatarDataUrl: "data:image/jpeg;base64,AAAA" },
+  });
+  assert.match(html, /<img class="message-avatar-image" data-user-profile-avatar-image src="data:image\/jpeg;base64,AAAA" alt="" aria-hidden="true" \/>/);
+  assert.doesNotMatch(html, />PU<\/span>/);
+});
+
+test("profile identity refresh updates existing user nodes without rerendering the transcript", () => {
+  const previousDocument = globalThis.document;
+  const avatars = [{ textContent: "OLD" }, { textContent: "OLD" }];
+  const names = [{ textContent: "Old user" }, { textContent: "Old user" }];
+  const messagesElement = {
+    innerHTML: "preserved transcript",
+    querySelectorAll(selector) {
+      if (selector === "[data-user-profile-avatar]") return avatars;
+      if (selector === "[data-user-profile-name]") return names;
+      return [];
+    },
+  };
+  globalThis.document = {
+    getElementById(id) {
+      return id === "messages" ? messagesElement : null;
+    },
+  };
+  const state = {
+    agent: { id: "agent-1" },
+    profile: { displayName: "Next <User>", avatarInitials: "nu" },
+  };
+  try {
+    const controller = createChatRenderingController({
+      state,
+      attachmentIcon: () => "file",
+      attachmentKind: () => "file",
+      copyToClipboard: async () => true,
+      notifyTerminal: () => {},
+      selectedModelValue: () => "",
+      shortPath: (value) => value,
+      showError: () => {},
+      showToast: () => {},
+    });
+    assert.equal(controller.refreshUserMessageIdentity(), true);
+    assert.deepEqual(avatars.map((node) => node.textContent), ["NU", "NU"]);
+    assert.deepEqual(names.map((node) => node.textContent), ["Next <User>", "Next <User>"]);
+    assert.equal(messagesElement.innerHTML, "preserved transcript");
+    assert.equal(controller.refreshUserMessageIdentity(), false);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("profile identity refresh replaces existing avatar initials with the saved JPEG", () => {
+  const previousDocument = globalThis.document;
+  const avatar = { textContent: "OLD", innerHTML: "", querySelector: () => null };
+  const name = { textContent: "Old user" };
+  const messagesElement = {
+    innerHTML: "preserved transcript",
+    querySelectorAll(selector) {
+      if (selector === "[data-user-profile-avatar]") return [avatar];
+      if (selector === "[data-user-profile-name]") return [name];
+      return [];
+    },
+  };
+  globalThis.document = { getElementById: (id) => id === "messages" ? messagesElement : null };
+  try {
+    const state = { agent: { id: "agent-1" }, profile: { displayName: "Photo user", avatarInitials: "PU", avatarDataUrl: "data:image/jpeg;base64,AAAA" } };
+    const controller = createChatRenderingController({
+      state,
+      attachmentIcon: () => "file",
+      attachmentKind: () => "file",
+      copyToClipboard: async () => true,
+      notifyTerminal: () => {},
+      selectedModelValue: () => "",
+      shortPath: (value) => value,
+      showError: () => {},
+      showToast: () => {},
+    });
+    assert.equal(controller.refreshUserMessageIdentity(), true);
+    assert.match(avatar.innerHTML, /data-user-profile-avatar-image[^>]*data:image\/jpeg;base64,AAAA/);
+    assert.equal(name.textContent, "Photo user");
+    assert.equal(messagesElement.innerHTML, "preserved transcript");
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test("message correction editor exposes a neutral editing-state style hook", () => {
@@ -291,6 +407,74 @@ test("task reports, tool output, approvals, and errors expose left-aligned bound
   assert.match(html, /data-chat-report="tool-approval"/);
   assert.doesNotMatch(html, /<run error>/);
   assert.match(html, /&lt;run error&gt;/);
+});
+
+test("project error reviews surface localized provider API failures in a red alert", () => {
+  const failures = [{
+    id: "accounts-exhausted",
+    errorMessage: `POST "https://pixelstarrysky.xyz/v1/responses": 403 Forbidden {"code":"server_error","message":"All available accounts exhausted"}`,
+    expected: "模型 API 错误 403：上游可用账户已耗尽，请稍后重试或切换模型。",
+  }, {
+    id: "insufficient-balance",
+    errorMessage: "OpenAI API error 403: 账户余额不足，请充值后重试",
+    expected: "模型 API 错误 403：账户余额不足，请充值后重试。",
+  }];
+
+  for (const failure of failures) {
+    const { html } = renderSnapshot([], {
+      navigationSelectionKind: "project",
+      activeRunSummaryRunId: `run-${failure.id}`,
+      activeRunSummary: {
+        run: { id: `run-${failure.id}`, source: "manual", status: "error", errorMessage: failure.errorMessage },
+        toolCalls: [],
+        recentMessages: [],
+      },
+    });
+
+    assert.match(html, /data-chat-report="project-run-failure"/);
+    assert.match(html, /class="run-summary-alert run-summary-failure-alert" role="alert"/);
+    assert.match(html, /class="run-summary-failure-mark" aria-hidden="true">!<\/span>/);
+    assert.ok(html.includes(failure.expected));
+    assert.doesNotMatch(html, /run-summary-card|run-summary-metrics|run-summary-checkpoint|data-run-summary-copy|data-run-summary-refresh/);
+  }
+});
+
+test("project error reviews escape unknown provider error text", () => {
+  const hostile = `<img src=x onerror=boom>${"failure ".repeat(100)}`;
+  const { html } = renderSnapshot([], {
+    navigationSelectionKind: "project",
+    activeRunSummaryRunId: "run-hostile-error",
+    activeRunSummary: {
+      run: { id: "run-hostile-error", source: "manual", status: "failed", errorMessage: hostile },
+      toolCalls: [],
+      recentMessages: [],
+    },
+  });
+
+  assert.match(html, /run-summary-failure-message/);
+  assert.match(html, /&lt;img src=x onerror=boom&gt;/);
+  assert.doesNotMatch(html, /<img src=x|onerror="boom"/);
+});
+
+test("project failures with tool activity retain the full review and rollback controls", () => {
+  const tool = { agentId: "agent-1", runId: "run-tool-failure", toolUseId: "edit-1", toolName: "Edit", status: "completed" };
+  const { html } = renderSnapshot([], {
+    navigationSelectionKind: "project",
+    activeRunSummaryRunId: "run-tool-failure",
+    activeRunSummary: {
+      run: { id: "run-tool-failure", source: "manual", status: "error", errorMessage: "provider failed after tool activity", checkpointState: "none" },
+      toolCallCount: 1,
+      toolCalls: [tool],
+      recentMessages: [],
+    },
+    activeRunToolCallsRunId: "run-tool-failure",
+    activeRunToolCalls: [tool],
+  });
+
+  assert.match(html, /data-chat-report="run-summary"/);
+  assert.match(html, /run-summary-metrics/);
+  assert.match(html, /data-run-summary-rollback/);
+  assert.doesNotMatch(html, /data-chat-report="project-run-failure"/);
 });
 
 test("ordinary completed conversations without tools render no Run review", () => {
@@ -443,6 +627,9 @@ test("ordinary Run outcome copy is localized in Simplified Chinese, Traditional 
   assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "zh-CN"), /对话消息仍可查看/);
   assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "zh-TW"), /對話訊息仍可查看/);
   assert.match(chatRenderingExtraText("run.summaryUnavailableHint", {}, "en"), /Conversation messages are still available/);
+  assert.equal(chatRenderingExtraText("run.providerErrorWithStatus", { status: 403, message: "余额不足" }, "zh-CN"), "模型 API 错误 403：余额不足");
+  assert.equal(chatRenderingExtraText("run.providerErrorWithStatus", { status: 403, message: "餘額不足" }, "zh-TW"), "模型 API 錯誤 403：餘額不足");
+  assert.equal(chatRenderingExtraText("run.providerErrorWithStatus", { status: 403, message: "insufficient balance" }, "en"), "Model API error 403: insufficient balance");
 });
 
 test("plan cards render pending review data safely and react to live plan events", () => {

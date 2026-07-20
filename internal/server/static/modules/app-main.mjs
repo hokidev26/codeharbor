@@ -1,4 +1,4 @@
-import { createAccountPreferencesController } from "./account-preferences.mjs";
+import { createAccountPreferencesController } from "./account-preferences.mjs?v=profile-avatar-1";
 import { createAgentStreamController } from "./agent-stream.mjs";
 import { createAutomationControlController } from "./automation-control.mjs?v=nav-schedules-1";
 import { createArchiveSettingsController } from "./archive-settings.mjs?v=archive-settings-1";
@@ -6,7 +6,8 @@ import { createBackgroundTasksController } from "./background-tasks.mjs?v=subage
 import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1-project-context-1";
-import { createChatRenderingController, findToolActivityByIdentity, renderAgentTaskActivityCardHTML } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1-subagent-cards-1-message-lifecycle-1-subagent-incremental-1";
+import { createChatRenderingController, findToolActivityByIdentity, renderAgentTaskActivityCardHTML } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1-subagent-cards-1-message-lifecycle-1-subagent-incremental-1-profile-message-identity-1-profile-avatar-1-provider-errors-1-compact-run-error-1";
+import { createContextManagementController } from "./context-management.mjs?v=context-ring-2";
 import {
   addRecentConversation,
   buildNavigationView,
@@ -18,7 +19,7 @@ import {
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1-project-context-1-recent-sync-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1-project-context-1-recent-sync-1-dual-rail-collapse-1-compact-navigation-1-theme-icons-1";
 import {
   basename,
   canonicalLocalPath,
@@ -29,15 +30,15 @@ import {
 } from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
-import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1";
+import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1-context-ring-2-global-background-1-theme-v2-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1-settings-cleanup-1";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
 import { createGitWorkflowController } from "./git-workflow.mjs";
-import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1-autoto-themes-1";
+import { createLocalPreferencesSettingsController } from "./local-preferences-settings.mjs?v=settings-flat-1-apple-theme-1-autoto-themes-1-profile-avatar-1-global-background-1";
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1-model-configs-1-provider-reference-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1-model-configs-1-provider-reference-1-default-openai-responses-1-provider-draft-session-1";
 import {
   createOverviewDashboardController,
   overviewRailTarget,
@@ -47,11 +48,11 @@ import { createPageLifecycleController } from "./page-lifecycle.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
 import { createScheduleWorkspaceController } from "./schedule-workspace.mjs?v=schedule-workspace-1";
 import { createTaskWorkspaceController } from "./task-workspace.mjs?v=task-workspace-1";
-import { createThemeManager, setThemePageContext } from "./theme-manager.mjs?v=autoto-themes-1";
-import { createThemeSettingsController } from "./theme-settings.mjs?v=autoto-themes-1";
-import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=autoto-themes-1-schedule-workspace-1";
+import { createAppearanceBackgroundManager, createThemeManager, setThemePageContext } from "./theme-manager.mjs?v=autoto-themes-2-background-2-theme-v2-1";
+import { createThemeSettingsController } from "./theme-settings.mjs?v=autoto-themes-2-theme-v2-1";
+import { readLocalPreference, recentConversationsKey } from "./preferences-data.mjs?v=autoto-themes-1-schedule-workspace-1-global-background-1";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext, terminalAccessAllowed } from "./remote-access-capabilities.mjs";
-import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-2";
+import { createRemoteAccessSettingsController } from "./remote-access-settings.mjs?v=remote-control-full-4-remote-full-toggle-3-tunnel-busy-1";
 import { createSharedAPISettingsController } from "./shared-api-settings.mjs?v=shared-api-1-compact-layout-1";
 import { applyServerSkillsLoadResult, createSkillsPhaseBController, hydrateServerSkillSummaries, isOptimisticSkillConflict, loadServerSkillsWithFallback, normalizeSkillContext } from "./skills-bootstrap.mjs";
 import { api, onAPIAuthorizationFailure, webSocketURL } from "./runtime.mjs";
@@ -59,13 +60,13 @@ import { firstSettingsItemForCategory, groupSettingsItemsByLegacyCategory, legac
 import { settingsIconSVG, settingsItemByKey, settingsItems, settingsSections } from "./settings-data.mjs?v=users-panel-removed-1-shared-api-1-agent-admin-removed-1-archive-1-settings-icons-1-settings-cleanup-1";
 import { createSettingsHelpController } from "./settings-help.mjs?v=settings-help-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
-import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1";
+import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1-profile-avatar-1-dual-rail-collapse-1-global-background-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
 import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
 import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-2";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1-context-ring-2-dual-rail-collapse-1-compact-navigation-1-global-rail-2";
 import { createUsageHistoryController } from "./usage-history.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
@@ -102,6 +103,7 @@ const state = {
   navigationMenuTarget: null,
   navigationSelectionKind: "conversation",
   navigationTransitionTitle: "",
+  sessionSidebarLayout: "expanded",
   recentConversations: [],
   project: null,
   workline: null,
@@ -431,6 +433,7 @@ const {
   loadRunSummary,
   rememberToolApproval,
   rememberToolStarted,
+  refreshUserMessageIdentity,
   replacePendingApprovals,
   replacePlanState,
   scheduleMessageRefresh,
@@ -740,6 +743,27 @@ const {
   saveBackend,
 } = backendRegistry;
 
+const contextManagement = createContextManagementController({
+  request: api,
+  getAgent: () => state.agent,
+  onStatusChange: (contextStatus) => {
+    state.agentContext = contextStatus;
+    if (state.agent?.id && (!contextStatus.agentId || contextStatus.agentId === state.agent.id)) {
+      state.agent = { ...state.agent, prunedPercent: contextStatus.prunedPercent, pruneEnabled: contextStatus.autoPrune };
+    }
+  },
+  onAgentChange: (agent) => {
+    if (!agent?.id || state.agent?.id !== agent.id) return;
+    state.agent = agent;
+    state.worklineAgents = (state.worklineAgents || []).map((item) => item.id === agent.id ? agent : item);
+  },
+  showToast,
+  showError,
+  canManage: () => fullAccessAllowed(state),
+  translate: t,
+});
+contextManagement.bind();
+
 const uiShell = createUIShellController({
   state,
   clearSettingsSearchQuery,
@@ -750,9 +774,17 @@ const uiShell = createUIShellController({
   normalizedSettingsSearchQuery,
   openDirectoryChooser,
   openModelSettings: () => openSettingsModal("models"),
-  compactContext: compactCurrentAgentContext,
-  getContextStatus: () => state.agentContext,
+  manageContext: (options) => contextManagement.open(options),
+  getContextStatus: () => contextManagement.getStatus(),
   renderProjects,
+  onLayoutChange: ({ sessionSidebarMode = "expanded" } = {}) => {
+    const changed = state.sessionSidebarLayout !== sessionSidebarMode;
+    state.sessionSidebarLayout = sessionSidebarMode;
+    if (!changed) return;
+    const render = () => renderProjects();
+    if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(render);
+    else globalThis.setTimeout?.(render, 0);
+  },
   resizeTerminal,
   showError,
   translate: t,
@@ -787,6 +819,7 @@ const accountPreferences = createAccountPreferencesController({
   onChange: ({ snapshot }) => {
     state.profile = snapshot.profile;
     settingsPreferences?.applyProfilePreferences?.();
+    refreshUserMessageIdentity();
     renderModelOptions?.();
   },
 });
@@ -796,6 +829,7 @@ const themeManager = createThemeManager({
   showToast,
   translate: t,
 });
+const appearanceBackgroundManager = createAppearanceBackgroundManager({ api, showToast });
 themeManager.subscribe(() => {
   if (state.activeSettingsPanel === "appearance") refreshActiveSettingsPanel();
 });
@@ -822,6 +856,7 @@ const {
   codexProviderSummary,
   currentModelValue,
   currentProviderConfig,
+  discardProviderConsoleDraft,
   getPreferredModel,
   isCurrentModelConfigured,
   loadProviderAuthFiles,
@@ -916,6 +951,13 @@ settingsPreferences = createSettingsPreferencesController({
   appendTerminal,
   applyPrimaryMode: applyPrimaryWorkbench,
   applyThemePreference: (prefs) => themeManager.applyPreference(prefs),
+  applyBackgroundPreference: (prefs) => appearanceBackgroundManager.saveOptions({
+    mode: prefs.backgroundMode,
+    url: prefs.backgroundUrl,
+    dim: prefs.backgroundDim,
+    positionX: prefs.backgroundPositionX,
+    positionY: prefs.backgroundPositionY,
+  }),
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -1010,6 +1052,10 @@ themeManager.setPreferenceAdapter({
   currentAppearancePreferences,
   saveAppearancePreferences,
 });
+appearanceBackgroundManager.setPreferenceAdapter({
+  currentAppearancePreferences,
+  saveAppearancePreferences,
+});
 
 const themeSettings = createThemeSettingsController({
   themeManager,
@@ -1025,6 +1071,7 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   state,
   copyText,
   currentAppearancePreferences,
+  backgroundManager: appearanceBackgroundManager,
   currentNotificationPreferences,
   currentProfilePreferences,
   currentRegionalPreferences,
@@ -1041,6 +1088,7 @@ const localPreferencesSettings = createLocalPreferencesSettingsController({
   saveProfilePreferences,
   saveRegionalPreferences,
   saveSearchPreferences,
+  saveAppearancePreferences,
   searchPrefsExport,
   searchProviderLabel,
   renderThemeLibrarySection,
@@ -1971,6 +2019,7 @@ function renderPrimaryModeSidebar() {
   const scheduleMode = state.activeWorkbench === "schedules";
   const sidebar = $("sessionSidebar");
   const title = $("sessionSidebarTitle");
+  const compactTitle = $("sessionSidebarCompactTitle");
   const actions = $("sessionSidebarActions");
   const resizeHandle = $("sidebarResizeHandle");
   const searchToggle = $("projectSearchToggleBtn");
@@ -1992,6 +2041,16 @@ function renderPrimaryModeSidebar() {
 
   setTranslatedAttribute(sidebar, "aria-label", sidebarLabelKey);
   setTranslatedText(title, sidebarTitleKey);
+  if (compactTitle) {
+    compactTitle.removeAttribute("data-i18n");
+    compactTitle.textContent = scheduleMode
+      ? t("shell.nav.schedules")
+      : taskMode
+        ? t("workbench.sidebarTitle")
+        : state.navigationSelectionKind === "project"
+          ? String(state.project?.name || t("shell.sessionTitle"))
+          : String(state.agent?.title || state.project?.name || t("shell.sessionTitle"));
+  }
   setTranslatedAttribute(actions, "aria-label", sidebarActionsKey);
   setTranslatedAttribute(resizeHandle, "aria-label", scheduleMode ? "shell.resizeScheduleSidebar" : taskMode ? "workbench.resizeSidebar" : "shell.resizeSidebar");
   [searchToggle, mobileSearch].forEach((button) => {
@@ -2562,6 +2621,7 @@ function closeSettingsModal({ restoreWorkbench = true, restoreFocus = true } = {
     settingsHelp.close({ restoreFocus: false });
     remoteAccessSettings.consumeGeneratedPassword();
     sharedAPISettings.consumeOneTimeToken();
+    discardProviderConsoleDraft();
     $("settingsContentBody").textContent = "";
   }
   modal?.classList.add("hidden");
@@ -2880,6 +2940,7 @@ function focusSettingsSearchInput({ select = false } = {}) {
 
 function selectSettingsPanel(key) {
   const item = settingsItemByKey(key) || settingsItems[0];
+  if (state.activeSettingsPanel === "providers" && item.key !== "providers") discardProviderConsoleDraft();
   if ($("settingsModalTitle")) $("settingsModalTitle").textContent = isMobileSettingsViewport() ? item.label : t("settings.dialogTitle");
   if (isMobileSettingsViewport() && settingsModalOpen()) {
     state.settingsMobileViewport = true;
@@ -3751,7 +3812,9 @@ function renderProjects() {
   if (!el) return;
   const scheduleContext = state.activeWorkbench === "schedules";
   const taskContext = state.activeWorkbench === "workbench";
-  const effectiveNavigationMode = taskContext ? "projects" : state.navigationMode;
+  const compactSessionSidebar = state.sessionSidebarLayout === "compact";
+  const baseNavigationMode = taskContext ? "projects" : state.navigationMode;
+  const effectiveNavigationMode = !taskContext && compactSessionSidebar ? "all" : baseNavigationMode;
   renderPrimaryModeSidebar();
   if (scheduleContext) {
     el.innerHTML = scheduleWorkspace.renderNavigation(scheduleWorkspaceViewOptions());
@@ -3867,6 +3930,7 @@ function beginNavigationSelection(project, options = {}) {
   state.project = project || null;
   state.workline = null;
   state.agent = null;
+  contextManagement.reset(null);
   syncProjectOperationContext();
   state.workState = null;
   state.titleEditing = false;
@@ -4075,6 +4139,7 @@ async function enterAgent() {
   syncThemePageContext();
   closeConversationDetails();
   const agentId = state.agent.id;
+  contextManagement.setAgent(state.agent).catch(showError);
   state.navigationTransitionTitle = "";
   state.chatHydrating = true;
   const projectContext = syncProjectOperationContext();
@@ -4211,39 +4276,13 @@ function updateAgentStreamStatus(detail = {}) {
   renderWorkbenchShell();
 }
 
-function normalizeAgentContextStatus(value = {}) {
-  const messageCount = Math.max(0, Number(value?.messageCount) || 0);
-  const prunedPercent = Math.max(0, Math.min(100, Number(value?.prunedPercent) || 0));
-  return {
-    hasSummary: Boolean(value?.hasSummary),
-    prunedPercent,
-    messageCount,
-    canCompact: Boolean(value?.canCompact),
-    summaryModelConfigured: Boolean(value?.summaryModelConfigured),
-  };
-}
-
-async function compactCurrentAgentContext() {
-  const current = state.agent;
-  if (!current?.id) return;
-  const agentId = current.id;
-  const response = await api(`/api/agents/${encodeURIComponent(agentId)}/context/compact`, {
-    method: "POST",
-    body: JSON.stringify({ entityGeneration: current.entityGeneration }),
-  });
-  if (state.agent?.id !== agentId) return;
-  state.agentContext = normalizeAgentContextStatus(response?.context);
-  state.agent = { ...state.agent, prunedPercent: state.agentContext.prunedPercent };
-  showToast(t(response?.compacted ? "chat.contextCompactSuccess" : "chat.contextCompactNoop"), response?.compacted ? "success" : "warn");
-}
-
 async function applyAgentLiveSnapshot(snapshot, detail = {}) {
   const agentId = snapshot?.agent?.id || "";
   if (!agentId || state.agent?.id !== agentId) return;
   const nextAgent = snapshot.agent;
   const nextWorkState = normalizeWorkStateSnapshot(snapshot);
   state.agent = nextAgent;
-  state.agentContext = normalizeAgentContextStatus(snapshot.context);
+  contextManagement.applyStatus(snapshot.context || {}, { agentId });
   state.workState = nextWorkState;
   backgroundTasks.applySnapshot(snapshot, { agentId });
   if (detail.source === "initial") await executionNotifications.initial(snapshot, { agentId });
@@ -4288,6 +4327,18 @@ async function handleAgentStreamEvent(event) {
   await executionNotifications.live(event, { agentId });
   if (shouldLogAgentEvents()) appendTerminal(`[event] ${event.type}${event.text ? `: ${event.text}` : ""}\n`);
   applyPlanEvent(event);
+  if (event.type === "context.updated") {
+    const contextUpdate = event.data?.context || event.data?.status || event.data || {};
+    if (Number.isInteger(Number(contextUpdate.entityGeneration))) {
+      state.agent = {
+        ...state.agent,
+        entityGeneration: Number(contextUpdate.entityGeneration),
+        prunedPercent: Number(contextUpdate.prunedPercent) || state.agent?.prunedPercent || 0,
+        pruneEnabled: contextUpdate.pruneEnabled ?? state.agent?.pruneEnabled,
+      };
+    }
+    contextManagement.applyStatus(contextUpdate, { agentId, partial: true });
+  }
   const runId = event.data?.runId || "";
   const requestId = event.data?.requestId || "";
   const completedMessageEvents = ["message.created", "message.completed"];
@@ -4705,6 +4756,7 @@ window.addEventListener("autoto:auth-changed", () => {
   state.project = null;
   state.workline = null;
   state.agent = null;
+  contextManagement.reset(null);
   state.navigationSelectionKind = "conversation";
   state.workState = null;
   syncProjectOperationContext();
@@ -4798,6 +4850,13 @@ async function init() {
     state.promptHistory = loadPromptHistory();
     state.recentConversations = loadRecentConversations();
     applyAppearancePreferences({ applyTerminalDefault: true });
+    appearanceBackgroundManager.load().catch(() => appearanceBackgroundManager.apply({
+      mode: currentAppearancePreferences().backgroundMode,
+      url: currentAppearancePreferences().backgroundUrl,
+      dim: currentAppearancePreferences().backgroundDim,
+      positionX: currentAppearancePreferences().backgroundPositionX,
+      positionY: currentAppearancePreferences().backgroundPositionY,
+    }));
     themeManager.loadCatalog()
       .then(() => themeManager.applyPreference(currentAppearancePreferences(), { notifyMissing: false }))
       .catch(() => {});

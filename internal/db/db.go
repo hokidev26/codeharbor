@@ -143,6 +143,7 @@ type Agent struct {
 	ContextSummary         string `json:"-"`
 	PruneBoundaryMessageID string `json:"-"`
 	PrunedPercent          int    `json:"-"`
+	PruneEnabled           bool   `json:"pruneEnabled"`
 	CreatedAt              string `json:"createdAt"`
 	UpdatedAt              string `json:"updatedAt"`
 }
@@ -2618,17 +2619,18 @@ func (s *Store) MarkWorklineMerged(ctx context.Context, sourceWorklineID, target
 	return s.GetWorkline(ctx, sourceWorklineID)
 }
 
-const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(fast_mode,0), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(pinned,0), COALESCE(archived_at,''), COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), created_at, updated_at FROM agents`
+const agentSelectSQL = `SELECT id, COALESCE(workline_id,''), COALESCE(parent_agent_id,''), COALESCE(fork_message_id,''), COALESCE(inherit_mode,''), type, COALESCE(subagent_type,''), title, model, COALESCE(system_prompt,''), permission_mode, COALESCE(entity_generation,1), COALESCE(permission_generation,1), COALESCE(execution_generation,0), COALESCE(reasoning_effort,''), COALESCE(fast_mode,0), COALESCE(execution_device_id,'local'), status, plan_mode, COALESCE(pinned,0), COALESCE(archived_at,''), COALESCE(cwd,''), message_count, COALESCE(context_summary,''), COALESCE(prune_boundary_message_id,''), COALESCE(pruned_percent,0), COALESCE(prune_enabled,0), created_at, updated_at FROM agents`
 
 type agentScanner func(dest ...any) error
 
 func scanAgent(scan agentScanner) (Agent, error) {
 	var agent Agent
-	var fastMode, planMode, pinned int
-	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &fastMode, &agent.ExecutionDeviceID, &agent.Status, &planMode, &pinned, &agent.ArchivedAt, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &agent.CreatedAt, &agent.UpdatedAt)
+	var fastMode, planMode, pinned, pruneEnabled int
+	err := scan(&agent.ID, &agent.WorklineID, &agent.ParentAgentID, &agent.ForkMessageID, &agent.InheritMode, &agent.Type, &agent.SubagentType, &agent.Title, &agent.Model, &agent.SystemPrompt, &agent.PermissionMode, &agent.EntityGeneration, &agent.PermissionGeneration, &agent.ExecutionGeneration, &agent.ReasoningEffort, &fastMode, &agent.ExecutionDeviceID, &agent.Status, &planMode, &pinned, &agent.ArchivedAt, &agent.CWD, &agent.MessageCount, &agent.ContextSummary, &agent.PruneBoundaryMessageID, &agent.PrunedPercent, &pruneEnabled, &agent.CreatedAt, &agent.UpdatedAt)
 	agent.FastMode = fastMode != 0
 	agent.PlanMode = planMode != 0
 	agent.Pinned = pinned != 0
+	agent.PruneEnabled = pruneEnabled != 0
 	return agent, err
 }
 
@@ -2783,8 +2785,84 @@ func validAgentReasoningEffort(value string, allowEmpty bool) bool {
 
 func (s *Store) UpdateAgentContextSummary(ctx context.Context, id, summary, boundaryMessageID string, prunedPercent int) error {
 	now := Now()
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET context_summary = NULLIF(?, ''), prune_boundary_message_id = NULLIF(?, ''), pruned_percent = ?, prune_enabled = 1, updated_at = ? WHERE id = ?`, summary, boundaryMessageID, prunedPercent, now, id)
-	return err
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET context_summary = NULLIF(?, ''), prune_boundary_message_id = NULLIF(?, ''), pruned_percent = ?, updated_at = ? WHERE id = ?`, summary, boundaryMessageID, prunedPercent, now, id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) UpdateAgentPruneEnabled(ctx context.Context, id string, enabled bool, expectedEntityGeneration ...int64) (Agent, error) {
+	id = strings.TrimSpace(id)
+	if len(expectedEntityGeneration) > 1 {
+		return Agent{}, errors.New("expected entity generation accepts at most one value")
+	}
+	query := `UPDATE agents SET prune_enabled = ?, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ?`
+	args := []any{boolInt(enabled), Now(), id}
+	if len(expectedEntityGeneration) == 1 {
+		if expectedEntityGeneration[0] <= 0 {
+			return Agent{}, errors.New("expected entity generation must be positive")
+		}
+		query += ` AND entity_generation = ?`
+		args = append(args, expectedEntityGeneration[0])
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return Agent{}, sql.ErrNoRows
+		} else if err != nil {
+			return Agent{}, err
+		}
+		return Agent{}, fmt.Errorf("%w: agent settings changed", ErrConflict)
+	}
+	return s.GetAgent(ctx, id)
+}
+
+func (s *Store) ClearAgentContext(ctx context.Context, id string, expectedEntityGeneration int64, expectedLatestMessageID string) (Agent, error) {
+	id = strings.TrimSpace(id)
+	expectedLatestMessageID = strings.TrimSpace(expectedLatestMessageID)
+	if id == "" || expectedEntityGeneration <= 0 || expectedLatestMessageID == "" {
+		return Agent{}, errors.New("agent id, entity generation, and expected latest message id are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Agent{}, err
+	}
+	defer tx.Rollback()
+	var latest string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM agent_messages WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`, id).Scan(&latest); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Agent{}, fmt.Errorf("%w: agent has no messages", ErrConflict)
+		}
+		return Agent{}, err
+	}
+	if latest != expectedLatestMessageID {
+		return Agent{}, fmt.Errorf("%w: latest message changed", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET context_summary = NULL, prune_boundary_message_id = ?, pruned_percent = 100, entity_generation = entity_generation + 1, updated_at = ? WHERE id = ? AND entity_generation = ?`, latest, Now(), id, expectedEntityGeneration)
+	if err != nil {
+		return Agent{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Agent{}, err
+	} else if affected != 1 {
+		return Agent{}, fmt.Errorf("%w: agent settings changed", ErrConflict)
+	}
+	if err := tx.Commit(); err != nil {
+		return Agent{}, err
+	}
+	return s.GetAgent(ctx, id)
 }
 
 func (s *Store) UpdateAgentPermissionMode(ctx context.Context, id, mode string) (Agent, error) {

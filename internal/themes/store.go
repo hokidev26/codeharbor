@@ -62,6 +62,7 @@ type Theme struct {
 	PreviewURL    string             `json:"previewUrl,omitempty"`
 	Deletable     bool               `json:"deletable"`
 	Resources     []ResourceMetadata `json:"resources,omitempty"`
+	Capabilities  ThemeCapabilities  `json:"capabilities"`
 	Manifest      Manifest           `json:"-"`
 	Bundled       bool               `json:"-"`
 }
@@ -455,7 +456,7 @@ func newThemeMetadata(manifest Manifest, revision string, bundled bool, resource
 		ID: manifest.ID, Name: manifest.Name, Version: manifest.Version,
 		Description: manifest.Description, Author: manifest.Author, ColorScheme: manifest.ColorScheme,
 		Source: source, Revision: revision, Deletable: !bundled, Manifest: manifest,
-		Bundled: bundled, Resources: resources,
+		Capabilities: capabilitiesForManifest(manifest), Bundled: bundled, Resources: resources,
 		StylesheetURL: "/themes/" + manifest.ID + "/" + revision + "/theme.css",
 	}
 	if manifest.Preview != "" {
@@ -626,7 +627,17 @@ func readBoundedImage(reader io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-func validateImageBytes(resourcePath string, data []byte) (string, error) {
+// ImageDetails is the validated metadata shared by theme and appearance images.
+type ImageDetails struct {
+	ContentType string
+	Width       int
+	Height      int
+}
+
+// ValidateImageDetails validates an allowed PNG, JPEG, or WebP image and returns
+// its MIME type and dimensions. Both theme archives and appearance assets use
+// this entrypoint so they enforce identical byte, format, and pixel limits.
+func ValidateImageDetails(resourcePath string, data []byte) (ImageDetails, error) {
 	contentType := httpDetectContentType(data)
 	extension := strings.ToLower(filepath.Ext(resourcePath))
 	expected := ""
@@ -639,29 +650,39 @@ func validateImageBytes(resourcePath string, data []byte) (string, error) {
 		expected = "image/webp"
 	}
 	if expected == "" || contentType != expected {
-		return "", fmt.Errorf("theme resource %s content does not match its allowed image extension", resourcePath)
+		return ImageDetails{}, fmt.Errorf("theme resource %s content does not match its allowed image extension", resourcePath)
 	}
 	var width, height int
 	if expected == "image/webp" {
 		var err error
 		width, height, err = webPDimensions(data)
 		if err != nil {
-			return "", fmt.Errorf("theme resource %s is not a structurally valid WebP image: %w", resourcePath, err)
+			return ImageDetails{}, fmt.Errorf("theme resource %s is not a structurally valid WebP image: %w", resourcePath, err)
 		}
 	} else {
 		configuration, format, err := image.DecodeConfig(bytes.NewReader(data))
 		if err != nil || configuration.Width <= 0 || configuration.Height <= 0 {
-			return "", fmt.Errorf("theme resource %s is not a structurally valid image", resourcePath)
+			return ImageDetails{}, fmt.Errorf("theme resource %s is not a structurally valid image", resourcePath)
 		}
 		if (expected == "image/png" && format != "png") || (expected == "image/jpeg" && format != "jpeg") {
-			return "", fmt.Errorf("theme resource %s decoded format does not match its extension", resourcePath)
+			return ImageDetails{}, fmt.Errorf("theme resource %s decoded format does not match its extension", resourcePath)
 		}
 		width, height = configuration.Width, configuration.Height
 	}
 	if width > MaxImageDimension || height > MaxImageDimension || int64(width)*int64(height) > MaxImagePixels {
-		return "", fmt.Errorf("theme resource %s dimensions %dx%d exceed safe limits", resourcePath, width, height)
+		return ImageDetails{}, fmt.Errorf("theme resource %s dimensions %dx%d exceed safe limits", resourcePath, width, height)
 	}
-	return expected, nil
+	return ImageDetails{ContentType: expected, Width: width, Height: height}, nil
+}
+
+// ValidateImageBytes preserves the original MIME-only validation API.
+func ValidateImageBytes(resourcePath string, data []byte) (string, error) {
+	details, err := ValidateImageDetails(resourcePath, data)
+	return details.ContentType, err
+}
+
+func validateImageBytes(resourcePath string, data []byte) (string, error) {
+	return ValidateImageBytes(resourcePath, data)
 }
 
 func webPDimensions(data []byte) (int, int, error) {

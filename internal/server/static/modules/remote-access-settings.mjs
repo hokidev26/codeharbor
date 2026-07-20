@@ -1,5 +1,5 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
-import { t } from "./i18n.mjs?v=remote-control-full-1";
+import { t } from "./i18n.mjs?v=remote-control-full-3-remote-full-toggle-3";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext } from "./remote-access-capabilities.mjs";
 
 const endpoint = "/api/security/remote-access";
@@ -29,7 +29,7 @@ export function normalizeRemoteAccess(value = {}) {
     },
     policy: {
       allowFullAccess: Boolean(policy.allowFullAccess),
-      defaultMode: ["restricted", "full"].includes(textValue(policy.defaultMode)) ? textValue(policy.defaultMode) : "restricted",
+      defaultMode: Boolean(policy.allowFullAccess) ? "full" : "restricted",
       allowRemoteNativePicker: Boolean(policy.allowRemoteNativePicker),
       revision: Number.isSafeInteger(revision) && revision >= 1 ? revision : 0,
     },
@@ -78,10 +78,12 @@ export function isEnvironmentCredential(source) {
 export function policyPayload(access, draft, currentPassword = "") {
   const normalizedAccess = normalizeRemoteAccess(access);
   const normalizedDraft = objectValue(draft);
-  const defaultMode = normalizedDraft.defaultMode === "full" ? "full" : "restricted";
+  const allowFullAccess = normalizedDraft.allowFullAccess === undefined
+    ? normalizedDraft.defaultMode === "full"
+    : Boolean(normalizedDraft.allowFullAccess);
   const payload = {
-    allowFullAccess: defaultMode === "full",
-    defaultMode,
+    allowFullAccess,
+    defaultMode: allowFullAccess ? "full" : "restricted",
     allowRemoteNativePicker: Boolean(normalizedDraft.allowRemoteNativePicker),
     revision: normalizedAccess.policy.revision,
   };
@@ -247,6 +249,10 @@ export function createRemoteAccessSettingsController({
     return rt("local");
   }
 
+  function fullAccessStatusLabel(allowFullAccess) {
+    return rt(allowFullAccess ? "fullEnabledDefault" : "fullDisabled");
+  }
+
   function tunnelStatusLabel(status) {
     const labels = {
       idle: "tunnelIdle",
@@ -271,7 +277,7 @@ export function createRemoteAccessSettingsController({
           <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("temporaryTunnel"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("temporaryTunnelHint"))}</div></div><span class="settings-status-pill settings-badge ${active ? "ok" : tunnel.status === "error" ? "warn" : ""}">${escapeHtml(tunnelStatusLabel(tunnel.status))}</span></div>
           ${tunnel.error ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(tunnel.error)}</div>` : ""}
           ${tunnel.publicUrl ? `<div class="remote-access-tunnel-url"><a href="${escapeAttr(tunnel.publicUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(tunnel.publicUrl)}</a><button id="copyRemoteTunnelUrlBtn" class="settings-action-btn subtle" type="button">${escapeHtml(rt("copyTunnelUrl"))}</button></div>` : `<p class="settings-card-description">${escapeHtml(tunnel.available ? rt("tunnelStopped") : rt("tunnelUnavailableHint"))}</p>`}
-          <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(tunnel.available ? rt("tunnelAccessHint") : rt("tunnelInstallHint"))}</span><button id="${actionMethod}RemoteTunnelBtn" class="settings-action-btn ${active ? "subtle" : "primary"}" type="button" data-remote-tunnel-action="${actionMethod}" ${canManage && !busy ? "" : "disabled"}>${escapeHtml(busy ? tunnelStatusLabel(tunnel.status) : actionLabel)}</button></div>
+          <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(tunnel.available ? rt("tunnelAccessHint") : rt("tunnelInstallHint"))}</span><button id="${actionMethod}RemoteTunnelBtn" class="settings-action-btn remote-access-tunnel-action ${active ? "subtle" : "primary"}" type="button" data-remote-tunnel-action="${actionMethod}" data-remote-tunnel-busy-label="${escapeAttr(active ? rt("tunnelStopping") : rt("tunnelStarting"))}" ${canManage && !busy ? "" : "disabled"}>${escapeHtml(busy ? tunnelStatusLabel(tunnel.status) : actionLabel)}</button></div>
         </section>`;
   }
 
@@ -280,6 +286,9 @@ export function createRemoteAccessSettingsController({
     const environmentCredential = isEnvironmentCredential(value.credential.source);
     const fullAllowed = fullAccessAllowed(state);
     const securityAdminAllowed = value.capabilities.securityAdminAllowed;
+    const fullAccessEnabled = value.policy.allowFullAccess;
+    const canEditFullPolicy = fullAllowed && securityAdminAllowed;
+    const fullStatus = fullAccessStatusLabel(fullAccessEnabled);
     if (!state?.remoteAccess && state?.remoteAccessLoading) {
       return `<div class="settings-empty-card settings-empty-state">${escapeHtml(rt("loading"))}</div>`;
     }
@@ -306,15 +315,18 @@ export function createRemoteAccessSettingsController({
           <div class="settings-stat-card"><strong>${escapeHtml(value.credential.source)}</strong><span>${escapeHtml(rt("source"))}</span></div>
           <div class="settings-stat-card"><strong>${escapeHtml(value.session.expiresAt || rt("never"))}</strong><span>${escapeHtml(rt("expiresAt"))}</span></div>
         </div>
-        <section class="settings-provider-section settings-page-section settings-card">
-          <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("policy"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("allowFullAccessHint"))}</div></div></div>
+        <section class="settings-provider-section settings-page-section settings-card remote-access-policy-card">
+          <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("policy"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("policyDescription"))}</div></div></div>
           <form id="remoteAccessPolicyForm" class="settings-card-content remote-access-policy-form">
             <div class="settings-provider-form-grid settings-form-grid">
-              <label class="settings-form-field">${escapeHtml(rt("defaultMode"))}<select id="remoteAccessDefaultMode" class="settings-field" ${securityAdminAllowed ? "" : "disabled"}><option value="restricted" ${value.policy.defaultMode === "restricted" ? "selected" : ""}>${escapeHtml(rt("restricted"))}</option><option value="full" ${value.policy.defaultMode === "full" ? "selected" : ""} ${fullAllowed && securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("full"))}</option></select><small${fullAllowed ? " data-settings-help-copy" : ""}>${escapeHtml(fullAllowed ? rt("allowFullAccessHint") : rt("fullModeUnavailable"))}</small></label>
+              <div class="remote-access-full-access-card${fullAccessEnabled ? " is-on" : ""}" data-remote-full-card>
+                <div class="remote-access-full-access-copy"><strong>${escapeHtml(rt("allowFullAccess"))}</strong><small data-settings-help-copy>${escapeHtml(rt("allowFullAccessHint"))}</small><span class="remote-access-full-status ${fullAccessEnabled ? "ok" : "muted"}" data-remote-full-status>${escapeHtml(fullStatus)}</span></div>
+                <label class="remote-access-switch" title="${escapeAttr(rt("allowFullAccess"))}"><input id="remoteAccessAllowFullAccess" type="checkbox" role="switch" aria-checked="${fullAccessEnabled ? "true" : "false"}" ${fullAccessEnabled ? "checked" : ""} ${canEditFullPolicy ? "" : "disabled"} /><span class="remote-access-switch-track" aria-hidden="true"></span></label>
+              </div>
               <label class="settings-check-row"><input id="remoteAccessNativePicker" type="checkbox" ${value.policy.allowRemoteNativePicker ? "checked" : ""} ${securityAdminAllowed ? "" : "disabled"} /><span><strong>${escapeHtml(rt("nativePicker"))}</strong><small data-settings-help-copy>${escapeHtml(rt("nativePickerHint"))}</small></span></label>
               ${currentPasswordField("remoteAccessPolicyCurrentPassword")}
             </div>
-            <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(`${rt("revision")}: ${value.policy.revision || "—"}`)}</span><button class="settings-action-btn primary" type="submit" data-remote-policy-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("savePolicy"))}</button></div>
+            <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(`${rt("revision")}: ${value.policy.revision || "—"}`)} · ${escapeHtml(rt("policySaveHint"))}</span><button class="settings-action-btn primary" type="submit" data-remote-policy-submit ${securityAdminAllowed ? "" : "disabled"}>${escapeHtml(rt("savePolicy"))}</button></div>
           </form>
         </section>
         <section class="settings-provider-section settings-page-section settings-card">
@@ -340,9 +352,9 @@ export function createRemoteAccessSettingsController({
   }
 
   async function submitPolicy(form) {
-    const defaultMode = $("remoteAccessDefaultMode")?.value === "full" ? "full" : "restricted";
+    const allowFullAccess = Boolean($("remoteAccessAllowFullAccess")?.checked);
     await savePolicy({
-      defaultMode,
+      allowFullAccess,
       allowRemoteNativePicker: Boolean($("remoteAccessNativePicker")?.checked),
     }, $("remoteAccessPolicyCurrentPassword")?.value || "");
   }
@@ -362,8 +374,10 @@ export function createRemoteAccessSettingsController({
     const tunnelButton = $("startRemoteTunnelBtn") || $("stopRemoteTunnelBtn");
     tunnelButton?.addEventListener("click", async (event) => {
       const button = event.currentTarget;
-      const action = button.dataset.remoteTunnelAction === "stop" ? stopTunnel : startTunnel;
-      setButtonBusy(button, true);
+      const stopping = button.dataset.remoteTunnelAction === "stop";
+      const action = stopping ? stopTunnel : startTunnel;
+      const busyLabel = button.dataset.remoteTunnelBusyLabel || rt(stopping ? "tunnelStopping" : "tunnelStarting");
+      setButtonBusy(button, true, busyLabel);
       try {
         await action();
         showToast?.(rt(button.dataset.remoteTunnelAction === "stop" ? "tunnelStoppedToast" : "tunnelStartedToast"));
@@ -381,6 +395,18 @@ export function createRemoteAccessSettingsController({
         showToast?.(rt("tunnelUrlCopied"));
       } catch (err) {
         showError?.(err);
+      }
+    });
+    $("remoteAccessAllowFullAccess")?.addEventListener("change", (event) => {
+      const enabled = Boolean(event.currentTarget.checked);
+      event.currentTarget.setAttribute("aria-checked", enabled ? "true" : "false");
+      const card = document.querySelector?.("[data-remote-full-card]");
+      card?.classList.toggle("is-on", enabled);
+      const status = document.querySelector?.("[data-remote-full-status]");
+      if (status) {
+        status.textContent = fullAccessStatusLabel(enabled);
+        status.classList.toggle("ok", enabled);
+        status.classList.toggle("muted", !enabled);
       }
     });
     $("remoteAccessPolicyForm")?.addEventListener("submit", async (event) => {

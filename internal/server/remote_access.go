@@ -211,8 +211,7 @@ func (s *Server) verifyRemoteAccessPassword(password string) bool {
 }
 
 func configuredRemoteAccessMode(cfg config.Config) string {
-	mode := strings.ToLower(strings.TrimSpace(cfg.Security.DefaultRemoteAccessMode))
-	if mode == remoteAccessModeFull && cfg.Security.AllowRemoteFullAccess {
+	if cfg.Security.AllowRemoteFullAccess {
 		return remoteAccessModeFull
 	}
 	return remoteAccessModeRestricted
@@ -538,7 +537,7 @@ func (s *Server) getRemoteAccessSettings(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"credential":   map[string]any{"configured": configured, "source": source},
-		"policy":       map[string]any{"allowFullAccess": cfg.Security.AllowRemoteFullAccess, "defaultMode": cfg.Security.DefaultRemoteAccessMode, "allowRemoteNativePicker": cfg.Security.AllowRemoteNativePicker, "revision": normalizedCredentialRevision(cfg)},
+		"policy":       map[string]any{"allowFullAccess": cfg.Security.AllowRemoteFullAccess, "defaultMode": configuredRemoteAccessMode(cfg), "allowRemoteNativePicker": cfg.Security.AllowRemoteNativePicker, "revision": normalizedCredentialRevision(cfg)},
 		"session":      session,
 		"capabilities": s.capabilitiesForRequest(r),
 		"tunnel":       s.temporaryTunnelSnapshot(),
@@ -561,14 +560,9 @@ func (s *Server) updateRemoteAccessPolicy(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, message)
 		return
 	}
-	mode := strings.ToLower(strings.TrimSpace(req.DefaultMode))
-	if mode != remoteAccessModeRestricted && mode != remoteAccessModeFull {
-		writeError(w, http.StatusBadRequest, "defaultMode must be restricted or full")
-		return
-	}
-	if mode == remoteAccessModeFull && !*req.AllowFullAccess {
-		writeError(w, http.StatusBadRequest, "defaultMode full requires allowFullAccess")
-		return
+	mode := remoteAccessModeRestricted
+	if *req.AllowFullAccess {
+		mode = remoteAccessModeFull
 	}
 	current := s.configSnapshot()
 	if req.Revision != normalizedCredentialRevision(current) {

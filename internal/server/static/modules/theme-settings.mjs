@@ -1,5 +1,5 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
-import { t } from "./i18n.mjs";
+import { t } from "./i18n.mjs?v=global-background-1-theme-v2-1";
 
 function themeSourceLabel(theme) {
   return theme.source === "local" ? t("appearance.themeSourceLocal") : t("appearance.themeSourceBundled");
@@ -18,6 +18,7 @@ function themeCard(theme, active, snapshot) {
           <strong>${escapeHtml(theme.name)}</strong>
           <small>${escapeHtml(theme.description || t("appearance.themePackageDescriptionFallback"))}</small>
           <span class="theme-package-meta"><span>${escapeHtml(themeSourceLabel(theme))}</span>${theme.version ? `<span>v${escapeHtml(theme.version)}</span>` : ""}${theme.author ? `<span>${escapeHtml(theme.author)}</span>` : ""}</span>
+          <span class="theme-package-capabilities"><span class="theme-capability ${theme.capabilities?.background ? "supported" : "fallback"}" data-theme-capability="background">${escapeHtml(theme.capabilities?.background ? t("appearance.themeCapabilityBackground") : t("appearance.themeCapabilityBackgroundFallback"))}</span><span class="theme-capability ${theme.capabilities?.icons ? "supported" : "fallback"}" data-theme-capability="icons">${escapeHtml(theme.capabilities?.icons ? t("appearance.themeCapabilityIcons") : t("appearance.themeCapabilityIconsFallback"))}</span></span>
         </span>
       </button>
       ${theme.deletable ? `<button class="theme-package-delete" type="button" data-theme-delete="${escapeAttr(theme.id)}" title="${escapeAttr(t("appearance.themeDelete"))}" aria-label="${escapeAttr(t("appearance.themeDelete"))}" ${snapshot.importing || deleting ? "disabled" : ""}>${deleting ? "…" : "×"}</button>` : ""}

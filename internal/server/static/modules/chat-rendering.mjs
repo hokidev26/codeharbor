@@ -3,7 +3,8 @@ import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./forma
 import { t } from "./i18n.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
-import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1-i18n-shared-1-subagent-cards-1";
+import { normalizeAvatarDataUrl } from "./profile-avatar.mjs?v=profile-avatar-1";
+import { t as cr } from "./messages-chat-rendering-extra.mjs?v=plan-mode-1-i18n-shared-1-subagent-cards-1-provider-errors-1";
 
 const userMessageRoles = new Set(["user", "human"]);
 const maxTokenCount = 1_000_000_000;
@@ -64,6 +65,16 @@ export function chatMessagePresentation(message = {}) {
     alignment,
     timestampValue,
   };
+}
+
+export function normalizeMessageProfileIdentity(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const displayName = String(source.displayName || "").trim().slice(0, 80)
+    || String(source.workspaceLabel || "").trim().slice(0, 80)
+    || "Autoto User";
+  const avatarInitials = String(source.avatarInitials || "AT").trim().slice(0, 4).toUpperCase() || "AT";
+  const avatarDataUrl = normalizeAvatarDataUrl(source.avatarDataUrl);
+  return { displayName, avatarInitials, avatarDataUrl };
 }
 
 const messagePageLimit = 100;
@@ -899,6 +910,12 @@ export function createChatRenderingController({
   let messageLoadRequest = null;
   let olderMessagesRequest = null;
 
+  const currentUserMessageIdentity = () => normalizeMessageProfileIdentity(state.profile);
+
+  const profileAvatarHTML = (identity) => identity?.avatarDataUrl
+    ? `<img class="message-avatar-image" data-user-profile-avatar-image src="${escapeAttr(identity.avatarDataUrl)}" alt="" aria-hidden="true" />`
+    : escapeHtml(identity?.avatarInitials || "AT");
+
   const messageLifecycleIsCurrent = (agentId, generation) => (
     messageLifecycleGeneration === generation && state.agent?.id === agentId
   );
@@ -1226,9 +1243,16 @@ export function createChatRenderingController({
   function renderChatMessageHTML(message, index) {
     const presentation = chatMessagePresentation(message);
     const editing = Boolean(message.id && state.editingMessageId === message.id);
-    const avatarLabel = presentation.normalizedRole === "user"
-      ? "U"
-      : (presentation.normalizedRole === "assistant" ? "A" : (presentation.role.slice(0, 1).toUpperCase() || "•"));
+    const usesProfileIdentity = userMessageRoles.has(presentation.normalizedRole);
+    const profileIdentity = usesProfileIdentity ? currentUserMessageIdentity() : null;
+    const avatarLabel = presentation.normalizedRole === "assistant" ? "A" : (presentation.role.slice(0, 1).toUpperCase() || "•");
+    const avatarHTML = usesProfileIdentity ? profileAvatarHTML(profileIdentity) : escapeHtml(avatarLabel);
+    const roleLabel = profileIdentity?.displayName || presentation.role;
+    const profileAvatarAttr = usesProfileIdentity ? " data-user-profile-avatar" : "";
+    const correctionLabel = message.correctionOfMessageId ? " · 更正" : "";
+    const roleHTML = usesProfileIdentity
+      ? `<span data-user-profile-name>${escapeHtml(roleLabel)}</span>${correctionLabel}`
+      : `${escapeHtml(roleLabel)}${correctionLabel}`;
     const timeHTML = presentation.timestampValue
       ? `<time class="message-time" datetime="${escapeAttr(presentation.timestampValue)}" title="${escapeAttr(formatTimestamp(presentation.timestampValue))}">${escapeHtml(formatTimestamp(presentation.timestampValue, { timeOnly: true }))}</time>`
       : "";
@@ -1236,7 +1260,7 @@ export function createChatRenderingController({
     return `
       <div class="message ${presentation.roleClass}${editing ? " message-editing" : ""} chat-message chat-flow-item chat-flow-${presentation.alignment}" data-chat-alignment="${presentation.alignment}" data-message-role="${escapeAttr(presentation.normalizedRole)}">
         <div class="message-head">
-          <div class="message-meta"><span class="message-avatar" aria-hidden="true">${escapeHtml(avatarLabel)}</span><div class="message-role">${escapeHtml(presentation.role)}${message.correctionOfMessageId ? " · 更正" : ""}</div></div>
+          <div class="message-meta"><span class="message-avatar" aria-hidden="true"${profileAvatarAttr}>${avatarHTML}</span><div class="message-role">${roleHTML}</div></div>
           <div class="message-head-actions">${actions}</div>
           ${timeHTML}
         </div>
@@ -1244,6 +1268,31 @@ export function createChatRenderingController({
         ${presentation.normalizedRole === "assistant" ? renderPerformanceHTML(message.turnUsage) : ""}
       </div>
     `;
+  }
+
+  function refreshUserMessageIdentity() {
+    const root = $("messages");
+    if (!root) return false;
+    const identity = currentUserMessageIdentity();
+    let updated = false;
+    root.querySelectorAll("[data-user-profile-avatar]").forEach((node) => {
+      const image = node.querySelector?.("[data-user-profile-avatar-image]");
+      if (identity.avatarDataUrl) {
+        if (image?.getAttribute?.("src") === identity.avatarDataUrl) return;
+        node.innerHTML = profileAvatarHTML(identity);
+        updated = true;
+        return;
+      }
+      if (!image && node.textContent === identity.avatarInitials) return;
+      node.textContent = identity.avatarInitials;
+      updated = true;
+    });
+    root.querySelectorAll("[data-user-profile-name]").forEach((node) => {
+      if (node.textContent === identity.displayName) return;
+      node.textContent = identity.displayName;
+      updated = true;
+    });
+    return updated;
   }
 
   function renderLiveAssistantCard({ preserveView = false } = {}) {
@@ -1520,11 +1569,29 @@ export function createChatRenderingController({
     }
     const toolCalls = activeRunToolCallList(summary, runId);
     if (!isProjectRunReview(run)) return renderConversationRunOutcomeHTML(run, runId, toolCalls);
+    if (isCompactProjectFailure(summary, run, toolCalls)) return renderCompactProjectFailureHTML(run, runId);
     return renderProjectRunReviewHTML(summary, run, runId, toolCalls);
   }
 
   function isProjectRunReview(run) {
     return state.navigationSelectionKind === "project" && String(run?.source || "").trim() !== "conversation";
+  }
+
+  function isCompactProjectFailure(summary, run, toolCalls) {
+    const status = String(run?.status || "").trim().toLowerCase();
+    const errorMessage = String(run?.errorMessage || "").trim();
+    const reportedToolCount = Math.max(0, Number(summary?.toolCallCount || 0));
+    return (status === "error" || status === "failed")
+      && Boolean(errorMessage)
+      && Math.max(reportedToolCount, toolCalls.length) === 0;
+  }
+
+  function renderCompactProjectFailureHTML(run, runId) {
+    return `
+      <section class="project-run-failure chat-flow-item chat-flow-left ${escapeAttr(runStatusClass(run?.status || "error"))}" data-chat-alignment="left" data-chat-report="project-run-failure" data-run-outcome-card data-run-id="${escapeAttr(runId)}">
+        ${renderRunFailureAlertHTML(run)}
+      </section>
+    `;
   }
 
   function activeRunToolCallList(summary, runId) {
@@ -1549,6 +1616,7 @@ export function createChatRenderingController({
           <span class="run-summary-status">${escapeHtml(status)}</span>
         </div>
         ${state.runSummaryError ? `<div class="run-summary-alert">${escapeHtml(state.runSummaryError)}</div>` : ""}
+        ${renderRunFailureAlertHTML(run)}
         ${renderRunCheckpoint(run, checkpoint)}
         <div class="run-summary-metrics">
           ${renderRunMetric(cr("run.metrics.messages"), summary?.messageCount)}
@@ -1572,6 +1640,70 @@ export function createChatRenderingController({
     `;
   }
 
+  function renderRunFailureAlertHTML(run) {
+    const status = String(run?.status || "").trim().toLowerCase();
+    if (status !== "error" && status !== "failed") return "";
+    return `
+      <div class="run-summary-alert run-summary-failure-alert" role="alert">
+        <span class="run-summary-failure-mark" aria-hidden="true">!</span>
+        <span class="run-summary-failure-message">${escapeHtml(runFailureMessage(run))}</span>
+      </div>
+    `;
+  }
+
+  function runFailureMessage(run) {
+    const raw = String(run?.errorMessage || "").trim();
+    if (!raw) return cr("run.conversationErrorFallback");
+    const normalized = raw.replace(/\s+/g, " ");
+    const detail = extractProviderErrorDetail(normalized);
+    const haystack = `${normalized} ${detail}`.toLowerCase();
+    let message = detail;
+    if (haystack.includes("all available accounts exhausted") || haystack.includes("no available accounts")) {
+      message = cr("run.providerErrorAccountsExhausted");
+    } else if (
+      haystack.includes("账户余额不足")
+      || haystack.includes("帳戶餘額不足")
+      || haystack.includes("余额不足")
+      || haystack.includes("餘額不足")
+      || /insufficient (?:account )?(?:balance|credits?)/.test(haystack)
+    ) {
+      message = cr("run.providerErrorInsufficientBalance");
+    } else if (
+      haystack.includes("rate limit")
+      || haystack.includes("too many requests")
+      || haystack.includes("请求过于频繁")
+      || haystack.includes("請求過於頻繁")
+    ) {
+      message = cr("run.providerErrorRateLimited");
+    } else if (
+      /(?:model.{0,80}(?:not found|does not exist|unsupported|unavailable)|(?:unsupported|unknown) model|模型.{0,24}(?:不存在|不可用|無法使用|无法使用|不支持|不支援))/.test(haystack)
+    ) {
+      message = cr("run.providerErrorModelUnavailable");
+    }
+    const httpStatus = normalized.match(/\b([45]\d{2})\b/)?.[1] || "";
+    const bounded = compactText(message || normalized, 600);
+    return httpStatus ? cr("run.providerErrorWithStatus", { status: httpStatus, message: bounded }) : bounded;
+  }
+
+  function extractProviderErrorDetail(value) {
+    const text = String(value || "").trim();
+    const jsonStart = text.indexOf("{");
+    if (jsonStart >= 0) {
+      try {
+        const payload = JSON.parse(text.slice(jsonStart));
+        const nestedError = payload?.error;
+        const message = typeof nestedError === "string"
+          ? nestedError
+          : (nestedError?.message || payload?.message || payload?.detail);
+        if (typeof message === "string" && message.trim()) return message.trim();
+      } catch {
+        // Keep the original provider text when the trailing payload is not valid JSON.
+      }
+    }
+    const prefixed = text.match(/\b(?:openai\s+)?api\s+error(?:\s+[45]\d{2})?\s*:\s*(.+)$/i);
+    return prefixed?.[1]?.trim() || text;
+  }
+
   function renderConversationRunOutcomeHTML(run, runId, toolCalls) {
     const status = String(run?.status || "unknown").trim().toLowerCase();
     if (status === "superseded") return "";
@@ -1590,7 +1722,7 @@ export function createChatRenderingController({
 
   function renderConversationRunNoticeHTML(run, status) {
     if (status === "error" || status === "failed") {
-      const message = String(run?.errorMessage || "").trim() || cr("run.conversationErrorFallback");
+      const message = runFailureMessage(run);
       return `
         <div class="conversation-run-notice error" role="status">
           <strong>${escapeHtml(cr("run.conversationErrorTitle"))}</strong>
@@ -2564,6 +2696,7 @@ export function createChatRenderingController({
     performPlanAction,
     rememberToolApproval,
     rememberToolStarted,
+    refreshUserMessageIdentity,
     replacePendingApprovals,
     replacePlanState,
     scheduleMessageRefresh,

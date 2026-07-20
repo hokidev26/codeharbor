@@ -22,13 +22,13 @@ func (r *Runner) toolOutputPipelineActive(agentID, runID string) bool {
 	return r != nil && r.toolOutputPipeline != nil && r.toolOutputPipeline.IsActive(toolOutputPipelineScope(agentID, runID))
 }
 
-func (r *Runner) appendToolOutputPipelineControl(messages []providers.Message, agentID, runID string) []providers.Message {
+func (r *Runner) toolOutputPipelineControl(agentID, runID string) *providers.Message {
 	if !r.toolOutputPipelineActive(agentID, runID) {
-		return messages
+		return nil
 	}
 	text := "SERVER TOOL OUTPUT PIPELINE CONTROL (trusted): A tool output pipeline is active for this Run. Before giving a final answer, call EndPipeline to retrieve the filtered captures, or call EndPipeline with discard=true if none are needed. Do not answer from previews alone."
 	message := providers.Message{Role: "system", Content: text, Blocks: []providers.ContentBlock{{Type: "text", Text: text, Kind: "server_tool_output_pipeline_control"}}}
-	return append(messages, message)
+	return &message
 }
 
 func (r *Runner) closeToolOutputPipelineRun(agentID, runID string) {

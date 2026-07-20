@@ -487,8 +487,8 @@ function renderProject(project, activeProjectId, options = {}) {
   const stateMeta = navigationStateMarkup({ pinned: project.pinned, archivedAt: project.archivedAt });
   const icon = `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <div class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}${stateClass}" role="button" tabindex="0" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-kind="project" data-navigation-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "project"}">
-      <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
+    <div class="navigation-conversation-row navigation-project-row ${options.taskContext ? "task-context " : ""}${active ? "active " : ""}project-card ${stateClass}" role="button" tabindex="0" title="${escapeNavigationHtml(project.name)}" data-project-id="${escapeNavigationHtml(project.id)}" data-navigation-kind="project" data-navigation-id="${escapeNavigationHtml(project.id)}" data-navigation-context="${options.taskContext ? "tasks" : "project"}">
+      <span class="navigation-agent-icon theme-icon-slot" data-theme-icon-slot="sidebar-project" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title navigation-project-title"><span class="project-kind-badge">PROJECT</span><span class="project-name">${escapeNavigationHtml(project.name)}</span>${stateMeta}</span>
         <span class="navigation-conversation-meta project-path" title="${escapeNavigationHtml(path)}">${escapeNavigationHtml(displayPath)}</span>
@@ -518,8 +518,8 @@ function renderConversation(conversation, activeAgentId, nested = false, options
     ? `<svg viewBox="0 0 20 20"><circle cx="10" cy="6.5" r="3"></circle><path d="M4.5 17c.7-3.5 2.5-5.2 5.5-5.2s4.8 1.7 5.5 5.2"></path></svg>`
     : `<svg viewBox="0 0 20 20"><path d="M5 4.5h10a2 2 0 0 1 2 2V12a2 2 0 0 1-2 2H9l-4 2.5V14a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"></path></svg>`;
   return `
-    <div class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass} ${stateClass}" role="button" tabindex="0" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-navigation-kind="conversation" data-navigation-id="${escapeNavigationHtml(conversation.agentId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : conversation.standalone ? "conversation" : "project"}" data-standalone-conversation="${conversation.standalone ? "true" : "false"}">
-      <span class="navigation-agent-icon" aria-hidden="true">${icon}</span>
+    <div class="navigation-conversation-row ${nested ? "nested " : ""}${taskContext ? "task-context " : ""}${active ? "active " : ""}status-${statusClass} ${stateClass}" role="button" tabindex="0" title="${escapeNavigationHtml(conversation.agentTitle)}" data-navigation-target="${escapeNavigationHtml(conversation.targetId)}" data-navigation-kind="conversation" data-navigation-id="${escapeNavigationHtml(conversation.agentId)}" data-agent-status="${escapeNavigationHtml(conversation.agentStatus || "idle")}" data-navigation-context="${taskContext ? "tasks" : conversation.standalone ? "conversation" : "project"}" data-standalone-conversation="${conversation.standalone ? "true" : "false"}">
+      <span class="navigation-agent-icon theme-icon-slot" data-theme-icon-slot="sidebar-conversation" aria-hidden="true">${icon}</span>
       <span class="navigation-conversation-main">
         <span class="navigation-conversation-title"><span class="navigation-title-text">${escapeNavigationHtml(conversation.agentTitle)}</span>${stateMeta}</span>
         <span class="navigation-conversation-meta" title="${escapeNavigationHtml(meta)}">${escapeNavigationHtml(meta)}</span>

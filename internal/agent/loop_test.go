@@ -1222,7 +1222,7 @@ func TestRunnerSummarizesOldContextWithLocalFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.ContextSummary == "" || updated.PruneBoundaryMessageID != firstMessages[3].ID || updated.PrunedPercent == 0 {
+	if updated.ContextSummary == "" || updated.PruneBoundaryMessageID != firstMessages[9].ID || updated.PrunedPercent == 0 {
 		t.Fatalf("unexpected stored summary state: %+v", updated)
 	}
 }
@@ -1337,25 +1337,26 @@ func TestCompactConversationForBudgetBoundsSummaryAndToolPayloads(t *testing.T) 
 	}
 }
 
-func TestProviderMessagesCompactOnlyOldToolResults(t *testing.T) {
+func TestProviderMessagesProgressivelyPruneOnlyOldToolResults(t *testing.T) {
 	longOutput := "tool output " + strings.Repeat("very long ", 100)
 	oldBlocks := mustJSON([]providers.ContentBlock{{Type: "tool_result", ToolUseID: "old-tool", ToolName: "Read", Output: longOutput}})
 	recentBlocks := mustJSON([]providers.ContentBlock{{Type: "tool_result", ToolUseID: "recent-tool", ToolName: "Read", Output: "fresh output"}})
-	messages := []db.Message{{ID: "old", Role: "user", ParentToolID: "old-tool", ContentText: "old result", ContentJSON: oldBlocks}}
-	for i := 0; i < contextKeepRecentMessages-1; i++ {
-		messages = append(messages, db.Message{ID: string(rune('a' + i)), Role: "user", ContentText: "recent filler"})
+	messages := []db.Message{
+		{ID: "u1", Role: "user", ContentText: "old prompt"},
+		{ID: "old", Role: "user", ParentToolID: "old-tool", ContentText: "old result", ContentJSON: oldBlocks},
+		{ID: "u2", Role: "user", ContentText: "recent prompt"},
+		{ID: "recent", Role: "user", ParentToolID: "recent-tool", ContentText: "recent result", ContentJSON: recentBlocks},
 	}
-	messages = append(messages, db.Message{ID: "recent", Role: "user", ParentToolID: "recent-tool", ContentText: "recent result", ContentJSON: recentBlocks})
 
-	providerMessages := providerMessagesForContext(db.Agent{}, messages)
-	oldOutput := toolResultOutput(providerMessages, "old-tool")
-	if strings.Contains(oldOutput, "very long") || oldOutput != "[Tool Read executed; output omitted]" {
-		t.Fatalf("expected old tool output to be compacted, got %q", oldOutput)
+	providerMessages, eligible := providerMessagesForContextPlan(db.Agent{}, messages, 1)
+	if strings.Contains(toolResultOutput(providerMessages, "old-tool"), "very long") == false {
+		t.Fatalf("raw context should preserve old tool output before pruning")
 	}
-	if strings.Contains(providerMessages[0].Content, "very long") {
-		t.Fatalf("expected compacted message content to omit old tool output, got %q", providerMessages[0].Content)
+	pruned := progressivelyPruneContextToolPayloads(providerMessages, eligible, config.ContextManagementConfig{CompactKeepTurns: 1, MinPrunePercent: 30, MaxPrunePercent: 80}, 0)
+	if got := toolResultOutput(pruned, "old-tool"); got != "[Tool Read executed; output omitted]" {
+		t.Fatalf("expected old tool output to be compacted, got %q", got)
 	}
-	if got := toolResultOutput(providerMessages, "recent-tool"); got != "fresh output" {
+	if got := toolResultOutput(pruned, "recent-tool"); got != "fresh output" {
 		t.Fatalf("expected recent tool output to stay intact, got %q", got)
 	}
 }

@@ -1,11 +1,13 @@
 import { $ } from "./dom.mjs";
-import { applyDocumentLocale, applyStaticTranslations, currentUILocale } from "./i18n.mjs";
+import { normalizeAvatarDataUrl } from "./profile-avatar.mjs?v=profile-avatar-1";
+import { applyDocumentLocale, applyStaticTranslations, currentUILocale } from "./i18n.mjs?v=global-background-1-theme-v2-1";
 import { setRegionalPreferences } from "./locale-registry.mjs";
 import {
   accountPreferenceStorageKeys,
   appearancePrefsKey,
   appearanceStyleVersion,
   appearanceThemeForRef,
+  normalizeAppearanceBackground,
   normalizeAppearanceThemePreset,
   normalizeAppearanceThemeRef,
   chatDraftsKey,
@@ -39,7 +41,7 @@ import {
   searchPrefsKey,
   skillsPrefsKey,
   terminalPrefsKey,
-} from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1-schedule-workspace-1";
+} from "./preferences-data.mjs?v=apple-theme-1-autoto-themes-1-schedule-workspace-1-global-background-1";
 import { preferencesMessage } from "./messages-preferences.mjs";
 
 export function createSettingsPreferencesController({
@@ -49,6 +51,7 @@ export function createSettingsPreferencesController({
   appendTerminal,
   applyPrimaryMode,
   applyThemePreference,
+  applyBackgroundPreference,
   loadChatDrafts,
   loadPromptHistory,
   loadTerminalPreferences,
@@ -94,10 +97,11 @@ export function createSettingsPreferencesController({
     const displayName = String(value.displayName || "").trim().slice(0, 80);
     const roleLabel = String(value.roleLabel || defaultProfilePrefs.roleLabel).trim().slice(0, 80) || defaultProfilePrefs.roleLabel;
     const avatarInitials = String(value.avatarInitials || defaultProfilePrefs.avatarInitials).trim().slice(0, 4).toUpperCase() || defaultProfilePrefs.avatarInitials;
+    const avatarDataUrl = normalizeAvatarDataUrl(value.avatarDataUrl);
     const gitName = String(value.gitName || "").trim().slice(0, 120);
     const gitEmail = String(value.gitEmail || "").trim().slice(0, 160);
     const workspaceLabel = String(value.workspaceLabel || defaultProfilePrefs.workspaceLabel).trim().slice(0, 80) || defaultProfilePrefs.workspaceLabel;
-    return { displayName, roleLabel, avatarInitials, gitName, gitEmail, workspaceLabel };
+    return { displayName, roleLabel, avatarInitials, avatarDataUrl, gitName, gitEmail, workspaceLabel };
   }
 
   function currentProfilePreferences() {
@@ -138,6 +142,7 @@ export function createSettingsPreferencesController({
       : "Autoto";
     const displayName = profileDisplayName();
     const avatar = $("sidebarAvatar");
+    const globalRailAvatar = $("globalRailAvatar");
     const accountName = $("sidebarAccountName");
     const menuName = $("sidebarMenuProfileName");
     const menuMeta = $("sidebarMenuProfileMeta");
@@ -146,16 +151,31 @@ export function createSettingsPreferencesController({
     const settingsMeta = $("settingsIdentityMeta");
     const mobileAvatar = $("mobileSidebarAvatar");
     const mobileName = $("mobileSidebarAccountName");
-    if (avatar) avatar.textContent = profile.avatarInitials;
+    [avatar, globalRailAvatar, settingsAvatar, mobileAvatar].forEach((node) => applyAvatarNode(node, profile));
     if (accountName) accountName.textContent = displayName;
     if (menuName) menuName.textContent = displayName;
     if (menuMeta) menuMeta.textContent = profile.roleLabel || pt("settings.localWorkspace");
-    if (settingsAvatar) settingsAvatar.textContent = profile.avatarInitials;
     if (settingsName) settingsName.textContent = displayName;
     if (settingsMeta) settingsMeta.textContent = profile.roleLabel || pt("settings.localWorkspace");
-    if (mobileAvatar) mobileAvatar.textContent = profile.avatarInitials;
     if (mobileName) mobileName.textContent = displayName;
     updateSidebarAccountSummary();
+  }
+
+  function applyAvatarNode(node, profile) {
+    if (!node) return;
+    const dataUrl = normalizeAvatarDataUrl(profile?.avatarDataUrl);
+    if (dataUrl && typeof globalThis.document?.createElement === "function") {
+      const image = globalThis.document.createElement("img");
+      image.src = dataUrl;
+      image.alt = "";
+      image.className = "profile-avatar-image";
+      image.setAttribute("aria-hidden", "true");
+      node.replaceChildren?.(image);
+      if (!node.replaceChildren) node.innerHTML = "";
+      if (!node.replaceChildren) node.appendChild?.(image);
+      return;
+    }
+    node.textContent = profile?.avatarInitials || defaultProfilePrefs.avatarInitials;
   }
 
   function profileDisplayName() {
@@ -543,12 +563,18 @@ export function createSettingsPreferencesController({
       ? themeRef.id
       : (requestedPreset || themeRef.colorScheme || defaultAppearancePrefs.themePreset);
     const density = ["comfortable", "compact"].includes(value.density) ? value.density : defaultAppearancePrefs.density;
+    const background = normalizeAppearanceBackground({ ...defaultAppearancePrefs, ...value });
     return {
       styleVersion: appearanceStyleVersion,
       themeRef,
       themePreset,
       theme: appearanceThemeForRef(themeRef, themePreset),
       density,
+      backgroundMode: background.mode,
+      backgroundUrl: background.url,
+      backgroundDim: background.dim,
+      backgroundPositionX: background.positionX,
+      backgroundPositionY: background.positionY,
       terminalDefaultOpen: value.terminalDefaultOpen !== undefined ? Boolean(value.terminalDefaultOpen) : defaultAppearancePrefs.terminalDefaultOpen,
       showEventLog: value.showEventLog !== undefined ? Boolean(value.showEventLog) : defaultAppearancePrefs.showEventLog,
     };
@@ -582,6 +608,8 @@ export function createSettingsPreferencesController({
     document.body.classList.toggle("ui-density-comfortable", prefs.density !== "compact");
     const themeResult = applyThemePreference?.(prefs);
     themeResult?.catch?.(() => {});
+    const backgroundResult = applyBackgroundPreference?.(prefs);
+    backgroundResult?.catch?.(() => {});
     updateGlobalThemeToggle?.();
     if (applyTerminalDefault && $("appShell")) {
       toggleTerminal?.(!prefs.terminalDefaultOpen);

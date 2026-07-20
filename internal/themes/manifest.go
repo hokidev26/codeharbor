@@ -17,6 +17,7 @@ import (
 
 const (
 	SchemaVersionV1  = 1
+	SchemaVersionV2  = 2
 	ManifestFilename = "manifest.json"
 	LicenseFilename  = "LICENSE.txt"
 
@@ -41,19 +42,28 @@ const (
 	ShadowStrong = "strong"
 )
 
-// Manifest is the schemaVersion=1 theme description.
+// Icon slots are deliberately fixed so a theme cannot invent arbitrary CSS
+// selectors or replace security-sensitive UI affordances.
+var AllowedIconSlots = []string{
+	"brand", "rail-home", "rail-conversation", "rail-schedules", "rail-settings", "rail-collapse",
+	"sidebar-search", "sidebar-create", "sidebar-refresh", "sidebar-project", "sidebar-conversation", "sidebar-collapse",
+}
+
+// Manifest is the schemaVersion=1 or schemaVersion=2 theme description.
 type Manifest struct {
-	SchemaVersion  int             `json:"schemaVersion"`
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Version        string          `json:"version"`
-	Description    string          `json:"description"`
-	Author         string          `json:"author"`
-	ColorScheme    string          `json:"colorScheme"`
-	Tokens         Tokens          `json:"tokens"`
-	Materials      Materials       `json:"materials"`
-	Preview        string          `json:"preview,omitempty"`
-	HomeBackground *HomeBackground `json:"homeBackground,omitempty"`
+	SchemaVersion  int               `json:"schemaVersion"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Version        string            `json:"version"`
+	Description    string            `json:"description"`
+	Author         string            `json:"author"`
+	ColorScheme    string            `json:"colorScheme"`
+	Tokens         Tokens            `json:"tokens"`
+	Materials      Materials         `json:"materials"`
+	Preview        string            `json:"preview,omitempty"`
+	HomeBackground *HomeBackground   `json:"homeBackground,omitempty"`
+	Backgrounds    *Backgrounds      `json:"backgrounds,omitempty"`
+	Icons          map[string]string `json:"icons,omitempty"`
 }
 
 // Tokens is the complete v1 color vocabulary. Values are restricted to hex
@@ -99,7 +109,27 @@ type HomeBackground struct {
 	Scope string `json:"scope"`
 }
 
-// ParseManifest strictly decodes and validates one schemaVersion=1 manifest.
+// BackgroundAsset is a schema v2 image declaration. Position is a bounded
+// percentage used for server-generated CSS object positioning.
+type BackgroundAsset struct {
+	Path            string  `json:"path"`
+	PositionX       *int    `json:"positionX,omitempty"`
+	PositionY       *int    `json:"positionY,omitempty"`
+	FallbackOpacity float64 `json:"fallbackOpacity,omitempty"`
+}
+
+type Backgrounds struct {
+	Global *BackgroundAsset `json:"global,omitempty"`
+	Home   *BackgroundAsset `json:"home,omitempty"`
+}
+
+type ThemeCapabilities struct {
+	GlobalBackground bool `json:"globalBackground"`
+	HomeBackground   bool `json:"homeBackground"`
+	Icons            bool `json:"icons"`
+}
+
+// ParseManifest strictly decodes and validates one schemaVersion=1 or v2 manifest.
 func ParseManifest(data []byte) (Manifest, error) {
 	if len(data) == 0 {
 		return Manifest{}, errors.New("theme manifest is empty")
@@ -163,8 +193,14 @@ func LoadManifest(filename string) (Manifest, error) {
 
 // ValidateManifest validates a programmatically constructed manifest.
 func ValidateManifest(manifest Manifest) error {
-	if manifest.SchemaVersion != SchemaVersionV1 {
-		return fmt.Errorf("theme schemaVersion must be %d", SchemaVersionV1)
+	if manifest.SchemaVersion != SchemaVersionV1 && manifest.SchemaVersion != SchemaVersionV2 {
+		return fmt.Errorf("theme schemaVersion must be %d or %d", SchemaVersionV1, SchemaVersionV2)
+	}
+	if manifest.SchemaVersion == SchemaVersionV1 && (manifest.Backgrounds != nil || len(manifest.Icons) != 0) {
+		return errors.New("schemaVersion=1 does not support backgrounds or icons")
+	}
+	if manifest.SchemaVersion == SchemaVersionV2 && manifest.HomeBackground != nil {
+		return errors.New("schemaVersion=2 must use backgrounds.home instead of homeBackground")
 	}
 	if !validID(manifest.ID) {
 		return errors.New("theme id must be 1-63 lowercase ASCII letters, digits, or interior hyphens")
@@ -213,31 +249,68 @@ func ValidateManifest(manifest Manifest) error {
 			return err
 		}
 	}
-	seen := make(map[string]struct{}, 2)
-	if manifest.Preview != "" {
-		resource, err := normalizeResourcePath(manifest.Preview)
+	seen := make(map[string]struct{}, 16)
+	addResource := func(role, resourcePath string, iconOnly bool) error {
+		resource, err := normalizeResourcePath(resourcePath)
 		if err != nil {
-			return fmt.Errorf("theme preview: %w", err)
+			return fmt.Errorf("theme %s: %w", role, err)
 		}
-		if resource != manifest.Preview {
-			return errors.New("theme preview path must already be normalized")
+		if resource != resourcePath {
+			return fmt.Errorf("theme %s path must already be normalized", role)
 		}
-		seen[strings.ToLower(resource)] = struct{}{}
-	}
-	if manifest.HomeBackground != nil {
-		if manifest.HomeBackground.Scope != "home" {
-			return errors.New("theme homeBackground scope must be home")
-		}
-		resource, err := normalizeResourcePath(manifest.HomeBackground.Path)
-		if err != nil {
-			return fmt.Errorf("theme homeBackground: %w", err)
-		}
-		if resource != manifest.HomeBackground.Path {
-			return errors.New("theme homeBackground path must already be normalized")
+		if iconOnly && strings.ToLower(path.Ext(resource)) != ".png" && strings.ToLower(path.Ext(resource)) != ".webp" {
+			return fmt.Errorf("theme %s must use a PNG or WebP resource", role)
 		}
 		key := strings.ToLower(resource)
 		if _, duplicate := seen[key]; duplicate {
-			return errors.New("theme preview and homeBackground must use distinct paths")
+			return fmt.Errorf("theme resources must use distinct paths: %s", resource)
+		}
+		seen[key] = struct{}{}
+		return nil
+	}
+	if manifest.Preview != "" {
+		if err := addResource("preview", manifest.Preview, false); err != nil {
+			return err
+		}
+	}
+	if manifest.SchemaVersion == SchemaVersionV1 && manifest.HomeBackground != nil {
+		if manifest.HomeBackground.Scope != "home" {
+			return errors.New("theme homeBackground scope must be home")
+		}
+		if err := addResource("homeBackground", manifest.HomeBackground.Path, false); err != nil {
+			return err
+		}
+	}
+	if manifest.SchemaVersion == SchemaVersionV2 {
+		if manifest.Backgrounds != nil {
+			for role, asset := range map[string]*BackgroundAsset{"backgrounds.global": manifest.Backgrounds.Global, "backgrounds.home": manifest.Backgrounds.Home} {
+				if asset == nil {
+					continue
+				}
+				for axis, position := range map[string]*int{"positionX": asset.PositionX, "positionY": asset.PositionY} {
+					if position != nil && (*position < 0 || *position > 100) {
+						return fmt.Errorf("theme %s %s must be between 0 and 100", role, axis)
+					}
+				}
+				if asset.FallbackOpacity < 0 || asset.FallbackOpacity > 1 {
+					return fmt.Errorf("theme %s fallbackOpacity must be between 0 and 1", role)
+				}
+				if err := addResource(role, asset.Path, false); err != nil {
+					return err
+				}
+			}
+		}
+		allowed := make(map[string]struct{}, len(AllowedIconSlots))
+		for _, slot := range AllowedIconSlots {
+			allowed[slot] = struct{}{}
+		}
+		for slot, resource := range manifest.Icons {
+			if _, ok := allowed[slot]; !ok {
+				return fmt.Errorf("theme icon slot %q is not allowed", slot)
+			}
+			if err := addResource("icon "+slot, resource, true); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -425,13 +498,40 @@ func normalizeResourcePath(value string) (string, error) {
 	return clean, nil
 }
 
+func capabilitiesForManifest(manifest Manifest) ThemeCapabilities {
+	capabilities := ThemeCapabilities{}
+	if manifest.SchemaVersion == SchemaVersionV1 {
+		capabilities.HomeBackground = manifest.HomeBackground != nil
+		return capabilities
+	}
+	capabilities.GlobalBackground = manifest.Backgrounds != nil && manifest.Backgrounds.Global != nil
+	capabilities.HomeBackground = manifest.Backgrounds != nil && manifest.Backgrounds.Home != nil
+	capabilities.Icons = len(manifest.Icons) > 0
+	return capabilities
+}
+
 func declaredResourcePaths(manifest Manifest) []string {
-	paths := make([]string, 0, 2)
+	paths := make([]string, 0, 2+len(manifest.Icons))
 	if manifest.Preview != "" {
 		paths = append(paths, manifest.Preview)
 	}
-	if manifest.HomeBackground != nil {
+	if manifest.SchemaVersion == SchemaVersionV1 && manifest.HomeBackground != nil {
 		paths = append(paths, manifest.HomeBackground.Path)
+	}
+	if manifest.SchemaVersion == SchemaVersionV2 && manifest.Backgrounds != nil {
+		if manifest.Backgrounds.Global != nil {
+			paths = append(paths, manifest.Backgrounds.Global.Path)
+		}
+		if manifest.Backgrounds.Home != nil {
+			paths = append(paths, manifest.Backgrounds.Home.Path)
+		}
+	}
+	if manifest.SchemaVersion == SchemaVersionV2 {
+		for _, slot := range AllowedIconSlots {
+			if resource := manifest.Icons[slot]; resource != "" {
+				paths = append(paths, resource)
+			}
+		}
 	}
 	return paths
 }
