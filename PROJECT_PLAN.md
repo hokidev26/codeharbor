@@ -892,7 +892,7 @@ make check
 
 ## 5. 工程工作流状态（历史 Phase 1–6）
 
-本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指 IM 控制面**；当前只完成受限 Telegram 配对/状态/一次性审批/拒绝，不包含 `/task`、自由聊天或其他渠道。不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
+本节的 Phase 1–6 是早期**工程工作流编号**，只用于追踪实现主题；它们不是 `docs/notes/needtodo0712.md` 的产品 Phase A/B/C。产品 **Phase B 专指 IM 控制面**；当前只完成受限 Telegram 配对/状态/一次性审批/拒绝，不包含 `/task`、自由聊天或其他渠道。不得把本节的 Provider、Tools、Skills 或前端工作称为产品 Phase B。
 
 ### Engineering Phase 1：当前 MVP 完善
 

@@ -49,8 +49,8 @@
 ### 11. `internal/server` 逐漸變成 god package
 35K 行、60+ 檔案，git、remote access、provider admin、review、automation、oauth 全在同一 package，邊界只靠檔名。`internal/db/db.go` 也有 4.9K 行。建議按 AGENTS.md 的邊界精神逐步拆子package。
 
-### 12. Repo 根目錄的規劃草稿被 git 追蹤
-`needtodo0709`（36KB、無副檔名）、`needtodo0712.md`、`feedback-changelog-lessons-0712.md`。建議移到 `docs/`（或獨立 notes 目錄）或移出版本控制，根目錄留正式文件。
+### 12. 規劃文件已歸檔
+規劃文件已移至 `docs/notes/needtodo0709.md`、`docs/notes/needtodo0712.md`、`docs/notes/feedback-changelog-lessons-0712.md`。
 
 ### 13. 測試
 116 個 Go 測試檔 + 355 個 JS 測試，覆蓋面好。唯 `internal/compat`（76 行）無測試——小，順手補即可。

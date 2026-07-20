@@ -1,6 +1,6 @@
 # needtodo0712：Autoto 合併後定位審查與產品路線圖
 
-> 本文件是 `needtodo0709` 的後繼版本，基於 2026-07-12 對倉庫的完整只讀審查（README、PROJECT_PLAN、needtodo0709、CHANGELOG、git 歷史、未提交 diff、前後端原始碼結構），以及對外部成熟專案 OpenClaw（🦞）現況的對照調研。
+> 本文件是 `docs/notes/needtodo0709.md` 的後繼版本，基於 2026-07-12 對倉庫的完整只讀審查（README、PROJECT_PLAN、docs/notes/needtodo0709.md、CHANGELOG、git 歷史、未提交 diff、前後端原始碼結構），以及對外部成熟專案 OpenClaw（🦞）現況的對照調研。
 >
 > 審查時倉庫狀態：main @ d2e8cf0（Add run review notifications and rollback checkpoints），working tree 有未提交變更（詳見 2.3）。
 >
@@ -93,10 +93,7 @@
 
 - 空目錄：`internal/auth`、`internal/narrator`、`internal/project` —— 三個月沒放內容就刪掉，需要時再建。
 - 空目錄 `.narrafork/`：舊專案殘留，確認無用後刪除並加入 `.gitignore`。
-- 規劃文件散落：`PROJECT_PLAN.md`（部分「待做」實際已完成）、`needtodo0709`（歷史審查記錄）、`CHANGELOG.md` 三者有漂移。建議：
-  - `PROJECT_PLAN.md` 只保留「架構現狀 + 已完成能力」的事實描述，砍掉過時的待辦勾選框。
-  - 規劃/審查類文件統一收進 `docs/plans/`（`needtodo0709`、本文件都移入，repo 根目錄只留 README/CHANGELOG 等標準文件），並給 `needtodo0709` 補 `.md` 副檔名。
-  - 未來待辦只維護在最新一份 plan 文件 + GitHub Issues，避免三處同步。
+- 規劃文件已移至 `docs/notes/`：`needtodo0709.md`、本文件及其姊妹文件 `feedback-changelog-lessons-0712.md` 已歸檔至該目錄。`PROJECT_PLAN.md` 宜持續保持「架構現狀 + 已完成能力」的事實描述。未來待辦應維護在最新一份 plan 文件 + GitHub Issues，避免多份規劃文件同步。
 
 ---
 
