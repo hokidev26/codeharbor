@@ -64,6 +64,34 @@ func TestBuiltInProvidersDeclareCapabilities(t *testing.T) {
 	}
 }
 
+func TestBuiltInProvidersExposeConfiguredModelContextLimits(t *testing.T) {
+	const limit = 345678
+	model := "configured-model"
+	cfg := config.ProviderConfig{Model: model, Models: []config.ProviderModelConfig{{Name: model, ContextTokenLimit: limit}}}
+	for _, provider := range []Provider{
+		NewOpenAIOfficial(cfg),
+		NewAnthropicProvider(cfg),
+		NewOpenAICompatible(cfg),
+		NewGeminiInteractions(cfg),
+	} {
+		if got := ModelCapabilitiesFor(provider, model).ContextTokenLimit; got != limit {
+			t.Fatalf("%T context limit = %d, want %d", provider, got, limit)
+		}
+	}
+
+	codex := NewCodexProvider(config.ProviderConfig{
+		Name:    "codex",
+		Type:    config.ProviderTypeCodex,
+		BaseURL: "https://chatgpt.com/backend-api/codex",
+		Model:   "gpt-5.5",
+		Models:  []config.ProviderModelConfig{{Name: "gpt-5.5", ContextTokenLimit: limit}},
+	})
+	capabilities := ModelCapabilitiesFor(codex, "gpt-5.5")
+	if capabilities.ContextTokenLimit != limit || !capabilities.FastMode || !capabilities.FastModeKnown {
+		t.Fatalf("Codex did not merge configured context and Fast capabilities: %+v", capabilities)
+	}
+}
+
 func TestNewProviderBuildsKnownTypes(t *testing.T) {
 	for _, providerType := range []string{"openai", "anthropic", "openai-compatible", "gemini-interactions"} {
 		provider, err := NewProvider(config.ProviderConfig{Name: providerType, Type: providerType})

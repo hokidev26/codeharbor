@@ -35,6 +35,7 @@ All notable changes to Autoto are tracked here. The project is still an experime
 
 ### Changed
 
+- Hardened conversation switching with cancellable, generation-bound message requests so stale A→B→A responses cannot overwrite the active session. Subagent task updates now patch stable `runId`/`toolUseId` cards instead of rebuilding the full message history, and recent-conversation state synchronizes across browser tabs through the existing local preference key.
 - Model discovery now reports whether models were remotely discovered or fallback-only, and the setup wizard accepts any registered provider with usable models.
 - Run summaries no longer load complete tool inputs/outputs; full details remain available from the tool-call detail APIs.
 - Browser-local drafts remain an unauthenticated compatibility fallback, while logged-in users use versioned private server drafts.
@@ -45,6 +46,7 @@ All notable changes to Autoto are tracked here. The project is still an experime
 
 ### Security
 
+- Bound Agent and terminal WebSockets to the authenticated local account session that opened them. Local logout or session expiry now terminates established sockets immediately, while other independent login sessions remain connected.
 - Hardened tool and filesystem path resolution against symlink escapes, bounded file/DOCX/Git fingerprint work, and restricted remote root-directory browsing.
 - Hardened attachment filenames and MIME detection, explicitly cleans multipart temporary files, defaults downloads to attachment, and only inlines validated safe images with `nosniff`.
 

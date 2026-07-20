@@ -112,9 +112,12 @@ func (p *CodexProvider) ModelCapabilities(model string) ModelCapabilities {
 	if p == nil {
 		return ModelCapabilities{}
 	}
+	model = strings.TrimSpace(model)
 	p.modelCapabilitiesMu.RLock()
-	defer p.modelCapabilitiesMu.RUnlock()
-	return p.modelCapabilities[strings.TrimSpace(model)]
+	capabilities := p.modelCapabilities[model]
+	p.modelCapabilitiesMu.RUnlock()
+	capabilities.ContextTokenLimit = p.cfg.ModelContextTokenLimit(model)
+	return capabilities
 }
 
 func (p *CodexProvider) replaceModelCapabilities(capabilities map[string]ModelCapabilities) {

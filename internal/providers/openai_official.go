@@ -67,6 +67,13 @@ func (p *OpenAIOfficial) Capabilities() Capabilities {
 	}
 }
 
+func (p *OpenAIOfficial) ModelCapabilities(model string) ModelCapabilities {
+	if p == nil {
+		return ModelCapabilities{}
+	}
+	return configuredModelCapabilities(p.cfg, model)
+}
+
 func (p *OpenAIOfficial) ListModels(ctx context.Context) ([]string, error) {
 	if p.configErr != nil {
 		return nil, p.configErr

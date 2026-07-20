@@ -36,6 +36,8 @@ import {
   normalizeCodexSelectedIds,
   normalizeModelAggregateList,
   normalizeCodexAccountList,
+  markProviderModelsStale,
+  providerConnectionFingerprint,
   providerConsoleDraftFromForm,
   providerModelDiscovery,
   providerPreflightResult,
@@ -57,9 +59,15 @@ import {
   isAnthropicAccountProvider,
   isBuiltinProvider,
   isProviderDeletable,
+  mergeProviderModelDiscovery,
   modelProvidersForUIUnion,
   normalizeConsoleProvider,
+  normalizeProviderModelConfigs,
   providerConfigPayload,
+  providerModelDraftUsable,
+  providerVisibilityPreferencesForDraft,
+  removeProviderVisibilityPreferences,
+  setProviderModelHidden,
   providerConsoleRequest,
   providerConsoleStats,
   providerTestPayload,
@@ -594,15 +602,195 @@ test("缺少必填 API Key 的预检使用三语言警告，不显示成功", ()
   assert.equal(success.tone, "success");
 });
 
-test("模型发现去重并自动选择首个可用模型", () => {
-  assert.deepEqual(providerModelDiscovery({ models: [" model-b ", "model-a", "model-b", ""] }, "missing"), {
-    models: ["model-b", "model-a"],
-    selectedModel: "model-b",
+test("模型发现去重、合并 Token 能力并保留已有编辑", () => {
+  const discovered = providerModelDiscovery({
+    models: [" model-b ", "model-a", "model-b", ""],
+    modelCapabilities: { "model-a": { contextTokenLimit: 128000 } },
+  }, "missing", [{ name: "model-b", contextTokenLimit: 64000, hidden: true }]);
+  assert.deepEqual(discovered.models, ["model-b", "model-a", "missing"]);
+  assert.equal(discovered.selectedModel, "missing");
+  assert.deepEqual(discovered.modelConfigs, [
+    { name: "model-b", contextTokenLimit: 64000, hidden: true, manual: false },
+    { name: "model-a", contextTokenLimit: 128000, hidden: false, manual: false },
+    { name: "missing", contextTokenLimit: 0, hidden: false, manual: true },
+  ]);
+  assert.equal(providerModelDiscovery({ models: ["model-b", "model-a"] }, "model-a").selectedModel, "model-a");
+});
+
+test("旧 Provider 数据合成 modelConfigs 并兼容对象模型与 capabilities", () => {
+  const normalized = normalizeConsoleProvider({
+    name: "legacy",
+    model: "model-b",
+    models: ["model-a", { name: "model-b", contextTokenLimit: 64000 }, "model-a"],
+    modelCapabilities: { "model-a": { contextTokenLimit: 128000 } },
   });
-  assert.deepEqual(providerModelDiscovery({ models: ["model-b", "model-a"] }, "model-a"), {
-    models: ["model-b", "model-a"],
-    selectedModel: "model-a",
+  assert.deepEqual(normalized.models, ["model-a", "model-b"]);
+  assert.deepEqual(normalized.modelConfigs, [
+    { name: "model-a", contextTokenLimit: 128000, hidden: false, manual: false },
+    { name: "model-b", contextTokenLimit: 64000, hidden: false, manual: false },
+  ]);
+  const draft = createProviderDraft("openai-compatible", normalized);
+  assert.equal(draft.modelsReady, true);
+  assert.equal(draft.modelsStale, false);
+});
+
+test("连接关键字段变化只标记 stale，模型编辑与名称前缀变化不标记", () => {
+  const ready = {
+    name: "relay",
+    type: "openai-compatible",
+    baseUrl: "https://one.example/v1",
+    apiKey: "draft-secret",
+    apiKeyOptional: false,
+    proxyUrl: "",
+    userAgent: "",
+    requestHeaders: [],
+    insecureSkipTLSVerify: false,
+    model: "model-a",
+    modelConfigs: [{ name: "model-a", contextTokenLimit: 128000, hidden: false }],
+    modelsReady: true,
+    modelsStale: false,
+  };
+  const renamed = markProviderModelsStale(ready, { ...ready, name: "renamed", model: "model-a", maxTokens: 99 });
+  assert.equal(renamed.modelsStale, false);
+  const changed = markProviderModelsStale(ready, { ...ready, baseUrl: "https://two.example/v1" });
+  assert.equal(changed.modelsStale, true);
+  assert.deepEqual(changed.modelConfigs, ready.modelConfigs);
+  assert.notEqual(providerConnectionFingerprint(ready), providerConnectionFingerprint(changed));
+  assert.equal(providerModelDraftUsable(changed), false);
+});
+
+test("隐藏保护自动迁移默认模型且禁止隐藏最后一个可见模型", () => {
+  const configs = [
+    { name: "a", contextTokenLimit: 100, hidden: false },
+    { name: "b", contextTokenLimit: 200, hidden: false },
+  ];
+  const hiddenDefault = setProviderModelHidden(configs, "a", true, "a");
+  assert.equal(hiddenDefault.changed, true);
+  assert.equal(hiddenDefault.defaultModel, "b");
+  assert.equal(hiddenDefault.modelConfigs[0].hidden, true);
+  const blocked = setProviderModelHidden(hiddenDefault.modelConfigs, "b", true, "b");
+  assert.equal(blocked.changed, false);
+  assert.equal(blocked.modelConfigs[1].hidden, false);
+});
+
+test("可见性偏好重命名和删除只处理当前 Provider 前缀", () => {
+  const preferences = {
+    hiddenModels: { "old:a": true, "old:orphan": true, "other:z": true },
+    showUnconfiguredProviders: true,
+  };
+  const migrated = providerVisibilityPreferencesForDraft(preferences, "old", "new", [
+    { name: "a", hidden: false },
+    { name: "b", hidden: true },
+  ]);
+  assert.deepEqual(migrated.hiddenModels, { "other:z": true, "new:b": true });
+  assert.equal(migrated.showUnconfiguredProviders, true);
+  assert.deepEqual(removeProviderVisibilityPreferences(migrated, "new").hiddenModels, { "other:z": true });
+});
+
+test("模型 payload 发送 name/contextTokenLimit 且不泄露 hidden 或草稿元数据", () => {
+  const payload = providerConfigPayload({
+    name: "relay",
+    type: "openai-compatible",
+    model: "a",
+    modelConfigs: [{ name: "a", contextTokenLimit: 128000, hidden: true, manual: true }],
+    modelsReady: true,
+    modelsStale: false,
   });
+  assert.deepEqual(payload.models, [{ name: "a", contextTokenLimit: 128000 }]);
+  assert.equal(JSON.stringify(payload).includes("hidden"), false);
+  assert.equal(JSON.stringify(payload).includes("modelsReady"), false);
+  assert.equal(JSON.stringify(payload).includes("modelsStale"), false);
+});
+
+test("参考图扁平 DOM 保留 ready/stale 与默认模型保存约束", () => {
+  const base = {
+    name: "relay",
+    type: "openai-compatible",
+    baseUrl: "https://relay.example/v1",
+    model: "a",
+    modelConfigs: [{ name: "a", contextTokenLimit: 128000, hidden: false }],
+    models: ["a"],
+    modelsReady: true,
+    modelsStale: false,
+    origin: "custom",
+  };
+  const ready = renderProviderConsolePage({ providers: [], consoleState: { drawer: "provider", mode: "create", type: base.type, dirty: true, draft: base } });
+  assert.match(ready, /mp-provider-reference-layout/);
+  assert.match(ready, /mp-provider-reference-header/);
+  assert.match(ready, /data-mp-provider-prefix-preview/);
+  assert.match(ready, /data-mp-toggle-api-key/);
+  assert.match(ready, /mp-provider-header-add-bar/);
+  assert.match(ready, /mp-provider-reference-protocol/);
+  assert.doesNotMatch(ready, /mp-provider-steps|mp-provider-create-section mp-provider-create-section-linear/);
+  assert.match(ready, /data-mp-model-config="a"/);
+  assert.match(ready, /data-mp-save-provider  >/);
+  assert.doesNotMatch(ready, /data-mp-save-provider disabled/);
+  const stale = renderProviderConsolePage({ providers: [], consoleState: { drawer: "provider", mode: "create", type: base.type, dirty: true, draft: { ...base, modelsStale: true } } });
+  assert.match(stale, /data-models-stale="true"/);
+  assert.match(stale, /data-mp-test-provider disabled/);
+  assert.match(stale, /data-mp-save-provider disabled/);
+});
+
+test("控制器最终保存按 config、enable、可见性偏好、刷新顺序执行", async () => {
+  const order = [];
+  const state = {
+    settings: { providers: [] },
+    modelCatalog: { providers: [] },
+    providerConsole: {
+      view: "providers",
+      drawer: "provider",
+      mode: "edit",
+      type: "openai-compatible",
+      providerName: "old-relay",
+      busy: {},
+      dirty: true,
+      draft: {
+        name: "new-relay",
+        type: "openai-compatible",
+        baseUrl: "https://relay.example/v1",
+        apiKeyOptional: true,
+        model: "a",
+        models: ["a", "b"],
+        modelConfigs: [
+          { name: "a", contextTokenLimit: 128000, hidden: false },
+          { name: "b", contextTokenLimit: 64000, hidden: true },
+        ],
+        modelsReady: true,
+        modelsStale: false,
+        origin: "custom",
+      },
+    },
+  };
+  const form = {
+    elements: {
+      name: { value: "new-relay", setCustomValidity() {}, setAttribute() {} },
+      type: { value: "openai-compatible" },
+      baseUrl: { value: "https://relay.example/v1" },
+      apiKey: { value: "" },
+      apiKeyOptional: { checked: true },
+      model: { value: "a" },
+      maxTokens: { value: "0" },
+      insecureSkipTLSVerify: { checked: false },
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  const controller = createModelProviderSettingsController({
+    state,
+    requestAPI: async (path, options = {}) => {
+      order.push(options.method === "PUT" ? "config" : options.method === "PATCH" ? "enable" : path);
+      return {};
+    },
+    getModelVisibilityPreference: () => ({ hiddenModels: { "old-relay:b": true, "other:z": true }, showUnconfiguredProviders: false }),
+    setModelVisibilityPreference: async (value) => {
+      order.push("visibility");
+      assert.deepEqual(value.hiddenModels, { "other:z": true, "new-relay:b": true });
+    },
+    loadSettings: async () => { order.push("settings"); },
+    loadModelCatalog: async () => { order.push("catalog"); },
+  });
+  await controller.saveConsoleProvider(form);
+  assert.deepEqual(order, ["config", "enable", "visibility", "settings", "catalog"]);
 });
 
 test("model catalog preserves reasoning effort capabilities for composer controls", () => {
@@ -729,11 +917,11 @@ test("已获取模型在 Provider 页面可见并进入全局模型选择器", (
   });
   assert.match(html, /mp-provider-create-page mp-provider-create-form/);
   assert.match(html, /mp-provider-edit-page/);
-  assert.match(html, /list="mp-provider-create-model-options"/);
-  assert.match(html, /<option value="terra-a"><\/option>/);
-  assert.match(html, /<option value="terra-b"><\/option>/);
-  assert.match(html, /data-mp-model-choice/);
-  assert.match(html, /value="terra-a"/);
+  assert.match(html, /data-mp-model-workspace/);
+  assert.match(html, /data-mp-model-config="terra-a"/);
+  assert.match(html, /data-mp-model-config="terra-b"/);
+  assert.match(html, /name="model" value="terra-a" checked/);
+  assert.match(html, /data-mp-model-token="terra-a"/);
   assert.doesNotMatch(html, /data-mp-provider-card="relay"|mp-provider-drawer-backdrop/);
 
   const controller = createModelProviderSettingsController({
@@ -876,8 +1064,8 @@ test("供应商控制台移除类型选择弹窗并让普通编辑使用全页�
   assert.match(editPage, /name="baseUrl"[^>]*type="url"/);
   assert.doesNotMatch(editPage, /name="baseUrl"[^>]*readonly/);
   assert.match(editPage, /data-mp-fetch-models/);
-  assert.match(editPage, /list="mp-provider-create-model-options"/);
-  assert.match(editPage, /<option value="llama"><\/option>/);
+  assert.match(editPage, /data-mp-model-config="llama"/);
+  assert.match(editPage, /name="model" value="llama" checked/);
   assert.match(editPage, /data-mp-test-provider/);
   assert.match(editPage, /发送测试/);
   assert.match(editPage, /data-mp-save-provider/);
@@ -919,6 +1107,9 @@ test("新增供应商入口默认直接建立 custom-openai 全页草稿", () =>
   assert.equal(state.providerConsole.providerName, "custom-openai");
   assert.equal(state.providerConsole.draft.name, "custom-openai");
   assert.equal(state.providerConsole.draft.baseUrl, "https://api.example.com/v1");
+  assert.equal(state.providerConsole.draft.model, "");
+  assert.deepEqual(state.providerConsole.draft.modelConfigs, []);
+  assert.equal(state.providerConsole.draft.modelsReady, false);
   assert.equal(refreshes, 1);
   const html = controller.renderProviderSettingsContent();
   assert.match(html, /mp-provider-create-page/);
@@ -965,9 +1156,9 @@ test("供应商控制台重绘保持状态对象身份，异步模型发现结�
   const html = controller.renderProviderSettingsContent();
 
   assert.equal(state.providerConsole, retainedConsoleState);
-  assert.match(html, /name="model"[^>]*value="codex-auto-review"/);
-  assert.match(html, /<option value="codex-auto-review" selected>/);
-  assert.match(html, /<option value="model-g"><\/option>/);
+  assert.match(html, /name="model" value="codex-auto-review" checked/);
+  assert.match(html, /data-mp-model-config="codex-auto-review"/);
+  assert.match(html, /data-mp-model-config="model-g"/);
   assert.match(html, /value="zzz:codex-auto-review"/);
 });
 
@@ -1003,11 +1194,30 @@ test("新增普通供应商使用独立全宽扁平配置页", () => {
   assert.match(html, /data-mp-fetch-models/);
   assert.match(html, /data-mp-save-provider/);
   assert.match(html, /放弃更改/);
-  assert.match(html, /list="mp-provider-create-model-options"/);
-  assert.match(html, /<option value="model-b"><\/option>/);
+  assert.match(html, /data-mp-model-config="model-a"/);
+  assert.match(html, /data-mp-model-config="model-b"/);
+  assert.match(html, /data-mp-model-token="model-b"/);
   assert.match(html, /value="new-gateway:model-a" readonly data-mp-model-example/);
+  assert.match(html, /mp-provider-reference-layout/);
+  assert.match(html, /data-mp-toggle-api-key/);
+  assert.match(html, /mp-provider-header-add-bar/);
+  const referenceOrder = [
+    'name="name"',
+    "data-mp-provider-prefix-preview",
+    'name="apiKey"',
+    'name="baseUrl"',
+    'name="proxyUrl"',
+    'name="userAgent"',
+    "data-mp-add-request-header",
+    "mp-provider-reference-protocol",
+    "data-mp-model-workspace",
+    'name="maxTokens"',
+    "data-mp-model-example",
+  ].map((marker) => html.indexOf(marker));
+  assert.ok(referenceOrder.every((index) => index >= 0));
+  assert.deepEqual(referenceOrder, [...referenceOrder].sort((a, b) => a - b));
   assert.doesNotMatch(html, /data-mp-provider-card="existing"/);
-  assert.doesNotMatch(html, /mp-provider-drawer-backdrop|mp-provider-type-modal/);
+  assert.doesNotMatch(html, /mp-provider-steps|mp-provider-create-section-linear|mp-provider-drawer-backdrop|mp-provider-type-modal/);
 });
 
 test("Provider API Key 元数据安全规范化、掩码渲染和草稿隔离", () => {
@@ -1060,6 +1270,7 @@ test("供应商控制台配置 payload 保留空 API Key 并规范请求与网�
     baseUrl: " https://api.acme.example/v1 ",
     apiKey: "",
     model: " model-a ",
+    modelConfigs: [{ name: " model-a ", contextTokenLimit: "128000", hidden: true }],
     maxTokens: "4096.8",
     apiKeyOptional: true,
     proxyUrl: " http://proxy-user:proxy-pass@127.0.0.1:7890 ",
@@ -1078,6 +1289,7 @@ test("供应商控制台配置 payload 保留空 API Key 并规范请求与网�
     baseUrl: "https://api.acme.example/v1",
     apiKey: "",
     model: "model-a",
+    models: [{ name: "model-a", contextTokenLimit: 128000 }],
     maxTokens: 4096,
     apiKeyOptional: true,
     proxyUrl: "http://proxy-user:proxy-pass@127.0.0.1:7890",
@@ -1121,6 +1333,7 @@ test("供应商控制台 toggle、草稿预检、delete 与 config 请求遵守�
     baseUrl: " https://example.test/v1 ",
     apiKey: "",
     model: " model-a ",
+    modelConfigs: [{ name: "model-a", contextTokenLimit: 32000, hidden: true }],
     maxTokens: "4096.2",
     apiKeyOptional: true,
     proxyUrl: "http://proxy-user:proxy-pass@127.0.0.1:7890",
@@ -1139,6 +1352,7 @@ test("供应商控制台 toggle、草稿预检、delete 与 config 请求遵守�
     baseUrl: "https://example.test/v1",
     apiKey: "",
     model: "model-a",
+    models: [{ name: "model-a", contextTokenLimit: 32000 }],
     maxTokens: 4096,
     apiKeyOptional: true,
     proxyUrl: "http://proxy-user:proxy-pass@127.0.0.1:7890",
@@ -1250,6 +1464,21 @@ test("供应商表单草稿实时同步并在后台重绘时保持 dirty 内容"
   assert.equal(state.providerConsole.draft.apiKey, "draft-key");
 });
 
+test("安全重绘后的空 API Key 输入不会清除仅存在于内存的草稿 secret", () => {
+  const form = {
+    elements: {
+      name: { value: "relay" }, type: { value: "openai-compatible" }, baseUrl: { value: "https://relay.example/v1" },
+      apiKey: { value: "" }, model: { value: "a" }, maxTokens: { value: "0" }, apiKeyOptional: { checked: false },
+    },
+    querySelectorAll() { return []; },
+  };
+  const draft = providerConsoleDraftFromForm({
+    name: "relay", type: "openai-compatible", apiKey: "draft-secret", apiKeyDraft: true,
+    model: "a", modelConfigs: [{ name: "a" }], modelsReady: true,
+  }, form);
+  assert.equal(draft.apiKey, "draft-secret");
+});
+
 test("模型选择器更新 draft 后会在重绘中保持选中模型和引用", () => {
   const form = {
     elements: {
@@ -1269,7 +1498,7 @@ test("模型选择器更新 draft 后会在重绘中保持选中模型和引用"
     providers: [{ name: "relay", type: "openai-compatible", model: "model-b", models: ["model-a", "model-b"], baseUrl: "https://relay.example/v1", configured: true, enabled: true, origin: "custom" }],
     consoleState: { drawer: "provider", mode: "edit", type: "openai-compatible", draft: consoleState.draft },
   });
-  assert.match(html, /<option value="model-b" selected>/);
+  assert.match(html, /name="model" value="model-b" checked/);
   assert.match(html, /value="relay:model-b"/);
 });
 
@@ -1487,9 +1716,9 @@ test("供应商新增表单使用 placeholder 示例且名称和 Base URL 不自
   assert.match(html, /name="baseUrl"[^>]*value=""[^>]*placeholder="https:\/\/api\.example\.com\/v1"/);
   assert.doesNotMatch(html, /name="name"[^>]*data-select-on-focus="true"/);
   assert.doesNotMatch(html, /name="baseUrl"[^>]*data-select-on-focus="true"/);
-  for (const field of ["model", "maxTokens"]) {
-    assert.match(html, new RegExp(`name="${field}"[^>]*data-select-on-focus="true"`));
-  }
+  assert.doesNotMatch(html, /name="model"[^>]*data-select-on-focus="true"/);
+  assert.match(html, /data-mp-model-workspace/);
+  assert.match(html, /name="maxTokens"[^>]*data-select-on-focus="true"/);
 });
 
 test("供应商弹层焦点环与触发元素恢复", () => {

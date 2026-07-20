@@ -96,6 +96,7 @@ type ProvidersConfig struct {
 
 const ProviderProfileCLIProxyAPI = "cliproxyapi"
 const ProviderTypeCodex = "codex"
+const ProviderModelContextTokenLimitMax = 10_000_000
 
 const (
 	ProviderOriginBuiltin = "builtin"
@@ -107,6 +108,11 @@ type ProviderRequestHeader struct {
 	Value string `json:"-"`
 }
 
+type ProviderModelConfig struct {
+	Name              string `json:"name"`
+	ContextTokenLimit int    `json:"contextTokenLimit"`
+}
+
 type ProviderConfig struct {
 	Name                  string                  `json:"name"`
 	Type                  string                  `json:"type"`
@@ -114,6 +120,7 @@ type ProviderConfig struct {
 	BaseURL               string                  `json:"baseUrl,omitempty"`
 	APIKey                string                  `json:"apiKey,omitempty"`
 	Model                 string                  `json:"model"`
+	Models                []ProviderModelConfig   `json:"models,omitempty"`
 	MaxTokens             int64                   `json:"maxTokens,omitempty"`
 	APIKeyOptional        bool                    `json:"apiKeyOptional,omitempty"`
 	GatewayEnabled        bool                    `json:"gatewayEnabled,omitempty"`
@@ -824,6 +831,8 @@ func normalizeProviders(p ProvidersConfig) ProvidersConfig {
 			provider.Profile = legacyProviderProfile(provider.Name)
 		}
 		applyProviderEnvDefaults(provider)
+		provider.Model = strings.TrimSpace(provider.Model)
+		provider.Models = NormalizeProviderModels(provider.Models, provider.Model)
 		if strings.EqualFold(provider.Type, ProviderTypeCodex) || strings.EqualFold(provider.Profile, ProviderProfileCLIProxyAPI) {
 			provider.GatewayEnabled = false
 		}
@@ -837,6 +846,47 @@ func legacyProviderProfile(name string) string {
 		return ProviderProfileCLIProxyAPI
 	}
 	return ""
+}
+
+// NormalizeProviderModels trims names, removes duplicates, bounds context limits,
+// and keeps the configured default model addressable for legacy configurations.
+func NormalizeProviderModels(models []ProviderModelConfig, defaultModel string) []ProviderModelConfig {
+	defaultModel = strings.TrimSpace(defaultModel)
+	seen := make(map[string]struct{}, len(models)+1)
+	normalized := make([]ProviderModelConfig, 0, len(models)+1)
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		limit := model.ContextTokenLimit
+		if limit < 0 {
+			limit = 0
+		} else if limit > ProviderModelContextTokenLimitMax {
+			limit = ProviderModelContextTokenLimitMax
+		}
+		seen[name] = struct{}{}
+		normalized = append(normalized, ProviderModelConfig{Name: name, ContextTokenLimit: limit})
+	}
+	if defaultModel != "" {
+		if _, exists := seen[defaultModel]; !exists {
+			normalized = append(normalized, ProviderModelConfig{Name: defaultModel})
+		}
+	}
+	return normalized
+}
+
+func (p ProviderConfig) ModelContextTokenLimit(model string) int {
+	model = strings.TrimSpace(model)
+	for _, configured := range p.Models {
+		if strings.TrimSpace(configured.Name) == model && configured.ContextTokenLimit > 0 {
+			return configured.ContextTokenLimit
+		}
+	}
+	return 0
 }
 
 // NormalizeProviderConfig applies the same compatibility defaults used when loading config.

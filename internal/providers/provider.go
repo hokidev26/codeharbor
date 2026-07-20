@@ -140,8 +140,9 @@ type CapabilityProvider interface {
 // ModelCapabilities are optional features that can differ between models of
 // the same provider. Unknown models default to no optional model features.
 type ModelCapabilities struct {
-	FastMode      bool `json:"fastMode"`
-	FastModeKnown bool `json:"-"`
+	FastMode          bool `json:"fastMode"`
+	FastModeKnown     bool `json:"-"`
+	ContextTokenLimit int  `json:"contextTokenLimit"`
 }
 
 type ModelCapabilityProvider interface {
@@ -188,6 +189,10 @@ func ModelCapabilitiesFor(provider Provider, model string) ModelCapabilities {
 		return provider.ModelCapabilities(strings.TrimSpace(model))
 	}
 	return ModelCapabilities{}
+}
+
+func configuredModelCapabilities(cfg config.ProviderConfig, model string) ModelCapabilities {
+	return ModelCapabilities{ContextTokenLimit: cfg.ModelContextTokenLimit(model)}
 }
 
 // NewProvider constructs a provider adapter from a normalized provider config.

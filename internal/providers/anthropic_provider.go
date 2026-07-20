@@ -64,6 +64,13 @@ func (p *AnthropicProvider) Capabilities() Capabilities {
 	return Capabilities{Tools: true, Streaming: true, ImageInput: true}
 }
 
+func (p *AnthropicProvider) ModelCapabilities(model string) ModelCapabilities {
+	if p == nil {
+		return ModelCapabilities{}
+	}
+	return configuredModelCapabilities(p.cfg, model)
+}
+
 func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	if p == nil {
 		return nil, providerUnavailableError(anthropicauth.DefaultProviderName, "provider is not configured")

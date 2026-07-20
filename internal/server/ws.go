@@ -39,9 +39,9 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 	if !s.validateWebSocketRequest(w, r) {
 		return
 	}
-	wsCtx, releaseAuthorization, authorized := s.remoteWebSocketContext(r.Context(), r)
+	wsCtx, releaseAuthorization, authorized := s.webSocketAuthorizationContext(r.Context(), r)
 	if !authorized {
-		writeError(w, http.StatusUnauthorized, "remote websocket authorization expired")
+		writeError(w, http.StatusUnauthorized, "websocket authorization expired")
 		return
 	}
 	defer releaseAuthorization()

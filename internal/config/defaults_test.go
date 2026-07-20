@@ -623,6 +623,54 @@ func TestNormalizeProvidersClearsOAuthGatewayEligibility(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderModelsSupportsLegacyDefaultsAndBoundsLimits(t *testing.T) {
+	provider := NormalizeProviderConfig(ProviderConfig{
+		Name:  "relay",
+		Type:  "openai-compatible",
+		Model: " default-model ",
+		Models: []ProviderModelConfig{
+			{Name: " model-a ", ContextTokenLimit: -1},
+			{Name: "model-a", ContextTokenLimit: 9000},
+			{Name: "model-b", ContextTokenLimit: ProviderModelContextTokenLimitMax + 1},
+			{Name: "   ", ContextTokenLimit: 100},
+		},
+	})
+	if provider.Model != "default-model" {
+		t.Fatalf("default model was not normalized: %q", provider.Model)
+	}
+	want := []ProviderModelConfig{
+		{Name: "model-a", ContextTokenLimit: 0},
+		{Name: "model-b", ContextTokenLimit: ProviderModelContextTokenLimitMax},
+		{Name: "default-model", ContextTokenLimit: 0},
+	}
+	if len(provider.Models) != len(want) {
+		t.Fatalf("unexpected normalized models: %+v", provider.Models)
+	}
+	for i := range want {
+		if provider.Models[i] != want[i] {
+			t.Fatalf("model %d = %+v, want %+v", i, provider.Models[i], want[i])
+		}
+	}
+
+	legacy := NormalizeProviderConfig(ProviderConfig{Name: "legacy", Type: "openai-compatible", Model: "legacy-default"})
+	if len(legacy.Models) != 1 || legacy.Models[0].Name != "legacy-default" || legacy.Models[0].ContextTokenLimit != 0 {
+		t.Fatalf("legacy provider default was not added to models: %+v", legacy.Models)
+	}
+}
+
+func TestProviderModelConfigJSONContract(t *testing.T) {
+	encoded, err := json.Marshal(ProviderConfig{Model: "model-a", Models: []ProviderModelConfig{{Name: "model-a", ContextTokenLimit: 123456}}, MaxTokens: 789})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, required := range []string{`"models":[{"name":"model-a","contextTokenLimit":123456}]`, `"maxTokens":789`} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("provider model JSON contract missing %s: %s", required, text)
+		}
+	}
+}
+
 func TestDefaultWithReportTracksOnlyEffectiveLegacyFallbacks(t *testing.T) {
 	for _, name := range []string{
 		"AUTOTO_DEFAULT_MODEL",

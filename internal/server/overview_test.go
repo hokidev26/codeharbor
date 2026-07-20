@@ -203,10 +203,11 @@ func TestOverviewMatchesTaskWorkspaceAuthenticationAndFiltersMembership(t *testi
 			t.Fatal(err)
 		}
 	}
+	nextRunAt := app.clock().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 	for id, agentID := range map[string]string{"first-schedule": firstAgent.ID, "second-schedule": secondAgent.ID} {
 		if _, err := store.CreateSchedule(ctx, db.Schedule{
 			ID: id, Name: id, AgentID: agentID, Expression: "@daily", Timezone: "UTC", Prompt: "PRIVATE_SCHEDULE_PROMPT",
-			PermissionMode: "readOnly", Enabled: true, NextRunAt: "2026-07-20T00:00:00Z",
+			PermissionMode: "readOnly", Enabled: true, NextRunAt: nextRunAt,
 		}); err != nil {
 			t.Fatal(err)
 		}

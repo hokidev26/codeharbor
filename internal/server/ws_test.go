@@ -144,6 +144,86 @@ func TestRemoteAgentWebSocketClosesWhenSessionIsRevoked(t *testing.T) {
 	}
 }
 
+func TestAgentWebSocketClosesOnlyRevokedUserSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	store, err := db.Open(ctx, filepath.Join(t.TempDir(), "user-session-ws-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	user, err := store.CreateUser(ctx, "socket-user", "test-password-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, agent, err := store.CreateProjectForUser(ctx, user.ID, "User Session WebSocket", "", t.TempDir(), "fake:test", "acceptEdits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstToken := "first-user-session-token"
+	secondToken := "second-user-session-token"
+	expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	for _, token := range []string{firstToken, secondToken} {
+		if _, err := store.CreateAuthSession(ctx, db.AuthSession{
+			UserID:    user.ID,
+			TokenHash: db.HashSessionToken(token),
+			ExpiresAt: expiresAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := New(config.Config{}, store, nil, agentpkg.NewHub())
+	server := httptest.NewServer(app.Routes())
+	defer server.Close()
+
+	first := dialWSTestWithCookies(t, ctx, server.URL, app.localToken, url.Values{
+		"id":       {agent.ID},
+		"protocol": {"2"},
+	}, &http.Cookie{Name: authSessionCookieName, Value: firstToken})
+	defer first.CloseNow()
+	second := dialWSTestWithCookies(t, ctx, server.URL, app.localToken, url.Values{
+		"id":       {agent.ID},
+		"protocol": {"2"},
+	}, &http.Cookie{Name: authSessionCookieName, Value: secondToken})
+	defer second.CloseNow()
+	if frame := readWSTestFrame(t, ctx, first); frame.Type != "connected" {
+		t.Fatalf("unexpected first connected frame: %+v", frame)
+	}
+	if frame := readWSTestFrame(t, ctx, second); frame.Type != "connected" {
+		t.Fatalf("unexpected second connected frame: %+v", frame)
+	}
+
+	logoutRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/auth/logout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutRequest.Header.Set(localTokenHeader, app.localToken)
+	logoutRequest.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: firstToken})
+	logoutResponse, err := server.Client().Do(logoutRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logoutResponse.Body.Close()
+	if logoutResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(logoutResponse.Body)
+		t.Fatalf("logout returned %d: %s", logoutResponse.StatusCode, body)
+	}
+
+	firstReadCtx, firstReadCancel := context.WithTimeout(ctx, time.Second)
+	defer firstReadCancel()
+	if _, _, err := first.Read(firstReadCtx); err == nil {
+		t.Fatal("revoked user session left the Agent websocket open")
+	}
+
+	app.hub.Publish(agentpkg.Event{Type: "agent.text", AgentID: agent.ID, Text: "still-authorized"})
+	secondReadCtx, secondReadCancel := context.WithTimeout(ctx, time.Second)
+	defer secondReadCancel()
+	frame := readWSTestFrame(t, secondReadCtx, second)
+	if frame.Type != "agent.text" || frame.Text != "still-authorized" {
+		t.Fatalf("independent user session was interrupted: %+v", frame)
+	}
+}
+
 func TestAgentLiveSnapshotV2RouteReturnsAuthoritativeWatermark(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -224,9 +304,20 @@ func newWSTestServer(t *testing.T, ctx context.Context) (*Server, *httptest.Serv
 
 func dialWSTest(t *testing.T, ctx context.Context, baseURL, token string, query url.Values) *websocket.Conn {
 	t.Helper()
+	return dialWSTestWithCookies(t, ctx, baseURL, token, query)
+}
+
+func dialWSTestWithCookies(t *testing.T, ctx context.Context, baseURL, token string, query url.Values, cookies ...*http.Cookie) *websocket.Conn {
+	t.Helper()
 	query.Set("token", token)
 	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/agent?" + query.Encode()
-	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{baseURL}}})
+	headers := http.Header{"Origin": []string{baseURL}}
+	for _, cookie := range cookies {
+		if cookie != nil {
+			headers.Add("Cookie", cookie.String())
+		}
+	}
+	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		if response != nil {
 			t.Fatalf("websocket dial failed with status %d: %v", response.StatusCode, err)

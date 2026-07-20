@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -40,6 +42,132 @@ type authLoginFailure struct {
 type authCredentialsRequest struct {
 	Handle   string `json:"handle"`
 	Password string `json:"password"`
+}
+
+func cancelAuthSessionConnections(cancels []context.CancelFunc) {
+	for _, cancel := range cancels {
+		if cancel != nil {
+			cancel()
+		}
+	}
+}
+
+func (s *Server) removeAuthSessionConnectionsLocked(tokenHash string) []context.CancelFunc {
+	connections := s.authSessionConnections[tokenHash]
+	delete(s.authSessionConnections, tokenHash)
+	cancels := make([]context.CancelFunc, 0, len(connections))
+	for _, cancel := range connections {
+		cancels = append(cancels, cancel)
+	}
+	return cancels
+}
+
+func (s *Server) revokeAuthSessionToken(ctx context.Context, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" || s.store == nil {
+		return nil
+	}
+	tokenHash := db.HashSessionToken(token)
+	s.authSessionMu.Lock()
+	if err := s.store.RevokeAuthSessionToken(ctx, token); err != nil {
+		s.authSessionMu.Unlock()
+		return err
+	}
+	cancels := s.removeAuthSessionConnectionsLocked(tokenHash)
+	s.authSessionMu.Unlock()
+	cancelAuthSessionConnections(cancels)
+	return nil
+}
+
+// authSessionWebSocketContext binds a WebSocket to the browser login session
+// that authorized its project access. Logout or expiry therefore terminates an
+// established connection instead of only rejecting the next HTTP request.
+func (s *Server) authSessionWebSocketContext(parent context.Context, r *http.Request) (context.Context, context.CancelFunc, bool) {
+	if s.store == nil {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, true
+	}
+
+	token := ""
+	if cookie, err := r.Cookie(authSessionCookieName); err == nil {
+		token = strings.TrimSpace(cookie.Value)
+	}
+
+	// Serialize validation/registration with logout so revocation either wins
+	// before this lookup or observes and cancels the newly registered socket.
+	s.authSessionMu.Lock()
+	hasUsers, err := s.store.HasUsers(parent)
+	if err != nil {
+		s.authSessionMu.Unlock()
+		return nil, func() {}, false
+	}
+	if !hasUsers {
+		s.authSessionMu.Unlock()
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, true
+	}
+	if token == "" {
+		s.authSessionMu.Unlock()
+		return nil, func() {}, false
+	}
+	_, session, err := s.store.GetUserBySessionToken(parent, token, s.clock())
+	if err != nil {
+		s.authSessionMu.Unlock()
+		return nil, func() {}, false
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, session.ExpiresAt)
+	if err != nil || !expiresAt.After(s.clock()) {
+		s.authSessionMu.Unlock()
+		return nil, func() {}, false
+	}
+	ctx, cancel := context.WithDeadline(parent, expiresAt)
+	if ctx.Err() != nil {
+		s.authSessionMu.Unlock()
+		cancel()
+		return nil, func() {}, false
+	}
+	if s.authSessionConnections == nil {
+		s.authSessionConnections = make(map[string]map[uint64]context.CancelFunc)
+	}
+	if s.authSessionConnections[session.TokenHash] == nil {
+		s.authSessionConnections[session.TokenHash] = make(map[uint64]context.CancelFunc)
+	}
+	s.authSessionConnectionSeq++
+	connectionID := s.authSessionConnectionSeq
+	s.authSessionConnections[session.TokenHash][connectionID] = cancel
+	s.authSessionMu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			s.authSessionMu.Lock()
+			if connections := s.authSessionConnections[session.TokenHash]; connections != nil {
+				delete(connections, connectionID)
+				if len(connections) == 0 {
+					delete(s.authSessionConnections, session.TokenHash)
+				}
+			}
+			s.authSessionMu.Unlock()
+		})
+	}
+	return ctx, release, true
+}
+
+func (s *Server) webSocketAuthorizationContext(parent context.Context, r *http.Request) (context.Context, context.CancelFunc, bool) {
+	remoteCtx, releaseRemote, ok := s.remoteWebSocketContext(parent, r)
+	if !ok {
+		return nil, func() {}, false
+	}
+	authCtx, releaseAuth, ok := s.authSessionWebSocketContext(remoteCtx, r)
+	if !ok {
+		releaseRemote()
+		return nil, func() {}, false
+	}
+	return authCtx, func() {
+		releaseAuth()
+		releaseRemote()
+	}, true
 }
 
 func validUserPasswordLength(password string) bool {
@@ -164,7 +292,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(authSessionCookieName); err == nil && cookie.Value != "" {
-		if err := s.store.RevokeAuthSessionToken(r.Context(), cookie.Value); err != nil {
+		if err := s.revokeAuthSessionToken(r.Context(), cookie.Value); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

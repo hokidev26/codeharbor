@@ -21,12 +21,13 @@ import (
 )
 
 type scriptedProvider struct {
-	mu         sync.Mutex
-	requests   []providers.GenerateRequest
-	turns      [][]providers.Event
-	onGenerate func(int)
-	reasoning  bool
-	fastModels map[string]bool
+	mu            sync.Mutex
+	requests      []providers.GenerateRequest
+	turns         [][]providers.Event
+	onGenerate    func(int)
+	reasoning     bool
+	fastModels    map[string]bool
+	contextLimits map[string]int
 }
 
 func (p *scriptedProvider) Name() string { return "fake" }
@@ -34,7 +35,7 @@ func (p *scriptedProvider) Capabilities() providers.Capabilities {
 	return providers.Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: p.reasoning}
 }
 func (p *scriptedProvider) ModelCapabilities(model string) providers.ModelCapabilities {
-	return providers.ModelCapabilities{FastMode: p.fastModels[model], FastModeKnown: true}
+	return providers.ModelCapabilities{FastMode: p.fastModels[model], FastModeKnown: true, ContextTokenLimit: p.contextLimits[model]}
 }
 func (p *scriptedProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"test"}, nil
@@ -1154,6 +1155,36 @@ func TestRunnerRecordsEstimatedCostAndCredentialAttribution(t *testing.T) {
 	}
 	if credentialID != "credential-1" {
 		t.Fatalf("expected credential attribution to be stored, got %q", credentialID)
+	}
+}
+
+func TestRunnerContextTokenLimitUsesResolvedAgentModelCapability(t *testing.T) {
+	registry := providers.NewRegistry()
+	provider := &scriptedProvider{contextLimits: map[string]int{"large": 654321, "inherit": 0}}
+	registry.Register(provider)
+	if !registry.SetDefaultFromConfig("fake:large", []config.ProviderConfig{{Name: "fake"}}) {
+		t.Fatal("expected fake provider to become default")
+	}
+	runner := &Runner{providers: registry, cfg: config.AgentConfig{ContextTokenLimit: 123456}}
+
+	for _, test := range []struct {
+		model string
+		want  int
+	}{
+		{model: "fake:large", want: 654321},
+		{model: "large", want: 654321},
+		{model: "fake:inherit", want: 123456},
+		{model: "missing:model", want: 123456},
+		{model: "aggregate:fast", want: 123456},
+	} {
+		if got := runner.contextTokenLimit(test.model); got != test.want {
+			t.Fatalf("contextTokenLimit(%q) = %d, want %d", test.model, got, test.want)
+		}
+	}
+
+	runner.cfg.ContextTokenLimit = 0
+	if got := runner.contextTokenLimit("missing:model"); got != defaultContextTokenLimit {
+		t.Fatalf("unresolved model default limit = %d, want %d", got, defaultContextTokenLimit)
 	}
 }
 

@@ -8,12 +8,18 @@ import {
   isAnthropicAccountProvider,
   isBuiltinProvider,
   isProviderDeletable,
+  mergeProviderModelDiscovery,
   modelProvidersForUIUnion,
   normalizeConsoleProvider,
+  normalizeProviderModelConfigs,
   providerConfigPayload,
   providerConsoleRequest,
+  providerModelDraftUsable,
+  providerVisibilityPreferencesForDraft,
+  removeProviderVisibilityPreferences,
   renderProviderConsolePage,
-} from "./model-provider-components.mjs?v=provider-card-clean-3-provider-create-page-2-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1";
+  setProviderModelHidden,
+} from "./model-provider-components.mjs?v=provider-card-clean-3-provider-create-page-2-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-model-configs-1-provider-reference-1";
 
 const providerConsoleInteractiveSelector = "button, input, select, textarea, a, details, summary, [role=\"switch\"], [contenteditable=\"true\"]";
 const providerConsoleFocusableSelector = "a[href], button, input, select, textarea, [tabindex]";
@@ -86,6 +92,32 @@ export function redactedProviderProxyURL(value) {
   }
 }
 
+export function providerConnectionFingerprint(draft = {}) {
+  return JSON.stringify({
+    type: String(draft.type || "").trim(),
+    baseUrl: String(draft.baseUrl || "").trim(),
+    apiKey: String(draft.apiKey || ""),
+    clearApiKey: Boolean(draft.clearApiKey),
+    apiKeyOptional: Boolean(draft.apiKeyOptional),
+    proxyUrl: String(draft.proxyUrl || "").trim(),
+    clearProxyAuth: Boolean(draft.clearProxyAuth),
+    userAgent: String(draft.userAgent || "").trim(),
+    requestHeaders: (Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []).map((header) => ({
+      name: String(header?.name || "").trim().toLowerCase(),
+      value: String(header?.value || ""),
+      keepExisting: Boolean(header?.keepExisting),
+    })),
+    insecureSkipTLSVerify: Boolean(draft.insecureSkipTLSVerify),
+  });
+}
+
+export function markProviderModelsStale(previousDraft = {}, nextDraft = {}) {
+  if (!previousDraft.modelsReady || previousDraft.modelsStale) return { ...nextDraft };
+  return providerConnectionFingerprint(previousDraft) === providerConnectionFingerprint(nextDraft)
+    ? { ...nextDraft }
+    : { ...nextDraft, modelsStale: true };
+}
+
 export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackType = "openai-compatible") {
   const fields = form?.elements || {};
   const value = (name, fallback = "") => String(fields[name]?.value ?? fallback ?? "");
@@ -103,13 +135,15 @@ export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackTy
       configured: row.dataset?.configured === "true",
     };
   });
-  return {
+  const nextDraft = {
     ...currentDraft,
     name: value("name", currentDraft.name),
     type: value("type", currentDraft.type || fallbackType),
     profile: String(currentDraft.profile || ""),
     baseUrl: value("baseUrl", currentDraft.baseUrl),
-    apiKey: value("apiKey", currentDraft.apiKey),
+    apiKey: fields.apiKey && String(fields.apiKey.value || "") === "" && currentDraft.apiKeyDraft
+      ? String(currentDraft.apiKey || "")
+      : value("apiKey", currentDraft.apiKey),
     apiKeyDraft: true,
     clearApiKey: Boolean(fields.clearApiKey?.checked),
     proxyUrl: value("proxyUrl", currentDraft.proxyUrl),
@@ -124,6 +158,7 @@ export function providerConsoleDraftFromForm(currentDraft = {}, form, fallbackTy
     maxTokens: Number(fields.maxTokens?.value || 0),
     apiKeyOptional: Boolean(fields.apiKeyOptional?.checked),
   };
+  return markProviderModelsStale(currentDraft, nextDraft);
 }
 
 export function syncProviderConsoleDraft(consoleState, form) {
@@ -204,14 +239,15 @@ export function providerPreflightResult(response, translate) {
   };
 }
 
-export function providerModelDiscovery(response, currentModel = "") {
-  const models = [...new Set((Array.isArray(response?.models) ? response.models : [])
-    .map((model) => String(model || "").trim())
-    .filter(Boolean))];
+export function providerModelDiscovery(response, currentModel = "", currentConfigs = []) {
+  const modelConfigs = mergeProviderModelDiscovery(currentConfigs, response, currentModel);
+  const models = modelConfigs.map((item) => item.name);
   const current = String(currentModel || "").trim();
+  const visible = modelConfigs.filter((item) => !item.hidden);
   return {
     models,
-    selectedModel: models.includes(current) ? current : (models[0] || current),
+    modelConfigs,
+    selectedModel: visible.some((item) => item.name === current) ? current : (visible[0]?.name || current),
   };
 }
 
@@ -923,6 +959,7 @@ export function createModelProviderSettingsController({
   notifyTerminal,
   openSettingsModal,
   refreshActiveSettingsPanel,
+  requestAPI = api,
   setModelVisibilityPreference,
   setPreferredModelPreference,
   showError,
@@ -970,7 +1007,7 @@ export function createModelProviderSettingsController({
     state.modelAggregatesError = "";
     if (state.activeSettingsPanel === "models") refreshActiveSettingsPanel?.();
     try {
-      const response = await api("/api/model-aggregates");
+      const response = await requestAPI("/api/model-aggregates");
       if (seq !== state.modelAggregateSeq) return false;
       state.modelAggregates = normalizeModelAggregateList(response);
       state.modelAggregatesLoaded = true;
@@ -996,7 +1033,7 @@ export function createModelProviderSettingsController({
     setButtonBusy(button, true, mt("refreshing"));
     if (silent && providerConsoleState().view === "codex" && !extractAuthFiles(state.providerAuthFiles).length) refreshActiveSettingsPanel?.();
     try {
-      const files = await api("/api/providers/oauth/codex/accounts");
+      const files = await requestAPI("/api/providers/oauth/codex/accounts");
       if (seq !== state.providerAuthSeq) return;
       state.providerAuthFiles = files;
       providerConsoleState().codexSelectedIds = normalizeCodexSelectedIds(providerConsoleState().codexSelectedIds, extractAuthFiles(files));
@@ -1025,7 +1062,7 @@ export function createModelProviderSettingsController({
     if (providerConsoleState().view === "anthropic") refreshActiveSettingsPanel?.();
     try {
       const request = anthropicAccountsListRequest();
-      const response = await api(request.path, request.options);
+      const response = await requestAPI(request.path, request.options);
       if (seq !== state.anthropicAccountSeq) return false;
       state.anthropicAccounts = normalizeAnthropicAccountList(response);
       state.anthropicAccountsError = "";
@@ -1129,7 +1166,7 @@ export function createModelProviderSettingsController({
         if (prepared.length) {
           try {
             const request = codexImportBatchRequest(prepared);
-            const response = normalizeCodexImportBatchResult(await api(request.path, request.options));
+            const response = normalizeCodexImportBatchResult(await requestAPI(request.path, request.options));
             imported = response.imported;
             skipped = response.skipped;
             prepared.forEach((item, index) => {
@@ -1157,7 +1194,7 @@ export function createModelProviderSettingsController({
       } else {
         consoleState.codexImportDraft = draft;
         try {
-          const response = await api("/api/providers/oauth/codex/import", {
+          const response = await requestAPI("/api/providers/oauth/codex/import", {
             method: "POST",
             body: JSON.stringify({ filename: "autoto-codex-auth.json", content: draft }),
           });
@@ -1252,7 +1289,7 @@ export function createModelProviderSettingsController({
       if (accountID) {
         try {
           const request = codexAccountActionRequest("sync", accountID);
-          await api(request.path, request.options);
+          await requestAPI(request.path, request.options);
         } catch (error) {
           refreshFailures.push(error?.message || mt("unknown"));
         }
@@ -1287,7 +1324,7 @@ export function createModelProviderSettingsController({
       const request = codexBrowserLoginRequest("status", loginId);
       let status;
       try {
-        status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+        status = normalizeCodexBrowserLoginStatus(await requestAPI(request.path, request.options));
       } catch (error) {
         if (seq !== codexBrowserLoginState().seq) return;
         await finishCodexBrowserLogin({ loginId, status: "failed", message: error?.message || mt("unknown") }, seq);
@@ -1329,7 +1366,7 @@ export function createModelProviderSettingsController({
     refreshProviderConsole();
     try {
       const request = codexBrowserLoginRequest("start");
-      const status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+      const status = normalizeCodexBrowserLoginStatus(await requestAPI(request.path, request.options));
       if (seq !== codexBrowserLoginState().seq) {
         popup?.close?.();
         return;
@@ -1367,7 +1404,7 @@ export function createModelProviderSettingsController({
     login.seq = seq;
     try {
       const request = codexBrowserLoginRequest("cancel", login.loginId);
-      const status = normalizeCodexBrowserLoginStatus(await api(request.path, request.options));
+      const status = normalizeCodexBrowserLoginStatus(await requestAPI(request.path, request.options));
       Object.assign(login, status, { seq, status: status.status || "cancelled", popupBlocked: false });
       setProviderConsoleResult(mt("browserLoginCancelled"), "info");
     } catch (error) {
@@ -1420,7 +1457,7 @@ export function createModelProviderSettingsController({
     if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
     return runCodexAccountAction(id, button, mt("saving"), async () => {
       const request = codexAccountActionRequest("save", id, { alias, priority });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       consoleState.codexEdit = null;
       setProviderConsoleResult(mt("accountSaved"), "success");
       notifyTerminal?.(`[info] ${mt("accountSaved")}\n`);
@@ -1430,7 +1467,7 @@ export function createModelProviderSettingsController({
   async function syncCodexAccount(id, button) {
     return runCodexAccountAction(id, button, mt("syncing"), async () => {
       const request = codexAccountActionRequest("sync", id);
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       setProviderConsoleResult(mt("accountSynced"), "success");
       notifyTerminal?.(`[info] ${mt("accountSynced")}\n`);
     });
@@ -1439,7 +1476,7 @@ export function createModelProviderSettingsController({
   async function toggleCodexAccount(id, disabled, button) {
     return runCodexAccountAction(id, button, mt("saving"), async () => {
       const request = codexAccountActionRequest("toggle", id, { disabled });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       const message = mt(disabled ? "accountEnabled" : "accountDisabled");
       setProviderConsoleResult(message, "success");
       notifyTerminal?.(`[info] ${message}\n`);
@@ -1493,7 +1530,7 @@ export function createModelProviderSettingsController({
     if (state.codexAccountBusy?.[id] || !globalThis.confirm?.(mt("deleteAccountConfirm"))) return;
     return runCodexAccountAction(id, button, mt("deleting"), async () => {
       const request = codexAccountActionRequest("delete", id);
-      const result = await api(request.path, request.options);
+      const result = await requestAPI(request.path, request.options);
       const warning = codexDeleteResultWarning(result, mt);
       if (!warning) {
         setProviderConsoleResult(mt("accountDeleted"), "success");
@@ -1521,7 +1558,7 @@ export function createModelProviderSettingsController({
     refreshProviderConsole();
     try {
       const request = codexAccountBatchRequest(operation, ids, { priority });
-      const response = await api(request.path, request.options);
+      const response = await requestAPI(request.path, request.options);
       const result = normalizeCodexBatchResult(response, ids);
       const message = result.failed
         ? mt("batchPartial", { success: result.success, failed: result.failed })
@@ -1580,7 +1617,7 @@ export function createModelProviderSettingsController({
     state.anthropicAccountCreating = true;
     refreshProviderConsole();
     try {
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       const consoleState = providerConsoleState();
       consoleState.anthropicProfile = "";
       consoleState.anthropicAlias = "";
@@ -1602,7 +1639,7 @@ export function createModelProviderSettingsController({
     if (!Number.isInteger(priority) || priority < 1 || priority > 1000000) throw new Error(mt("invalidPriority"));
     return runAnthropicAccountAction(id, button, mt("saving"), async () => {
       const request = anthropicAccountActionRequest("save", id, { alias: String(edit.alias || "").trim(), priority });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       providerConsoleState().anthropicEdit = null;
       setProviderConsoleResult(mt("anthropic.accountSaved"), "success");
     });
@@ -1611,7 +1648,7 @@ export function createModelProviderSettingsController({
   async function syncAnthropicAccount(id, button) {
     return runAnthropicAccountAction(id, button, mt("syncing"), async () => {
       const request = anthropicAccountActionRequest("sync", id);
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       setProviderConsoleResult(mt("anthropic.accountSynced"), "success");
     });
   }
@@ -1619,7 +1656,7 @@ export function createModelProviderSettingsController({
   async function toggleAnthropicAccount(id, disabled, button) {
     return runAnthropicAccountAction(id, button, mt("saving"), async () => {
       const request = anthropicAccountActionRequest("toggle", id, { disabled });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       setProviderConsoleResult(mt(disabled ? "anthropic.accountEnabled" : "anthropic.accountDisabled"), "success");
     });
   }
@@ -1628,7 +1665,7 @@ export function createModelProviderSettingsController({
     if (state.anthropicAccountBusy?.[id] || !globalThis.confirm?.(mt("anthropic.deleteConfirm"))) return;
     return runAnthropicAccountAction(id, button, mt("deleting"), async () => {
       const request = anthropicAccountActionRequest("delete", id);
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       setProviderConsoleResult(mt("anthropic.accountDeleted"), "success");
     });
   }
@@ -2413,7 +2450,7 @@ export function createModelProviderSettingsController({
     form.dataset.submitting = "true";
     setButtonBusy(saveButton, true, mt("saving"));
     try {
-      const response = await api(`/api/providers/${encodeURIComponent(providerName)}/config`, { method: "PUT", body: JSON.stringify(payload) });
+      const response = await requestAPI(`/api/providers/${encodeURIComponent(providerName)}/config`, { method: "PUT", body: JSON.stringify(payload) });
       if (form.elements.apiKey) form.elements.apiKey.value = "";
       if (form.elements.clearApiKey) form.elements.clearApiKey.checked = false;
       state.providerConfigStatus = response.message || mt("providerConfigSaved");
@@ -2524,10 +2561,10 @@ export function createModelProviderSettingsController({
     if (normalizeDefaultReasoningEffort(runtimeSettings.defaultReasoningEffort) === desired) return runtimeSettings;
     let request = runtimeReasoningSettingsRequest(desired, runtimeSettings);
     try {
-      return await api(request.path, request.options);
+      return await requestAPI(request.path, request.options);
     } catch (error) {
       if (error?.status !== 409) throw error;
-      const latestSettings = await api("/api/settings");
+      const latestSettings = await requestAPI("/api/settings");
       runtimeSettings = latestSettings?.runtimeSettings || {};
       state.settings = { ...(state.settings || {}), runtimeSettings };
       if (normalizeDefaultReasoningEffort(runtimeSettings.defaultReasoningEffort) === desired) return runtimeSettings;
@@ -2549,7 +2586,7 @@ export function createModelProviderSettingsController({
     settingsState.result = null;
     refreshActiveSettingsPanel?.();
     try {
-      const response = await api(state.settings?.agentModelSettingsEndpoint || "/api/runtime/agent-model-settings", {
+      const response = await requestAPI(state.settings?.agentModelSettingsEndpoint || "/api/runtime/agent-model-settings", {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
@@ -2628,7 +2665,7 @@ export function createModelProviderSettingsController({
     refreshActiveSettingsPanel?.();
     try {
       const request = modelAggregateActionRequest("save", aggregate, { ...values, revision: aggregate.revision || 0 });
-      const response = await api(request.path, request.options);
+      const response = await requestAPI(request.path, request.options);
       const saved = normalizeModelAggregateList([response])[0];
       const remaining = normalizeModelAggregateList(state.modelAggregates).filter((item) => item.name !== saved.name);
       state.modelAggregates = [...remaining, saved].sort((left, right) => left.name.localeCompare(right.name));
@@ -2659,7 +2696,7 @@ export function createModelProviderSettingsController({
     refreshActiveSettingsPanel?.();
     try {
       const request = modelAggregateActionRequest("delete", aggregate, { revision: aggregate.revision });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       state.modelAggregates = normalizeModelAggregateList(state.modelAggregates).filter((item) => item.name !== aggregate.name);
       state.modelAggregatesLoaded = true;
       if (state.modelAggregateEditor?.name === aggregate.name) state.modelAggregateEditor = null;
@@ -2861,6 +2898,16 @@ export function createModelProviderSettingsController({
     if (!state.anthropicAccountsLoading) loadAnthropicAccounts({ silent: true }).catch(showError);
   }
 
+  function providerDraftWithVisibility(draft, providerName = draft?.name) {
+    const prefs = loadModelVisibilityPreferences();
+    const modelConfigs = normalizeProviderModelConfigs(draft, { hiddenModels: prefs.hiddenModels, providerName });
+    const selected = String(draft?.model || "").trim();
+    const visibleDefault = modelConfigs.find((item) => item.name === selected && !item.hidden)?.name
+      || modelConfigs.find((item) => !item.hidden)?.name
+      || selected;
+    return { ...draft, model: visibleDefault, models: modelConfigs.map((item) => item.name), modelConfigs };
+  }
+
   function openProviderConsoleDrawer(provider) {
     const normalized = normalizeConsoleProvider(provider || {});
     if (normalized.type === "codex" || normalized.name === "codex") {
@@ -2878,7 +2925,7 @@ export function createModelProviderSettingsController({
     consoleState.mode = "edit";
     consoleState.type = normalized.type;
     consoleState.providerName = normalized.name;
-    consoleState.draft = createProviderDraft(normalized.type, normalized);
+    consoleState.draft = providerDraftWithVisibility(createProviderDraft(normalized.type, normalized), normalized.name);
     consoleState.dirty = false;
     setProviderConsoleResult("");
     refreshProviderConsole({ focusCreate: true });
@@ -2894,14 +2941,22 @@ export function createModelProviderSettingsController({
       openAnthropicConsolePage(draft);
       return;
     }
+    const emptyModelDraft = {
+      ...draft,
+      model: "",
+      models: [],
+      modelConfigs: [],
+      modelsReady: false,
+      modelsStale: false,
+    };
     const consoleState = providerConsoleState();
     consoleState.view = "providers";
     consoleState.modal = "";
     consoleState.drawer = "provider";
     consoleState.mode = "create";
     consoleState.type = type;
-    consoleState.providerName = draft.name;
-    consoleState.draft = draft;
+    consoleState.providerName = emptyModelDraft.name;
+    consoleState.draft = providerDraftWithVisibility(emptyModelDraft, emptyModelDraft.name);
     consoleState.dirty = false;
     setProviderConsoleResult("");
     refreshProviderConsole({ focusCreate: true });
@@ -2990,10 +3045,11 @@ export function createModelProviderSettingsController({
     return validation;
   }
 
-  function validateConsoleDraft(draft, { requireModel = true } = {}) {
+  function validateConsoleDraft(draft, { requireModel = true, requireModelsReady = requireModel } = {}) {
     const nameValidation = currentProviderNameValidation(draft.name);
     if (!nameValidation.valid) throw new Error(providerNameValidationMessage(nameValidation.code));
     if (requireModel && !draft.model) throw new Error(mt("selectDefaultModel"));
+    if (requireModelsReady && !providerModelDraftUsable(draft)) throw new Error(ct(draft.modelsStale ? "messages.modelsStaleSaveBlocked" : "messages.modelsRequired"));
     if (draft.type === "openai-compatible" && !draft.baseUrl) throw new Error(mt("missingBaseUrl"));
     const headerNames = new Set();
     for (const header of Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []) {
@@ -3027,18 +3083,16 @@ export function createModelProviderSettingsController({
     return Boolean(draft.apiKey || draft.apiKeyOptional || existing?.configured);
   }
 
-  async function discoverConsoleProviderModels(form, { automatic = false } = {}) {
+  async function discoverConsoleProviderModels(form) {
     const consoleState = providerConsoleState();
     const rawDraft = consoleDraftFromForm(form);
     const draft = { ...rawDraft, ...providerConfigPayload(rawDraft) };
     updateProviderNameValidation(form);
     validateConsoleDraft(draft, { requireModel: false });
     if (!consoleDraftCanDiscoverModels(draft)) {
-      if (!automatic) {
-        const message = ct("messages.currentDraftTestNeedsApiKey");
-        setProviderConsoleResult(message, "attention");
-        notifyTerminal?.(`[warn] ${message}\n`);
-      }
+      const message = ct("messages.currentDraftTestNeedsApiKey");
+      setProviderConsoleResult(message, "attention");
+      notifyTerminal?.(`[warn] ${message}\n`);
       return false;
     }
     if (providerConsoleBusy(`models:${draft.name}`)) return false;
@@ -3047,14 +3101,14 @@ export function createModelProviderSettingsController({
     await runProviderConsoleBusy(`models:${draft.name}`, async () => {
       try {
         const request = providerConsoleRequest("test", null, consoleDraftRequestValues(draft));
-        const response = await api(request.path, request.options);
+        const response = await requestAPI(request.path, request.options);
         const preflight = providerPreflightResult(response, ct);
         if (preflight.tone !== "success") {
           setProviderConsoleResult(preflight.message, preflight.tone);
           notifyTerminal?.(`[${preflight.terminalLevel}] ${preflight.message}\n`);
           return;
         }
-        const discovery = providerModelDiscovery(response, draft.model);
+        const discovery = providerModelDiscovery(response, draft.model, draft.modelConfigs);
         if (!discovery.models.length) {
           const message = ct("messages.noModelsDiscovered");
           setProviderConsoleResult(message, "attention");
@@ -3064,9 +3118,12 @@ export function createModelProviderSettingsController({
         consoleState.draft = {
           ...draft,
           models: discovery.models,
+          modelConfigs: discovery.modelConfigs,
           model: discovery.selectedModel,
+          modelsReady: true,
+          modelsStale: false,
         };
-        const message = ct(automatic ? "messages.modelsDiscoveredAutomatically" : "messages.modelsDiscovered", {
+        const message = ct("messages.modelsDiscovered", {
           count: discovery.models.length,
           model: discovery.selectedModel,
         });
@@ -3120,7 +3177,7 @@ export function createModelProviderSettingsController({
     await runProviderConsoleBusy(`message-test:${draft.name}`, async () => {
       try {
         const request = providerConsoleRequest("message-test", null, consoleDraftRequestValues(draft, { prompt }));
-        const response = await api(request.path, request.options);
+        const response = await requestAPI(request.path, request.options);
         const success = response?.success === true;
         const result = {
           success,
@@ -3155,7 +3212,7 @@ export function createModelProviderSettingsController({
     await runProviderConsoleBusy(`test:${draft.name}`, async () => {
       try {
         const request = providerConsoleRequest("test", null, consoleDraftRequestValues(draft));
-        const response = await api(request.path, request.options);
+        const response = await requestAPI(request.path, request.options);
         const preflight = providerPreflightResult(response, ct);
         setProviderConsoleResult(preflight.message, preflight.tone);
         notifyTerminal?.(`[${preflight.terminalLevel}] ${preflight.message}\n`);
@@ -3182,7 +3239,7 @@ export function createModelProviderSettingsController({
           ? String(consoleState.providerName || draft.name).trim()
           : String(draft.name).trim();
         const configRequest = providerConsoleRequest("config", { name: originalName }, consoleDraftRequestValues({ ...providerConfigPayload(draft), pathName: originalName }));
-        await api(configRequest.path, configRequest.options);
+        await requestAPI(configRequest.path, configRequest.options);
         saved = true;
         consoleState.providerName = draft.name;
         consoleState.draft = {
@@ -3201,7 +3258,9 @@ export function createModelProviderSettingsController({
         };
         consoleState.dirty = false;
         const enableRequest = providerConsoleRequest("toggle", { name: draft.name, defaultModel: draft.model }, { enabled: true, model: draft.model });
-        await api(enableRequest.path, enableRequest.options);
+        await requestAPI(enableRequest.path, enableRequest.options);
+        const nextVisibility = providerVisibilityPreferencesForDraft(loadModelVisibilityPreferences(), originalName, draft.name, draft.modelConfigs);
+        await persistModelVisibilityPreferences(nextVisibility);
         await refreshProviderDataAfterMutation(ct("messages.providerSavedAndEnabled", { provider: providerDisplayName(draft) }));
       } catch (error) {
         const message = saved
@@ -3226,7 +3285,7 @@ export function createModelProviderSettingsController({
     const displayName = providerDisplayName(provider);
     await runProviderConsoleBusy(`toggle:${name}`, async () => {
       const request = providerConsoleRequest("toggle", provider, { enabled, model });
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
       await refreshProviderDataAfterMutation(ct(enabled ? "messages.providerStarted" : "messages.providerStopped", { provider: displayName }));
     });
   }
@@ -3237,7 +3296,8 @@ export function createModelProviderSettingsController({
     if (!globalThis.confirm?.(ct("messages.deleteProviderConfirm", { provider: providerDisplayName(provider) }))) return;
     await runProviderConsoleBusy(`delete:${name}`, async () => {
       const request = providerConsoleRequest("delete", provider);
-      await api(request.path, request.options);
+      await requestAPI(request.path, request.options);
+      await persistModelVisibilityPreferences(removeProviderVisibilityPreferences(loadModelVisibilityPreferences(), name));
       const consoleState = providerConsoleState();
       consoleState.drawer = "";
       consoleState.mode = "";
@@ -3260,8 +3320,18 @@ export function createModelProviderSettingsController({
     const target = event.target;
     const form = target?.closest?.("[data-mp-provider-form]");
     if (!form || (!target?.name && !target?.matches?.("[data-mp-model-choice]"))) return false;
-    const draft = syncProviderConsoleDraft(providerConsoleState(), form);
+    const consoleState = providerConsoleState();
+    if (target?.name === "apiKey") {
+      consoleState.draft = { ...(consoleState.draft || {}), apiKey: String(target.value || ""), apiKeyDraft: true };
+    }
+    const draft = syncProviderConsoleDraft(consoleState, form);
     if (!draft) return false;
+    const prefixPreview = form.querySelector?.("[data-mp-provider-prefix-preview]");
+    if (prefixPreview) {
+      const value = draft.name || "provider";
+      if ("value" in prefixPreview) prefixPreview.value = value;
+      else prefixPreview.textContent = value;
+    }
     const example = form.querySelector?.("[data-mp-model-example]");
     if (example) {
       const value = `${draft.name || "provider"}:${draft.model || "your-model"}`;
@@ -3337,6 +3407,17 @@ export function createModelProviderSettingsController({
       if (edit?.id === rawTarget.dataset.codexEditPriority) edit.priority = rawTarget.value || "";
       return;
     }
+    if (rawTarget?.matches?.("[data-mp-model-token]")) {
+      const consoleState = providerConsoleState();
+      const name = String(rawTarget.dataset.mpModelToken || "").trim();
+      const value = Math.min(10_000_000, Math.max(0, Math.floor(Number(rawTarget.value || 0) || 0)));
+      consoleState.draft = {
+        ...(consoleState.draft || {}),
+        modelConfigs: normalizeProviderModelConfigs({ modelConfigs: consoleState.draft?.modelConfigs }).map((item) => item.name === name ? { ...item, contextTokenLimit: value } : item),
+      };
+      consoleState.dirty = true;
+      return;
+    }
     if (rawTarget?.matches?.("[data-mp-request-header-name], [data-mp-request-header-value]")) {
       const row = rawTarget.closest?.("[data-mp-request-header-row]");
       if (rawTarget.matches?.("[data-mp-request-header-value]") && rawTarget.value) row?.setAttribute?.("data-keep-existing", "false");
@@ -3407,12 +3488,8 @@ export function createModelProviderSettingsController({
       refreshProviderConsole();
       return;
     }
-    if (!updated || !["baseUrl", "apiKey", "clearApiKey"].includes(target?.name)) return;
-    if (!form) return;
-    const draft = providerConsoleState().draft;
-    if (consoleDraftCanDiscoverModels(draft)) {
-      discoverConsoleProviderModels(form, { automatic: true }).catch(showError);
-    }
+    if (!updated) return;
+    if (providerConsoleState().draft?.modelsStale) refreshProviderConsole();
   }
 
   function handleProviderConsoleDragOver(event) {
@@ -3478,6 +3555,17 @@ export function createModelProviderSettingsController({
     const consoleState = providerConsoleState();
     if (target.dataset.mpBackdrop && event.target === target) {
       closeProviderConsoleLayer();
+      return;
+    }
+    if (target.dataset.mpToggleApiKey !== undefined) {
+      const input = target.closest?.(".mp-provider-secret-control")?.querySelector?.('input[name="apiKey"]');
+      if (!input) return;
+      const revealing = input.type === "password";
+      input.type = revealing ? "text" : "password";
+      const label = ct(revealing ? "actions.hideApiKey" : "actions.showApiKey");
+      target.setAttribute?.("aria-pressed", revealing ? "true" : "false");
+      target.setAttribute?.("aria-label", label);
+      target.setAttribute?.("title", label);
       return;
     }
     if (target.dataset.mpCloseCodexPage !== undefined || target.dataset.mpCloseAnthropicPage !== undefined) {
@@ -3586,6 +3674,57 @@ export function createModelProviderSettingsController({
       closeProviderConsoleLayer();
       return;
     }
+    if (target.dataset.mpAddManualModel !== undefined) {
+      const form = target.closest?.("[data-mp-provider-form]");
+      const input = form?.querySelector?.("[data-mp-manual-model-input]");
+      const name = String(input?.value || "").trim();
+      if (!name) return;
+      const draft = form ? providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type) : { ...(consoleState.draft || {}) };
+      const configs = normalizeProviderModelConfigs({ modelConfigs: draft.modelConfigs });
+      if (!configs.some((item) => item.name === name)) configs.push({ name, contextTokenLimit: 0, hidden: false, manual: true });
+      consoleState.draft = {
+        ...draft,
+        model: draft.model && configs.some((item) => item.name === draft.model && !item.hidden) ? draft.model : name,
+        models: configs.map((item) => item.name),
+        modelConfigs: configs,
+        modelsReady: true,
+        modelsStale: false,
+      };
+      consoleState.dirty = true;
+      setProviderConsoleResult(ct("messages.manualModelAdded", { model: name }), "info");
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.mpModelVisibility) {
+      const name = String(target.dataset.mpModelVisibility || "").trim();
+      const draft = { ...(consoleState.draft || {}) };
+      const result = setProviderModelHidden(draft.modelConfigs, name, target.dataset.hidden !== "true", draft.model);
+      if (!result.changed) {
+        setProviderConsoleResult(ct("messages.lastVisibleModel"), "attention");
+        refreshProviderConsole();
+        return;
+      }
+      consoleState.draft = { ...draft, model: result.defaultModel, modelConfigs: result.modelConfigs, models: result.modelConfigs.map((item) => item.name) };
+      consoleState.dirty = true;
+      refreshProviderConsole();
+      return;
+    }
+    if (target.dataset.mpRemoveManualModel) {
+      const name = String(target.dataset.mpRemoveManualModel || "").trim();
+      const draft = { ...(consoleState.draft || {}) };
+      const configs = normalizeProviderModelConfigs({ modelConfigs: draft.modelConfigs }).filter((item) => item.name !== name || !item.manual);
+      const visible = configs.filter((item) => !item.hidden);
+      consoleState.draft = {
+        ...draft,
+        model: draft.model === name ? (visible[0]?.name || "") : draft.model,
+        models: configs.map((item) => item.name),
+        modelConfigs: configs,
+        modelsReady: Boolean(visible.length),
+      };
+      consoleState.dirty = true;
+      refreshProviderConsole();
+      return;
+    }
     if (target.dataset.mpAddRequestHeader !== undefined) {
       const form = target.closest?.("[data-mp-provider-form]");
       const draft = form ? providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type) : { ...(consoleState.draft || {}) };
@@ -3604,9 +3743,10 @@ export function createModelProviderSettingsController({
       const form = target.closest?.("[data-mp-provider-form]");
       const draft = form ? providerConsoleDraftFromForm(consoleState.draft || {}, form, consoleState.type) : { ...(consoleState.draft || {}) };
       const index = Number(target.dataset.mpRemoveRequestHeader);
+      const previousDraft = consoleState.draft || {};
       draft.requestHeaders = (Array.isArray(draft.requestHeaders) ? draft.requestHeaders : []).filter((_, itemIndex) => itemIndex !== index);
       draft.requestHeadersDraft = true;
-      consoleState.draft = draft;
+      consoleState.draft = markProviderModelsStale(previousDraft, draft);
       consoleState.dirty = true;
       refreshProviderConsole();
       return;
@@ -3804,7 +3944,7 @@ export function createModelProviderSettingsController({
     try {
       agentId = state.agent?.id || "";
       if (agentId && value && value !== state.agent.model) {
-        const updated = await api(`/api/agents/${agentId}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
+        const updated = await requestAPI(`/api/agents/${agentId}/model`, { method: "PATCH", body: JSON.stringify({ model: value }) });
         if (seq !== state.modelApplySeq || state.agent?.id !== agentId) return;
         state.agent = updated;
       }
@@ -3849,6 +3989,15 @@ export function createModelProviderSettingsController({
       showUnconfiguredProviders: Boolean(prefs?.showUnconfiguredProviders),
     };
     setModelVisibilityPreference?.(modelVisibilityFallback);
+    return modelVisibilityFallback;
+  }
+
+  async function persistModelVisibilityPreferences(prefs) {
+    modelVisibilityFallback = {
+      hiddenModels: { ...(prefs?.hiddenModels || {}) },
+      showUnconfiguredProviders: Boolean(prefs?.showUnconfiguredProviders),
+    };
+    await Promise.resolve(setModelVisibilityPreference?.(modelVisibilityFallback));
     return modelVisibilityFallback;
   }
 
@@ -4138,5 +4287,8 @@ export function createModelProviderSettingsController({
     renderProviderSettingsContent,
     selectedModelValue,
     setPreferredModel,
+    saveConsoleProvider,
+    deleteConsoleProvider,
+    discoverConsoleProviderModels,
   };
 }

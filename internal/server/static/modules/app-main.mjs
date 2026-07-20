@@ -6,18 +6,19 @@ import { createBackgroundTasksController } from "./background-tasks.mjs?v=subage
 import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
 import { createChatComposerController, normalizeChatDrafts, normalizePromptHistory } from "./chat-composer.mjs?v=plan-mode-1-project-context-1";
-import { createChatRenderingController } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1-subagent-cards-1";
+import { createChatRenderingController, findToolActivityByIdentity, renderAgentTaskActivityCardHTML } from "./chat-rendering.mjs?v=message-thread-1-plan-mode-2-user-message-left-1-switch-fix-3-hide-run-loading-1-i18n-shared-1-conversation-boundary-1-subagent-cards-1-message-lifecycle-1-subagent-incremental-1";
 import {
   addRecentConversation,
   buildNavigationView,
   createNavigationRefreshController,
+  createRecentConversationSyncController,
   normalizeNavigationPayload,
   normalizeRecentConversations,
   parseNavigationTargetId,
   renderNavigationHTML,
   renderRecentConversationsHTML,
   resolveInitialNavigationTarget,
-} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1-project-context-1";
+} from "./conversation-navigation.mjs?v=mode-boundaries-2-project-flat-1-task-workspace-1-navigation-state-1-project-context-1-recent-sync-1";
 import {
   basename,
   canonicalLocalPath,
@@ -36,7 +37,7 @@ import { createLocalPreferencesSettingsController } from "./local-preferences-se
 import { createMCPRegistryUIController } from "./mcp-registry-ui.mjs";
 import { createPluginRegistryUIController } from "./plugin-registry-ui.mjs";
 import { createMemorySettingsController } from "./memory-settings.mjs";
-import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1";
+import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1-model-configs-1-provider-reference-1";
 import {
   createOverviewDashboardController,
   overviewRailTarget,
@@ -320,6 +321,7 @@ let backgroundTaskAgentLoadGeneration = 0;
 let backgroundTaskAgentLoadInFlight = null;
 let subagentCardRefreshHandle = 0;
 let subagentCardRefreshAgentId = "";
+let subagentCardRefreshSelectionSeq = 0;
 const subagentCardRefreshReasons = new Set([
   "loaded",
   "task-loaded",
@@ -422,6 +424,7 @@ const {
   clearToolApproval,
   copyCurrentConversationMarkdown,
   finishToolOutput,
+  invalidateMessageLifecycle,
   loadLatestRunSummary,
   loadMessages,
   loadOlderMessages,
@@ -458,32 +461,35 @@ const executionNotifications = createExecutionNotifications({
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
 });
 
-function subagentCardIdentity(card, index = 0) {
+function subagentCardIdentity(card) {
   const dataset = card?.dataset || {};
-  const runId = String(dataset.runId || "");
-  const toolUseId = String(dataset.toolUseId || "");
-  if (runId || toolUseId) return JSON.stringify([runId, toolUseId]);
-  const taskId = String(dataset.taskId || "");
-  return taskId || String(index);
+  const runId = String(dataset.runId || "").trim();
+  const toolUseId = String(dataset.toolUseId || "").trim();
+  if (runId && toolUseId) return JSON.stringify([runId, toolUseId]);
+  const taskId = String(dataset.taskId || "").trim();
+  return taskId ? `task:${taskId}` : "";
 }
 
 function captureSubagentCardViewState(root = $("messages")) {
   if (!root) return { cards: [], focus: null, scrollTop: 0 };
   const active = globalThis.document?.activeElement;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")].map((card, cardIndex) => {
+  const cards = [...root.querySelectorAll("[data-subagent-card]")].flatMap((card) => {
+    const key = subagentCardIdentity(card);
+    if (!key) return [];
     const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
-    return {
-      key: subagentCardIdentity(card, cardIndex),
+    return [{
+      key,
       status: String(card.dataset?.subagentStatus || ""),
       open: details.map((detail) => Boolean(detail.open)),
-    };
+    }];
   });
   const focusButton = active?.closest?.("[data-subagent-action]");
   const focusCard = focusButton?.closest?.("[data-subagent-card]");
+  const focusKey = subagentCardIdentity(focusCard);
   return {
     cards,
-    focus: focusButton && focusCard ? {
-      key: subagentCardIdentity(focusCard, [...root.querySelectorAll("[data-subagent-card]")].indexOf(focusCard)),
+    focus: focusButton && focusKey ? {
+      key: focusKey,
       action: focusButton.dataset.subagentAction || "",
       taskId: focusButton.dataset.taskId || "",
       childAgentId: focusButton.dataset.childAgentId || "",
@@ -496,8 +502,8 @@ function captureSubagentCardViewState(root = $("messages")) {
 function restoreSubagentCardViewState(snapshot, root = $("messages")) {
   if (!root || !snapshot) return;
   const cards = [...root.querySelectorAll("[data-subagent-card]")];
-  for (const [cardIndex, card] of cards.entries()) {
-    const saved = snapshot.cards?.find((item) => item.key === subagentCardIdentity(card, cardIndex));
+  for (const card of cards) {
+    const saved = snapshot.cards?.find((item) => item.key === subagentCardIdentity(card));
     if (!saved) continue;
     const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
     const statusChanged = saved.status !== String(card.dataset?.subagentStatus || "");
@@ -507,7 +513,7 @@ function restoreSubagentCardViewState(snapshot, root = $("messages")) {
     });
   }
   if (snapshot.focus) {
-    const card = cards.find((item, index) => subagentCardIdentity(item, index) === snapshot.focus.key);
+    const card = cards.find((item) => subagentCardIdentity(item) === snapshot.focus.key);
     const button = [...(card?.querySelectorAll?.("[data-subagent-action]") || [])].find((candidate) => (
       (candidate.dataset.subagentAction || "") === snapshot.focus.action
       && (candidate.dataset.taskId || "") === snapshot.focus.taskId
@@ -520,10 +526,39 @@ function restoreSubagentCardViewState(snapshot, root = $("messages")) {
   root.scrollTop = snapshot.scrollTop || 0;
 }
 
-function refreshSubagentCardsPreservingUI(agentId = state.agent?.id) {
-  if (!agentId || state.agent?.id !== agentId || state.chatHydrating) return false;
+function subagentToolActivity(runId, toolUseId) {
+  return findToolActivityByIdentity([
+    state.liveToolOutputs,
+    state.activeRunToolCalls,
+    state.activeRunSummary?.toolCalls,
+  ], runId, toolUseId);
+}
+
+function replaceSubagentCard(card) {
+  const runId = String(card?.dataset?.runId || "").trim();
+  const toolUseId = String(card?.dataset?.toolUseId || "").trim();
+  if (!runId || !toolUseId || !("outerHTML" in card)) return false;
+  const tool = subagentToolActivity(runId, toolUseId);
+  if (!tool) return false;
+  const task = backgroundTasks?.getTaskByParentTool?.(runId, toolUseId) || null;
+  const html = renderAgentTaskActivityCardHTML(tool, task);
+  if (!html) return false;
+  card.outerHTML = html;
+  return true;
+}
+
+function refreshSubagentCardsPreservingUI(agentId = state.agent?.id, selectionSeq = state.projectSelectSeq) {
+  if (!agentId || state.agent?.id !== agentId || selectionSeq !== state.projectSelectSeq || state.chatHydrating) return false;
   const root = $("messages");
+  if (!root) return false;
+  const cards = [...root.querySelectorAll("[data-subagent-card]")];
+  if (!cards.length) return false;
   const snapshot = captureSubagentCardViewState(root);
+  const replaced = cards.reduce((count, card) => count + (replaceSubagentCard(card) ? 1 : 0), 0);
+  if (replaced === cards.length) {
+    restoreSubagentCardViewState(snapshot, root);
+    return true;
+  }
   const rendered = applyMessageSnapshot(state.currentMessages, agentId, { forceRender: true, preserveScroll: true });
   if (rendered) restoreSubagentCardViewState(snapshot, root);
   return rendered;
@@ -535,13 +570,17 @@ function scheduleSubagentCardRefresh(change = {}) {
   if (!subagentCardRefreshReasons.has(reason)) return;
   if (!agentId || state.chatHydrating || (change.agentId && change.agentId !== agentId)) return;
   subagentCardRefreshAgentId = agentId;
+  subagentCardRefreshSelectionSeq = state.projectSelectSeq;
   if (subagentCardRefreshHandle) return;
   const schedule = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
   subagentCardRefreshHandle = schedule(() => {
     subagentCardRefreshHandle = 0;
     const expectedAgentId = subagentCardRefreshAgentId;
+    const expectedSelectionSeq = subagentCardRefreshSelectionSeq;
     subagentCardRefreshAgentId = "";
-    refreshSubagentCardsPreservingUI(expectedAgentId);
+    subagentCardRefreshSelectionSeq = 0;
+    if (expectedSelectionSeq !== state.projectSelectSeq) return;
+    refreshSubagentCardsPreservingUI(expectedAgentId, expectedSelectionSeq);
   });
 }
 
@@ -639,6 +678,14 @@ const agentStream = createAgentStreamController({
 const navigationRefresh = createNavigationRefreshController({
   refresh: () => loadProjects(),
   shouldRefresh: () => globalThis.navigator?.onLine !== false && globalThis.document?.visibilityState !== "hidden",
+});
+
+const recentConversationSync = createRecentConversationSyncController({
+  key: recentConversationsKey,
+  onChange: (recent) => {
+    state.recentConversations = recent;
+    renderRecentSidebarConversations();
+  },
 });
 
 const pageLifecycle = createPageLifecycleController({
@@ -4108,6 +4155,7 @@ function setComposerConnectionStatus(text, ok = false) {
 
 function disconnectAgentTransports() {
   clearMessageRefreshTimer(state.agent?.id);
+  invalidateMessageLifecycle();
   agentStream.disconnect();
   backgroundTaskAgentLoadGeneration += 1;
   backgroundTaskAgentLoadInFlight = null;
@@ -4679,6 +4727,7 @@ window.addEventListener("autoto:auth-changed", () => {
 });
 window.addEventListener("beforeunload", () => {
   navigationRefresh.stop();
+  recentConversationSync.stop();
   saveCurrentChatDraft();
 });
 $("refreshModelsBtn")?.addEventListener("click", () => refreshModelCatalog().catch(showError));

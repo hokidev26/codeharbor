@@ -379,6 +379,60 @@ export function normalizeRecentConversations(value, limit = 8) {
   }).slice(0, Math.max(0, limit));
 }
 
+export function createRecentConversationSyncController({
+  key,
+  onChange,
+  window: windowImpl = globalThis.window,
+  storage: storageImpl = globalThis.localStorage,
+  limit = 8,
+  autoStart = true,
+} = {}) {
+  const storageKey = String(key || "").trim();
+  if (!storageKey) throw new Error("createRecentConversationSyncController requires key");
+  if (typeof onChange !== "function") throw new Error("createRecentConversationSyncController requires onChange");
+  let started = false;
+
+  function handleStorage(event = {}) {
+    if (String(event.key || "") !== storageKey) return false;
+    if (event.storageArea && storageImpl && event.storageArea !== storageImpl) return false;
+    let value = [];
+    if (event.newValue !== null && event.newValue !== undefined && event.newValue !== "") {
+      try {
+        value = JSON.parse(event.newValue);
+      } catch {
+        return false;
+      }
+      if (!Array.isArray(value)) return false;
+    }
+    onChange(normalizeRecentConversations(value, limit), { reason: "storage", key: storageKey });
+    return true;
+  }
+
+  function start() {
+    if (started || typeof windowImpl?.addEventListener !== "function") return false;
+    started = true;
+    windowImpl.addEventListener("storage", handleStorage);
+    return true;
+  }
+
+  function stop() {
+    if (!started) return false;
+    started = false;
+    windowImpl?.removeEventListener?.("storage", handleStorage);
+    return true;
+  }
+
+  if (autoStart) start();
+
+  return {
+    start,
+    stop,
+    dispose: stop,
+    handleStorage,
+    isStarted: () => started,
+  };
+}
+
 export function resolveInitialNavigationTarget(recent, conversations) {
   const knownTargets = new Set((Array.isArray(conversations) ? conversations : [])
     .map((conversation) => text(conversation?.targetId))

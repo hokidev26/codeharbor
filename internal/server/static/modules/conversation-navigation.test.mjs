@@ -6,6 +6,7 @@ import {
   buildNavigationView,
   createNavigationRefreshController,
   createNavigationTargetId,
+  createRecentConversationSyncController,
   navigationAgentStatusClass,
   navigationRefreshDefaults,
   normalizeNavigationPayload,
@@ -42,6 +43,25 @@ class FakeTimers {
 
   nextDelay() {
     return this.tasks[0]?.delay;
+  }
+}
+
+class FakeWindow {
+  constructor() {
+    this.listeners = new Map();
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type).add(listener);
+  }
+
+  removeEventListener(type, listener) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  dispatch(type, event) {
+    for (const listener of this.listeners.get(type) || []) listener(event);
   }
 }
 
@@ -298,6 +318,44 @@ test("recent conversations deduplicate newest targets and truncate to eight", ()
   assert.equal(recent[0].targetId, createNavigationTargetId(targets[3]));
   assert.equal(recent.filter((item) => item.targetId === recent[0].targetId).length, 1);
   assert.deepEqual(normalizeRecentConversations([recent[0], recent[0], { targetId: "bad" }]), [recent[0]]);
+});
+
+test("recent conversation sync accepts only valid canonical storage events", () => {
+  const window = new FakeWindow();
+  const storage = {};
+  const updates = [];
+  const controller = createRecentConversationSyncController({
+    key: recentConversationsKey,
+    window,
+    storage,
+    onChange: (recent, detail) => updates.push({ recent, detail }),
+  });
+  assert.equal(controller.isStarted(), true);
+
+  window.dispatch("storage", { key: "other-key", newValue: "[]", storageArea: storage });
+  window.dispatch("storage", { key: recentConversationsKey, newValue: "{", storageArea: storage });
+  window.dispatch("storage", { key: recentConversationsKey, newValue: JSON.stringify({ targetId: "p1::w1::a1" }), storageArea: storage });
+  window.dispatch("storage", { key: recentConversationsKey, newValue: "[]", storageArea: {} });
+  assert.equal(updates.length, 0);
+
+  window.dispatch("storage", {
+    key: recentConversationsKey,
+    storageArea: storage,
+    newValue: JSON.stringify([
+      { targetId: "p1::w1::a1", openedAt: "2026-07-20T10:00:00Z" },
+      { targetId: "p1::w1::a1", openedAt: "2026-07-19T10:00:00Z" },
+      { targetId: "invalid" },
+    ]),
+  });
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].recent, [{ targetId: "p1::w1::a1", openedAt: "2026-07-20T10:00:00Z" }]);
+  assert.deepEqual(updates[0].detail, { reason: "storage", key: recentConversationsKey });
+
+  window.dispatch("storage", { key: recentConversationsKey, newValue: null, storageArea: storage });
+  assert.deepEqual(updates[1].recent, []);
+  assert.equal(controller.stop(), true);
+  window.dispatch("storage", { key: recentConversationsKey, newValue: "[]", storageArea: storage });
+  assert.equal(updates.length, 2);
 });
 
 test("initial navigation restores the newest valid recent conversation before backend fallback", () => {

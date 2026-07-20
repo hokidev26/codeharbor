@@ -284,7 +284,7 @@ func TestModelsRouteReturnsDynamicProviderModels(t *testing.T) {
 	if provider.Capabilities.Tools || provider.Capabilities.Streaming || provider.Capabilities.ImageInput || provider.Capabilities.ReasoningEffort || len(provider.Capabilities.ReasoningEfforts) != 0 {
 		t.Fatalf("unknown provider capabilities must be false, got %+v", provider.Capabilities)
 	}
-	expected := []string{"a-model", "z-model"}
+	expected := []string{"a-model", "fallback-model", "z-model"}
 	if len(provider.Models) != len(expected) {
 		t.Fatalf("expected models %+v, got %+v", expected, provider.Models)
 	}
@@ -325,7 +325,7 @@ func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *
 	registry := providers.NewRegistry()
 	registry.Register(fakeModelProvider{name: "relay", models: []string{"remote-model"}, listCalls: &calls})
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
-		Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8080/v1", Model: "fallback-model", Disabled: true,
+		Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8080/v1", Model: "fallback-model", Models: []config.ProviderModelConfig{{Name: "saved-model", ContextTokenLimit: 123000}}, Disabled: true,
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
@@ -341,8 +341,11 @@ func TestModelsRouteKeepsDisabledProviderVisibleWithoutListingUpstreamModels(t *
 		t.Fatalf("unexpected providers: %+v", models.Providers)
 	}
 	provider := models.Providers[0]
-	if provider.Enabled || provider.Origin != config.ProviderOriginCustom || provider.Error != "" || len(provider.Models) != 1 || provider.Models[0] != "fallback-model" {
+	if provider.Enabled || provider.Origin != config.ProviderOriginCustom || provider.Error != "" || strings.Join(provider.Models, ",") != "fallback-model,saved-model" {
 		t.Fatalf("unexpected disabled provider response: %+v", provider)
+	}
+	if provider.ModelCapabilities["saved-model"].ContextTokenLimit != 123000 {
+		t.Fatalf("disabled provider lost saved model capabilities: %+v", provider.ModelCapabilities)
 	}
 	if calls != 0 {
 		t.Fatalf("disabled provider must not list upstream models, got %d calls", calls)
@@ -472,7 +475,7 @@ func TestModelsRouteExposesXHighForCodexCapability(t *testing.T) {
 		},
 	})
 	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{{
-		Name: "codex", Type: config.ProviderTypeCodex, Model: "gpt-5",
+		Name: "codex", Type: config.ProviderTypeCodex, Model: "gpt-5", Models: []config.ProviderModelConfig{{Name: "gpt-5", ContextTokenLimit: 400000}},
 	}}}}, nil, nil, nil, registry)
 
 	recorder := httptest.NewRecorder()
@@ -489,8 +492,8 @@ func TestModelsRouteExposesXHighForCodexCapability(t *testing.T) {
 		t.Fatalf("model catalog did not expose canonical Codex xhigh capability: %+v", got)
 	}
 	modelCapabilities := body.Providers[0].ModelCapabilities
-	if !modelCapabilities["gpt-5"].FastMode {
-		t.Fatalf("model catalog did not expose per-model Fast capability: %+v", modelCapabilities)
+	if !modelCapabilities["gpt-5"].FastMode || modelCapabilities["gpt-5"].ContextTokenLimit != 400000 {
+		t.Fatalf("model catalog did not merge per-model Fast and context capabilities: %+v", modelCapabilities)
 	}
 	if _, exists := modelCapabilities["gpt-5-mini"]; exists {
 		t.Fatalf("unsupported model should not expose Fast capability: %+v", modelCapabilities)
@@ -512,6 +515,7 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 		Profile:        config.ProviderProfileCLIProxyAPI,
 		BaseURL:        "http://127.0.0.1:8317/v1",
 		Model:          "fallback-model",
+		Models:         []config.ProviderModelConfig{{Name: "saved-model", ContextTokenLimit: 250000}},
 		APIKeyOptional: true,
 	}}}}, nil, nil, nil, registry)
 
@@ -526,14 +530,32 @@ func TestModelsRouteFallsBackWhenProviderModelListFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := body.Providers[0]
-	if len(provider.Models) != 1 || provider.Models[0] != "fallback-model" {
-		t.Fatalf("expected fallback model, got %+v", provider.Models)
+	if strings.Join(provider.Models, ",") != "fallback-model,saved-model" {
+		t.Fatalf("expected saved and default models after remote failure, got %+v", provider.Models)
 	}
 	if provider.Error == "" {
 		t.Fatal("expected provider error message")
 	}
 	if capability, exists := provider.ModelCapabilities["fallback-model"]; !exists || !capability.FastMode {
 		t.Fatalf("fallback model must retain its explicit Fast capability: %+v", provider.ModelCapabilities)
+	}
+	if capability, exists := provider.ModelCapabilities["saved-model"]; !exists || capability.ContextTokenLimit != 250000 {
+		t.Fatalf("saved model must retain its configured context limit: %+v", provider.ModelCapabilities)
+	}
+
+	settingsRecorder := httptest.NewRecorder()
+	app.Routes().ServeHTTP(settingsRecorder, newTestRequest(http.MethodGet, "/api/settings", nil))
+	if settingsRecorder.Code != http.StatusOK {
+		t.Fatalf("expected settings 200, got %d: %s", settingsRecorder.Code, settingsRecorder.Body.String())
+	}
+	var settings struct {
+		Providers []settingsProviderResponse `json:"providers"`
+	}
+	if err := json.NewDecoder(settingsRecorder.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Providers) != 1 || len(settings.Providers[0].Models) != 2 || settings.Providers[0].Models[0].Name != "saved-model" || settings.Providers[0].Models[0].ContextTokenLimit != 250000 || settings.Providers[0].Models[1].Name != "fallback-model" {
+		t.Fatalf("settings did not return normalized model configuration: %+v", settings.Providers)
 	}
 }
 

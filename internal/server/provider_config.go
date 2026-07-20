@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -42,6 +43,7 @@ type providerConfigUpdateRequest struct {
 	CreateOnly            bool                          `json:"createOnly,omitempty"`
 	OriginalName          string                        `json:"originalName,omitempty"`
 	Model                 string                        `json:"model"`
+	Models                *[]config.ProviderModelConfig `json:"models,omitempty"`
 	MaxTokens             int64                         `json:"maxTokens"`
 	APIKeyOptional        bool                          `json:"apiKeyOptional"`
 	GatewayEnabled        *bool                         `json:"gatewayEnabled"`
@@ -90,6 +92,7 @@ type providerMessageTestRequest struct {
 	CreateOnly            bool                          `json:"createOnly,omitempty"`
 	OriginalName          string                        `json:"originalName,omitempty"`
 	Model                 string                        `json:"model"`
+	Models                *[]config.ProviderModelConfig `json:"models,omitempty"`
 	MaxTokens             int64                         `json:"maxTokens"`
 	APIKeyOptional        bool                          `json:"apiKeyOptional"`
 	ProxyURL              *string                       `json:"proxyUrl,omitempty"`
@@ -121,6 +124,7 @@ func (r providerMessageTestRequest) configUpdateRequest() providerConfigUpdateRe
 		CreateOnly:            r.CreateOnly,
 		OriginalName:          r.OriginalName,
 		Model:                 r.Model,
+		Models:                r.Models,
 		MaxTokens:             r.MaxTokens,
 		APIKeyOptional:        r.APIKeyOptional,
 		ProxyURL:              r.ProxyURL,
@@ -141,6 +145,7 @@ const (
 	maxProviderBaseURLBytes            = 2048
 	maxProviderAPIKeyBytes             = 16 << 10
 	maxProviderModelBytes              = 512
+	maxProviderModels                  = 256
 	maxProviderProfileBytes            = 64
 	maxProviderProxyURLBytes           = 2048
 	maxProviderUserAgentBytes          = 512
@@ -178,6 +183,9 @@ func (s *Server) updateProviderConfig(w http.ResponseWriter, r *http.Request) {
 	s.providerMutationMu.Lock()
 	defer s.providerMutationMu.Unlock()
 	existing, existed := s.providerConfig(providerName)
+	if existed {
+		existing.Models = s.providerModels(providerName)
+	}
 	if req.CreateOnly && existed {
 		writeError(w, http.StatusConflict, "Provider 名称已存在")
 		return
@@ -403,6 +411,7 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "provider not found")
 		return
 	}
+	existing.Models = s.providerModels(providerName)
 
 	updated := existing
 	if req.Enabled != nil {
@@ -425,6 +434,7 @@ func (s *Server) patchProviderConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "model is invalid")
 			return
 		}
+		updated.Models = config.NormalizeProviderModels(updated.Models, updated.Model)
 	}
 
 	adapter, err := s.newRuntimeProvider(updated)
@@ -590,6 +600,7 @@ func (s *Server) providerConfigForDraftTest(providerName string, req providerCon
 		}
 	}
 	existing, _ := s.providerConfig(originalName)
+	existing.Models = s.providerModels(originalName)
 	provider, err := providerConfigFromUpdateRequest(providerName, existing, req)
 	if err != nil {
 		return config.ProviderConfig{}, err
@@ -800,6 +811,17 @@ func (s *Server) providerConfig(name string) (config.ProviderConfig, bool) {
 	return config.ProviderConfig{}, false
 }
 
+func (s *Server) providerModels(name string) []config.ProviderModelConfig {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	for _, provider := range s.cfg.Providers.Instances {
+		if provider.Name == name {
+			return config.NormalizeProviderModels(provider.Models, "")
+		}
+	}
+	return nil
+}
+
 func decodeProviderJSONRequest(r *http.Request, dst any) error {
 	defer r.Body.Close()
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxProviderConfigRequestSize+1))
@@ -845,6 +867,33 @@ func validateProviderConfigRequest(req providerConfigUpdateRequest) error {
 		}
 		if strings.ContainsAny(field.value, "\x00\r\n") {
 			return fmt.Errorf("%s contains invalid control characters", field.name)
+		}
+	}
+	if req.Models != nil {
+		if len(*req.Models) > maxProviderModels {
+			return fmt.Errorf("models exceeds %d entries", maxProviderModels)
+		}
+		seen := make(map[string]struct{}, len(*req.Models))
+		for _, model := range *req.Models {
+			name := strings.TrimSpace(model.Name)
+			if name == "" {
+				return errors.New("model name is required")
+			}
+			if len(name) > maxProviderModelBytes {
+				return errors.New("model name exceeds size limit")
+			}
+			for _, r := range name {
+				if unicode.IsControl(r) {
+					return errors.New("model name contains invalid control characters")
+				}
+			}
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("model %q is duplicated", name)
+			}
+			seen[name] = struct{}{}
+			if model.ContextTokenLimit < 0 || model.ContextTokenLimit > config.ProviderModelContextTokenLimitMax {
+				return fmt.Errorf("model %q contextTokenLimit must be between 0 and %d", name, config.ProviderModelContextTokenLimitMax)
+			}
 		}
 	}
 	if req.ProxyURL != nil {
@@ -1063,6 +1112,11 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 			model = "gpt-4.1-mini"
 		}
 	}
+	models := append([]config.ProviderModelConfig(nil), existing.Models...)
+	if req.Models != nil {
+		models = append([]config.ProviderModelConfig(nil), (*req.Models)...)
+	}
+	models = config.NormalizeProviderModels(models, model)
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 && existing.Name != "" {
 		maxTokens = existing.MaxTokens
@@ -1111,6 +1165,7 @@ func providerConfigFromUpdateRequest(providerName string, existing config.Provid
 		BaseURL:                 baseURL,
 		APIKey:                  apiKey,
 		Model:                   model,
+		Models:                  models,
 		MaxTokens:               maxTokens,
 		APIKeyOptional:          apiKeyOptional,
 		GatewayEnabled:          gatewayEnabled,

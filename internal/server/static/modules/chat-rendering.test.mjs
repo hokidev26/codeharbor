@@ -5,6 +5,7 @@ import { t as chatRenderingExtraText } from "./messages-chat-rendering-extra.mjs
 import {
   chatMessagePresentation,
   createChatRenderingController,
+  findToolActivityByIdentity,
   formatTurnUsagePerformance,
   isAgentToolActivity,
   normalizeAgentPlan,
@@ -81,6 +82,62 @@ function renderSnapshot(messages, stateOverrides = {}, applyOptions = {}, contro
   }
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createAsyncChatRenderingHarness(apiRequest, stateOverrides = {}) {
+  const messagesElement = fakeMessagesElement();
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById(id) {
+      return id === "messages" ? messagesElement : null;
+    },
+  };
+  const state = {
+    agent: { id: "agent-a", cwd: "/work/project" },
+    navigationSelectionKind: "conversation",
+    currentMessages: [],
+    messageCopyTexts: [],
+    messageHasMoreBefore: false,
+    messageNextBefore: "",
+    messageOlderLoading: false,
+    liveToolOutputs: {},
+    liveAssistantActive: false,
+    liveAssistantText: "",
+    pendingToolApprovals: {},
+    activeRunSummary: null,
+    activeRunSummaryRunId: "",
+    runSummaryLoading: false,
+    runSummaryError: "",
+    ...stateOverrides,
+  };
+  const controller = createChatRenderingController({
+    state,
+    apiRequest,
+    attachmentIcon: () => "file",
+    attachmentKind: () => "file",
+    copyToClipboard: async () => true,
+    notifyTerminal: () => {},
+    selectedModelValue: () => "",
+    shortPath: (value) => value,
+    showError: () => {},
+    showToast: () => {},
+  });
+  return {
+    controller,
+    messagesElement,
+    state,
+    restore() { globalThis.document = previousDocument; },
+  };
+}
+
 test("chatMessagePresentation keeps user semantics while aligning messages left", () => {
   assert.deepEqual(chatMessagePresentation({ role: "user" }).alignment, "left");
   assert.deepEqual(chatMessagePresentation({ role: "user" }).roleClass, "user");
@@ -102,6 +159,73 @@ test("chat hydration batches message snapshots until the final forced render", (
 
   const committed = renderSnapshot([{ role: "assistant", contentText: "ready" }], { chatHydrating: true }, { forceRender: true });
   assert.match(committed.html, /ready/);
+});
+
+test("message lifecycle rejects a delayed A response after A to B to A navigation", async () => {
+  const requests = [];
+  const harness = createAsyncChatRenderingHarness((_path, options = {}) => {
+    const pending = deferred();
+    requests.push({ ...pending, signal: options.signal });
+    return pending.promise;
+  });
+  try {
+    const first = harness.controller.loadMessages("agent-a");
+    assert.equal(requests.length, 1);
+
+    harness.controller.invalidateMessageLifecycle();
+    assert.equal(requests[0].signal?.aborted, true);
+    harness.state.agent = { id: "agent-b" };
+    harness.controller.invalidateMessageLifecycle();
+    harness.state.agent = { id: "agent-a" };
+
+    const second = harness.controller.loadMessages("agent-a");
+    assert.equal(requests.length, 2);
+    requests[1].resolve({ messages: [{ id: "new-a", role: "assistant", contentText: "new lifecycle" }] });
+    assert.equal(await second, true);
+    assert.equal(harness.state.currentMessages[0].id, "new-a");
+
+    requests[0].resolve({ messages: [{ id: "old-a", role: "assistant", contentText: "stale lifecycle" }] });
+    assert.equal(await first, false);
+    assert.equal(harness.state.currentMessages[0].id, "new-a");
+    assert.doesNotMatch(harness.messagesElement.innerHTML, /stale lifecycle/);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("invalidated older-message requests cannot clear the next lifecycle loading state", async () => {
+  const pending = deferred();
+  const harness = createAsyncChatRenderingHarness((_path, options = {}) => {
+    pending.signal = options.signal;
+    return pending.promise;
+  }, {
+    currentMessages: [{ id: "current", role: "assistant", contentText: "current" }],
+    messageHasMoreBefore: true,
+    messageNextBefore: "cursor-1",
+  });
+  try {
+    const loading = harness.controller.loadOlderMessages("agent-a");
+    assert.equal(harness.state.messageOlderLoading, true);
+    harness.controller.invalidateMessageLifecycle();
+    assert.equal(pending.signal?.aborted, true);
+    harness.state.agent = { id: "agent-b" };
+    harness.state.messageOlderLoading = true;
+    pending.resolve({ messages: [{ id: "older", role: "user", contentText: "older" }] });
+    assert.equal(await loading, false);
+    assert.equal(harness.state.messageOlderLoading, true);
+    assert.deepEqual(harness.state.currentMessages.map((message) => message.id), ["current"]);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("tool activity lookup requires the stable run and tool identity across activity stores", () => {
+  const live = { live: { runId: "run-1", toolUseId: "tool-1", toolName: "Agent" } };
+  const persisted = [{ run_id: "run-2", tool_use_id: "tool-2", tool_name: "Agent" }];
+  assert.equal(findToolActivityByIdentity([live, persisted], "run-1", "tool-1"), live.live);
+  assert.equal(findToolActivityByIdentity([live, persisted], "run-2", "tool-2"), persisted[0]);
+  assert.equal(findToolActivityByIdentity([live, persisted], "", "tool-1"), null);
+  assert.equal(findToolActivityByIdentity([live, persisted], "run-1", "missing"), null);
 });
 
 test("message rendering aligns user, assistant, legacy, and streaming messages left", () => {

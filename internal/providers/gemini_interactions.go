@@ -50,6 +50,13 @@ func (p *GeminiInteractions) Capabilities() Capabilities {
 	return Capabilities{Tools: true, Streaming: true, ImageInput: true, Reasoning: true, ReasoningEffort: true, ReasoningEfforts: []string{"low", "medium", "high"}}
 }
 
+func (p *GeminiInteractions) ModelCapabilities(model string) ModelCapabilities {
+	if p == nil {
+		return ModelCapabilities{}
+	}
+	return configuredModelCapabilities(p.cfg, model)
+}
+
 // The Interactions endpoint does not expose a portable model-list resource for
 // API-key clients, so configured models remain the reliable fallback.
 func (p *GeminiInteractions) ListModels(context.Context) ([]string, error) {

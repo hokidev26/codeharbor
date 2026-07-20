@@ -338,6 +338,22 @@ export function normalizeToolActivity(call = {}, fallback = {}) {
   };
 }
 
+export function findToolActivityByIdentity(collections, runId, toolUseId) {
+  const expectedRunId = String(runId || "").trim();
+  const expectedToolUseId = String(toolUseId || "").trim();
+  if (!expectedRunId || !expectedToolUseId) return null;
+  for (const collection of Array.isArray(collections) ? collections : [collections]) {
+    const records = Array.isArray(collection)
+      ? collection
+      : (collection && typeof collection === "object" ? Object.values(collection) : []);
+    for (const record of records) {
+      const tool = normalizeToolActivity(record);
+      if (tool.runId === expectedRunId && tool.toolUseId === expectedToolUseId) return record;
+    }
+  }
+  return null;
+}
+
 function toolActivityInputText(item) {
   const input = item.inputJson && typeof item.inputJson === "object" ? item.inputJson : {};
   try {
@@ -867,6 +883,7 @@ export function createChatRenderingController({
   attachmentIcon,
   attachmentKind,
   apiRequest = api,
+  AbortControllerImpl = globalThis.AbortController,
   copyToClipboard,
   notifyTerminal,
   openGitModal,
@@ -878,32 +895,86 @@ export function createChatRenderingController({
   showToast,
 } = {}) {
   const request = apiRequest || api;
+  let messageLifecycleGeneration = 0;
+  let messageLoadRequest = null;
+  let olderMessagesRequest = null;
+
+  const messageLifecycleIsCurrent = (agentId, generation) => (
+    messageLifecycleGeneration === generation && state.agent?.id === agentId
+  );
+
+  function abortMessageRequest(operation) {
+    try { operation?.controller?.abort?.(); } catch {}
+  }
+
+  function messageRequest(agentId, generation) {
+    return {
+      agentId,
+      generation,
+      controller: typeof AbortControllerImpl === "function" ? new AbortControllerImpl() : null,
+    };
+  }
+
+  function isAbortedMessageRequest(error, operation) {
+    return Boolean(operation?.controller?.signal?.aborted)
+      || error?.name === "AbortError"
+      || error?.code === 20;
+  }
+
+  function invalidateMessageLifecycle() {
+    messageLifecycleGeneration += 1;
+    abortMessageRequest(messageLoadRequest);
+    abortMessageRequest(olderMessagesRequest);
+    messageLoadRequest = null;
+    olderMessagesRequest = null;
+    state.messageOlderLoading = false;
+    return messageLifecycleGeneration;
+  }
 
   async function loadMessages(agentId = state.agent?.id) {
-    if (!agentId) return;
-    let page;
+    if (!agentId) return false;
+    const generation = messageLifecycleGeneration;
+    abortMessageRequest(messageLoadRequest);
+    abortMessageRequest(olderMessagesRequest);
+    olderMessagesRequest = null;
+    state.messageOlderLoading = false;
+    const operation = messageRequest(agentId, generation);
+    messageLoadRequest = operation;
     try {
-      page = await request(`/api/agents/${encodeURIComponent(agentId)}/messages?limit=${messagePageLimit}`);
+      const page = await request(
+        `/api/agents/${encodeURIComponent(agentId)}/messages?limit=${messagePageLimit}`,
+        operation.controller ? { signal: operation.controller.signal } : {},
+      );
+      if (!messageLifecycleIsCurrent(agentId, generation)) return false;
+      return applyMessageSnapshot(page?.messages, agentId, {
+        hasMoreBefore: page?.hasMoreBefore,
+        nextBefore: page?.nextBefore,
+      });
     } catch (err) {
-      if (state.agent?.id === agentId) throw err;
-      return;
+      if (isAbortedMessageRequest(err, operation) || !messageLifecycleIsCurrent(agentId, generation)) return false;
+      throw err;
+    } finally {
+      if (messageLoadRequest === operation) messageLoadRequest = null;
     }
-    return applyMessageSnapshot(page?.messages, agentId, {
-      hasMoreBefore: page?.hasMoreBefore,
-      nextBefore: page?.nextBefore,
-    });
   }
 
   async function loadOlderMessages(agentId = state.agent?.id) {
-    if (!agentId || state.agent?.id !== agentId || !state.messageHasMoreBefore || !state.messageNextBefore || state.messageOlderLoading) return;
+    if (!agentId || state.agent?.id !== agentId || !state.messageHasMoreBefore || !state.messageNextBefore || state.messageOlderLoading) return false;
+    const generation = messageLifecycleGeneration;
+    const cursor = state.messageNextBefore;
+    const operation = messageRequest(agentId, generation);
+    olderMessagesRequest = operation;
     state.messageOlderLoading = true;
     const el = $("messages");
     const previousHeight = el?.scrollHeight || 0;
     const previousTop = el?.scrollTop || 0;
     applyMessageSnapshot(state.currentMessages, agentId, { preserveScroll: true });
     try {
-      const page = await request(`/api/agents/${encodeURIComponent(agentId)}/messages?before=${encodeURIComponent(state.messageNextBefore)}&limit=${messagePageLimit}`);
-      if (state.agent?.id !== agentId) return;
+      const page = await request(
+        `/api/agents/${encodeURIComponent(agentId)}/messages?before=${encodeURIComponent(cursor)}&limit=${messagePageLimit}`,
+        operation.controller ? { signal: operation.controller.signal } : {},
+      );
+      if (!messageLifecycleIsCurrent(agentId, generation) || olderMessagesRequest !== operation) return false;
       const older = Array.isArray(page?.messages) ? page.messages : [];
       const existing = new Set((state.currentMessages || []).map((message) => message?.id).filter(Boolean));
       const merged = [...older.filter((message) => !message?.id || !existing.has(message.id)), ...(state.currentMessages || [])];
@@ -913,9 +984,18 @@ export function createChatRenderingController({
         preserveScroll: true,
       });
       if (el) el.scrollTop = previousTop + Math.max(0, el.scrollHeight - previousHeight);
+      return true;
+    } catch (err) {
+      if (isAbortedMessageRequest(err, operation) || !messageLifecycleIsCurrent(agentId, generation)) return false;
+      throw err;
     } finally {
-      state.messageOlderLoading = false;
-      if (state.agent?.id === agentId) applyMessageSnapshot(state.currentMessages, agentId, { preserveScroll: true });
+      if (olderMessagesRequest === operation) {
+        olderMessagesRequest = null;
+        if (messageLifecycleIsCurrent(agentId, generation)) {
+          state.messageOlderLoading = false;
+          applyMessageSnapshot(state.currentMessages, agentId, { preserveScroll: true });
+        }
+      }
     }
   }
 
@@ -2476,6 +2556,7 @@ export function createChatRenderingController({
     clearToolApproval,
     copyCurrentConversationMarkdown,
     finishToolOutput,
+    invalidateMessageLifecycle,
     loadLatestRunSummary,
     loadMessages,
     loadOlderMessages,

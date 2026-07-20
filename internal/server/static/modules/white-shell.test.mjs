@@ -649,11 +649,12 @@ test("browser preview dock compacts both control rows to preserve page space", a
 });
 
 test("desktop conversation layout follows the compact resizable geometry", async () => {
-  const [html, styles, appMain, chatRendering] = await Promise.all([
+  const [html, styles, appMain, chatRendering, navigation] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(stylesURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(chatRenderingURL, "utf8"),
+    readFile(new URL("./conversation-navigation.mjs", import.meta.url), "utf8"),
   ]);
   const finalDesktopComposer = styles.slice(styles.indexOf("/* Final desktop full-width composer override. */"));
   assert.match(styles, /grid-template-columns:\s*76px var\(--session-sidebar-width\) minmax\(420px, 1fr\)/);
@@ -692,6 +693,9 @@ test("desktop conversation layout follows the compact resizable geometry", async
   assert.doesNotMatch(html, /id="messages"[\s\S]{0,500}data-i18n="chat\.emptyTitle"/);
   assert.match(appMain, /resolveInitialNavigationTarget\(state\.recentConversations, state\.navigationConversations\)/);
   assert.match(appMain, /createNavigationRefreshController\(\{[\s\S]*?refresh:\s*\(\) => loadProjects\(\)[\s\S]*?visibilityState !== "hidden"/);
+  assert.match(appMain, /createRecentConversationSyncController\(\{[\s\S]*?key:\s*recentConversationsKey[\s\S]*?state\.recentConversations = recent[\s\S]*?renderRecentSidebarConversations\(\)/);
+  assert.match(navigation, /addEventListener\("storage", handleStorage\)/);
+  assert.match(appMain, /beforeunload[\s\S]*?recentConversationSync\.stop\(\)/);
   assert.match(appMain, /navigationRefresh\.request\(event\.type\)/);
   assert.match(appMain, /navigationRefresh\.start\(\)/);
   assert.match(appMain, /syncNavigationConversationFromAgent\(state\.agent/);
@@ -823,15 +827,21 @@ test("Subagent compact cards integrate background tasks without polling child to
   const refreshEnd = appMain.indexOf("function loadBackgroundTasksForAgent", refreshStart);
   const refreshBody = appMain.slice(refreshStart, refreshEnd);
   assert.match(refreshBody, /captureSubagentCardViewState/);
+  assert.match(refreshBody, /cards\.reduce\(\(count, card\) => count \+ \(replaceSubagentCard\(card\) \? 1 : 0\), 0\)/);
+  assert.match(refreshBody, /if \(replaced === cards\.length\)[\s\S]*?restoreSubagentCardViewState\(snapshot, root\);[\s\S]*?return true/);
   assert.match(refreshBody, /applyMessageSnapshot\(state\.currentMessages, agentId, \{ forceRender: true, preserveScroll: true \}\)/);
   assert.match(refreshBody, /restoreSubagentCardViewState/);
   assert.doesNotMatch(refreshBody, /loadRunSummary|tool-calls|loadTask/);
+  assert.match(appMain, /findToolActivityByIdentity\(\[[\s\S]*?state\.liveToolOutputs[\s\S]*?state\.activeRunToolCalls[\s\S]*?state\.activeRunSummary\?\.toolCalls/);
+  assert.match(appMain, /renderAgentTaskActivityCardHTML\(tool, task\)/);
   assert.match(appMain, /details\.map\(\(detail\) => Boolean\(detail\.open\)\)/);
   assert.match(appMain, /status:\s*String\(card\.dataset\?\.subagentStatus/);
   assert.match(appMain, /statusChanged[\s\S]*?detailIndex === 0 && statusChanged[\s\S]*?detail\.open = Boolean\(saved\.open\?\.\[detailIndex\]\)/);
   assert.match(appMain, /button\.focus\?\.\(\{ preventScroll: true \}\)[\s\S]*?querySelector\?\.\("summary"\)\?\.focus/);
-  assert.match(appMain, /JSON\.stringify\(\[runId, toolUseId\]\)/);
+  assert.match(appMain, /if \(runId && toolUseId\) return JSON\.stringify\(\[runId, toolUseId\]\)/);
+  assert.doesNotMatch(appMain.slice(appMain.indexOf("function subagentCardIdentity"), appMain.indexOf("function captureSubagentCardViewState")), /String\(index\)|cardIndex/);
   assert.match(appMain, /subagentCardRefreshReasons[\s\S]*?if \(!subagentCardRefreshReasons\.has\(reason\)\) return/);
+  assert.match(appMain, /subagentCardRefreshSelectionSeq = state\.projectSelectSeq[\s\S]*?expectedSelectionSeq !== state\.projectSelectSeq/);
   assert.doesNotMatch(appMain.slice(appMain.indexOf("const subagentCardRefreshReasons"), appMain.indexOf("]);", appMain.indexOf("const subagentCardRefreshReasons"))), /task\.output|output-loaded/);
 
   const actionStart = appMain.indexOf("async function performSubagentCardAction");
@@ -1293,7 +1303,8 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.match(app, /app-main\.mjs\?v=[^"\n]*settings-icons-1/);
   assert.match(appMain, /settings-data\.mjs\?v=[^"\n]*settings-icons-1/);
   assert.match(settingsStyles, /\.settings-nav-icon \.settings-icon-svg\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;/);
-  assert.match(settingsStyles, /\[aria-current="page"\] \.settings-nav-icon\s*\{[^}]*background:[^}]*color:\s*var\(--settings-primary\)/);
+  assert.match(settingsStyles, /\[aria-current="page"\] \.settings-nav-icon\s*\{[^}]*background:\s*transparent;[^}]*color:\s*var\(--settings-primary\);[^}]*box-shadow:\s*none;/);
+  assert.match(html, /styles\.css\?v=[^"\n]*settings-active-icon-frame-removed-1/);
 
   const mobile = settingsStyles.slice(settingsStyles.indexOf("@media (max-width: 767px)"));
   assert.match(mobile, /\.settings-sidebar\s*\{[\s\S]*?display:\s*grid;/);
@@ -1669,6 +1680,12 @@ test("model provider settings styles remain scoped, responsive, and independent 
   assert.match(providerStyles, /\.mp-provider-drawer \.mp-drawer-foot\s*\{[\s\S]*?position:\s*sticky/);
   assert.match(providerStyles, /\.mp-provider-drawer \.mp-config-section\s*\{/);
   assert.match(providerStyles, /\.mp-provider-drawer \.codex-account-table-wrap,[\s\S]*?overflow-x:\s*auto/);
+  assert.match(providerStyles, /#settingsContentBody:has\(\.mp-provider-reference-layout\)\s*\{[\s\S]*?max-width:\s*none;/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-reference-layout\s*\{[\s\S]*?width:\s*100%;/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-flat-switch-track\s*\{[\s\S]*?border-radius:\s*999px;/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-reference-protocol \.mp-provider-create-protocol-options\s*\{[\s\S]*?display:\s*flex;/);
+  assert.match(providerStyles, /#settingsContentBody \.mp-provider-secret-toggle\[aria-pressed="true"\] \.mp-provider-secret-icon-hide/);
+  assert.match(providerStyles, /@media \(max-width: 767px\)[\s\S]*?#settingsContentBody:has\(\.mp-provider-reference-layout\)/);
   assert.doesNotMatch(providerStyles, /(?:^|\n)\s*width:\s*1120px;/m);
   assert.match(providerStyles, /body\.white-shell\.theme-light\.theme-dark #settingsContentBody \.mp-provider-page,/);
   assert.match(providerStyles, /body\.ui-density-compact #settingsContentBody \.mp-provider-page/);

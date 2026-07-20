@@ -53,6 +53,13 @@ func (p *OpenAICompatible) Capabilities() Capabilities {
 	return capabilities
 }
 
+func (p *OpenAICompatible) ModelCapabilities(model string) ModelCapabilities {
+	if p == nil {
+		return ModelCapabilities{}
+	}
+	return configuredModelCapabilities(p.cfg, model)
+}
+
 func (p *OpenAICompatible) applyRequestHeaders(req *http.Request) {
 	if client := autotoClientHeaderValue(p.cfg); client != "" {
 		req.Header.Set("X-Autoto-Client", client)

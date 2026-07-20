@@ -1247,7 +1247,7 @@ func mergeMemorySystemContext(systemPrompt, memoryContext string) string {
 
 func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, messages []db.Message, toolSpecs []providers.ToolSpec, controls turnSystemControls) ([]providers.Message, db.Agent, error) {
 	providerMessages := providerMessagesForContext(agent, messages)
-	limit := r.contextTokenLimit()
+	limit := r.contextTokenLimit(agent.Model)
 	preferredControls := controls.preferredMessages()
 	preferredRequest := appendProviderMessages(providerMessages, preferredControls)
 	if estimateRequestTokens(agent.SystemPrompt, preferredRequest, toolSpecs) <= limit {
@@ -1287,11 +1287,24 @@ func (r *Runner) managedContextForTurn(ctx context.Context, agent db.Agent, mess
 	return appendProviderMessages(providerMessages, fittedControls), agent, nil
 }
 
-func (r *Runner) contextTokenLimit() int {
-	if r.cfg.ContextTokenLimit > 0 {
-		return r.cfg.ContextTokenLimit
+func (r *Runner) contextTokenLimit(model string) int {
+	globalLimit := defaultContextTokenLimit
+	if r != nil && r.cfg.ContextTokenLimit > 0 {
+		globalLimit = r.cfg.ContextTokenLimit
 	}
-	return defaultContextTokenLimit
+	model = strings.TrimSpace(model)
+	providerName, _ := providers.SplitModel(model)
+	if r == nil || r.providers == nil || strings.EqualFold(providerName, "aggregate") || strings.HasPrefix(strings.ToLower(model), "aggregate:") {
+		return globalLimit
+	}
+	provider, resolvedModel, err := r.providers.Resolve(model)
+	if err != nil || provider == nil || strings.EqualFold(strings.TrimSpace(provider.Name()), "aggregate") {
+		return globalLimit
+	}
+	if limit := providers.ModelCapabilitiesFor(provider, resolvedModel).ContextTokenLimit; limit > 0 {
+		return limit
+	}
+	return globalLimit
 }
 
 func providerMessagesForContext(agent db.Agent, messages []db.Message) []providers.Message {

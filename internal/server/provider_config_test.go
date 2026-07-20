@@ -78,7 +78,7 @@ func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	app.SetConfigPath(configPath)
 
-	payload := []byte(`{"name":"openai-compatible","type":"openai-compatible","baseUrl":"` + upstream.URL + `/v1","apiKey":"relay-secret","model":"relay-model"}`)
+	payload := []byte(`{"name":"openai-compatible","type":"openai-compatible","baseUrl":"` + upstream.URL + `/v1","apiKey":"relay-secret","model":"relay-model","models":[{"name":"relay-model","contextTokenLimit":300000}]}`)
 	recorder := httptest.NewRecorder()
 	request := newTestRequest(http.MethodPut, "/api/providers/openai-compatible/config", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
@@ -98,8 +98,12 @@ func TestUpdateProviderConfigRegistersRuntimeProvider(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&models); err != nil {
 		t.Fatal(err)
 	}
-	if len(models.Providers) != 1 || len(models.Providers[0].Models) != 1 || models.Providers[0].Models[0] != "relay-model" {
+	if len(models.Providers) != 1 || len(models.Providers[0].Models) != 1 || models.Providers[0].Models[0] != "relay-model" || models.Providers[0].ModelCapabilities["relay-model"].ContextTokenLimit != 300000 {
 		t.Fatalf("unexpected models response: %+v", models)
+	}
+	runtimeProvider, ok := registry.Get("openai-compatible")
+	if !ok || providers.ModelCapabilitiesFor(runtimeProvider, "relay-model").ContextTokenLimit != 300000 {
+		t.Fatalf("runtime provider did not receive the updated model capability")
 	}
 	written, err := os.ReadFile(configPath)
 	if err != nil {
@@ -358,6 +362,86 @@ func TestProviderConfigUpdatePreservesProfileWithoutNameBasedAPIKeyOverride(t *t
 	}
 	if !updated.APIKeyOptional {
 		t.Fatalf("CLIProxyAPI profile must retain its explicit optional-key requirement, got %+v", updated)
+	}
+}
+
+func TestProviderConfigUpdateModelsOmittedPreservesAndProvidedReplaces(t *testing.T) {
+	existing := config.ProviderConfig{
+		Name:      "relay",
+		Type:      "openai-compatible",
+		BaseURL:   "http://127.0.0.1:8080/v1",
+		Model:     "old-default",
+		Models:    []config.ProviderModelConfig{{Name: "saved-model", ContextTokenLimit: 111111}},
+		MaxTokens: 777,
+	}
+	omitted, err := providerConfigFromUpdateRequest("relay", existing, providerConfigUpdateRequest{
+		Name: "relay", Type: "openai-compatible", BaseURL: existing.BaseURL, Model: "new-default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.MaxTokens != existing.MaxTokens {
+		t.Fatalf("omitted models update changed MaxTokens: %d", omitted.MaxTokens)
+	}
+	if len(omitted.Models) != 2 || omitted.Models[0] != existing.Models[0] || omitted.Models[1].Name != "new-default" {
+		t.Fatalf("omitted models did not preserve saved models and add the default: %+v", omitted.Models)
+	}
+
+	replacement := []config.ProviderModelConfig{{Name: " replacement ", ContextTokenLimit: 222222}}
+	replaced, err := providerConfigFromUpdateRequest("relay", existing, providerConfigUpdateRequest{
+		Name: "relay", Type: "openai-compatible", BaseURL: existing.BaseURL, Model: "new-default", Models: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.MaxTokens != existing.MaxTokens {
+		t.Fatalf("provided models update changed MaxTokens: %d", replaced.MaxTokens)
+	}
+	if len(replaced.Models) != 2 || replaced.Models[0].Name != "replacement" || replaced.Models[0].ContextTokenLimit != 222222 || replaced.Models[1].Name != "new-default" {
+		t.Fatalf("provided models did not replace and normalize the catalog: %+v", replaced.Models)
+	}
+}
+
+func TestProviderConfigRequestValidatesModels(t *testing.T) {
+	valid := []config.ProviderModelConfig{{Name: " model-a ", ContextTokenLimit: config.ProviderModelContextTokenLimitMax}}
+	if err := validateProviderConfigRequest(providerConfigUpdateRequest{Models: &valid}); err != nil {
+		t.Fatalf("valid models rejected: %v", err)
+	}
+	for _, models := range [][]config.ProviderModelConfig{
+		{{Name: "model-a"}, {Name: " model-a "}},
+		{{Name: "bad\tmodel"}},
+		{{Name: strings.Repeat("m", maxProviderModelBytes+1)}},
+		{{Name: "model-a", ContextTokenLimit: -1}},
+		{{Name: "model-a", ContextTokenLimit: config.ProviderModelContextTokenLimitMax + 1}},
+	} {
+		models := models
+		if err := validateProviderConfigRequest(providerConfigUpdateRequest{Models: &models}); err == nil {
+			t.Fatalf("invalid models accepted: %+v", models)
+		}
+	}
+	tooMany := make([]config.ProviderModelConfig, maxProviderModels+1)
+	for i := range tooMany {
+		tooMany[i].Name = fmt.Sprintf("model-%d", i)
+	}
+	if err := validateProviderConfigRequest(providerConfigUpdateRequest{Models: &tooMany}); err == nil {
+		t.Fatal("oversized model catalog was accepted")
+	}
+}
+
+func TestProviderDraftModelsDoNotPersist(t *testing.T) {
+	existing := config.ProviderConfig{Name: "relay", Type: "openai-compatible", BaseURL: "http://127.0.0.1:8080/v1", Model: "saved", Models: []config.ProviderModelConfig{{Name: "saved", ContextTokenLimit: 1000}}}
+	app := New(config.Config{Providers: config.ProvidersConfig{Instances: []config.ProviderConfig{existing}}}, nil, nil, nil, providers.NewRegistry())
+	draftModels := []config.ProviderModelConfig{{Name: "draft", ContextTokenLimit: 2000}}
+	draft, err := app.providerConfigForDraftTest("relay", providerConfigUpdateRequest{Name: "relay", Type: "openai-compatible", BaseURL: existing.BaseURL, Model: "draft", Models: &draftModels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(draft.Models) != 1 || draft.Models[0].Name != "draft" || draft.Models[0].ContextTokenLimit != 2000 {
+		t.Fatalf("draft models were not applied to temporary config: %+v", draft.Models)
+	}
+	stored := app.configSnapshot().Providers.Instances[0]
+	if stored.Model != existing.Model || len(stored.Models) != 1 || stored.Models[0] != existing.Models[0] {
+		t.Fatalf("draft model test mutated saved config: %+v", stored)
 	}
 }
 

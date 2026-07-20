@@ -72,7 +72,10 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) modelProviderResponse(ctx context.Context, provider config.ProviderSummary) modelProviderResponse {
 	metadata := s.providerSettingsMetadata(provider)
-	providerConfig, _ := s.providerConfig(provider.Name)
+	providerConfig, ok := s.providerConfig(provider.Name)
+	if !ok {
+		providerConfig = config.NormalizeProviderConfig(config.ProviderConfig{Name: provider.Name, Type: provider.Type, Model: provider.Model})
+	}
 	keyStatus := s.providerAPIKeyStatus(ctx, providerConfig)
 	response := modelProviderResponse{
 		Name:             provider.Name,
@@ -81,7 +84,7 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 		BaseURL:          provider.BaseURL,
 		DefaultModel:     provider.Model,
 		MaxTokens:        provider.MaxTokens,
-		Models:           fallbackModels(provider.Model),
+		Models:           configuredModelNames(providerConfig),
 		ModelsSource:     "configured-default",
 		Configured:       s.providerConfigured(provider),
 		APIKeyConfigured: keyStatus.Configured,
@@ -103,16 +106,19 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 			response.ModelsSource = "fallback"
 			response.Error = "模型注册表尚未初始化。"
 		}
+		attachModelCapabilities(&response, nil, providerConfig)
 		return response
 	}
 	registered, ok := s.providers.Get(provider.Name)
 	response.Registered = ok
 	if !provider.Enabled {
+		attachModelCapabilities(&response, registered, providerConfig)
 		return response
 	}
 	if !ok {
 		response.ModelsSource = "fallback"
 		response.Error = fmt.Sprintf("provider %s 尚未注册。", provider.Name)
+		attachModelCapabilities(&response, nil, providerConfig)
 		return response
 	}
 	response.Capabilities = providers.CapabilitiesFor(registered)
@@ -124,11 +130,11 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	if err != nil {
 		response.ModelsSource = "fallback"
 		response.Error = friendlyModelListError(provider, err)
-		attachFastModelCapabilities(&response, registered)
+		attachModelCapabilities(&response, registered, providerConfig)
 		return response
 	}
-	response.Models = normalizeModelNames(models, provider.Model)
-	attachFastModelCapabilities(&response, registered)
+	response.Models = mergeModelNames(models, providerConfig)
+	attachModelCapabilities(&response, registered, providerConfig)
 	// Some adapters return the configured default as a local fallback when no
 	// credential is available. Do not label that placeholder as remotely
 	// discovered; only a configured adapter's successful list is selectable as a
@@ -145,13 +151,16 @@ func (s *Server) modelProviderResponse(ctx context.Context, provider config.Prov
 	return response
 }
 
-func attachFastModelCapabilities(response *modelProviderResponse, provider providers.Provider) {
-	if response == nil || provider == nil {
+func attachModelCapabilities(response *modelProviderResponse, provider providers.Provider, cfg config.ProviderConfig) {
+	if response == nil {
 		return
 	}
 	for _, model := range response.Models {
 		capabilities := providers.ModelCapabilitiesFor(provider, model)
-		if !capabilities.FastModeKnown || !capabilities.FastMode {
+		if capabilities.ContextTokenLimit <= 0 {
+			capabilities.ContextTokenLimit = cfg.ModelContextTokenLimit(model)
+		}
+		if capabilities.ContextTokenLimit <= 0 && (!capabilities.FastModeKnown || !capabilities.FastMode) {
 			continue
 		}
 		if response.ModelCapabilities == nil {
@@ -243,6 +252,21 @@ func fallbackModels(defaultModel string) []string {
 		return []string{}
 	}
 	return []string{strings.TrimSpace(defaultModel)}
+}
+
+func configuredModelNames(provider config.ProviderConfig) []string {
+	provider = config.NormalizeProviderConfig(provider)
+	models := make([]string, 0, len(provider.Models))
+	for _, model := range provider.Models {
+		models = append(models, model.Name)
+	}
+	return normalizeModelNames(models, provider.Model)
+}
+
+func mergeModelNames(remote []string, provider config.ProviderConfig) []string {
+	models := append([]string(nil), remote...)
+	models = append(models, configuredModelNames(provider)...)
+	return normalizeModelNames(models, provider.Model)
 }
 
 func normalizeModelNames(models []string, defaultModel string) []string {

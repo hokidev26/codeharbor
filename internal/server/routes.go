@@ -40,6 +40,7 @@ type settingsProviderResponse struct {
 	Profile                 string                           `json:"profile,omitempty"`
 	BaseURL                 string                           `json:"baseUrl,omitempty"`
 	Model                   string                           `json:"model"`
+	Models                  []config.ProviderModelConfig     `json:"models"`
 	MaxTokens               int64                            `json:"maxTokens,omitempty"`
 	Configured              bool                             `json:"configured"`
 	APIKeyConfigured        bool                             `json:"apiKeyConfigured"`
@@ -65,7 +66,7 @@ type settingsProviderResponse struct {
 
 func (s *Server) settingsProviderResponse(ctx context.Context, provider config.ProviderConfig) settingsProviderResponse {
 	safeProvider := config.NormalizeProviderConfig(provider)
-	summary := provider.Summary()
+	summary := safeProvider.Summary()
 	metadata := s.providerSettingsMetadata(summary)
 	keyStatus := s.providerAPIKeyStatus(ctx, provider)
 	proxyStatus := s.providerProxyAuthStatus(ctx, provider)
@@ -80,7 +81,7 @@ func (s *Server) settingsProviderResponse(ctx context.Context, provider config.P
 	}
 	return settingsProviderResponse{
 		Name: summary.Name, Type: summary.Type, Profile: metadata.Profile, BaseURL: summary.BaseURL, Model: summary.Model,
-		MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyConfigured: keyStatus.Configured,
+		Models: safeProvider.Models, MaxTokens: summary.MaxTokens, Configured: s.providerConfigured(summary), APIKeyConfigured: keyStatus.Configured,
 		APIKeyPersisted: keyStatus.Persisted, APIKeyLastFive: keyStatus.LastFive, APIKeySource: keyStatus.Source,
 		APIKeyOptional: summary.APIKeyOptional, GatewayEnabled: summary.GatewayEnabled, Enabled: summary.Enabled,
 		Origin: summary.Origin, ProxyURL: safeProvider.ProxyURL, ProxyAuthConfigured: proxyStatus.Configured,

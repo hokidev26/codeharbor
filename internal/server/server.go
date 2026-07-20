@@ -97,6 +97,9 @@ type Server struct {
 	remoteAccessConnectionSeq uint64
 	remoteAccessFailure       map[string]remoteAccessFailure
 	remoteAccessMu            sync.Mutex
+	authSessionConnections    map[string]map[uint64]context.CancelFunc
+	authSessionConnectionSeq  uint64
+	authSessionMu             sync.Mutex
 	authLoginFailures         map[string]authLoginFailure
 	authLoginMu               sync.Mutex
 	agentMutationLocksMu      sync.Mutex
@@ -146,6 +149,7 @@ func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agent
 		remoteAccessSessions:    make(map[string]remoteAccessSession),
 		remoteAccessConnections: make(map[string]map[uint64]context.CancelFunc),
 		remoteAccessFailure:     make(map[string]remoteAccessFailure),
+		authSessionConnections:  make(map[string]map[uint64]context.CancelFunc),
 		authLoginFailures:       make(map[string]authLoginFailure),
 		agentMutationLocks:      make(map[string]*agentMutationLock),
 		legacyWarnings: compat.NewRegistry(func(usage compat.Usage) {
