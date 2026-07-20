@@ -1,0 +1,404 @@
+import { escapeAttr, escapeHtml } from "./dom.mjs";
+import { formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs";
+import { t } from "./i18n.mjs?v=provider-draft-session-1";
+import { normalizeCodexSelectedIds } from "./provider-settings-normalization.mjs";
+
+export function codexAccountStatus(account = {}, { now = Date.now() } = {}) {
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
+  const expiresAt = String(account?.expires_at || account?.expiresAt || "").trim();
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= now && !Boolean(account?.refreshable);
+  if (Boolean(account?.disabled)) return { key: "disabled", tone: "muted", expiresAt };
+  if (expired) return { key: "expired", tone: "danger", expiresAt };
+  if (codexQuotaIsLimited(quota)) return { key: "rateLimited", tone: "warn", expiresAt };
+  return { key: "available", tone: "ok", expiresAt };
+}
+
+export function codexAccountOverview(accounts, { now = Date.now() } = {}) {
+  const overview = { total: 0, available: 0, rateLimited: 0, disabled: 0, expired: 0 };
+  for (const account of Array.isArray(accounts) ? accounts : []) {
+    overview.total += 1;
+    const status = codexAccountStatus(account, { now });
+    if (Object.hasOwn(overview, status.key)) overview[status.key] += 1;
+  }
+  return overview;
+}
+
+export function anthropicAccountStatus(account = {}) {
+  if (Boolean(account?.disabled)) return { key: "disabled", tone: "muted" };
+  const limit = account?.rate_limit ?? account?.rateLimit ?? account?.quota;
+  if (anthropicRateLimitReached(limit)) return { key: "rateLimited", tone: "warn" };
+  if (account?.configured === false) return { key: "unconfigured", tone: "warn" };
+  return { key: "available", tone: "ok" };
+}
+
+export function anthropicAccountOverview(accounts) {
+  const overview = { total: 0, available: 0, rateLimited: 0, disabled: 0 };
+  for (const account of Array.isArray(accounts) ? accounts : []) {
+    overview.total += 1;
+    const status = anthropicAccountStatus(account);
+    if (Object.hasOwn(overview, status.key)) overview[status.key] += 1;
+  }
+  return overview;
+}
+export function codexAccountStableID(account) {
+  return String(account?.id || account?.auth_index || account?.authIndex || account?.name || "").trim();
+}
+
+function renderCodexBatchToolbar(items, selectedIds, mt, { batchBusy = false, batchPriority = 100 } = {}) {
+  const selected = normalizeCodexSelectedIds(selectedIds, items);
+  const selectedCount = selected.length;
+  const disabled = batchBusy || selectedCount === 0;
+  const disabledAttributes = disabled ? " disabled" : "";
+  return `<div class="codex-batch-toolbar" aria-busy="${batchBusy ? "true" : "false"}">
+    <div class="codex-batch-selection">
+      <strong>${escapeHtml(mt("selectedAccounts", { count: selectedCount }))}</strong>
+      <button type="button" class="codex-batch-link" data-codex-select-all-accounts${batchBusy ? " disabled" : ""}>${escapeHtml(mt("selectAllAccounts"))}</button>
+      <span aria-hidden="true">·</span>
+      <button type="button" class="codex-batch-link" data-codex-clear-selection${disabledAttributes}>${escapeHtml(mt("clearSelection"))}</button>
+    </div>
+    <div class="codex-batch-actions" role="group" aria-label="${escapeAttr(mt("batchActions"))}">
+      <button class="settings-action-btn" type="button" data-codex-batch-sync${disabledAttributes}>${escapeHtml(mt("batchSync"))}</button>
+      <button class="settings-action-btn" type="button" data-codex-batch-enable${disabledAttributes}>${escapeHtml(mt("batchEnable"))}</button>
+      <button class="settings-action-btn" type="button" data-codex-batch-disable${disabledAttributes}>${escapeHtml(mt("batchDisable"))}</button>
+      <label class="codex-batch-priority"><span>${escapeHtml(mt("batchPriority"))}</span><input class="settings-text-input" type="number" min="1" max="1000000" step="1" value="${escapeAttr(batchPriority)}" data-codex-batch-priority${disabledAttributes}></label>
+      <button class="settings-action-btn" type="button" data-codex-batch-priority-apply${disabledAttributes}>${escapeHtml(mt("apply"))}</button>
+      <button class="settings-action-btn danger" type="button" data-codex-batch-delete${disabledAttributes}>${escapeHtml(mt("batchDelete"))}</button>
+    </div>
+  </div>`;
+}
+
+export function renderCodexAccountManagementTable(accounts, {
+  translate = (key, params) => t(`modelProvider.${key}`, params),
+  now = Date.now(),
+  editing = null,
+  busy = {},
+  selectedIds = [],
+  batchBusy = false,
+  batchPriority = 100,
+} = {}) {
+  const mt = translate;
+  const items = Array.isArray(accounts) ? accounts : [];
+  if (!items.length) return `<div class="settings-empty-card settings-card settings-alert compact" role="status">${escapeHtml(mt("noCodexCredentials"))}</div>`;
+  const selected = normalizeCodexSelectedIds(selectedIds, items);
+  const selectedSet = new Set(selected);
+  const allSelected = items.every((account) => selectedSet.has(codexAccountStableID(account)));
+  return `<div class="codex-account-management">
+    ${renderCodexBatchToolbar(items, selected, mt, { batchBusy, batchPriority })}
+    <div class="codex-account-table-wrap settings-card-content">
+      <table class="codex-account-table codex-oauth-account-table" aria-label="${escapeAttr(mt("importedCredentials"))}">
+        <thead><tr>
+          <th scope="col" class="codex-account-select-heading"><input type="checkbox" data-codex-select-all aria-label="${escapeAttr(mt("selectAllAccounts"))}" ${allSelected ? "checked" : ""}${batchBusy ? " disabled" : ""}></th>
+          <th scope="col">${escapeHtml(mt("accountName"))}</th><th scope="col">${escapeHtml(mt("accountId"))}</th><th scope="col">${escapeHtml(mt("priority"))}</th><th scope="col">${escapeHtml(mt("status"))}</th>
+          <th scope="col">${escapeHtml(mt("successFailure"))}</th><th scope="col">${escapeHtml(mt("usage"))}</th><th scope="col">${escapeHtml(mt("lastUsed"))}</th><th scope="col">${escapeHtml(mt("actions"))}</th>
+        </tr></thead>
+        <tbody>${items.map((account) => renderCodexAccountRow(account, mt, now, editing, busy, { selected: selectedSet.has(codexAccountStableID(account)), batchBusy })).join("")}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+export function renderAnthropicAccountManagementTable(accounts, {
+  translate = (key, params) => t(`modelProvider.${key}`, params),
+  editing = null,
+  busy = {},
+} = {}) {
+  const mt = translate;
+  const items = Array.isArray(accounts) ? accounts : [];
+  if (!items.length) return `<div class="settings-empty-card settings-card settings-alert compact" role="status">${escapeHtml(mt("anthropic.noAccounts"))}</div>`;
+  return `<div class="codex-account-table-wrap anthropic-account-table-wrap settings-card-content">
+    <table class="codex-account-table anthropic-account-table" aria-label="${escapeAttr(mt("anthropic.accountsTitle"))}">
+      <thead><tr>
+        <th scope="col">${escapeHtml(mt("accountName"))}</th><th scope="col">${escapeHtml(mt("anthropic.authType"))}</th><th scope="col">${escapeHtml(mt("priority"))}</th><th scope="col">${escapeHtml(mt("status"))}</th>
+        <th scope="col">${escapeHtml(mt("successFailure"))}</th><th scope="col">${escapeHtml(mt("usage"))}</th><th scope="col">${escapeHtml(mt("lastUsed"))}</th><th scope="col">${escapeHtml(mt("actions"))}</th>
+      </tr></thead>
+      <tbody>${items.map((account) => renderAnthropicAccountRow(account, mt, editing, busy)).join("")}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderAnthropicAccountRow(account, mt, editing, busy) {
+  const id = String(account?.id || "");
+  const alias = String(account?.alias || "");
+  const priority = finiteNumber(account?.priority, 100);
+  const disabled = Boolean(account?.disabled);
+  const managed = account?.managed !== false;
+  const isEditing = managed && editing?.id === id;
+  const isBusy = managed && Boolean(busy?.[id]);
+  const authType = String(account?.auth_type || account?.authType || "profile").toLowerCase();
+  const profile = String(account?.profile || "");
+  const source = managed ? String(account?.source || "") : mt("anthropic.existingConfigSource");
+  const fallbackName = profile || source || id || mt("unknown");
+  const displayName = alias || fallbackName;
+  const secondaryName = [alias && fallbackName !== alias ? fallbackName : "", source && source !== fallbackName ? source : ""].filter(Boolean).join(" · ");
+  const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
+  const success = Math.max(0, finiteNumber(stats.success_count ?? stats.successCount, 0));
+  const failure = Math.max(0, finiteNumber(stats.failure_count ?? stats.failureCount, 0));
+  const lastUsed = String(stats.last_use_at || stats.lastUseAt || stats.last_used_at || stats.lastUsedAt || stats.last_attempt_at || stats.lastAttemptAt || "");
+  const status = anthropicAccountStatus(account);
+  const disabledAttributes = isBusy ? ` disabled aria-busy="true"` : "";
+  const editAlias = String(isEditing ? editing.alias ?? alias : alias);
+  const editPriority = finiteNumber(isEditing ? editing.priority : priority, priority);
+  const modelCount = Array.isArray(account?.models) ? account.models.filter(Boolean).length : 0;
+  return `<tr data-anthropic-account-row="${escapeAttr(id)}" class="${isEditing ? "is-editing" : ""}" aria-busy="${isBusy ? "true" : "false"}">
+    <td data-label="${escapeAttr(mt("accountName"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("accountName"))}</span><input class="codex-account-alias settings-text-input settings-form-field" value="${escapeAttr(editAlias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-anthropic-edit-alias="${escapeAttr(id)}" data-select-on-focus="true"${disabledAttributes}></label>`
+      : `<strong class="codex-account-name">${escapeHtml(displayName)}</strong>`}${secondaryName ? `<div class="codex-account-secondary">${escapeHtml(secondaryName)}</div>` : ""}${modelCount ? `<div class="codex-account-secondary">${escapeHtml(mt("anthropic.modelCount", { count: modelCount }))}</div>` : ""}</td>
+    <td data-label="${escapeAttr(mt("anthropic.authType"))}"><span class="settings-badge">${escapeHtml(mt(authType === "api_key" ? "anthropic.apiKeyAuth" : "anthropic.profileAuth"))}</span></td>
+    <td data-label="${escapeAttr(mt("priority"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("priority"))}</span><input class="codex-priority-input settings-text-input settings-form-field" type="number" min="1" max="1000000" step="1" value="${escapeAttr(editPriority)}" data-anthropic-edit-priority="${escapeAttr(id)}" data-select-on-focus="true"${disabledAttributes}></label>`
+      : `<span class="codex-priority-value">${escapeHtml(String(priority))}</span>`}</td>
+    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill settings-badge ${escapeAttr(status.tone)}">${escapeHtml(mt(status.key))}</span></td>
+    <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
+    <td data-label="${escapeAttr(mt("usage"))}">${renderAnthropicQuota(account?.quota ?? account?.rate_limit ?? account?.rateLimit, mt)}</td>
+    <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
+    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions settings-inline-actions" role="group" aria-label="${escapeAttr(mt("accountActions", { account: displayName }))}">
+      ${!managed ? `<span class="settings-badge muted anthropic-readonly-badge">${escapeHtml(mt("anthropic.readOnly"))}</span>` : isEditing ? `<button class="codex-icon-action save" type="button" data-anthropic-save="${escapeAttr(id)}" aria-label="${escapeAttr(mt("saveAccount"))}" title="${escapeAttr(mt("saveAccount"))}"${disabledAttributes}>${codexActionIcon("save")}<span>${escapeHtml(mt("save"))}</span></button><button class="codex-icon-action cancel" type="button" data-anthropic-edit-cancel="${escapeAttr(id)}" aria-label="${escapeAttr(mt("cancelEdit"))}" title="${escapeAttr(mt("cancelEdit"))}"${disabledAttributes}>${codexActionIcon("cancel")}<span>${escapeHtml(mt("cancel"))}</span></button>` : `<button class="codex-icon-action edit" type="button" data-anthropic-edit="${escapeAttr(id)}" aria-label="${escapeAttr(mt("editAccount"))}" title="${escapeAttr(mt("editAccount"))}"${disabledAttributes}>${codexActionIcon("edit")}<span>${escapeHtml(mt("edit"))}</span></button><button class="codex-icon-action sync" type="button" data-anthropic-sync="${escapeAttr(id)}" aria-label="${escapeAttr(mt("syncAccount"))}" title="${escapeAttr(mt("syncAccount"))}"${disabledAttributes}>${codexActionIcon("sync")}<span>${escapeHtml(mt("sync"))}</span></button><button class="codex-icon-action toggle" type="button" data-anthropic-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}" aria-label="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}" title="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}"${disabledAttributes}>${codexActionIcon(disabled ? "enable" : "disable")}<span>${escapeHtml(disabled ? mt("enable") : mt("disable"))}</span></button><button class="codex-icon-action delete" type="button" data-anthropic-delete="${escapeAttr(id)}" aria-label="${escapeAttr(mt("deleteAccount"))}" title="${escapeAttr(mt("deleteAccount"))}"${disabledAttributes}>${codexActionIcon("delete")}<span>${escapeHtml(mt("delete"))}</span></button>`}
+    </div></td>
+  </tr>`;
+}
+
+function renderCodexAccountRow(account, mt, now, editing, busy, { selected = false, batchBusy = false } = {}) {
+  const id = codexAccountStableID(account);
+  const alias = String(account?.alias || "");
+  const priority = finiteNumber(account?.priority, 100);
+  const disabled = Boolean(account?.disabled);
+  const isEditing = editing?.id === id;
+  const isBusy = batchBusy || Boolean(busy?.[id]);
+  const stats = account?.stats && typeof account.stats === "object" ? account.stats : {};
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : null;
+  const plan = String(quota?.plan_type || quota?.planType || account?.plan_type || account?.planType || "").trim();
+  const status = codexAccountStatus(account, { now });
+  const accountLabel = String(account?.account_id || account?.accountID || id || mt("unknown"));
+  const fallbackName = String(account?.email || account?.name || mt("unknown"));
+  const displayName = alias || fallbackName;
+  const success = Math.max(0, finiteNumber(stats.success_count ?? stats.successCount, 0));
+  const failure = Math.max(0, finiteNumber(stats.failure_count ?? stats.failureCount, 0));
+  const lastUsed = String(stats.last_use_at || stats.lastUseAt || stats.last_attempt_at || stats.lastAttemptAt || "");
+  const disabledAttributes = isBusy ? ` disabled aria-busy="true"` : "";
+  const secondaryName = alias && fallbackName !== alias ? fallbackName : "";
+  const editAlias = String(isEditing ? editing.alias ?? alias : alias);
+  const editPriority = finiteNumber(isEditing ? editing.priority : priority, priority);
+  return `<tr data-codex-account-row="${escapeAttr(id)}" class="${[isEditing ? "is-editing" : "", selected ? "is-selected" : ""].filter(Boolean).join(" ")}" aria-busy="${isBusy ? "true" : "false"}">
+    <td class="codex-account-select-cell" data-label="${escapeAttr(mt("selectAccount"))}"><input type="checkbox" data-codex-select="${escapeAttr(id)}" aria-label="${escapeAttr(mt("selectAccountNamed", { account: displayName }))}" ${selected ? "checked" : ""}${isBusy ? " disabled" : ""}></td>
+    <td data-label="${escapeAttr(mt("accountName"))}">
+      ${isEditing
+        ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("accountName"))}</span><input class="codex-account-alias settings-text-input settings-form-field" value="${escapeAttr(editAlias)}" placeholder="${escapeAttr(fallbackName)}" maxlength="200" data-codex-edit-alias="${escapeAttr(id)}" data-select-on-focus="true"${disabledAttributes}></label>`
+        : `<strong class="codex-account-name">${escapeHtml(displayName)}</strong>`}
+      ${(secondaryName || plan) ? `<div class="codex-account-secondary">${secondaryName ? escapeHtml(secondaryName) : ""}${plan ? `<span class="codex-plan-badge settings-badge">${escapeHtml(plan)}</span>` : ""}</div>` : ""}
+    </td>
+    <td data-label="${escapeAttr(mt("accountId"))}"><code class="codex-account-id">${escapeHtml(accountLabel)}</code></td>
+    <td data-label="${escapeAttr(mt("priority"))}">${isEditing
+      ? `<label class="codex-inline-edit-field"><span class="mp-visually-hidden">${escapeHtml(mt("priority"))}</span><input class="codex-priority-input settings-text-input settings-form-field" type="number" min="1" max="1000000" step="1" value="${escapeAttr(editPriority)}" data-codex-edit-priority="${escapeAttr(id)}" data-select-on-focus="true"${disabledAttributes}></label>`
+      : `<span class="codex-priority-value">${escapeHtml(String(priority))}</span>`}</td>
+    <td data-label="${escapeAttr(mt("status"))}"><span class="settings-status-pill settings-badge ${escapeAttr(status.tone)}">${escapeHtml(mt(status.key))}</span></td>
+    <td data-label="${escapeAttr(mt("successFailure"))}"><span class="codex-success-count">${escapeHtml(String(success))}</span> / <span class="codex-failure-count">${escapeHtml(String(failure))}</span></td>
+    <td data-label="${escapeAttr(mt("usage"))}">${renderCodexUsage(account, mt, now)}</td>
+    <td data-label="${escapeAttr(mt("lastUsed"))}">${escapeHtml(lastUsed ? formatCodexTimestamp(lastUsed) : mt("never"))}</td>
+    <td data-label="${escapeAttr(mt("actions"))}"><div class="codex-account-actions settings-inline-actions" role="group" aria-label="${escapeAttr(mt("accountActions", { account: displayName }))}">
+      ${isEditing ? `
+        <button class="codex-icon-action save" type="button" data-codex-save="${escapeAttr(id)}" aria-label="${escapeAttr(mt("saveAccount"))}" title="${escapeAttr(mt("saveAccount"))}"${disabledAttributes}>${codexActionIcon("save")}<span>${escapeHtml(mt("save"))}</span></button>
+        <button class="codex-icon-action cancel" type="button" data-codex-edit-cancel="${escapeAttr(id)}" aria-label="${escapeAttr(mt("cancelEdit"))}" title="${escapeAttr(mt("cancelEdit"))}"${disabledAttributes}>${codexActionIcon("cancel")}<span>${escapeHtml(mt("cancel"))}</span></button>` : `
+        <button class="codex-icon-action edit" type="button" data-codex-edit="${escapeAttr(id)}" aria-label="${escapeAttr(mt("editAccount"))}" title="${escapeAttr(mt("editAccount"))}"${disabledAttributes}>${codexActionIcon("edit")}<span>${escapeHtml(mt("edit"))}</span></button>
+        <button class="codex-icon-action sync" type="button" data-codex-sync="${escapeAttr(id)}" aria-label="${escapeAttr(mt("syncAccount"))}" title="${escapeAttr(mt("syncAccount"))}"${disabledAttributes}>${codexActionIcon("sync")}<span>${escapeHtml(mt("sync"))}</span></button>
+        <button class="codex-icon-action export" type="button" data-codex-export="${escapeAttr(id)}" aria-label="${escapeAttr(mt("exportAccountJSON"))}" title="${escapeAttr(mt("exportAccountJSON"))}"${disabledAttributes}>${codexActionIcon("export")}<span>${escapeHtml(mt("exportAccount"))}</span></button>
+        <span class="codex-account-action-divider" aria-hidden="true"></span>
+        <button class="codex-icon-action toggle" type="button" data-codex-toggle="${escapeAttr(id)}" data-disabled="${disabled ? "true" : "false"}" aria-label="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}" title="${escapeAttr(disabled ? mt("enableAccount") : mt("disableAccount"))}"${disabledAttributes}>${codexActionIcon(disabled ? "enable" : "disable")}<span>${escapeHtml(disabled ? mt("enable") : mt("disable"))}</span></button>
+        <button class="codex-icon-action delete" type="button" data-codex-delete="${escapeAttr(id)}" aria-label="${escapeAttr(mt("deleteAccount"))}" title="${escapeAttr(mt("deleteAccount"))}"${disabledAttributes}>${codexActionIcon("delete")}<span>${escapeHtml(mt("delete"))}</span></button>`}
+    </div></td>
+  </tr>`;
+}
+
+function renderAnthropicQuota(value, mt) {
+  if (!value || typeof value !== "object") return `<span class="codex-no-quota">${escapeHtml(mt("anthropic.noQuotaData"))}</span>`;
+  const requests = value.requests && typeof value.requests === "object" ? value.requests : value;
+  const buckets = [
+    [mt("anthropic.quotaRequests"), requests],
+    [mt("anthropic.quotaInputTokens"), value.input_tokens || value.inputTokens],
+    [mt("anthropic.quotaOutputTokens"), value.output_tokens || value.outputTokens],
+  ].map(([label, bucket]) => renderAnthropicQuotaBucket(label, bucket, mt)).filter(Boolean);
+  const meta = [];
+  const retryAfter = value.retry_after ?? value.retryAfter;
+  const fetchedAt = value.fetched_at || value.fetchedAt;
+  if (retryAfter !== undefined && retryAfter !== null && retryAfter !== "") meta.push(mt("anthropic.quotaRetryAfter", { time: formatAnthropicLimitTime(retryAfter, { duration: true }) }));
+  if (fetchedAt) meta.push(mt("anthropic.quotaFetchedAt", { time: formatAnthropicLimitTime(fetchedAt) }));
+  if (!buckets.length && !meta.length) return `<span class="codex-no-quota">${escapeHtml(mt("anthropic.noQuotaData"))}</span>`;
+  return `<div class="codex-quota-stack anthropic-quota-stack">${buckets.join("")}${meta.map((row) => `<div class="codex-quota-meta">${escapeHtml(row)}</div>`).join("")}</div>`;
+}
+
+function renderAnthropicQuotaBucket(label, bucket, mt) {
+  if (!bucket || typeof bucket !== "object") return "";
+  const remainingValue = bucket.remaining ?? bucket.remaining_requests ?? bucket.remainingRequests ?? bucket.requests_remaining ?? bucket.requestsRemaining;
+  const limitValue = bucket.limit ?? bucket.request_limit ?? bucket.requestLimit ?? bucket.total;
+  const usedPercentValue = bucket.used_percent ?? bucket.usedPercent;
+  const resetValue = bucket.reset ?? bucket.reset_at ?? bucket.resetAt ?? bucket.resets_at ?? bucket.resetsAt;
+  const hasRemaining = remainingValue !== null && remainingValue !== "" && Number.isFinite(Number(remainingValue));
+  const hasLimit = limitValue !== null && limitValue !== "" && Number.isFinite(Number(limitValue));
+  const hasUsedPercent = usedPercentValue !== null && usedPercentValue !== "" && Number.isFinite(Number(usedPercentValue));
+  if (!hasRemaining && !hasLimit && !hasUsedPercent && (resetValue === undefined || resetValue === null || resetValue === "")) return "";
+  const rows = [];
+  if (hasRemaining) rows.push(mt("anthropic.quotaRemaining", { count: Math.max(0, Number(remainingValue)) }));
+  if (hasLimit) rows.push(mt("anthropic.quotaLimit", { count: Math.max(0, Number(limitValue)) }));
+  if (hasUsedPercent) rows.push(mt("anthropic.quotaUsed", { percent: formatPercent(Math.max(0, Math.min(100, Number(usedPercentValue)))) }));
+  if (resetValue !== undefined && resetValue !== null && resetValue !== "") rows.push(mt("anthropic.quotaResetAt", { time: formatAnthropicLimitTime(resetValue) }));
+  return `<div class="anthropic-quota-bucket"><strong>${escapeHtml(label)}</strong>${rows.map((row) => `<div class="codex-quota-meta">${escapeHtml(row)}</div>`).join("")}</div>`;
+}
+
+function formatAnthropicLimitTime(value, { duration = false } = {}) {
+  const number = Number(value);
+  if (Number.isFinite(number)) {
+    if (duration || number < 1000000000) return `${Math.max(0, number)}s`;
+    return formatCodexTimestamp(new Date(number > 1000000000000 ? number : number * 1000).toISOString());
+  }
+  const raw = String(value || "").trim();
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? formatCodexTimestamp(raw) : raw;
+}
+
+function anthropicRateLimitReached(value) {
+  if (!value || typeof value !== "object") return Boolean(value);
+  const hasRequestsBucket = Boolean(value.requests && typeof value.requests === "object");
+  const requests = hasRequestsBucket ? value.requests : value;
+  if (requests.limited === true || requests.rate_limited === true || requests.rateLimited === true || requests.reached === true) return true;
+  const remaining = requests.remaining ?? requests.remaining_requests ?? requests.remainingRequests ?? requests.requests_remaining ?? requests.requestsRemaining;
+  if (remaining !== undefined && remaining !== null && remaining !== "" && Number.isFinite(Number(remaining))) return Number(remaining) <= 0;
+  if (hasRequestsBucket) return false;
+  return value.limited === true || value.rate_limited === true || value.rateLimited === true || value.reached === true;
+}
+
+function normalizeCodexLocalUsageWindow(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const inputTokens = Math.max(0, finiteNumber(source.inputTokens ?? source.input_tokens, 0));
+  const outputTokens = Math.max(0, finiteNumber(source.outputTokens ?? source.output_tokens, 0));
+  return {
+    requestCount: Math.max(0, finiteNumber(source.requestCount ?? source.request_count, 0)),
+    inputTokens,
+    outputTokens,
+    totalTokens: Math.max(0, finiteNumber(source.totalTokens ?? source.total_tokens, inputTokens + outputTokens)),
+    costUsd: Math.max(0, finiteNumber(source.costUsd ?? source.cost_usd, 0)),
+  };
+}
+
+function codexLocalUsageHasData(value) {
+  return Boolean(value.requestCount || value.totalTokens || value.costUsd);
+}
+
+function codexQuotaWindowKey(window, fallback) {
+  const seconds = finiteNumber(window?.limit_window_seconds ?? window?.limitWindowSeconds ?? window?.windowSeconds, 0);
+  if (seconds === 18000) return "5h";
+  if (seconds === 604800) return "7d";
+  return fallback;
+}
+
+export function codexAccountUsageWindows(account = {}) {
+  const quota = account?.quota && typeof account.quota === "object" ? account.quota : {};
+  const usage = account?.usage && typeof account.usage === "object" ? account.usage : {};
+  const upstream = { "5h": null, "7d": null };
+  for (const [window, fallback] of [
+    [quota.primary_window || quota.primaryWindow, "5h"],
+    [quota.secondary_window || quota.secondaryWindow, "7d"],
+  ]) {
+    if (!window || typeof window !== "object") continue;
+    const key = codexQuotaWindowKey(window, fallback);
+    if (!upstream[key]) upstream[key] = window;
+  }
+  const local = {
+    "5h": normalizeCodexLocalUsageWindow(usage.last5Hours || usage.last_5_hours),
+    "7d": normalizeCodexLocalUsageWindow(usage.last7Days || usage.last_7_days),
+  };
+  return ["5h", "7d"].map((key) => ({
+    key,
+    quota: upstream[key],
+    usage: local[key],
+    hasQuota: Boolean(upstream[key]),
+    hasUsage: codexLocalUsageHasData(local[key]),
+  })).filter((item) => item.hasQuota || item.hasUsage);
+}
+
+function renderCodexUsageStats(stats, mt) {
+  if (!codexLocalUsageHasData(stats)) return "";
+  return `<div class="codex-usage-window-stats" title="${escapeAttr(mt("recordedCostHint"))}">
+    <span>${escapeHtml(formatNumber(stats.requestCount))} ${escapeHtml(mt("usageRequests"))}</span>
+    <span>${escapeHtml(formatNumber(stats.totalTokens, { notation: "compact", maximumFractionDigits: 1 }))} ${escapeHtml(mt("usageTokens"))}</span>
+    <span>${escapeHtml(formatMoney(stats.costUsd))}</span>
+  </div>`;
+}
+
+function renderCodexUsageWindow(item, mt, now) {
+  const window = item.quota;
+  const used = window ? Math.max(0, Math.min(100, finiteNumber(window.used_percent ?? window.usedPercent, 0))) : 0;
+  const reset = window ? quotaResetText(window, mt, now) : "";
+  const tone = used >= 100 ? "danger" : used >= 80 ? "warning" : "healthy";
+  const meter = window
+    ? `<div class="codex-usage-window-meter">
+        <span class="codex-usage-window-badge is-${escapeAttr(item.key)}">${escapeHtml(item.key)}</span>
+        <div class="codex-quota-progress ${tone}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeAttr(used)}"><span style="width:${escapeAttr(used)}%"></span></div>
+        <strong class="codex-usage-window-percent ${tone}">${escapeHtml(`${formatPercent(used)}%`)}</strong>
+        ${reset ? `<span class="codex-quota-meta">${escapeHtml(reset)}</span>` : ""}
+      </div>`
+    : `<div class="codex-usage-window-meter is-local-only"><span class="codex-usage-window-badge is-${escapeAttr(item.key)}">${escapeHtml(item.key)}</span><span class="codex-quota-meta">${escapeHtml(mt("usageLocalOnly"))}</span></div>`;
+  return `<div class="codex-quota-window">${renderCodexUsageStats(item.usage, mt)}${meter}</div>`;
+}
+
+function renderCodexUsage(account, mt, now) {
+  const windows = codexAccountUsageWindows(account);
+  if (!windows.length) return `<span class="codex-no-quota">${escapeHtml(mt("noQuota"))}</span>`;
+  return `<div class="codex-quota-stack">${windows.map((item) => renderCodexUsageWindow(item, mt, now)).join("")}</div>`;
+}
+
+function codexActionIcon(name) {
+  const paths = {
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    sync: '<path d="M20 7h-5V2"/><path d="M20 7a8 8 0 0 0-14.9-2"/><path d="M4 17h5v5"/><path d="M4 17a8 8 0 0 0 14.9 2"/>',
+    enable: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
+    disable: '<path d="M5 5l14 14"/><path d="M18.4 6.6A9 9 0 0 1 6.6 18.4"/><path d="M5.6 5.6A9 9 0 0 1 18.4 18.4"/>',
+    delete: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/>',
+    save: '<path d="m5 12 4 4L19 6"/>',
+    cancel: '<path d="m6 6 12 12"/><path d="m18 6-12 12"/>',
+    export: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.edit}</svg>`;
+}
+
+function codexQuotaIsLimited(quota) {
+  if (!quota || typeof quota !== "object") return false;
+  if (quota.rate_limit_reached_type || quota.rateLimitReachedType) return true;
+  return [quota.primary_window, quota.primaryWindow, quota.secondary_window, quota.secondaryWindow]
+    .some((window) => window && finiteNumber(window.used_percent ?? window.usedPercent, 0) >= 100);
+}
+
+export function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatPercent(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatWindowSeconds(seconds) {
+  if (!(seconds > 0)) return "";
+  if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${Math.round(seconds)}s`;
+}
+
+function quotaResetText(window, mt, now) {
+  let seconds = finiteNumber(window.reset_after_seconds ?? window.resetAfterSeconds, 0);
+  const resetAtValue = window.reset_at || window.resetAt;
+  if (!(seconds > 0) && resetAtValue) {
+    const resetAt = Date.parse(resetAtValue);
+    if (Number.isFinite(resetAt)) seconds = Math.max(0, Math.ceil((resetAt - now) / 1000));
+  }
+  if (!(seconds > 0)) return "";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const compact = days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
+  return mt("resetsIn", { time: compact });
+}
+
+function formatCodexTimestamp(value) {
+  return formatTimestamp(value, { fallback: value });
+}
