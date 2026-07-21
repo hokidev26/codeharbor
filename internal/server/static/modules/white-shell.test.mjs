@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readStylesSource } from "./styles-source-helper.mjs";
 
 import {
   appearancePrefsKey,
@@ -155,7 +156,7 @@ test("white shell adds the global rail before the conversation sidebar with the 
 
 test("desktop home overview stays available while mobile starts in conversation", async () => {
   const [html, appMain, overviewDashboard, styles, messagesCN, messagesTW, messagesEN] = await Promise.all([
-    readFile(indexURL, "utf8"), readFile(appMainURL, "utf8"), readFile(overviewDashboardURL, "utf8"), readFile(stylesURL, "utf8"),
+    readFile(indexURL, "utf8"), readFile(appMainURL, "utf8"), readFile(overviewDashboardURL, "utf8"), readStylesSource(stylesURL),
     readFile(new URL("./messages-zh-CN.mjs", import.meta.url), "utf8"),
     readFile(new URL("./messages-zh-TW.mjs", import.meta.url), "utf8"),
     readFile(new URL("./messages-en.mjs", import.meta.url), "utf8"),
@@ -203,7 +204,7 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
   const [html, appMain, styles] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(appMainURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.match(html, /id="conversationPanel" class="chat-panel hidden"/);
@@ -256,7 +257,7 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
 test("project switching preserves the current view until the next Agent is ready", async () => {
   const [appMain, styles] = await Promise.all([
     readFile(appMainURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
   const selectStart = appMain.indexOf("async function selectProject");
   const selectEnd = appMain.indexOf("async function selectNavigationConversation", selectStart);
@@ -277,7 +278,7 @@ test("boot transition waits for app readiness and cross-fades the localized shel
     readFile(indexURL, "utf8"),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.match(app, /function normalizeBootLocale|const normalizeBootLocale/);
@@ -354,7 +355,7 @@ test("settings help cache stamps reach the shell and locale catalogs", async () 
 test("storage settings cards keep visible vertical spacing", async () => {
   const [html, styles] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.match(styles, /body\.white-shell\.theme-light \.legacy-settings-content-body \.storage-entry-list\s*\{[\s\S]*?gap:\s*12px/);
@@ -386,7 +387,7 @@ test("folder picker uses stable SVG actions and directory icons instead of font 
   const [html, directoryBrowser, styles, appMain, app] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(directoryBrowserURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appMainURL, "utf8"),
     readFile(appURL, "utf8"),
   ]);
@@ -423,7 +424,7 @@ test("conversation sidebar separates projects and standalone conversations witho
     readFile(indexURL, "utf8"),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
   const header = html.slice(html.indexOf('<header class="session-sidebar-header">'), html.indexOf("</header>", html.indexOf('<header class="session-sidebar-header">')));
   const filters = html.slice(html.indexOf('id="navigationFilters"'), html.indexOf("</div>", html.indexOf('id="navigationFilters"')));
@@ -486,7 +487,7 @@ test("conversation navigation exposes archive, pin, and accessible context-menu 
     readFile(indexURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(new URL("./conversation-navigation.mjs", import.meta.url), "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.doesNotMatch(html, /id="navigationArchiveToggleBtn"/);
@@ -508,7 +509,7 @@ test("conversation, task, and schedule modes expose separate creation boundaries
   const [html, appMain, styles] = await Promise.all([
     readFile(indexURL, "utf8"),
     readFile(appMainURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.match(html, /id="sessionSidebar" class="sidebar"/);
@@ -540,7 +541,7 @@ test("conversation, task, and schedule modes expose separate creation boundaries
 test("composer operation controls are exposed only in project context", async () => {
   const [html, styles, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appMainURL, "utf8"),
   ]);
   const formStart = html.indexOf('<form id="messageForm"');
@@ -588,7 +589,7 @@ test("composer operation controls are exposed only in project context", async ()
 test("lightning control is a capability-gated Fast mode toggle", async () => {
   const [html, styles, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appMainURL, "utf8"),
   ]);
   assert.match(html, /styles\.css\?v=[^"]*lightning-icon-1/);
@@ -631,7 +632,7 @@ test("chat header exposes the legacy six-tool order with real SVG icons", async 
 test("background tasks share the right utility column instead of overlaying chat", async () => {
   const [html, styles, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appMainURL, "utf8"),
   ]);
   const detailsPanel = html.indexOf('id="conversationDetailsPanel"');
@@ -647,7 +648,7 @@ test("background tasks share the right utility column instead of overlaying chat
 });
 
 test("browser preview dock compacts both control rows to preserve page space", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
   const dockStart = styles.indexOf("body.white-shell.theme-light .workspace-preview-dock-mode {");
   const dockEnd = styles.indexOf("@media (min-width: 1280px)", dockStart);
   const dock = styles.slice(dockStart, dockEnd);
@@ -661,7 +662,7 @@ test("browser preview dock compacts both control rows to preserve page space", a
 test("desktop conversation layout follows the compact resizable geometry", async () => {
   const [html, styles, appMain, chatRendering, navigation] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appMainURL, "utf8"),
     readFile(chatRenderingURL, "utf8"),
     readFile(new URL("./conversation-navigation.mjs", import.meta.url), "utf8"),
@@ -744,7 +745,7 @@ test("desktop conversation layout follows the compact resizable geometry", async
 test("composer selects hide external labels and open titled menus upward", async () => {
   const [html, styles, uiShell] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(uiShellURL, "utf8"),
   ]);
   for (const id of ["modelSelect", "reasoningEffort", "permissionMode"]) {
@@ -783,7 +784,7 @@ test("permission menu groups the real modes in figure-two order", () => {
 });
 
 test("desktop composer uses the full chat width without centered side gutters", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
   const marker = "/* Final desktop full-width composer override. */";
   const desktopComposerStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Compact mobile composer", styles.indexOf(marker)));
   assert.ok(desktopComposerStyles.startsWith(marker));
@@ -798,7 +799,7 @@ test("desktop composer uses the full chat width without centered side gutters", 
 });
 
 test("composer task activity is borderless, left aligned, and spins blue while active", async () => {
-  const [styles, backgroundTasks] = await Promise.all([readFile(stylesURL, "utf8"), readFile(backgroundTasksURL, "utf8")]);
+  const [styles, backgroundTasks] = await Promise.all([readStylesSource(stylesURL), readFile(backgroundTasksURL, "utf8")]);
   const marker = "/* Minimal left-aligned task activity, matching the inline running indicator. */";
   const indicatorStyles = styles.slice(styles.indexOf(marker));
   assert.ok(indicatorStyles.startsWith(marker));
@@ -816,7 +817,7 @@ test("Subagent compact cards integrate background tasks without polling child to
     readFile(appMainURL, "utf8"),
     readFile(chatRenderingURL, "utf8"),
     readFile(chatRenderingMessagesURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(backgroundTasksURL, "utf8"),
   ]);
 
@@ -905,7 +906,7 @@ test("Subagent compact cards integrate background tasks without polling child to
 });
 
 test("composer responds to its actual width before the mobile breakpoint", async () => {
-  const [html, styles] = await Promise.all([readFile(indexURL, "utf8"), readFile(stylesURL, "utf8")]);
+  const [html, styles] = await Promise.all([readFile(indexURL, "utf8"), readStylesSource(stylesURL)]);
   assert.match(html, /styles\.css\?v=[^"]*composer-responsive-2/);
   assert.match(html, /styles\.css\?v=[^"]*composer-effort-compact-2/);
   const marker = "/* Responsive composer tiers follow the editor's real width, not the full viewport. */";
@@ -939,7 +940,7 @@ test("composer responds to its actual width before the mobile breakpoint", async
 });
 
 test("mobile header and composer use compact icon-first layouts", async () => {
-  const [html, styles, appMain, app] = await Promise.all([readFile(indexURL, "utf8"), readFile(stylesURL, "utf8"), readFile(appMainURL, "utf8"), readFile(appURL, "utf8")]);
+  const [html, styles, appMain, app] = await Promise.all([readFile(indexURL, "utf8"), readStylesSource(stylesURL), readFile(appMainURL, "utf8"), readFile(appURL, "utf8")]);
   const marker = "/* Compact mobile composer: one utility row plus one message row. */";
   const mobileComposerStyles = styles.slice(styles.indexOf(marker), styles.indexOf("/* Model provider settings.", styles.indexOf(marker)));
   assert.ok(mobileComposerStyles.startsWith(marker));
@@ -987,7 +988,7 @@ test("mobile header and composer use compact icon-first layouts", async () => {
 });
 
 test("narrow composer switches atomically to a fixed unframed icon rail", async () => {
-  const [styles, uiShell] = await Promise.all([readFile(stylesURL, "utf8"), readFile(uiShellURL, "utf8")]);
+  const [styles, uiShell] = await Promise.all([readStylesSource(stylesURL), readFile(uiShellURL, "utf8")]);
   const marker = "/* Narrow composer icon rail: preserve every control at one fixed size. */";
   const iconRail = styles.slice(styles.indexOf(marker), styles.indexOf("/* Flat, single-pass settings layout", styles.indexOf(marker)));
   assert.ok(iconRail.startsWith(marker));
@@ -1315,7 +1316,7 @@ test("dual rail collapse compacts both rails, preserves independent sidebar rest
 
 test("legacy chat alignment keeps the composer untouched and flattens the transcript", async () => {
   const [styles, chatRendering, appMain] = await Promise.all([
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(chatRenderingURL, "utf8"),
     readFile(appMainURL, "utf8"),
   ]);
@@ -1421,7 +1422,7 @@ test("settings dialog mounts the shadcn shell without dropping legacy entry poin
 });
 
 test("settings navigation uses a filled selection rail without a full outline", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
   assert.match(styles, /#settingsModal :is\(\.settings-nav-item, \.settings-nav-group button\)\.active,[\s\S]*?\[aria-current="page"\]\s*\{[\s\S]*?border-color:\s*transparent;[\s\S]*?background:\s*var\(--settings-primary-soft\)/);
   assert.match(styles, /#settingsModal :is\(\.settings-nav-item, \.settings-nav-group button\)\.active::before,[\s\S]*?width:\s*3px;[\s\S]*?background:\s*var\(--settings-primary\)/);
   assert.match(styles, /:focus-visible\s*\{[\s\S]*?box-shadow:\s*0 0 0 3px var\(--settings-ring\)/);
@@ -1430,7 +1431,7 @@ test("settings navigation uses a filled selection rail without a full outline", 
 test("settings shell docks beside the global rail and keeps complete mobile navigation", async () => {
   const [html, styles, app, appMain] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
   ]);
@@ -1510,7 +1511,7 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
 test("mobile shell skips home and keeps the drawer, settings index, and model sheet wired", async () => {
   const [html, styles, app, appMain, uiShell, settingsPreferences, messagesCN, messagesTW, messagesEN] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(uiShellURL, "utf8"),
@@ -1663,7 +1664,7 @@ test("about settings use the legacy version layout and real update status", () =
 test("legacy font stack and static shell translations are wired", async () => {
   const [html, styles, app, appMain, chatRendering] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(chatRenderingURL, "utf8"),
@@ -1733,7 +1734,7 @@ test("initial shell and default appearance use the versioned light theme", async
 test("dark appearance keeps the legacy white-shell geometry and layers colors only", async () => {
   const [preferences, styles] = await Promise.all([
     readFile(settingsPreferencesURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
   ]);
 
   assert.match(preferences, /classList\.toggle\("theme-light", true\)/);
@@ -1744,7 +1745,7 @@ test("dark appearance keeps the legacy white-shell geometry and layers colors on
 });
 
 test("chat-platform settings use the shared flat settings layout", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
 
   assert.match(styles, /legacy-settings-content-body \.automation-section\.span-2,[\s\S]*?grid-column:\s*1/);
   assert.match(styles, /legacy-settings-content-body \.automation-list\s*\{[\s\S]*?max-height:\s*none/);
@@ -1831,7 +1832,7 @@ test("appearance backup import and export normalize the new schema without rejec
 });
 
 test("Codex and Anthropic account consoles use the available desktop width for account actions", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
 
   assert.match(styles, /#settingsModal \.settings-page-frame:has\(\.codex-account-console\)\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
   assert.match(styles, /#settingsContentBody \.codex-oauth-account-table th:nth-child\(7\)\s*\{\s*width:\s*22%;\s*\}/);
@@ -1845,7 +1846,7 @@ test("Codex and Anthropic account consoles use the available desktop width for a
 });
 
 test("agent model pools stay compact after redundant lower model sections are removed", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
 
   assert.match(styles, /#settingsContentBody \.agent-model-pool-details\s*\{[\s\S]*?overflow:\s*hidden;/);
   assert.match(styles, /#settingsContentBody \.agent-model-pool-summary\s*\{[\s\S]*?min-height:\s*40px;/);
@@ -1853,7 +1854,7 @@ test("agent model pools stay compact after redundant lower model sections are re
 });
 
 test("model provider settings styles remain scoped, responsive, and independent from legacy cards", async () => {
-  const styles = await readFile(stylesURL, "utf8");
+  const styles = await readStylesSource(stylesURL);
   const marker = "/* Model provider settings. Scoped after legacy settings overrides by design. */";
   const blockIndex = styles.lastIndexOf(marker);
   const providerStyles = styles.slice(blockIndex);

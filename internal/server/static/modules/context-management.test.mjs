@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readStylesSource } from "./styles-source-helper.mjs";
 
 import {
   contextRingStyle,
@@ -211,7 +212,7 @@ test("controller uses one API path for preferences, compact, and logical clear c
 test("static shell mounts one shared context ring, accessible overlays, APIs, and cache stamps", async () => {
   const [html, styles, app, appMain, uiShell, i18n, contextModule] = await Promise.all([
     readFile(indexURL, "utf8"),
-    readFile(stylesURL, "utf8"),
+    readStylesSource(stylesURL),
     readFile(appURL, "utf8"),
     readFile(appMainURL, "utf8"),
     readFile(uiShellURL, "utf8"),

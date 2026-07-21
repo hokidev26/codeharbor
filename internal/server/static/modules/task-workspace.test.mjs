@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readStylesSource } from "./styles-source-helper.mjs";
 import {
   createTaskWorkspaceController,
   flattenTaskWorkspace,
@@ -170,7 +171,7 @@ test("static shell mounts the three-level task workspace in the main workbench",
   const [indexHTML, appMain, styles, appEntry] = await Promise.all([
     readFile(new URL("../index.html", import.meta.url), "utf8"),
     readFile(new URL("./app-main.mjs", import.meta.url), "utf8"),
-    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+    readStylesSource(new URL("../styles.css", import.meta.url)),
     readFile(new URL("../app.js", import.meta.url), "utf8"),
   ]);
   const workbenchMarkup = indexHTML.slice(indexHTML.indexOf('id="workbenchPanel"'), indexHTML.indexOf('id="terminalPanel"'));
