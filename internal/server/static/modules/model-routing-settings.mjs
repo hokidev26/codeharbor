@@ -1,4 +1,5 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { api } from "./runtime.mjs";
 import { t } from "./i18n.mjs?v=provider-draft-session-1";
 
@@ -529,7 +530,7 @@ export function createModelRoutingController(ctx) {
     if (state.modelAggregateBusy) return;
     const aggregate = modelAggregateByName(name);
     if (!aggregate) return;
-    if (typeof globalThis.confirm === "function" && !globalThis.confirm(mt("routing.deleteAggregateConfirm", { name: aggregate.name }))) return;
+    if (!(await platformConfirm(mt("routing.deleteAggregateConfirm", { name: aggregate.name })))) return;
     state.modelAggregateBusy = true;
     refreshActiveSettingsPanel?.();
     try {

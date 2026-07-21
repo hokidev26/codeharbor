@@ -3294,7 +3294,7 @@ function updateSecurityModeUI() {
     badge.dataset.connectionMode = connection.remote ? (connection.restricted ? "tunnel-restricted" : "tunnel-full") : "local";
   }
   const terminalUnavailable = terminalLocked || !projectOperationContextActive();
-  [$("toggleTerminalBtn"), $("workbenchTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn")].forEach((button) => {
+  [$("toggleTerminalBtn"), $("workbenchTerminalBtn"), $("expandTerminalBtn"), $("reconnectTerminalBtn"), $("mobileTerminalBtn")].forEach((button) => {
     if (!button) return;
     if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.title || "";
     button.disabled = terminalUnavailable;
@@ -4596,7 +4596,8 @@ $("mobileWorkbenchBtn")?.addEventListener("click", () => {
 $("mobileSidebarCloseBtn")?.addEventListener("click", closeMobileSidebar);
 $("mobileSidebarBackdrop").addEventListener("click", closeMobileSidebar);
 $("mobileTerminalBtn").addEventListener("click", () => {
-  if (projectOperationContextActive()) toggleMobileTerminal();
+  if (!projectOperationContextActive() || !terminalAccessAllowed(state)) return;
+  toggleMobileTerminal();
 });
 $("mobileSearchBtn").addEventListener("click", focusMobileSearch);
 $("mobileDrawerSearchBtn")?.addEventListener("click", focusMobileSearch);
@@ -4930,6 +4931,29 @@ async function init() {
           const target = state.navigationConversations.find((item) => item.agentId === agentId || item.targetId === agentId)
             || state.recentConversations.find((item) => item.agentId === agentId || item.targetId === agentId);
           if (target) selectNavigationConversation(target).catch(showError);
+        },
+        openView: (view) => {
+          const name = String(view || "").trim().toLowerCase();
+          if (!name) return;
+          if (name === "settings") {
+            openSettingsModal("providers");
+            return;
+          }
+          if (name === "details") {
+            openConversationDetails();
+            return;
+          }
+          if (name === "browser") {
+            openWorkspace("preview");
+            return;
+          }
+          if (name === "terminal") {
+            toggleTerminalDock(false);
+            return;
+          }
+          if (name === "chat" || name === "conversation") {
+            applyPrimaryWorkbench("conversation");
+          }
         },
       });
       if (isDesktopShell()) {

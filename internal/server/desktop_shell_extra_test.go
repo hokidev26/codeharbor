@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -48,14 +50,19 @@ func (h stubUpdateHost) ClearPendingUpdate() error {
 	return updatepkg.ClearPendingReplace(h.home)
 }
 
+func withLocalShellToken(req *http.Request, app *Server) {
+	req.RemoteAddr = "127.0.0.1:9"
+	req.Host = "127.0.0.1:7788"
+	req.Header.Set(localTokenHeader, app.localToken)
+}
+
 func TestDesktopAutostartLocalOnly(t *testing.T) {
 	app := New(config.Config{}, nil, nil, nil)
 	host := &stubLifecycleHost{}
 	app.SetShellLifecycleHost(host)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/desktop/autostart", nil)
-	req.RemoteAddr = "127.0.0.1:9"
-	req.Host = "127.0.0.1:7788"
+	withLocalShellToken(req, app)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -65,9 +72,20 @@ func TestDesktopAutostartLocalOnly(t *testing.T) {
 		t.Fatal("expected enabled")
 	}
 
+	// Missing token on loopback must fail (port-forward defense).
+	noToken := httptest.NewRequest(http.MethodPost, "/api/desktop/autostart", nil)
+	noToken.RemoteAddr = "127.0.0.1:9"
+	noToken.Host = "127.0.0.1:7788"
+	noTokenRec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(noTokenRec, noToken)
+	if noTokenRec.Code == http.StatusOK {
+		t.Fatal("loopback without token must not control autostart")
+	}
+
 	remote := httptest.NewRequest(http.MethodPost, "/api/desktop/autostart", nil)
 	remote.RemoteAddr = "203.0.113.9:9"
 	remote.Host = "example.com"
+	remote.Header.Set(localTokenHeader, app.localToken)
 	remoteRec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(remoteRec, remote)
 	if remoteRec.Code == http.StatusOK {
@@ -81,8 +99,7 @@ func TestDesktopDeepLinkRejectsNonAutoto(t *testing.T) {
 	app.SetShellLifecycleHost(host)
 	body, _ := json.Marshal(map[string]string{"url": "https://evil.example"})
 	req := httptest.NewRequest(http.MethodPost, "/api/desktop/deep-link", bytes.NewReader(body))
-	req.RemoteAddr = "127.0.0.1:1"
-	req.Host = "127.0.0.1:1"
+	withLocalShellToken(req, app)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
@@ -92,8 +109,7 @@ func TestDesktopDeepLinkRejectsNonAutoto(t *testing.T) {
 
 	body, _ = json.Marshal(map[string]string{"url": "autoto://agent?id=a1"})
 	req = httptest.NewRequest(http.MethodPost, "/api/desktop/deep-link", bytes.NewReader(body))
-	req.RemoteAddr = "127.0.0.1:1"
-	req.Host = "127.0.0.1:1"
+	withLocalShellToken(req, app)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
@@ -111,16 +127,19 @@ func TestDesktopUpdateStageLocalOnly(t *testing.T) {
 	app.SetShellUpdateHost(stubUpdateHost{home: home})
 
 	src := filepath.Join(t.TempDir(), "bin")
-	if err := os.WriteFile(src, []byte("payload"), 0o755); err != nil {
+	payload := []byte("payload")
+	if err := os.WriteFile(src, payload, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(map[string]string{
+	sum := sha256.Sum256(payload)
+	hexSum := hex.EncodeToString(sum[:])
+	bodyPayload, _ := json.Marshal(map[string]string{
 		"sourcePath": src,
 		"version":    "0.2.0",
+		"sha256":     hexSum,
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/desktop/update/stage", bytes.NewReader(payload))
-	req.RemoteAddr = "127.0.0.1:1"
-	req.Host = "127.0.0.1:1"
+	req := httptest.NewRequest(http.MethodPost, "/api/desktop/update/stage", bytes.NewReader(bodyPayload))
+	withLocalShellToken(req, app)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
@@ -131,14 +150,30 @@ func TestDesktopUpdateStageLocalOnly(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["pending"] != true || body["apply"] != "manual_restart" {
+	if body["pending"] != true || body["apply"] != "not_implemented" {
 		t.Fatalf("body=%v", body)
 	}
 
+	// Missing SHA rejected.
+	noSHA, _ := json.Marshal(map[string]string{
+		"sourcePath": src,
+		"version":    "0.2.1",
+	})
+	missing := httptest.NewRequest(http.MethodPost, "/api/desktop/update/stage", bytes.NewReader(noSHA))
+	withLocalShellToken(missing, app)
+	missing.Header.Set("Content-Type", "application/json")
+	missingRec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(missingRec, missing)
+	if missingRec.Code == http.StatusOK {
+		t.Fatal("staging without sha256 must fail")
+	}
+
 	// Remote cannot stage.
-	remote := httptest.NewRequest(http.MethodPost, "/api/desktop/update/stage", bytes.NewReader(payload))
+	remote := httptest.NewRequest(http.MethodPost, "/api/desktop/update/stage", bytes.NewReader(bodyPayload))
 	remote.RemoteAddr = "198.51.100.2:1"
 	remote.Host = "tunnel.example"
+	remote.Header.Set(localTokenHeader, app.localToken)
+	remote.Header.Set("Content-Type", "application/json")
 	remoteRec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(remoteRec, remote)
 	if remoteRec.Code == http.StatusOK {

@@ -89,9 +89,11 @@ printf '==> Running embedded JavaScript tests\n'
 node --test internal/server/static/modules/*.test.mjs
 
 if [[ "${AUTOTO_CHECK_DESKTOP:-}" == "1" ]]; then
-  printf '==> Desktop shell (build tag desktop)\n'
+  printf '==> Desktop shell (build tags desktop + production)\n'
   go test -tags desktop ./internal/desktop/ -count=1
+  go vet -tags desktop ./internal/desktop/ ./cmd/autoto-desktop
   go build -tags desktop -o /dev/null ./cmd/autoto-desktop
+  go build -tags "desktop,production" -o /dev/null ./cmd/autoto-desktop
   printf '==> Desktop checks passed\n'
 else
   printf '==> Skipping desktop shell (set AUTOTO_CHECK_DESKTOP=1 to include)\n'

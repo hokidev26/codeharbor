@@ -81,6 +81,7 @@ func TestDesktopDialogConfirmLocal(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Host = "127.0.0.1:7788"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(localTokenHeader, app.localToken)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -95,6 +96,17 @@ func TestDesktopDialogConfirmLocal(t *testing.T) {
 	}
 	if seen != "delete project?" {
 		t.Fatalf("seen message %q", seen)
+	}
+
+	// Port-forward style loopback without token must not open dialogs.
+	noToken := httptest.NewRequest(http.MethodPost, "/api/desktop/dialog/confirm", desktopDialogJSONBody(t, map[string]any{"message": "delete project?"}))
+	noToken.RemoteAddr = "127.0.0.1:12345"
+	noToken.Host = "127.0.0.1:7788"
+	noToken.Header.Set("Content-Type", "application/json")
+	noTokenRec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(noTokenRec, noToken)
+	if noTokenRec.Code == http.StatusOK {
+		t.Fatal("loopback without local token must not open desktop dialogs")
 	}
 }
 
@@ -130,6 +142,7 @@ func TestDesktopDialogAlertLocal(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:9"
 	req.Host = "127.0.0.1:7788"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(localTokenHeader, app.localToken)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -160,6 +173,7 @@ func TestDesktopDialogOpenDirectoryLocal(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:9"
 	req.Host = "127.0.0.1:7788"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(localTokenHeader, app.localToken)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -188,6 +202,7 @@ func TestDesktopDialogOpenFileCanceled(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:9"
 	req.Host = "127.0.0.1:7788"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(localTokenHeader, app.localToken)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

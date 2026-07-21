@@ -16,6 +16,10 @@ build-cli:
 build-desktop:
 	go build -tags desktop -o autoto-desktop ./cmd/autoto-desktop
 
+# Release-like desktop binary (no Wails debug/devtools).
+build-desktop-release:
+	go build -tags "desktop,production" -ldflags "-X autoto/internal/config.Version=$${VERSION:-dev}" -o autoto-desktop ./cmd/autoto-desktop
+
 # Binaries + SHA256SUMS under dist/. No signing/notarization.
 release-desktop:
 	./scripts/build-desktop-release.sh

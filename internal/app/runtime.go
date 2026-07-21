@@ -278,11 +278,19 @@ func NewRuntime(options Options) (*Runtime, error) {
 	}, nil
 }
 
-// Start begins serving HTTP and runtime workers. The provided context cancels
-// only the start phase; callers should call Close to shut the runtime down.
+// Start begins serving HTTP and runtime workers. The provided context bounds
+// only the synchronous start phase (ctx.Err checks and service Start returns).
+// Long-lived workers must not inherit that context: callers cancel it after
+// Start returns (desktop ReadyTimeout), while lifecycle continues until Close.
 func (r *Runtime) Start(ctx context.Context) error {
 	if r == nil {
 		return errors.New("app: nil runtime")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -313,7 +321,10 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if r.gatewayHTTPServer != nil {
 		r.logger.Info("private API gateway listening", "addr", fmt.Sprintf("http://%s", r.actualGatewayAddr))
 	}
-	if err := supervisor.Start(ctx); err != nil {
+	// Detach from caller start timeout so channel/automation/http workers keep
+	// running until Close. Still honor an already-cancelled start context.
+	runCtx := context.WithoutCancel(ctx)
+	if err := supervisor.Start(runCtx); err != nil {
 		return err
 	}
 	// Background reconciliation runs as part of the supervisor start. Only then
@@ -508,10 +519,17 @@ func bindConfiguredHTTPListeners(cfg config.Config, ephemeralHTTP bool) (net.Lis
 	if !cfg.Gateway.Enabled {
 		return httpListener, nil, nil
 	}
-	gatewayListener, err := net.Listen("tcp", cfg.GatewayAddr())
+	// Ephemeral mode also isolates the private gateway: reuse loopback:0 so a
+	// desktop shell never collides with a CLI instance or opens a remote bind
+	// inherited from user config (e.g. 0.0.0.0).
+	gatewayAddr := cfg.GatewayAddr()
+	if ephemeralHTTP {
+		gatewayAddr = "127.0.0.1:0"
+	}
+	gatewayListener, err := net.Listen("tcp", gatewayAddr)
 	if err != nil {
 		_ = httpListener.Close()
-		return nil, nil, fmt.Errorf("listen on gateway %s: %w", cfg.GatewayAddr(), err)
+		return nil, nil, fmt.Errorf("listen on gateway %s: %w", gatewayAddr, err)
 	}
 	return httpListener, gatewayListener, nil
 }

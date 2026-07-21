@@ -14,7 +14,13 @@ import (
 	"autoto/internal/compat"
 )
 
-const Version = "0.1.0-dev"
+// Version is the product version string. Release builds override it with:
+//
+//	-ldflags "-X autoto/internal/config.Version=..."
+//
+// Keep this a package-level var (not const) so the Go linker can rewrite it.
+var Version = "0.1.0-dev"
+
 const CurrentConfigVersion = 1
 
 type Config struct {

@@ -106,8 +106,20 @@ func runWailsShell(ctx context.Context, rt *app.Runtime, url string, logger *slo
 		closeErr error
 		closeMu  sync.Mutex
 		closed   bool
+		winMu    sync.RWMutex
 		mainWin  *application.WebviewWindow
+		lifeHost *lifecycleHost
 	)
+	getMainWin := func() *application.WebviewWindow {
+		winMu.RLock()
+		defer winMu.RUnlock()
+		return mainWin
+	}
+	setMainWin := func(window *application.WebviewWindow) {
+		winMu.Lock()
+		mainWin = window
+		winMu.Unlock()
+	}
 	closeRuntime := func() {
 		closeMu.Lock()
 		defer closeMu.Unlock()
@@ -154,23 +166,23 @@ func runWailsShell(ctx context.Context, rt *app.Runtime, url string, logger *slo
 			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
 				logger.Info("second desktop instance redirected", "args", data.Args)
 				if raw, ok := FindDeepLinkInArgs(data.Args); ok {
-					// lifeHost may be nil until after application.New wiring; use mainWin focus always.
-					if mainWin != nil {
-						mainWin.Restore()
-						mainWin.Show()
-						mainWin.Focus()
+					if lifeHost != nil {
+						if err := lifeHost.NotifyDeepLink(raw); err != nil {
+							logger.Debug("second-instance deep link", "error", err, "url", raw)
+						}
+						return
 					}
-					// Best-effort: navigate after hosts attach (window JS).
-					if link, ok := ParseDeepLink(raw); ok && mainWin != nil {
-						js := fmt.Sprintf(`(function(){try{var t=%q;var i=t.indexOf('#');if(i>=0)location.hash=t.slice(i+1);window.dispatchEvent(new CustomEvent('autoto:deeplink',{detail:%q}));}catch(e){}})();`, link.Target, link.Raw)
-						mainWin.ExecJS(js)
+					if window := getMainWin(); window != nil {
+						window.Restore()
+						window.Show()
+						window.Focus()
 					}
 					return
 				}
-				if mainWin != nil {
-					mainWin.Restore()
-					mainWin.Show()
-					mainWin.Focus()
+				if window := getMainWin(); window != nil {
+					window.Restore()
+					window.Show()
+					window.Focus()
 				}
 			},
 		}
@@ -178,7 +190,7 @@ func runWailsShell(ctx context.Context, rt *app.Runtime, url string, logger *slo
 
 	wailsApp := application.New(appOptions)
 	dialogHost := NewWailsDialogHost(wailsApp)
-	lifeHost := newLifecycleHost(wailsApp, logger)
+	lifeHost = newLifecycleHost(wailsApp, logger, rt.ConfigPath())
 	homeDir := rt.Config().Paths.HomeDir
 	updHost := newUpdateHost(homeDir, logger)
 	rt.SetShellDialogHost(dialogHost)
@@ -192,7 +204,11 @@ func runWailsShell(ctx context.Context, rt *app.Runtime, url string, logger *slo
 		width, height = savedState.Width, savedState.Height
 	}
 
-	mainWin = wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+	// Queue cold-start argv deep links before the window exists so AttachWindow
+	// can flush them once the WebView is ready.
+	attachDeepLinkHandlers(wailsApp, lifeHost, logger)
+
+	window := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      "main",
 		Title:     "Autoto",
 		Width:     width,
@@ -203,17 +219,17 @@ func runWailsShell(ctx context.Context, rt *app.Runtime, url string, logger *slo
 		// Marker for frontend platform adapters (native dialogs via HTTP bridge).
 		JS: "window.AUTOTO_DESKTOP_SHELL=true;",
 	})
-	dialogHost.AttachWindow(mainWin)
-	lifeHost.AttachWindow(mainWin)
-	attachSystemTray(wailsApp, mainWin, logger, lifeHost)
-	attachDeepLinkHandlers(wailsApp, lifeHost, logger)
+	setMainWin(window)
+	dialogHost.AttachWindow(window)
+	lifeHost.AttachWindow(window)
+	attachSystemTray(wailsApp, window, logger, lifeHost)
 	if hasSavedState {
-		applyWindowState(mainWin, savedState)
+		applyWindowState(window, savedState)
 	} else {
-		mainWin.Center()
+		window.Center()
 	}
-	attachWindowStatePersistence(mainWin, statePath, logger)
-	mainWin.Show()
+	attachWindowStatePersistence(window, statePath, logger)
+	window.Show()
 
 	// If the HTTP server dies or the parent context is cancelled, quit the shell.
 	go func() {

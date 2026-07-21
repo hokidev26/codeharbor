@@ -84,15 +84,17 @@ func TestBindConfiguredHTTPListenersRejectsDuplicateMainProcess(t *testing.T) {
 func TestBindConfiguredHTTPListenersEphemeralUsesPortZero(t *testing.T) {
 	// Even when config listens on all interfaces, ephemeral must pin loopback.
 	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(config.Config{
-		Server: config.ServerConfig{Host: "0.0.0.0", Port: 16888},
+		Server:  config.ServerConfig{Host: "0.0.0.0", Port: 16888},
+		Gateway: config.GatewayConfig{Enabled: true, Host: "0.0.0.0", Port: 18789},
 	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer httpListener.Close()
-	if gatewayListener != nil {
-		_ = gatewayListener.Close()
+	if gatewayListener == nil {
+		t.Fatal("expected ephemeral gateway listener")
 	}
+	defer gatewayListener.Close()
 	addr, ok := httpListener.Addr().(*net.TCPAddr)
 	if !ok {
 		t.Fatalf("unexpected listener addr type %T", httpListener.Addr())
@@ -105,6 +107,13 @@ func TestBindConfiguredHTTPListenersEphemeralUsesPortZero(t *testing.T) {
 	}
 	if !addr.IP.Equal(net.ParseIP("127.0.0.1")) {
 		t.Fatalf("ephemeral bind expected 127.0.0.1, got %v", addr.IP)
+	}
+	gwAddr, ok := gatewayListener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected gateway addr type %T", gatewayListener.Addr())
+	}
+	if gwAddr.Port == 0 || gwAddr.Port == 18789 || !gwAddr.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("ephemeral gateway expected loopback:0-assigned, got %v", gwAddr)
 	}
 }
 
@@ -166,9 +175,14 @@ func TestRuntimeStartWaitReadyAndClose(t *testing.T) {
 	rt.SetShellUpdateHost(stubShellUpdateHost{})
 	rt.SetShellUpdateHost(nil)
 
-	if err := rt.Start(context.Background()); err != nil {
+	// Desktop ReadyTimeout cancels the start context after Start returns.
+	// Workers must keep serving until Close, not inherit that cancellation.
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := rt.Start(startCtx); err != nil {
+		cancelStart()
 		t.Fatal(err)
 	}
+	cancelStart()
 	readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rt.WaitReady(readyCtx); err != nil {
@@ -185,6 +199,17 @@ func TestRuntimeStartWaitReadyAndClose(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		_ = rt.Close(context.Background())
 		t.Fatalf("health status %d", resp.StatusCode)
+	}
+	// Start context is already canceled; health must still work.
+	resp2, err := http.Get(rt.URL() + "/api/health")
+	if err != nil {
+		_ = rt.Close(context.Background())
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		_ = rt.Close(context.Background())
+		t.Fatalf("health after start cancel status %d", resp2.StatusCode)
 	}
 
 	if err := rt.Close(context.Background()); err != nil {

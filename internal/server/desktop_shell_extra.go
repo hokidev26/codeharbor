@@ -87,7 +87,10 @@ func (s *Server) requireShellLoopback(w http.ResponseWriter, r *http.Request) bo
 		writeError(w, http.StatusForbidden, "desktop shell APIs require loopback peer")
 		return false
 	}
-	if isBrowserInitiated(r) && !s.validHeaderToken(r) {
+	// Always require the process-local API token. Loopback alone is not a
+	// desktop-shell identity: SSH/TCP port forwards present as 127.0.0.1 and
+	// non-browser clients previously skipped the token check.
+	if !s.validHeaderToken(r) {
 		writeError(w, http.StatusUnauthorized, "missing or invalid local API token")
 		return false
 	}
@@ -226,7 +229,33 @@ func (s *Server) desktopUpdateStagePost(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid stage request")
 		return
 	}
-	pending, err := host.StageLocalUpdate(req.SourcePath, req.Version, req.SHA256)
+	sourcePath := strings.TrimSpace(req.SourcePath)
+	version := strings.TrimSpace(req.Version)
+	sha256 := strings.ToLower(strings.TrimSpace(req.SHA256))
+	if sourcePath == "" || version == "" {
+		writeError(w, http.StatusBadRequest, "sourcePath and version are required")
+		return
+	}
+	if sha256 == "" {
+		writeError(w, http.StatusBadRequest, "sha256 is required")
+		return
+	}
+	// Require an unforgeable native confirmation when a dialog host is present.
+	// Without a host (tests/stubs), the loopback+token gate remains the boundary.
+	if dialog := s.shellDialog(); dialog != nil {
+		accepted, err := dialog.Confirm(r.Context(),
+			"Stage local desktop update "+version+" from:\n"+sourcePath+"\n\nThis only copies the file; it does not replace the running process.",
+			"Stage desktop update")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !accepted {
+			writeError(w, http.StatusConflict, "update staging canceled")
+			return
+		}
+	}
+	pending, err := host.StageLocalUpdate(sourcePath, version, sha256)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -237,9 +266,9 @@ func (s *Server) desktopUpdateStagePost(w http.ResponseWriter, r *http.Request) 
 		"version": pending.Version,
 		"path":    pending.StagedPath,
 		"sha256":  pending.SHA256,
-		// Apply requires an explicit host-side restart/replace helper.
-		"apply": "manual_restart",
-		"note":  "Staged only. Remote sessions cannot apply. Restart the desktop shell on the host to finish.",
+		// Staged only. A future host-side apply helper must verify SHA and replace.
+		"apply": "not_implemented",
+		"note":  "Staged only. Remote sessions cannot stage or apply. No automatic restart/replace is performed yet.",
 	})
 }
 

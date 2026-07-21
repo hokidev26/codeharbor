@@ -60,6 +60,17 @@ jobs:
           go list -tags desktop ./cmd/autoto-desktop ./internal/desktop
           go build -o /tmp/autoto-ci ./cmd/autoto
 
+      - name: Desktop package tests and production build
+        # Ubuntu runners have WebKit headers for Wails; this catches API breakages
+        # that go list alone would miss. GUI smoke is still opt-in locally.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          go test -tags desktop ./internal/desktop/ -count=1
+          go vet -tags desktop ./internal/desktop/ ./cmd/autoto-desktop
+          go build -tags "desktop,production" -o /tmp/autoto-desktop-ci ./cmd/autoto-desktop
+
   # Windows runs process Job Object coverage that cannot run on Unix.
   # Desktop Wails GUI is still opt-in (-tags desktop); this job stays CLI-only.
   windows-process:

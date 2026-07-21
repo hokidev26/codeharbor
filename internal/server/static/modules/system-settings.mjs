@@ -466,7 +466,7 @@ export function createSystemSettingsController({
               <input id="desktopStageVersion" class="settings-field" type="text" autocomplete="off" placeholder="0.2.0" value="${escapeHtml(state.desktopStageDraft?.version || "")}" />
             </label>
             <label class="settings-form-field">${escapeHtml(t("systemSettings.desktop.sha256Optional"))}
-              <input id="desktopStageSha256" class="settings-field" type="text" autocomplete="off" placeholder="optional" value="${escapeHtml(state.desktopStageDraft?.sha256 || "")}" />
+              <input id="desktopStageSha256" class="settings-field" type="text" autocomplete="off" placeholder="64-char hex" value="${escapeHtml(state.desktopStageDraft?.sha256 || "")}" />
             </label>
           </div>
           <div class="settings-action-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
@@ -542,6 +542,14 @@ export function createSystemSettingsController({
       const version = $("desktopStageVersion")?.value?.trim() || "";
       const sha256 = $("desktopStageSha256")?.value?.trim() || "";
       state.desktopStageDraft = { sourcePath, version, sha256 };
+      if (!sourcePath || !version) {
+        showError?.(new Error(t("systemSettings.desktop.stageMissingFields") || "source path and version are required"));
+        return;
+      }
+      if (!sha256 || !/^[0-9a-fA-F]{64}$/.test(sha256)) {
+        showError?.(new Error(t("systemSettings.desktop.stageMissingSha") || "a 64-character SHA-256 hex digest is required"));
+        return;
+      }
       setButtonBusy(event.currentTarget, true, t("systemSettings.desktop.staging"));
       try {
         await stageDesktopUpdate({ sourcePath, version, sha256 });

@@ -151,19 +151,7 @@ func (s *Server) requireShellDialog(w http.ResponseWriter, r *http.Request) (She
 		writeError(w, http.StatusNotFound, "desktop shell dialogs unavailable")
 		return nil, false
 	}
-	// Never drive native desktop dialogs from a remote/tunneled session.
-	if s.remoteAccessGateRequired(r) {
-		writeError(w, http.StatusForbidden, "desktop shell dialogs require local access")
-		return nil, false
-	}
-	if !trustedLoopbackPeer(r) {
-		writeError(w, http.StatusForbidden, "desktop shell dialogs require loopback peer")
-		return nil, false
-	}
-	// Match other local browser-initiated APIs: require the process token so a
-	// random page on the same origin cannot open modal dialogs.
-	if isBrowserInitiated(r) && !s.validHeaderToken(r) {
-		writeError(w, http.StatusUnauthorized, "missing or invalid local API token")
+	if !s.requireShellLoopback(w, r) {
 		return nil, false
 	}
 	return host, true

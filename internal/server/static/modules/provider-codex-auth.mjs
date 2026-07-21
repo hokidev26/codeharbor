@@ -1,4 +1,5 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { apiDownload } from "./runtime.mjs";
 import { formatNumber } from "./formatters.mjs";
 import { t } from "./i18n.mjs?v=provider-draft-session-1";
@@ -493,7 +494,7 @@ export function createCodexAuthController(ctx) {
 
   async function exportCodexAccount(id, button) {
     state.codexAccountBusy ||= {};
-    if (!id || state.codexAccountBusy[id] || !globalThis.confirm?.(mt("exportAccountConfirm"))) return;
+    if (!id || state.codexAccountBusy[id] || !(await platformConfirm(mt("exportAccountConfirm")))) return;
     state.codexAccountBusy[id] = true;
     state.providerAuthMutationWarning = "";
     setProviderConsoleResult("");
@@ -527,7 +528,7 @@ export function createCodexAuthController(ctx) {
   }
 
   async function deleteCodexAccount(id, button) {
-    if (state.codexAccountBusy?.[id] || !globalThis.confirm?.(mt("deleteAccountConfirm"))) return;
+    if (state.codexAccountBusy?.[id] || !(await platformConfirm(mt("deleteAccountConfirm")))) return;
     return runCodexAccountAction(id, button, mt("deleting"), async () => {
       const request = codexAccountActionRequest("delete", id);
       const result = await requestAPI(request.path, request.options);
@@ -547,8 +548,8 @@ export function createCodexAuthController(ctx) {
     if (!ids.length || consoleState.codexBatchBusy) return;
     const priority = Number(consoleState.codexBatchPriority);
     if (operation === "set_priority" && (!Number.isInteger(priority) || priority < 1 || priority > 1000000)) throw new Error(mt("invalidPriority"));
-    if (operation === "sync" && !globalThis.confirm?.(mt("batchSyncConfirm", { count: ids.length }))) return;
-    if (operation === "delete" && !globalThis.confirm?.(mt("batchDeleteConfirm", { count: ids.length }))) return;
+    if (operation === "sync" && !(await platformConfirm(mt("batchSyncConfirm", { count: ids.length })))) return;
+    if (operation === "delete" && !(await platformConfirm(mt("batchDeleteConfirm", { count: ids.length })))) return;
     consoleState.codexBatchBusy = true;
     consoleState.codexEdit = null;
     state.providerAuthMutationWarning = "";

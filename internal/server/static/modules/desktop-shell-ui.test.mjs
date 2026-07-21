@@ -14,8 +14,10 @@ test("parseDesktopHash maps shell targets", () => {
   assert.deepEqual(parseDesktopHash("#project=p1"), { kind: "project", id: "p1" });
   assert.deepEqual(parseDesktopHash("#conversation=c1"), { kind: "conversation", id: "c1" });
   assert.deepEqual(parseDesktopHash("#settings"), { kind: "settings", panel: "providers" });
+  assert.deepEqual(parseDesktopHash("#chat"), { kind: "view", view: "chat" });
   assert.equal(parseDesktopHash(""), null);
   assert.equal(parseDesktopHash("#"), null);
+  assert.equal(parseDesktopHash("#project=%E0%A4%A"), null);
 });
 
 test("installDesktopDeepLinkRouter dispatches openSettings", () => {
@@ -37,11 +39,23 @@ test("installDesktopDeepLinkRouter dispatches openSettings", () => {
     const dispose = installDesktopDeepLinkRouter({
       openSettings: (panel) => calls.push(["settings", panel]),
       openAgent: (id) => calls.push(["agent", id]),
+      openView: (view) => calls.push(["view", view]),
     });
     assert.deepEqual(calls, [["settings", "remote-access"]]);
     globalThis.location.hash = "#agent=x";
     listeners.get("hashchange")?.();
     assert.deepEqual(calls[1], ["agent", "x"]);
+    globalThis.location.hash = "#chat";
+    listeners.get("hashchange")?.();
+    assert.deepEqual(calls[2], ["view", "chat"]);
+    // Re-install replaces listeners instead of stacking.
+    const dispose2 = installDesktopDeepLinkRouter({
+      openSettings: (panel) => calls.push(["settings2", panel]),
+    });
+    globalThis.location.hash = "#settings=about";
+    listeners.get("hashchange")?.();
+    assert.equal(calls.some((item) => item[0] === "settings2"), true);
+    dispose2();
     dispose();
   } finally {
     globalThis.window = previous;

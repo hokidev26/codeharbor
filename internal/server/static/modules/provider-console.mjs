@@ -1,4 +1,5 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { api } from "./runtime.mjs";
 import { t } from "./i18n.mjs?v=provider-draft-session-1";
 import {
@@ -1121,7 +1122,7 @@ export function createModelProviderSettingsController({
   async function deleteConsoleProvider(name) {
     const provider = providerByName(name);
     if (!provider || !isProviderDeletable(provider) || providerConsoleBusy(`delete:${name}`) || providerConsoleBusy(`toggle:${name}`)) return;
-    if (!globalThis.confirm?.(ct("messages.deleteProviderConfirm", { provider: providerDisplayName(provider) }))) return;
+    if (!(await platformConfirm(ct("messages.deleteProviderConfirm", { provider: providerDisplayName(provider) })))) return;
     await runProviderConsoleBusy(`delete:${name}`, async () => {
       const request = providerConsoleRequest("delete", provider);
       await requestAPI(request.path, request.options);
@@ -1302,14 +1303,14 @@ export function createModelProviderSettingsController({
       if (choice && choice.value !== target.value) choice.value = "";
     }
     if (target?.matches?.("[data-mp-clear-api-key]") && target.checked) {
-      if (!globalThis.confirm?.(ct("messages.clearApiKeyConfirm"))) {
-        target.checked = false;
-      }
+      void platformConfirm(ct("messages.clearApiKeyConfirm")).then((ok) => {
+        if (!ok) target.checked = false;
+      });
     }
     if (target?.matches?.("[data-mp-clear-proxy-auth]") && target.checked) {
-      if (!globalThis.confirm?.(ct("messages.clearProxyAuthConfirm"))) {
-        target.checked = false;
-      }
+      void platformConfirm(ct("messages.clearProxyAuthConfirm")).then((ok) => {
+        if (!ok) target.checked = false;
+      });
     }
     const updated = updateProviderConsoleDraftFromEvent(event);
     if (updated && target?.name === "insecureSkipTLSVerify") {

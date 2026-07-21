@@ -75,13 +75,21 @@ export async function clearPendingDesktopUpdate() {
  *   #agent=<id>
  *   #project=<id>
  *   #conversation=<id>
+ *   #chat | #terminal | #details | #browser | #settings (view)
  */
 export function parseDesktopHash(hashLike = globalThis.location?.hash || "") {
   const raw = String(hashLike || "").replace(/^#/, "").trim();
   if (!raw) return null;
   const eq = raw.indexOf("=");
   const key = (eq >= 0 ? raw.slice(0, eq) : raw).toLowerCase();
-  const value = eq >= 0 ? decodeURIComponent(raw.slice(eq + 1)) : "";
+  let value = "";
+  if (eq >= 0) {
+    try {
+      value = decodeURIComponent(raw.slice(eq + 1));
+    } catch {
+      return null;
+    }
+  }
   switch (key) {
     case "settings":
       return { kind: "settings", panel: value || "providers" };
@@ -98,41 +106,71 @@ export function parseDesktopHash(hashLike = globalThis.location?.hash || "") {
   }
 }
 
+let activeDispose = null;
+let lastAppliedKey = "";
+
+function dispatchParsed(parsed, handlers = {}) {
+  if (!parsed) return;
+  try {
+    if (parsed.kind === "settings") handlers.openSettings?.(parsed.panel);
+    else if (parsed.kind === "agent") handlers.openAgent?.(parsed.id);
+    else if (parsed.kind === "project") handlers.openProject?.(parsed.id);
+    else if (parsed.kind === "conversation") handlers.openConversation?.(parsed.id);
+    else if (parsed.kind === "view") handlers.openView?.(parsed.view);
+  } catch {
+    // navigation helpers may throw before boot completes
+  }
+}
+
 /**
- * Wire hash + CustomEvent('autoto:deeplink') handlers once.
- * handlers: { openSettings(panel), openAgent(id), openProject(id), openConversation(id) }
+ * Wire hash + CustomEvent('autoto:deeplink') handlers once (idempotent).
+ * handlers: { openSettings, openAgent, openProject, openConversation, openView }
  */
 export function installDesktopDeepLinkRouter(handlers = {}) {
   if (typeof globalThis.window === "undefined") return () => {};
-  const apply = (hash) => {
+  // Replace previous installation so refresh/auth re-init cannot stack listeners.
+  if (typeof activeDispose === "function") {
+    activeDispose();
+    activeDispose = null;
+  }
+
+  const applyHash = (hash, { force = false } = {}) => {
+    const key = `hash:${String(hash || "")}`;
+    if (!force && key === lastAppliedKey) return;
     const parsed = parseDesktopHash(hash);
     if (!parsed) return;
-    try {
-      if (parsed.kind === "settings") handlers.openSettings?.(parsed.panel);
-      else if (parsed.kind === "agent") handlers.openAgent?.(parsed.id);
-      else if (parsed.kind === "project") handlers.openProject?.(parsed.id);
-      else if (parsed.kind === "conversation") handlers.openConversation?.(parsed.id);
-    } catch {
-      // navigation helpers may throw before boot completes
-    }
+    lastAppliedKey = key;
+    dispatchParsed(parsed, handlers);
   };
-  const onHash = () => apply(globalThis.location?.hash || "");
+
+  const onHash = () => applyHash(globalThis.location?.hash || "");
   const onEvent = (event) => {
-    // Shell may set hash then emit; re-read hash.
-    onHash();
-    if (event?.detail) {
-      // detail is raw autoto:// URL — hash already applied by shell JS
+    // Prefer the current hash (shell usually sets it). If hash is empty but
+    // detail is present, parse the raw autoto:// URL's target fragment.
+    const hash = globalThis.location?.hash || "";
+    if (hash) {
+      applyHash(hash, { force: true });
+      return;
     }
+    const detail = String(event?.detail || "");
+    if (!detail) return;
+    // Best-effort: extract #fragment from detail target if shell only emitted event.
+    const hashIdx = detail.indexOf("#");
+    if (hashIdx >= 0) applyHash(detail.slice(hashIdx), { force: true });
   };
+
   globalThis.window.addEventListener("hashchange", onHash);
   globalThis.window.addEventListener("autoto:deeplink", onEvent);
-  // Initial hash after first paint (avoid double-call when queueMicrotask exists).
   if (typeof globalThis.queueMicrotask === "function") globalThis.queueMicrotask(onHash);
   else onHash();
-  return () => {
+
+  const dispose = () => {
     globalThis.window.removeEventListener("hashchange", onHash);
     globalThis.window.removeEventListener("autoto:deeplink", onEvent);
+    if (activeDispose === dispose) activeDispose = null;
   };
+  activeDispose = dispose;
+  return dispose;
 }
 
 export { isDesktopShell };

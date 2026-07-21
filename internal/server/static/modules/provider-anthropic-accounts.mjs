@@ -1,4 +1,5 @@
 import { escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { t } from "./i18n.mjs?v=provider-draft-session-1";
 import {
   createProviderDraft,
@@ -149,7 +150,7 @@ export function createAnthropicAccountsController(ctx) {
   }
 
   async function deleteAnthropicAccount(id, button) {
-    if (state.anthropicAccountBusy?.[id] || !globalThis.confirm?.(mt("anthropic.deleteConfirm"))) return;
+    if (state.anthropicAccountBusy?.[id] || !(await platformConfirm(mt("anthropic.deleteConfirm")))) return;
     return runAnthropicAccountAction(id, button, mt("deleting"), async () => {
       const request = anthropicAccountActionRequest("delete", id);
       await requestAPI(request.path, request.options);

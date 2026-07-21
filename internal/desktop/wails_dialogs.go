@@ -37,6 +37,10 @@ func (h *WailsDialogHost) AttachWindow(window *application.WebviewWindow) {
 }
 
 // Confirm implements server.ShellDialogHost.
+//
+// Wails message dialogs complete via button callbacks (async on macOS sheet /
+// Linux). We must never read the result immediately after Show() returns.
+// Windows maps Question dialogs to Yes/No labels, so use those labels.
 func (h *WailsDialogHost) Confirm(ctx context.Context, message, title string) (bool, error) {
 	if h == nil || h.app == nil {
 		return false, context.Canceled
@@ -52,22 +56,29 @@ func (h *WailsDialogHost) Confirm(ctx context.Context, message, title string) (b
 		err      error
 	}
 	done := make(chan result, 1)
+	var once sync.Once
+	finish := func(accepted bool, err error) {
+		once.Do(func() {
+			done <- result{accepted: accepted, err: err}
+		})
+	}
 	application.InvokeSync(func() {
-		accepted := false
 		dialog := h.app.Dialog.Question().
 			SetTitle(title).
 			SetMessage(message)
 		if window := h.mainWindow(); window != nil {
 			dialog.AttachToWindow(window)
 		}
-		yes := dialog.AddButton("OK")
-		yes.OnClick(func() { accepted = true })
+		// Windows MessageBox Question returns "Yes"/"No". Custom labels only
+		// work on macOS/Linux, so use the portable pair.
+		yes := dialog.AddButton("Yes")
+		yes.OnClick(func() { finish(true, nil) })
 		dialog.SetDefaultButton(yes)
-		no := dialog.AddButton("Cancel")
-		no.OnClick(func() { accepted = false })
+		no := dialog.AddButton("No")
+		no.OnClick(func() { finish(false, nil) })
 		dialog.SetCancelButton(no)
 		dialog.Show()
-		done <- result{accepted: accepted}
+		// Show may return before callbacks on sheet/async platforms; wait below.
 	})
 	select {
 	case <-ctx.Done():
@@ -89,6 +100,10 @@ func (h *WailsDialogHost) Alert(ctx context.Context, message, title string) erro
 		title = "Autoto"
 	}
 	done := make(chan error, 1)
+	var once sync.Once
+	finish := func(err error) {
+		once.Do(func() { done <- err })
+	}
 	application.InvokeSync(func() {
 		dialog := h.app.Dialog.Info().
 			SetTitle(title).
@@ -96,10 +111,11 @@ func (h *WailsDialogHost) Alert(ctx context.Context, message, title string) erro
 		if window := h.mainWindow(); window != nil {
 			dialog.AttachToWindow(window)
 		}
-		ok := dialog.AddButton("OK")
+		// Windows Info dialog maps to "Ok".
+		ok := dialog.AddButton("Ok")
+		ok.OnClick(func() { finish(nil) })
 		dialog.SetDefaultButton(ok)
 		dialog.Show()
-		done <- nil
 	})
 	select {
 	case <-ctx.Done():
@@ -140,7 +156,6 @@ func (h *WailsDialogHost) PickDirectory(ctx context.Context, title, defaultPath 
 		}
 		path, err := dialog.PromptForSingleSelection()
 		if err != nil {
-			// User cancel surfaces as empty path and/or error depending on platform.
 			msg := strings.ToLower(err.Error())
 			if path == "" || strings.Contains(msg, "cancel") || strings.Contains(msg, "abort") {
 				done <- result{canceled: true}

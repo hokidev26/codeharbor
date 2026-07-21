@@ -2337,8 +2337,10 @@ body.white-shell.theme-light[data-theme-preset="apple"] .modal {
   }
   .mobile-icon-btn svg { width: 22px; height: 22px; }
   .mobile-icon-btn:is(:hover, :focus-visible, :active) { outline: 0; background: rgba(118, 118, 128, .10); }
-  #mobileSearchBtn,
-  #mobileTerminalBtn { display: none; }
+  #mobileSearchBtn { display: none; }
+  /* Full remote + project context may use the mobile terminal entry; JS still
+     disables it when terminalAccessAllowed is false. */
+  #mobileTerminalBtn { display: inline-flex; }
   #mobileWorkbenchBtn { display: inline-flex; }
 
   body.white-shell.theme-light .mobile-backdrop {

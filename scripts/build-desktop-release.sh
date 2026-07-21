@@ -9,13 +9,15 @@ OUT="${OUT:-dist}"
 mkdir -p "$OUT"
 echo "Building Autoto $VERSION → $OUT"
 
+# config.Version is a package-level string var so -X can rewrite it.
 LDFLAGS="-X autoto/internal/config.Version=${VERSION}"
 
 echo "→ CLI"
 go build -ldflags "$LDFLAGS" -o "$OUT/autoto" ./cmd/autoto
 
-echo "→ desktop (tags=desktop)"
-go build -tags desktop -ldflags "$LDFLAGS" -o "$OUT/autoto-desktop" ./cmd/autoto-desktop
+echo "→ desktop (tags=desktop,production)"
+# production disables Wails debug/devtools mode for release-like binaries.
+go build -tags "desktop,production" -ldflags "$LDFLAGS" -o "$OUT/autoto-desktop" ./cmd/autoto-desktop
 
 (
   cd "$OUT"
