@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { currentUILocale, t } from "./i18n.mjs?v=shared-api-1";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 const endpoints = Object.freeze({
   keys: "/api/gateway/keys",
@@ -222,8 +223,9 @@ export function createSharedAPISettingsController({
   onChange,
   showError,
   showToast,
-  confirmAction = (message) => globalThis.confirm?.(message) !== false,
+  confirmAction = platformConfirm,
 } = {}) {
+  const confirm = confirmAction;
   let oneTimeToken = "";
   let oneTimeTokenContext = "";
   let editingKeyID = "";
@@ -390,7 +392,7 @@ export function createSharedAPISettingsController({
 
   async function rotateKey(id) {
     const key = state.gatewayKeys.find((item) => item.id === id);
-    if (!key || key.revokedAt || !confirmAction(t("sharedAPI.rotateConfirm", { name: key.name || key.keyPrefix }))) return null;
+    if (!key || key.revokedAt || !await confirm(t("sharedAPI.rotateConfirm", { name: key.name || key.keyPrefix }))) return null;
     const call = gatewayKeyRequest("rotate", key);
     const result = await perform(call.path, call.options);
     if (result?.key) state.gatewayKeys = replaceBy(state.gatewayKeys, normalizeGatewayKey(result.key), "id");
@@ -402,7 +404,7 @@ export function createSharedAPISettingsController({
 
   async function revokeKey(id) {
     const key = state.gatewayKeys.find((item) => item.id === id);
-    if (!key || key.revokedAt || !confirmAction(t("sharedAPI.revokeConfirm", { name: key.name || key.keyPrefix }))) return null;
+    if (!key || key.revokedAt || !await confirm(t("sharedAPI.revokeConfirm", { name: key.name || key.keyPrefix }))) return null;
     const call = gatewayKeyRequest("revoke", key);
     const result = await perform(call.path, call.options);
     state.gatewayKeys = replaceBy(state.gatewayKeys, normalizeGatewayKey(result?.key || { ...key, enabled: false, revokedAt: new Date().toISOString() }), "id");
@@ -454,7 +456,7 @@ export function createSharedAPISettingsController({
   }
 
   async function deleteModel(alias) {
-    if (!confirmAction(t("sharedAPI.deleteModelConfirm", { alias }))) return null;
+    if (!await confirm(t("sharedAPI.deleteModelConfirm", { alias }))) return null;
     const call = gatewayModelRequest("delete", alias);
     const result = await perform(call.path, call.options);
     state.gatewayModels = state.gatewayModels.filter((item) => item.alias !== alias);

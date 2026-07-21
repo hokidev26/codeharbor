@@ -92,6 +92,23 @@ test("normalizes and controls a temporary tunnel through the security endpoint",
     ["/api/security/remote-access/tunnel", "POST"],
     ["/api/security/remote-access/tunnel", "DELETE"],
   ]);
+
+  // Running tunnel UI includes phone QR + scan steps for mobile follow-up.
+  state.remoteAccess = {
+    ...localAccess,
+    tunnel: {
+      available: true,
+      status: "running",
+      publicUrl: "https://bright-sun.trycloudflare.com",
+      error: "",
+      startedAt: "2026-07-18T00:00:00Z",
+    },
+  };
+  const html = controller.render();
+  assert.match(html, /remote-access-tunnel-qr/);
+  assert.match(html, /<svg /);
+  assert.match(html, /remote-access-phone-steps/);
+  assert.match(html, /bright-sun\.trycloudflare\.com/);
 });
 
 test("temporary tunnel start button keeps its label and width hook while starting", async () => {

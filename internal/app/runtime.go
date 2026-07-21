@@ -1,0 +1,597 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"autoto/internal/agent"
+	"autoto/internal/anthropicauth"
+	"autoto/internal/audit"
+	"autoto/internal/automation"
+	"autoto/internal/background"
+	"autoto/internal/channels"
+	"autoto/internal/codexauth"
+	"autoto/internal/compat"
+	"autoto/internal/config"
+	"autoto/internal/db"
+	"autoto/internal/gateway"
+	"autoto/internal/integrations"
+	"autoto/internal/plugins"
+	"autoto/internal/preview"
+	"autoto/internal/providers"
+	"autoto/internal/runtime"
+	"autoto/internal/secrets"
+	"autoto/internal/server"
+	"autoto/internal/tools"
+)
+
+// Runtime owns a fully wired Autoto process that can be started and closed by
+// either the CLI entrypoint or a future desktop shell.
+type Runtime struct {
+	logger *slog.Logger
+
+	cfg        config.Config
+	configPath string
+
+	store             *db.Store
+	runner            *agent.Runner
+	application       *server.Server
+	httpServer        *http.Server
+	gatewayHTTPServer *http.Server
+	httpListener      net.Listener
+	gatewayListener   net.Listener
+	supervisor        *runtime.Supervisor
+	previewManager    *preview.Manager
+	temporaryTunnel   *server.TemporaryTunnelManager
+	channelManager    *channels.Manager
+	automationManager *automation.Manager
+	backgroundManager *background.Manager
+	providerRegistry  *providers.Registry
+	actualHTTPAddr    string
+	actualGatewayAddr string
+	ephemeralHTTP     bool
+
+	mu      sync.Mutex
+	state   runtimeLifecycleState
+	closeCh chan struct{}
+}
+
+type runtimeLifecycleState uint8
+
+const (
+	runtimeNew runtimeLifecycleState = iota
+	runtimeStarted
+	runtimeClosed
+)
+
+// NewRuntime loads configuration, binds listeners, opens persistence, and wires
+// services. It does not start serving until Start is called.
+func NewRuntime(options Options) (*Runtime, error) {
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if options.LegacyCommand {
+		logger.Warn("codeharbor command is deprecated; use autoto", "replacement", "autoto", "removalVersion", compat.RemovalVersion)
+	}
+
+	resolvedConfigPath, err := config.ResolvePath(options.ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config: %w", err)
+	}
+	cfg, legacyReport, err := config.LoadWithReport(resolvedConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	providerAPIKeyInputs, err := config.InspectProviderAPIKeyInputs(resolvedConfigPath, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("inspect provider credential sources: %w", err)
+	}
+	if !legacyReport.Empty() {
+		logger.Warn(
+			"legacy compatibility used",
+			"legacy", legacyReport.LegacyNames(),
+			"replacement", legacyReport.Replacements(),
+			"removalVersion", compat.RemovalVersion,
+		)
+	}
+
+	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(cfg, options.EphemeralHTTP)
+	if err != nil {
+		return nil, err
+	}
+	actualHTTPAddr := httpListener.Addr().String()
+	actualGatewayAddr := ""
+	if gatewayListener != nil {
+		actualGatewayAddr = gatewayListener.Addr().String()
+	}
+
+	cleanup := func(store *db.Store) {
+		if store != nil {
+			_ = store.Close()
+		}
+		if httpListener != nil {
+			_ = httpListener.Close()
+		}
+		if gatewayListener != nil {
+			_ = gatewayListener.Close()
+		}
+	}
+
+	store, err := db.Open(context.Background(), cfg.Paths.DatabasePath)
+	if err != nil {
+		cleanup(nil)
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	providerVault := secrets.NewProviderVault(store, cfg.Paths.HomeDir)
+	cfg, providerSecretWarnings := hydrateProviderSecrets(context.Background(), cfg, providerVault, providerAPIKeyInputs, resolvedConfigPath)
+	for _, warning := range providerSecretWarnings {
+		logger.Warn("provider credential recovery warning", "error", warning)
+	}
+	runtimeSettings, err := store.GetRuntimeSettings(context.Background())
+	if err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("load runtime settings: %w", err)
+	}
+	if err := store.SeedBackends(context.Background(), configuredBackends(cfg.Backends.Instances)); err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("seed backends: %w", err)
+	}
+
+	providerRegistry := providers.NewRegistry()
+	providerRegistry.SetAggregateSource(aggregateSourceFromStore(store))
+	for _, providerCfg := range cfg.Providers.Instances {
+		if providerCfg.Disabled {
+			logger.Info("skip disabled provider", "name", providerCfg.Name, "type", providerCfg.Type)
+			continue
+		}
+		providerCfg = providerConfigForRuntime(providerCfg, runtimeSettings)
+		if providerCfg.Type == config.ProviderTypeCodex {
+			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
+		if providerCfg.Name == anthropicauth.DefaultProviderName && providerCfg.Type == "anthropic" {
+			providerCfg.CredentialStorePath = anthropicauth.DefaultStoreDir(cfg.Paths.HomeDir)
+		}
+		provider, err := providers.NewProvider(providerCfg)
+		if err != nil {
+			logger.Warn("skip unsupported provider", "name", providerCfg.Name, "type", providerCfg.Type, "error", err)
+			continue
+		}
+		if codexProvider, ok := provider.(*providers.CodexProvider); ok {
+			codexProvider.SetAccountTelemetry(store)
+		}
+		if anthropicProvider, ok := provider.(*providers.AnthropicProvider); ok {
+			anthropicProvider.SetAccountTelemetry(store)
+		}
+		providerRegistry.Register(provider)
+	}
+	if !providerRegistry.SetDefaultFromConfig(cfg.Agent.DefaultModel, cfg.Providers.Instances) {
+		logger.Warn("no configured provider registered as default", "defaultModel", cfg.Agent.DefaultModel)
+	}
+
+	toolRegistry := tools.NewRegistry()
+	tools.RegisterCore(toolRegistry)
+	secretResolver := secrets.EnvResolver{}
+	pluginService := plugins.NewService(store, secretResolver)
+
+	hub := agent.NewHub()
+	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
+	runner.SetDynamicToolSource(pluginService)
+	runner.SetDefaultReasoningEffort(runtimeSettings.DefaultReasoningEffort)
+	if err := runner.RecoverInterruptedRuns(context.Background()); err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("recover interrupted runs: %w", err)
+	}
+	connectionService := integrations.NewConnectionService(store, secretResolver)
+	auditRecorder := audit.NewRecorder(store)
+	automationManager, err := automation.NewManager(automation.Config{Store: store, Runner: runner, Audit: auditRecorder})
+	if err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("create automation manager: %w", err)
+	}
+	channelManager, err := channels.New(store, connectionService, channelApprovalAdapter{runner: runner}, toolRegistry)
+	if err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("create channel manager: %w", err)
+	}
+	automationManager.SetTelegramSender(channelManager)
+	runner.SetNotifier(automationManager)
+
+	backgroundManager := background.NewManager(store, background.Options{})
+	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindShell, background.NewShellExecutor()); err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("register background shell executor: %w", err)
+	}
+	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindAgent, background.NewAgentExecutor(store, runner)); err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("register background agent executor: %w", err)
+	}
+	backgroundService := background.NewService(backgroundManager, store)
+	backgroundManager.SetValidator(runner.ValidateBackgroundTask)
+	eventHook, terminalHook := background.NewManagerHooks(hub, automationManager, runner)
+	backgroundManager.SetEventHook(eventHook)
+	backgroundManager.SetTerminalHook(terminalHook)
+	runner.SetBackgroundTaskService(backgroundService)
+
+	previewManager := preview.NewManager()
+	// Prefer the actual bound address so temporary tunnels point at the live
+	// listener when EphemeralHTTP or OS-assigned ports are in use.
+	temporaryTunnelManager := server.NewTemporaryTunnelManager(actualHTTPAddr)
+	reviewService := server.NewReviewService(providerRegistry, cfg.Agent.ReviewModel)
+	runner.SetReviewService(reviewService)
+	application := server.New(cfg, store, runner, hub, providerRegistry)
+	application.SetProviderVault(providerVault)
+	application.SetToolRegistry(toolRegistry)
+	application.SetBackgroundTaskService(backgroundService)
+	application.SetAutomationManager(automationManager)
+	application.SetConnectionService(connectionService)
+	application.SetPluginService(pluginService)
+	application.SetReviewService(reviewService)
+	application.SetAuditRecorder(auditRecorder)
+	application.SetPreviewManager(previewManager)
+	application.SetTemporaryTunnelManager(temporaryTunnelManager)
+	application.SetConfigPath(resolvedConfigPath)
+
+	httpServer := &http.Server{
+		Addr:              actualHTTPAddr,
+		Handler:           application.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	gatewayHTTPServer, err := newGatewayHTTPServer(cfg, store, providerRegistry, application.GatewayProviderAllowed)
+	if err != nil {
+		cleanup(store)
+		return nil, fmt.Errorf("create gateway service: %w", err)
+	}
+	if gatewayHTTPServer != nil && actualGatewayAddr != "" {
+		gatewayHTTPServer.Addr = actualGatewayAddr
+	}
+
+	return &Runtime{
+		logger:            logger,
+		cfg:               cfg,
+		configPath:        resolvedConfigPath,
+		store:             store,
+		runner:            runner,
+		application:       application,
+		httpServer:        httpServer,
+		gatewayHTTPServer: gatewayHTTPServer,
+		httpListener:      httpListener,
+		gatewayListener:   gatewayListener,
+		previewManager:    previewManager,
+		temporaryTunnel:   temporaryTunnelManager,
+		channelManager:    channelManager,
+		automationManager: automationManager,
+		backgroundManager: backgroundManager,
+		providerRegistry:  providerRegistry,
+		actualHTTPAddr:    actualHTTPAddr,
+		actualGatewayAddr: actualGatewayAddr,
+		ephemeralHTTP:     options.EphemeralHTTP,
+		closeCh:           make(chan struct{}),
+	}, nil
+}
+
+// Start begins serving HTTP and runtime workers. The provided context cancels
+// only the start phase; callers should call Close to shut the runtime down.
+func (r *Runtime) Start(ctx context.Context) error {
+	if r == nil {
+		return errors.New("app: nil runtime")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == runtimeClosed {
+		return errors.New("app: runtime already closed")
+	}
+	if r.state == runtimeStarted {
+		return errors.New("app: runtime already started")
+	}
+
+	supervisor := runtime.NewSupervisor()
+	onServeError := func(component string) func(error) {
+		return func(err error) {
+			r.logger.Error("serve "+component, "error", err)
+			r.requestClose()
+		}
+	}
+	services := []runtime.Service{r.previewManager, r.temporaryTunnel, r.channelManager, r.automationManager, r.backgroundManager}
+	if r.gatewayHTTPServer != nil {
+		services = append(services, runtime.NewHTTPServiceWithListener(r.gatewayHTTPServer, r.gatewayListener, onServeError("gateway")))
+	}
+	services = append(services, runtime.NewHTTPServiceWithListener(r.httpServer, r.httpListener, onServeError("http")))
+	if err := registerRuntimeServices(supervisor, services...); err != nil {
+		return err
+	}
+
+	r.logger.Info("autoto listening", "addr", r.URL(), "config", r.configPath, "ephemeralHTTP", r.ephemeralHTTP)
+	if r.gatewayHTTPServer != nil {
+		r.logger.Info("private API gateway listening", "addr", fmt.Sprintf("http://%s", r.actualGatewayAddr))
+	}
+	if err := supervisor.Start(ctx); err != nil {
+		return err
+	}
+	// Background reconciliation runs as part of the supervisor start. Only then
+	// can a continuation safely decide whether its task boundary is terminal.
+	if err := r.runner.RecoverContinuationPendingRuns(context.Background()); err != nil {
+		_ = supervisor.Close(context.Background())
+		return fmt.Errorf("recover continuation pending runs: %w", err)
+	}
+
+	r.supervisor = supervisor
+	r.state = runtimeStarted
+	return nil
+}
+
+// WaitReady polls /api/health until the HTTP server answers or ctx ends.
+func (r *Runtime) WaitReady(ctx context.Context) error {
+	if r == nil {
+		return errors.New("app: nil runtime")
+	}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	url := r.URL() + "/api/health"
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("health status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("wait ready: %w (%v)", ctx.Err(), lastErr)
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// Close stops services, closes the database, and releases listeners. It is
+// safe to call more than once.
+func (r *Runtime) Close(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	if r.state == runtimeClosed {
+		r.mu.Unlock()
+		return nil
+	}
+	supervisor := r.supervisor
+	store := r.store
+	httpListener := r.httpListener
+	gatewayListener := r.gatewayListener
+	r.supervisor = nil
+	r.store = nil
+	r.state = runtimeClosed
+	r.requestCloseLocked()
+	r.mu.Unlock()
+
+	var errs []error
+	if supervisor != nil {
+		if err := supervisor.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if store != nil {
+		if err := store.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// Listeners are normally closed by HTTP shutdown; close defensively when
+	// Start never ran or serve failed before takeover.
+	if httpListener != nil {
+		_ = httpListener.Close()
+	}
+	if gatewayListener != nil {
+		_ = gatewayListener.Close()
+	}
+	return errors.Join(errs...)
+}
+
+// Done returns a channel that closes when the runtime requests shutdown, for
+// example after a fatal serve error.
+func (r *Runtime) Done() <-chan struct{} {
+	if r == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return r.closeCh
+}
+
+// URL returns the browser-facing base URL for the bound HTTP listener.
+// Wildcard binds (0.0.0.0 / ::) are rewritten to 127.0.0.1 so WebViews and
+// health probes hit a loopback Host that localRequestGuard treats as local.
+func (r *Runtime) URL() string {
+	if r == nil || r.actualHTTPAddr == "" {
+		return ""
+	}
+	return "http://" + browserFacingHostPort(r.actualHTTPAddr)
+}
+
+// Addr returns the actual HTTP bind address (host:port).
+func (r *Runtime) Addr() string {
+	if r == nil {
+		return ""
+	}
+	return r.actualHTTPAddr
+}
+
+// ConfigPath returns the resolved config path used by this runtime.
+func (r *Runtime) ConfigPath() string {
+	if r == nil {
+		return ""
+	}
+	return r.configPath
+}
+
+// Config returns a snapshot of the loaded configuration.
+func (r *Runtime) Config() config.Config {
+	if r == nil {
+		return config.Config{}
+	}
+	return r.cfg
+}
+
+// SetShellDialogHost registers shell-only native dialogs on the HTTP server.
+// Browser/CLI runtimes leave this unset. The desktop shell registers a host
+// that shows OS dialogs without exposing Agent APIs.
+func (r *Runtime) SetShellDialogHost(host server.ShellDialogHost) {
+	if r == nil || r.application == nil {
+		return
+	}
+	r.application.SetShellDialogHost(host)
+}
+
+// SetShellLifecycleHost registers desktop-only autostart / deep-link handlers.
+func (r *Runtime) SetShellLifecycleHost(host server.ShellLifecycleHost) {
+	if r == nil || r.application == nil {
+		return
+	}
+	r.application.SetShellLifecycleHost(host)
+}
+
+// SetShellUpdateHost registers desktop-only local update staging (no network).
+func (r *Runtime) SetShellUpdateHost(host server.ShellUpdateHost) {
+	if r == nil || r.application == nil {
+		return
+	}
+	r.application.SetShellUpdateHost(host)
+}
+
+func (r *Runtime) requestClose() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requestCloseLocked()
+}
+
+func (r *Runtime) requestCloseLocked() {
+	select {
+	case <-r.closeCh:
+	default:
+		close(r.closeCh)
+	}
+}
+
+func bindConfiguredHTTPListeners(cfg config.Config, ephemeralHTTP bool) (net.Listener, net.Listener, error) {
+	httpAddr := cfg.Addr()
+	if ephemeralHTTP {
+		// Desktop shells and parallel CLI smokes must not steal the configured
+		// port. Always bind IPv4 loopback so local token/origin checks treat the
+		// instance as local even when user config uses 0.0.0.0 or ::.
+		httpAddr = "127.0.0.1:0"
+	}
+	httpListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on %s: %w", httpAddr, err)
+	}
+	if !cfg.Gateway.Enabled {
+		return httpListener, nil, nil
+	}
+	gatewayListener, err := net.Listen("tcp", cfg.GatewayAddr())
+	if err != nil {
+		_ = httpListener.Close()
+		return nil, nil, fmt.Errorf("listen on gateway %s: %w", cfg.GatewayAddr(), err)
+	}
+	return httpListener, gatewayListener, nil
+}
+
+// browserFacingHostPort rewrites wildcard listener addresses to loopback so
+// clients open a URL that passes the local request guard.
+func browserFacingHostPort(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	switch strings.Trim(strings.ToLower(host), "[]") {
+	case "", "0.0.0.0", "::", "*":
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func newGatewayHTTPServer(cfg config.Config, store *db.Store, registry *providers.Registry, providerAllowed gateway.ProviderPolicy) (*http.Server, error) {
+	if !cfg.Gateway.Enabled {
+		return nil, nil
+	}
+	service, err := gateway.New(store, registry, gateway.Options{
+		MaxGlobalConcurrency: cfg.Gateway.MaxGlobalConcurrency,
+		MaxRequestBytes:      cfg.Gateway.MaxRequestBytes,
+		ProviderAllowed:      providerAllowed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Server{
+		Addr:              cfg.GatewayAddr(),
+		Handler:           service.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}, nil
+}
+
+func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime.Service) error {
+	for _, service := range services {
+		if err := supervisor.Register(service); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func providerConfigForRuntime(providerCfg config.ProviderConfig, settings db.RuntimeSettings) config.ProviderConfig {
+	providerCfg.ClientVersion = config.Version
+	providerCfg.InstallationID = settings.InstallationID
+	return providerCfg
+}
+
+func aggregateSourceFromStore(store *db.Store) providers.AggregateSource {
+	return providers.AggregateSourceFunc(func(ctx context.Context, name string) (providers.AggregateDefinition, error) {
+		aggregate, err := store.GetModelAggregate(ctx, name)
+		if err != nil {
+			return providers.AggregateDefinition{}, err
+		}
+		return providers.AggregateDefinition{
+			Name:    aggregate.Name,
+			Mode:    aggregate.Mode,
+			Members: append([]string(nil), aggregate.Members...),
+		}, nil
+	})
+}
+
+func configuredBackends(backends []config.BackendConfig) []db.Backend {
+	out := make([]db.Backend, 0, len(backends))
+	for _, backend := range backends {
+		out = append(out, db.Backend{
+			ID:      backend.ID,
+			Name:    backend.Name,
+			Kind:    backend.Kind,
+			BaseURL: backend.BaseURL,
+			APIKey:  backend.APIKey,
+			Active:  backend.Active,
+		})
+	}
+	return out
+}

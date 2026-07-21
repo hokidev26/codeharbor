@@ -1,4 +1,5 @@
 import { escapeAttr, escapeHtml } from "./dom.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 export const taskWorkspaceStatuses = Object.freeze(["todo", "doing", "blocked", "done"]);
 export const taskWorkspaceScopes = Object.freeze(["dispatch", "project", "agent"]);
@@ -346,7 +347,7 @@ export function createTaskWorkspaceController({
   document: documentImpl = globalThis.document,
 } = {}) {
   if (typeof request !== "function") throw new TypeError("Task workspace request must be a function");
-  const confirm = confirmAction || ((message) => globalThis.window?.confirm?.(message));
+  const confirm = confirmAction || platformConfirm;
   const state = {
     workspace: normalizeTaskWorkspace({}),
     scope: "dispatch",

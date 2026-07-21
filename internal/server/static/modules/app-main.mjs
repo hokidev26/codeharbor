@@ -45,6 +45,7 @@ import {
   resolveOverviewStartup,
 } from "./overview-dashboard.mjs?v=overview-home-3-nav-schedules-1-mobile-no-home-1-schedule-workspace-1";
 import { createPageLifecycleController } from "./page-lifecycle.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { createProjectKanbanController } from "./project-kanban.mjs?v=workbench-3-mode-boundaries-1";
 import { createScheduleWorkspaceController } from "./schedule-workspace.mjs?v=schedule-workspace-1";
 import { createTaskWorkspaceController } from "./task-workspace.mjs?v=task-workspace-1";
@@ -63,7 +64,8 @@ import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1-profile-avatar-1-dual-rail-collapse-1-global-background-1";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
-import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1";
+import { createSystemSettingsController } from "./system-settings.mjs?v=users-panel-removed-1-about-brand-license-1-desktop-shell-1";
+import { installDesktopDeepLinkRouter, isDesktopShell } from "./desktop-shell-ui.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
 import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-2";
 import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1-context-ring-2-dual-rail-collapse-1-compact-navigation-1-global-rail-2";
@@ -1286,7 +1288,7 @@ const scheduleWorkspace = createScheduleWorkspaceController({
   },
   showError,
   showToast,
-  confirmAction: async (message) => window.confirm(message),
+  confirmAction: async (message) => platformConfirm(message),
   formatTimestamp: formatDateTime,
 });
 
@@ -1367,7 +1369,7 @@ const taskWorkspace = createTaskWorkspaceController({
   translate: (key, params) => t(key, params),
   showError,
   showToast,
-  confirmAction: async (message) => window.confirm(message),
+  confirmAction: async (message) => platformConfirm(message),
   onChange: () => {
     if (state.activeWorkbench !== "workbench") return;
     renderWorkbenchHeaderIdentity();
@@ -4900,6 +4902,40 @@ async function init() {
         state.chatHydrating = false;
       }
       if (startup.overviewActive) await overviewDashboard.load();
+    }
+    if (seq === state.initSeq) {
+      installDesktopDeepLinkRouter({
+        openSettings: (panel) => {
+          openSettingsModal(panel || "providers");
+        },
+        openAgent: (id) => {
+          const agentId = String(id || "").trim();
+          if (!agentId) return;
+          const target = state.navigationConversations.find((item) => item.agentId === agentId)
+            || state.recentConversations.find((item) => item.agentId === agentId);
+          if (target) {
+            selectNavigationConversation(target).catch(showError);
+            return;
+          }
+          // Fallback: open settings if agent not in list yet.
+          showToast?.(t("chat.noAgent"), "info");
+        },
+        openProject: (id) => {
+          if (!id) return;
+          selectProject(id).catch(showError);
+        },
+        openConversation: (id) => {
+          const agentId = String(id || "").trim();
+          if (!agentId) return;
+          const target = state.navigationConversations.find((item) => item.agentId === agentId || item.targetId === agentId)
+            || state.recentConversations.find((item) => item.agentId === agentId || item.targetId === agentId);
+          if (target) selectNavigationConversation(target).catch(showError);
+        },
+      });
+      if (isDesktopShell()) {
+        // Soft-refresh desktop shell status when About is opened later.
+        state.desktopShellReady = true;
+      }
     }
   } finally {
     if (seq === state.initSeq) {

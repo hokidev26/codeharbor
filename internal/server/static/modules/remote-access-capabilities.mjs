@@ -130,5 +130,9 @@ export function nativeDirectoryPickerAllowedFor(state = {}, locationLike = globa
   const capabilityAllowed = typeof capabilities.nativePickerAllowed === "boolean"
     ? capabilities.nativePickerAllowed
     : Boolean(security.nativePickerAllowed ?? security.nativeDirectoryPickerAllowed);
-  return capabilityAllowed && !state?.remoteAccessFailClosed && loopbackLocation(locationLike) && /mac/i.test(String(platformLike || ""));
+  if (!capabilityAllowed || state?.remoteAccessFailClosed || !loopbackLocation(locationLike)) return false;
+  // Desktop shell (Wails) provides cross-platform native pickers; browser path
+  // remains macOS-only via AppleScript fallback on the server.
+  if (globalThis.window?.AUTOTO_DESKTOP_SHELL) return true;
+  return /mac/i.test(String(platformLike || ""));
 }

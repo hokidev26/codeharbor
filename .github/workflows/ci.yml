@@ -46,4 +46,49 @@ jobs:
         run: go mod download
 
       - name: Run validation checks
+        # Default tags exclude //go:build desktop (Wails). GUI shell is
+        # validated on developer machines via `make check-desktop`.
         run: ./scripts/check.sh
+
+      - name: Confirm desktop packages are excluded without tag
+        run: |
+          set -euo pipefail
+          if go list ./cmd/autoto-desktop ./internal/desktop >/dev/null 2>&1; then
+            echo "desktop packages must not list without -tags desktop" >&2
+            exit 1
+          fi
+          go list -tags desktop ./cmd/autoto-desktop ./internal/desktop
+          go build -o /tmp/autoto-ci ./cmd/autoto
+
+  # Windows runs process Job Object coverage that cannot run on Unix.
+  # Desktop Wails GUI is still opt-in (-tags desktop); this job stays CLI-only.
+  windows-process:
+    name: Windows process Job Object
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Test process package (Job Object)
+        run: go test ./internal/process/ -count=1 -v
+
+      - name: Build CLI (no Wails)
+        run: go build -o autoto.exe ./cmd/autoto
+
+      - name: Confirm desktop tag is required for GUI shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          if go list ./cmd/autoto-desktop ./internal/desktop >/dev/null 2>&1; then
+            echo "desktop packages must not list without -tags desktop" >&2
+            exit 1
+          fi

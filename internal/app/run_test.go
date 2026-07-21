@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -63,7 +65,7 @@ func TestBindConfiguredHTTPListenersRejectsDuplicateMainProcess(t *testing.T) {
 
 	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(config.Config{
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: port},
-	})
+	}, false)
 	if err == nil {
 		if httpListener != nil {
 			_ = httpListener.Close()
@@ -76,6 +78,129 @@ func TestBindConfiguredHTTPListenersRejectsDuplicateMainProcess(t *testing.T) {
 	if httpListener != nil || gatewayListener != nil {
 		t.Fatalf("failed bind leaked listeners: main=%v gateway=%v", httpListener, gatewayListener)
 	}
+}
+
+func TestBindConfiguredHTTPListenersEphemeralUsesPortZero(t *testing.T) {
+	// Even when config listens on all interfaces, ephemeral must pin loopback.
+	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(config.Config{
+		Server: config.ServerConfig{Host: "0.0.0.0", Port: 16888},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer httpListener.Close()
+	if gatewayListener != nil {
+		_ = gatewayListener.Close()
+	}
+	addr, ok := httpListener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type %T", httpListener.Addr())
+	}
+	if addr.Port == 0 || addr.Port == 16888 {
+		t.Fatalf("ephemeral bind did not receive an OS-assigned non-configured port: %v", addr)
+	}
+	if addr.IP == nil || !addr.IP.IsLoopback() {
+		t.Fatalf("ephemeral bind expected loopback, got %v", addr)
+	}
+	if !addr.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("ephemeral bind expected 127.0.0.1, got %v", addr.IP)
+	}
+}
+
+func TestBrowserFacingHostPortRewritesWildcards(t *testing.T) {
+	if got := browserFacingHostPort("0.0.0.0:7788"); got != "127.0.0.1:7788" {
+		t.Fatalf("0.0.0.0 rewrite: got %q", got)
+	}
+	if got := browserFacingHostPort("[::]:7788"); got != "127.0.0.1:7788" {
+		t.Fatalf(":: rewrite: got %q", got)
+	}
+	if got := browserFacingHostPort("127.0.0.1:7788"); got != "127.0.0.1:7788" {
+		t.Fatalf("loopback passthrough: got %q", got)
+	}
+}
+
+func TestRuntimeStartWaitReadyAndClose(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	cfg := config.Config{
+		SchemaVersion: config.CurrentConfigVersion,
+		Server:        config.ServerConfig{Host: "127.0.0.1", Port: 16888},
+		Paths: config.PathsConfig{
+			HomeDir:           home,
+			DatabasePath:      filepath.Join(home, "autoto.db"),
+			DefaultProjectDir: filepath.Join(home, "projects"),
+		},
+		Agent: config.AgentConfig{DefaultModel: "openai:gpt-4.1-mini", SummaryModel: "openai:gpt-4.1-mini"},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := NewRuntime(Options{
+		ConfigPath:    configPath,
+		EphemeralHTTP: true,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.URL() == "" || rt.Addr() == "" {
+		t.Fatalf("runtime missing bound address: url=%q addr=%q", rt.URL(), rt.Addr())
+	}
+	if rt.Addr() == "127.0.0.1:16888" {
+		t.Fatal("ephemeral runtime unexpectedly used configured port")
+	}
+	if got := rt.ConfigPath(); got != configPath {
+		t.Fatalf("ConfigPath=%q want %q", got, configPath)
+	}
+	if snap := rt.Config(); snap.Server.Host != "127.0.0.1" {
+		t.Fatalf("Config host=%q", snap.Server.Host)
+	}
+	// Shell dialog host is optional; registering a no-op keeps the desktop API
+	// surface reachable when the Wails package is build-tag excluded.
+	rt.SetShellDialogHost(stubShellDialogHost{})
+	rt.SetShellDialogHost(nil)
+
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := rt.WaitReady(readyCtx); err != nil {
+		_ = rt.Close(context.Background())
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(rt.URL() + "/api/health")
+	if err != nil {
+		_ = rt.Close(context.Background())
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = rt.Close(context.Background())
+		t.Fatalf("health status %d", resp.StatusCode)
+	}
+
+	if err := rt.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Close(context.Background()); err != nil {
+		t.Fatalf("second close should be idempotent: %v", err)
+	}
+}
+
+type stubShellDialogHost struct{}
+
+func (stubShellDialogHost) Confirm(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (stubShellDialogHost) Alert(context.Context, string, string) error { return nil }
+func (stubShellDialogHost) PickDirectory(context.Context, string, string) (string, bool, error) {
+	return "", true, nil
+}
+func (stubShellDialogHost) PickFile(context.Context, string, string, []server.ShellFileFilter) (string, bool, error) {
+	return "", true, nil
 }
 
 func TestNewGatewayHTTPServerHonorsDisabledConfig(t *testing.T) {

@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatBytes, formatMoney, formatNumber, formatTimestamp } from "./formatters.mjs?v=message-thread-1";
 import { t } from "./i18n.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { api } from "./runtime.mjs";
 import { visibleMessageText } from "./skills-commands.mjs";
 import { normalizeAvatarDataUrl } from "./profile-avatar.mjs?v=profile-avatar-1";
@@ -1897,7 +1898,7 @@ export function createChatRenderingController({
       showToast(reason, "warn", { force: true });
       return;
     }
-    const confirmed = window.confirm(rollbackPreviewConfirmation(preview));
+    const confirmed = await platformConfirm(rollbackPreviewConfirmation(preview));
     if (!confirmed) return;
     state.runRollbackBusy = true;
     state.runSummaryError = "";

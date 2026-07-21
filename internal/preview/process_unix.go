@@ -4,41 +4,13 @@ package preview
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func dynamicSupported() bool { return true }
-
-func prepareDynamicProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
-func terminateDynamicProcess(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	return err
-}
-
-func killDynamicProcess(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	return err
-}
 
 func validateLoopbackListener(ctx context.Context, port int) error {
 	lsof, err := exec.LookPath("lsof")

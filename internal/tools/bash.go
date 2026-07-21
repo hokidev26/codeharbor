@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"autoto/internal/process"
 )
 
 type BashTool struct{}
@@ -192,14 +194,36 @@ func (BashTool) Execute(ctx context.Context, call Call, env Env) (Result, error)
 		shell = "cmd"
 		args = []string{"/C", input.Command}
 	}
-	cmd := exec.CommandContext(cmdCtx, shell, args...)
+	// Use plain Command (not CommandContext) so process.Group owns tree kill on
+	// timeout/cancel. CommandContext only signals the direct child.
+	cmd := exec.Command(shell, args...)
 	if env.CWD != "" {
 		cmd.Dir = env.CWD
 	}
 	collector := newBashOutputCollector(env.Output)
 	cmd.Stdout = collector
 	cmd.Stderr = collector
-	err := cmd.Run()
+	group := process.Prepare(cmd)
+	if err := cmd.Start(); err != nil {
+		_ = group.Close()
+		return Result{Output: err.Error(), IsError: true, Meta: map[string]any{"truncated": false}}, nil
+	}
+	if err := group.Started(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = group.Close()
+		return Result{Output: err.Error(), IsError: true, Meta: map[string]any{"truncated": false}}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var err error
+	select {
+	case err = <-done:
+		_ = group.Close()
+	case <-cmdCtx.Done():
+		err = group.Terminate(cmd, done, 2*time.Second)
+		_ = group.Close()
+	}
 	text, cut := collector.result()
 	result := Result{Output: text, Meta: map[string]any{"truncated": cut}}
 	if cmdCtx.Err() != nil {

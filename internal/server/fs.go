@@ -133,10 +133,6 @@ func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "native directory selection requires a full remote session and policy approval")
 		return
 	}
-	if runtime.GOOS != "darwin" {
-		writeError(w, http.StatusNotImplemented, "当前系统暂不支持原生资料夹选择器，请使用内置目录浏览器")
-		return
-	}
 	defaultProjectDir := s.configSnapshot().Paths.DefaultProjectDir
 	defaultPath := strings.TrimSpace(r.URL.Query().Get("path"))
 	if defaultPath == "" {
@@ -148,6 +144,37 @@ func (s *Server) fsNativeDirectory(w http.ResponseWriter, r *http.Request) {
 		} else {
 			defaultPath = defaultDirectoryRoot(defaultProjectDir)
 		}
+	}
+
+	// Prefer the desktop shell host when registered (cross-platform Wails dialogs).
+	if host := s.shellDialog(); host != nil {
+		path, canceled, err := host.PickDirectory(r.Context(), "选择 Autoto 工作资料夹", defaultPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "原生资料夹选择器打开失败："+err.Error())
+			return
+		}
+		if canceled || strings.TrimSpace(path) == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"canceled": true})
+			return
+		}
+		path = filepath.Clean(strings.TrimSpace(path))
+		info, err := os.Stat(path)
+		if err != nil {
+			writeError(w, statusFromFSError(err), err.Error())
+			return
+		}
+		if !info.IsDir() {
+			writeError(w, http.StatusBadRequest, "path must be a directory")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": path, "name": filepath.Base(path), "canceled": false})
+		return
+	}
+
+	// Browser/CLI fallback: macOS AppleScript only.
+	if runtime.GOOS != "darwin" {
+		writeError(w, http.StatusNotImplemented, "当前系统暂不支持原生资料夹选择器，请使用内置目录浏览器")
+		return
 	}
 
 	script := `set chosenFolder to choose folder with prompt "选择 Autoto 工作资料夹"`

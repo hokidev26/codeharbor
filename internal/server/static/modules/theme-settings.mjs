@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { t } from "./i18n.mjs?v=global-background-1-theme-v2-1";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 function themeSourceLabel(theme) {
   return theme.source === "local" ? t("appearance.themeSourceLocal") : t("appearance.themeSourceBundled");
@@ -33,7 +34,7 @@ export function createThemeSettingsController({
   refreshActiveSettingsPanel,
   showError,
   showToast,
-  confirmAction = (message) => globalThis.confirm?.(message) !== false,
+  confirmAction = platformConfirm,
 } = {}) {
   function renderThemeLibrarySection() {
     const prefs = currentAppearancePreferences?.() || {};
@@ -79,7 +80,7 @@ export function createThemeSettingsController({
       const id = installed?.id || installed?.themeId;
       if (id) await themeManager.activateTheme(id);
     } catch (error) {
-      if (error?.status === 409 && confirmAction(t("appearance.themeReplaceConfirm"))) {
+      if (error?.status === 409 && await confirmAction(t("appearance.themeReplaceConfirm"))) {
         const installed = await themeManager.importTheme(file, { replace: true });
         showToast?.(t("appearance.themeReplaced"), "success");
         const id = installed?.id || installed?.themeId;
@@ -109,9 +110,14 @@ export function createThemeSettingsController({
     document.querySelectorAll("[data-theme-delete]").forEach((node) => {
       node.addEventListener("click", () => {
         const theme = themeManager.findTheme(node.dataset.themeDelete);
-        if (!theme || !confirmAction(t("appearance.themeDeleteConfirm", { name: theme.name }))) return;
-        themeManager.deleteTheme(theme.id)
-          .then(() => {
+        if (!theme) return;
+        Promise.resolve(confirmAction(t("appearance.themeDeleteConfirm", { name: theme.name })))
+          .then((ok) => {
+            if (!ok) return null;
+            return themeManager.deleteTheme(theme.id);
+          })
+          .then((deleted) => {
+            if (deleted === null || deleted === undefined) return;
             showToast?.(t("appearance.themeDeleted"), "success");
             refreshActiveSettingsPanel?.();
           })

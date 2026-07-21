@@ -1,6 +1,7 @@
 import { escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatTimestamp as formatRegionalTimestamp } from "./formatters.mjs";
 import { t } from "./messages-automation.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 export const automationLimits = Object.freeze({
   schedules: 100,
@@ -717,7 +718,7 @@ export function createAutomationControlController({
   now = () => Date.now(),
 } = {}) {
   if (typeof request !== "function") throw new TypeError("Automation control request must be a function");
-  const confirm = confirmAction || ((message) => typeof window !== "undefined" && window.confirm(message));
+  const confirm = confirmAction || platformConfirm;
   const state = {
     loaded: false,
     loading: false,

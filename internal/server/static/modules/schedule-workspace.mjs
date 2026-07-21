@@ -9,6 +9,7 @@ import { escapeAttr, escapeHtml } from "./dom.mjs";
 import { formatDuration, formatTimestamp as formatRegionalTimestamp } from "./formatters.mjs";
 import { currentUILocale } from "./i18n.mjs";
 import { t } from "./messages-automation.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 const CONVERSATION_LIMIT = 200;
 const MODES = new Set(["view", "create"]);
@@ -290,7 +291,7 @@ export function createScheduleWorkspaceController({
   now = () => Date.now(),
 } = {}) {
   if (typeof request !== "function") throw new TypeError("Schedule workspace request must be a function");
-  const confirm = confirmAction || ((message) => typeof globalThis.confirm === "function" && globalThis.confirm(message));
+  const confirm = confirmAction || platformConfirm;
   const state = {
     loaded: false,
     loading: false,

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed static/* static/modules/*
+//go:embed static/* static/modules/* static/icons/*
 var staticFiles embed.FS
 
 const uiDocumentCSP = "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"

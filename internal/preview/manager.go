@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"autoto/internal/process"
 )
 
 const (
@@ -60,6 +62,7 @@ type session struct {
 
 	server *http.Server
 	cmd    *exec.Cmd
+	group  *process.Group
 	done   chan struct{}
 }
 
@@ -304,14 +307,22 @@ func (m *Manager) startDynamic(ctx context.Context, current *session, requestedP
 	cmd.Env = append(os.Environ(), "BROWSER=none", "NO_OPEN=1")
 	cmd.Stdout = current.stdout
 	cmd.Stderr = current.stderr
-	prepareDynamicProcess(cmd)
+	group := process.Prepare(cmd)
 	if err := cmd.Start(); err != nil {
+		_ = group.Close()
 		m.failSession(current, "preview process could not be started")
 		return fmt.Errorf("%w: preview process could not be started", ErrStartFailed)
+	}
+	if err := group.Started(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = group.Close()
+		m.failSession(current, "preview process could not be started")
+		return fmt.Errorf("%w: preview process group attach failed", ErrStartFailed)
 	}
 
 	m.mu.Lock()
 	current.cmd = cmd
+	current.group = group
 	current.port = port
 	current.url = "http://127.0.0.1:" + strconv.Itoa(port)
 	current.running = true
@@ -322,7 +333,8 @@ func (m *Manager) startDynamic(ctx context.Context, current *session, requestedP
 		current.stderr.flush()
 		// Package managers can exit before descendants. Reap the process first,
 		// then ensure its dedicated process group cannot keep serving.
-		_ = killDynamicProcess(cmd)
+		_ = group.Kill(cmd)
+		_ = group.Close()
 		m.finishSession(current, err, "preview process exited")
 		close(current.done)
 	}()
@@ -385,6 +397,7 @@ func (m *Manager) stopSession(ctx context.Context, current *session, finalState,
 	current.stopping = true
 	server := current.server
 	cmd := current.cmd
+	group := current.group
 	done := current.done
 	m.mu.Unlock()
 
@@ -396,15 +409,16 @@ func (m *Manager) stopSession(ctx context.Context, current *session, finalState,
 		if stopErr != nil {
 			_ = server.Close()
 		}
-	} else if cmd != nil {
-		stopErr = terminateDynamicProcess(cmd)
+	} else if cmd != nil && group != nil {
+		// Signal the process group; the Wait goroutine owns the final Close.
+		_ = group.Kill(cmd)
 	}
 
 	select {
 	case <-done:
 	case <-ctx.Done():
-		if cmd != nil {
-			_ = killDynamicProcess(cmd)
+		if cmd != nil && group != nil {
+			_ = group.Kill(cmd)
 		}
 		select {
 		case <-done:
@@ -414,8 +428,8 @@ func (m *Manager) stopSession(ctx context.Context, current *session, finalState,
 			stopErr = ctx.Err()
 		}
 	case <-time.After(2 * time.Second):
-		if cmd != nil {
-			_ = killDynamicProcess(cmd)
+		if cmd != nil && group != nil {
+			_ = group.Kill(cmd)
 		} else if server != nil {
 			_ = server.Close()
 		}
@@ -427,10 +441,11 @@ func (m *Manager) stopSession(ctx context.Context, current *session, finalState,
 			}
 		}
 	}
-	if cmd != nil {
+	if cmd != nil && group != nil {
 		// The package-manager parent may exit before a child server. A final
 		// group kill ensures no descendant survives after the parent is reaped.
-		_ = killDynamicProcess(cmd)
+		_ = group.Kill(cmd)
+		_ = group.Close()
 	}
 
 	m.mu.Lock()
@@ -442,6 +457,7 @@ func (m *Manager) stopSession(ctx context.Context, current *session, finalState,
 		current.message = message
 		current.server = nil
 		current.cmd = nil
+		current.group = nil
 		current.stopping = false
 	}
 	m.mu.Unlock()

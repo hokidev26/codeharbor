@@ -1,8 +1,17 @@
 import { $, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from "./formatters.mjs";
 import { currentUILocale, t as baseT } from "./i18n.mjs";
-import systemSettingsMessages from "./messages-system-settings.mjs?v=about-brand-license-1";
+import systemSettingsMessages from "./messages-system-settings.mjs?v=about-brand-license-1-desktop-shell-1";
 import { localPreferenceBackupVersion } from "./preferences-data.mjs";
+import {
+  clearPendingDesktopUpdate,
+  disableAutostart,
+  enableAutostart,
+  getAutostartStatus,
+  getPendingDesktopUpdate,
+  isDesktopShell,
+  stageDesktopUpdate,
+} from "./desktop-shell-ui.mjs";
 
 function lookupMessage(catalog, key) {
   return String(key || "").split(".").reduce((value, part) => (
@@ -260,6 +269,7 @@ export function createSystemSettingsController({
         <button id="checkForUpdatesBtn" class="legacy-about-update-button" type="button">${escapeHtml(t("systemSettings.about.checkUpdates"))}</button>
         <p class="legacy-about-update-note" data-settings-help-copy>${escapeHtml(t("systemSettings.about.updateNote"))}</p>
         ${state.updateError ? `<div class="settings-inline-alert settings-alert legacy-about-update-error" role="alert">${escapeHtml(state.updateError)}</div>` : ""}
+        ${isDesktopShell() ? renderDesktopShellAboutExtras() : ""}
         </section>
       </section>
       <details class="legacy-about-more">
@@ -422,6 +432,76 @@ export function createSystemSettingsController({
     }
   }
 
+  function renderDesktopShellAboutExtras() {
+    const auto = state.desktopAutostart || {};
+    const pending = state.desktopPendingUpdate || {};
+    const autoLabel = auto.enabled
+      ? t("systemSettings.desktop.autostartOn")
+      : t("systemSettings.desktop.autostartOff");
+    const pendingLabel = pending.pending
+      ? t("systemSettings.desktop.pendingVersion", { version: pending.version || "—" })
+      : t("systemSettings.desktop.noPending");
+    return `
+        <section class="legacy-about-desktop-shell settings-page-section" aria-label="${escapeHtml(t("systemSettings.desktop.title"))}">
+          <div class="legacy-about-version-table settings-data-list">
+            <div class="legacy-about-version-row">
+              <span>${escapeHtml(t("systemSettings.desktop.loginItem"))}</span>
+              <strong class="settings-badge ${auto.enabled ? "ok" : "idle"}">${escapeHtml(autoLabel)}</strong>
+            </div>
+            <div class="legacy-about-version-row">
+              <span>${escapeHtml(t("systemSettings.desktop.stagedUpdate"))}</span>
+              <strong>${escapeHtml(pendingLabel)}</strong>
+            </div>
+          </div>
+          <div class="settings-action-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+            <button id="desktopAutostartEnableBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.desktop.enableAutostart"))}</button>
+            <button id="desktopAutostartDisableBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.desktop.disableAutostart"))}</button>
+            <button id="desktopRefreshShellStatusBtn" class="settings-action-btn subtle" type="button">${escapeHtml(t("systemSettings.desktop.refresh"))}</button>
+          </div>
+          <div class="settings-form-grid" style="margin-top:12px;gap:8px">
+            <label class="settings-form-field">${escapeHtml(t("systemSettings.desktop.localBinaryPath"))}
+              <input id="desktopStageSourcePath" class="settings-field" type="text" autocomplete="off" placeholder="/path/to/autoto-desktop" value="${escapeHtml(state.desktopStageDraft?.sourcePath || "")}" />
+            </label>
+            <label class="settings-form-field">${escapeHtml(t("systemSettings.desktop.version"))}
+              <input id="desktopStageVersion" class="settings-field" type="text" autocomplete="off" placeholder="0.2.0" value="${escapeHtml(state.desktopStageDraft?.version || "")}" />
+            </label>
+            <label class="settings-form-field">${escapeHtml(t("systemSettings.desktop.sha256Optional"))}
+              <input id="desktopStageSha256" class="settings-field" type="text" autocomplete="off" placeholder="optional" value="${escapeHtml(state.desktopStageDraft?.sha256 || "")}" />
+            </label>
+          </div>
+          <div class="settings-action-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+            <button id="desktopStageUpdateBtn" class="settings-action-btn primary" type="button">${escapeHtml(t("systemSettings.desktop.stageLocal"))}</button>
+            <button id="desktopClearPendingBtn" class="settings-action-btn subtle" type="button" ${pending.pending ? "" : "disabled"}>${escapeHtml(t("systemSettings.desktop.clearPending"))}</button>
+          </div>
+          <p class="legacy-about-update-note" data-settings-help-copy>${escapeHtml(t("systemSettings.desktop.stageNote"))}</p>
+          ${state.desktopShellError ? `<div class="settings-inline-alert settings-alert" role="alert">${escapeHtml(state.desktopShellError)}</div>` : ""}
+        </section>`;
+  }
+
+  async function refreshDesktopShellStatus({ notify = false } = {}) {
+    if (!isDesktopShell()) return;
+    try {
+      const [auto, pending] = await Promise.all([
+        getAutostartStatus().catch((err) => {
+          if (err?.status === 404) return { enabled: false, unavailable: true };
+          throw err;
+        }),
+        getPendingDesktopUpdate().catch((err) => {
+          if (err?.status === 404) return { pending: false, unavailable: true };
+          throw err;
+        }),
+      ]);
+      state.desktopAutostart = auto;
+      state.desktopPendingUpdate = pending;
+      state.desktopShellError = "";
+      if (notify) showToast?.(t("systemSettings.desktop.refreshed"), "success");
+    } catch (err) {
+      state.desktopShellError = err.message || String(err);
+      if (notify) showError?.(err);
+    }
+    if (state.activeSettingsPanel === "about") refreshActiveSettingsPanel?.();
+  }
+
   function bindAboutSettingsActions() {
     $("checkForUpdatesBtn")?.addEventListener("click", () => loadUpdateStatus({ notify: true }).catch(showError));
     $("refreshLicensesBtn")?.addEventListener("click", () => loadLicenseSummary({ notify: true }).catch(showError));
@@ -432,8 +512,64 @@ export function createSystemSettingsController({
       const textarea = $("localPrefsImportText");
       if (textarea) textarea.value = "";
     });
+    $("desktopAutostartEnableBtn")?.addEventListener("click", async (event) => {
+      setButtonBusy(event.currentTarget, true);
+      try {
+        await enableAutostart();
+        await refreshDesktopShellStatus();
+        showToast?.(t("systemSettings.desktop.autostartEnabled"), "success");
+      } catch (err) {
+        showError?.(err);
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
+    });
+    $("desktopAutostartDisableBtn")?.addEventListener("click", async (event) => {
+      setButtonBusy(event.currentTarget, true);
+      try {
+        await disableAutostart();
+        await refreshDesktopShellStatus();
+        showToast?.(t("systemSettings.desktop.autostartDisabled"), "success");
+      } catch (err) {
+        showError?.(err);
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
+    });
+    $("desktopRefreshShellStatusBtn")?.addEventListener("click", () => refreshDesktopShellStatus({ notify: true }).catch(showError));
+    $("desktopStageUpdateBtn")?.addEventListener("click", async (event) => {
+      const sourcePath = $("desktopStageSourcePath")?.value?.trim() || "";
+      const version = $("desktopStageVersion")?.value?.trim() || "";
+      const sha256 = $("desktopStageSha256")?.value?.trim() || "";
+      state.desktopStageDraft = { sourcePath, version, sha256 };
+      setButtonBusy(event.currentTarget, true, t("systemSettings.desktop.staging"));
+      try {
+        await stageDesktopUpdate({ sourcePath, version, sha256 });
+        await refreshDesktopShellStatus();
+        showToast?.(t("systemSettings.desktop.staged"), "success", { force: true });
+      } catch (err) {
+        showError?.(err);
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
+    });
+    $("desktopClearPendingBtn")?.addEventListener("click", async (event) => {
+      setButtonBusy(event.currentTarget, true);
+      try {
+        await clearPendingDesktopUpdate();
+        await refreshDesktopShellStatus();
+        showToast?.(t("systemSettings.desktop.pendingCleared"), "success");
+      } catch (err) {
+        showError?.(err);
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
+    });
     if (!state.licenseSummary && !state.licenseError) {
       loadLicenseSummary().catch(showError);
+    }
+    if (isDesktopShell() && !state.desktopAutostart && !state.desktopShellError) {
+      refreshDesktopShellStatus().catch(() => {});
     }
   }
 

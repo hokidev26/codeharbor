@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
 import { t } from "./i18n.mjs?v=remote-control-full-3-remote-full-toggle-3";
 import { applyRemoteAccessFailClosed, fullAccessAllowed, remoteAccessContext } from "./remote-access-capabilities.mjs";
+import { qrToSvg } from "./qrcode.mjs";
 
 const endpoint = "/api/security/remote-access";
 
@@ -265,6 +266,30 @@ export function createRemoteAccessSettingsController({
     return rt(labels[status] || labels.unavailable);
   }
 
+  function renderTunnelQr(publicUrl) {
+    const url = String(publicUrl || "").trim();
+    if (!url) return "";
+    let svg = "";
+    try {
+      svg = qrToSvg(url, { size: 168, margin: 2 });
+    } catch {
+      return `<p class="settings-card-description">${escapeHtml(rt("tunnelQrUnavailable"))}</p>`;
+    }
+    return `
+          <div class="remote-access-tunnel-phone">
+            <div class="remote-access-tunnel-qr" aria-hidden="false">${svg}</div>
+            <div class="remote-access-tunnel-phone-copy">
+              <strong>${escapeHtml(rt("phoneScanTitle"))}</strong>
+              <ol class="remote-access-phone-steps">
+                <li>${escapeHtml(rt("phoneStep1"))}</li>
+                <li>${escapeHtml(rt("phoneStep2"))}</li>
+                <li>${escapeHtml(rt("phoneStep3"))}</li>
+              </ol>
+              <p class="settings-card-description">${escapeHtml(rt("phoneSafetyHint"))}</p>
+            </div>
+          </div>`;
+  }
+
   function renderTunnelSection(value, securityAdminAllowed) {
     const tunnel = value.tunnel;
     const active = tunnel.status === "running";
@@ -276,7 +301,7 @@ export function createRemoteAccessSettingsController({
         <section class="settings-provider-section settings-page-section settings-card remote-access-tunnel-card">
           <div class="settings-provider-section-head settings-card-header"><div><div class="settings-provider-title settings-card-title">${escapeHtml(rt("temporaryTunnel"))}</div><div class="settings-provider-meta settings-card-description" data-settings-help-copy>${escapeHtml(rt("temporaryTunnelHint"))}</div></div><span class="settings-status-pill settings-badge ${active ? "ok" : tunnel.status === "error" ? "warn" : ""}">${escapeHtml(tunnelStatusLabel(tunnel.status))}</span></div>
           ${tunnel.error ? `<div class="settings-inline-alert settings-alert" role="status">${escapeHtml(tunnel.error)}</div>` : ""}
-          ${tunnel.publicUrl ? `<div class="remote-access-tunnel-url"><a href="${escapeAttr(tunnel.publicUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(tunnel.publicUrl)}</a><button id="copyRemoteTunnelUrlBtn" class="settings-action-btn subtle" type="button">${escapeHtml(rt("copyTunnelUrl"))}</button></div>` : `<p class="settings-card-description">${escapeHtml(tunnel.available ? rt("tunnelStopped") : rt("tunnelUnavailableHint"))}</p>`}
+          ${tunnel.publicUrl ? `<div class="remote-access-tunnel-url"><a href="${escapeAttr(tunnel.publicUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(tunnel.publicUrl)}</a><button id="copyRemoteTunnelUrlBtn" class="settings-action-btn subtle" type="button">${escapeHtml(rt("copyTunnelUrl"))}</button></div>${renderTunnelQr(tunnel.publicUrl)}` : `<p class="settings-card-description">${escapeHtml(tunnel.available ? rt("tunnelStopped") : rt("tunnelUnavailableHint"))}</p>`}
           <div class="settings-action-row settings-card-footer"><span class="settings-provider-meta">${escapeHtml(tunnel.available ? rt("tunnelAccessHint") : rt("tunnelInstallHint"))}</span><button id="${actionMethod}RemoteTunnelBtn" class="settings-action-btn remote-access-tunnel-action ${active ? "subtle" : "primary"}" type="button" data-remote-tunnel-action="${actionMethod}" data-remote-tunnel-busy-label="${escapeAttr(active ? rt("tunnelStopping") : rt("tunnelStarting"))}" ${canManage && !busy ? "" : "disabled"}>${escapeHtml(busy ? tunnelStatusLabel(tunnel.status) : actionLabel)}</button></div>
         </section>`;
   }

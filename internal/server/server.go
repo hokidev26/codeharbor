@@ -135,6 +135,12 @@ type Server struct {
 	deviceAdapterFactory      func(context.Context, string) (devices.Adapter, error)
 	oauthAppMu                sync.Mutex
 	oauthApp                  *oauthAppRuntime
+	// shellDialogHost is optional; only the desktop entrypoint registers it.
+	// Browser/CLI processes leave it nil so /api/desktop/dialog/* returns 404.
+	shellDialogMu      sync.RWMutex
+	shellDialogHost    ShellDialogHost
+	shellLifecycleHost ShellLifecycleHost
+	shellUpdateHost    ShellUpdateHost
 }
 
 func New(cfg config.Config, store *db.Store, runner *agentpkg.Runner, hub *agentpkg.Hub, providerRegistries ...*providers.Registry) *Server {
@@ -359,6 +365,8 @@ func (s *Server) Routes() http.Handler {
 	s.mountAppearanceAssetRoutes(r)
 
 	r.Get("/api/health", s.health)
+	s.mountDesktopShellRoutes(r)
+	s.mountDesktopShellExtraRoutes(r)
 	r.Get("/api/auth/status", s.authStatus)
 	r.Post("/api/auth/register", s.register)
 	r.Post("/api/auth/login", s.login)

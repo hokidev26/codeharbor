@@ -1,6 +1,7 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { buildMCPRegistryPayload, parseMCPCommandLine } from "./mcp-registry.mjs";
 import { t } from "./i18n.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { api } from "./runtime.mjs";
 
 export function createMCPRegistryUIController({
@@ -143,7 +144,7 @@ export function createMCPRegistryUIController({
   async function deleteMCPRegistryServer(id) {
     const server = state.mcpRegistryServers.find((item) => item.id === id);
     if (!server) throw new Error(t("mcp.serverNotFound"));
-    if (!window.confirm(t("mcp.deleteConfirm", { name: server.name || id }))) return;
+    if (!await platformConfirm(t("mcp.deleteConfirm", { name: server.name || id }))) return;
     setMCPRegistryActionBusy(id, "delete", true);
     try {
       await api(`/api/mcp/servers/${id}`, { method: "DELETE" });

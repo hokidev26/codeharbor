@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { t } from "./messages-skills.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 import { normalizeSlashCommandName } from "./skills-commands.mjs";
 import { skillTabs } from "./settings-data.mjs?v=users-panel-removed-1";
 
@@ -538,7 +539,7 @@ export function createSkillsWorkbenchController({
 
   async function deleteToolPermissionRuleFromPanel(id) {
     if (!id) return;
-    const ok = window.confirm(t("skillsWorkbench.confirmation.deleteRule"));
+    const ok = await platformConfirm(t("skillsWorkbench.confirmation.deleteRule"));
     if (!ok) return;
     await deleteToolPermissionRule?.(id);
   }
@@ -579,7 +580,7 @@ export function createSkillsWorkbenchController({
   }
 
   async function restoreSkillRevisionFromDrawer(skillId, revisionNo) {
-    if (!skillsPhaseB || !window.confirm(t("skillsWorkbench.confirmation.restoreRevision"))) return;
+    if (!skillsPhaseB || !await platformConfirm(t("skillsWorkbench.confirmation.restoreRevision"))) return;
     const context = getSkillContext?.() || { scope: "global" };
     const bucket = skillsPhaseB.ensureContext(context);
     const revisions = bucket.revisions?.[skillId]?.items || [];
@@ -592,7 +593,7 @@ export function createSkillsWorkbenchController({
         acknowledgeRisk,
         acknowledgedContentHash,
       }),
-      (message) => window.confirm(message),
+      (message) => platformConfirm(message),
     );
     if (restored) rerenderSkillPanel();
   }
@@ -620,7 +621,7 @@ export function createSkillsWorkbenchController({
     if (!pendingSkillImportContent || !pendingSkillImportPreview) throw new Error(t("skillsWorkbench.errors.selectAndPreview"));
     const verdict = pendingSkillImportPreview.scanVerdict || "safe";
     const command = pendingSkillImportPreview.command || t("skillsWorkbench.skills.unnamed");
-    const confirmed = window.confirm(t("skillsWorkbench.confirmation.importSkill", { command, verdict }));
+    const confirmed = await platformConfirm(t("skillsWorkbench.confirmation.importSkill", { command, verdict }));
     if (!confirmed) return;
     await importServerSkill?.(pendingSkillImportContent);
     notifyTerminal?.(`[info] ${t("skillsWorkbench.toast.importComplete", { command: pendingSkillImportPreview.command || "skill" })}\n`);
@@ -656,7 +657,7 @@ export function createSkillsWorkbenchController({
     }
     let acknowledgeRisk = false;
     if (skill.scanVerdict === "review") {
-      acknowledgeRisk = window.confirm(t("skillsWorkbench.confirmation.enableReview"));
+      acknowledgeRisk = await platformConfirm(t("skillsWorkbench.confirmation.enableReview"));
       if (!acknowledgeRisk) return;
     }
     await updateServerSkill?.(id, { enabled: true, acknowledgeRisk });
@@ -664,7 +665,7 @@ export function createSkillsWorkbenchController({
 
   async function deleteServerSkillFromPanel(id) {
     const skill = (state.serverSkills || []).find((item) => item.id === id);
-    if (!skill || !window.confirm(t("skillsWorkbench.confirmation.deleteSkill", { command: skill.command }))) return;
+    if (!skill || !await platformConfirm(t("skillsWorkbench.confirmation.deleteSkill", { command: skill.command }))) return;
     await deleteServerSkill?.(id);
   }
 

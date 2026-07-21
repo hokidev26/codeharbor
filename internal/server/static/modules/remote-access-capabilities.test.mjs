@@ -40,14 +40,32 @@ test("legacy runtime security is a safe fallback when capabilities are unavailab
   assert.equal(directoryBrowserScope(local), "host");
 });
 
-test("native picker needs capability, loopback address, and macOS", () => {
-  const state = { remoteAccess: { capabilities: { nativePickerAllowed: true } } };
-  const loopback = { hostname: "127.0.0.1" };
+test("native picker needs capability, loopback address, and macOS (browser)", () => {
+  const previous = globalThis.window;
+  globalThis.window = {};
+  try {
+    const state = { remoteAccess: { capabilities: { nativePickerAllowed: true } } };
+    const loopback = { hostname: "127.0.0.1" };
 
-  assert.equal(nativeDirectoryPickerAllowedFor(state, loopback, "MacIntel"), true);
-  assert.equal(nativeDirectoryPickerAllowedFor(state, { hostname: "example.test" }, "MacIntel"), false);
-  assert.equal(nativeDirectoryPickerAllowedFor(state, loopback, "Win32"), false);
-  assert.equal(nativeDirectoryPickerAllowedFor({}, loopback, "MacIntel"), false);
+    assert.equal(nativeDirectoryPickerAllowedFor(state, loopback, "MacIntel"), true);
+    assert.equal(nativeDirectoryPickerAllowedFor(state, { hostname: "example.test" }, "MacIntel"), false);
+    assert.equal(nativeDirectoryPickerAllowedFor(state, loopback, "Win32"), false);
+    assert.equal(nativeDirectoryPickerAllowedFor({}, loopback, "MacIntel"), false);
+  } finally {
+    globalThis.window = previous;
+  }
+});
+
+test("desktop shell enables native picker on non-mac platforms when loopback", () => {
+  const previous = globalThis.window;
+  globalThis.window = { AUTOTO_DESKTOP_SHELL: true };
+  try {
+    const state = { remoteAccess: { capabilities: { nativePickerAllowed: true } } };
+    assert.equal(nativeDirectoryPickerAllowedFor(state, { hostname: "127.0.0.1" }, "Win32"), true);
+    assert.equal(nativeDirectoryPickerAllowedFor(state, { hostname: "example.test" }, "Win32"), false);
+  } finally {
+    globalThis.window = previous;
+  }
 });
 
 test("missing capability data fails closed on remote locations", () => {

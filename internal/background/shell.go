@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"autoto/internal/db"
+	"autoto/internal/process"
 )
 
 type ShellExecutor struct {
@@ -42,10 +43,17 @@ func (executor *ShellExecutor) Execute(ctx context.Context, task db.BackgroundTa
 	command.Dir = payload.CWD
 	command.Stdout = streamWriter{output: output, stream: "stdout"}
 	command.Stderr = streamWriter{output: output, stream: "stderr"}
-	configureCommandProcessGroup(command)
+	group := process.Prepare(command)
 	if err := command.Start(); err != nil {
+		_ = group.Close()
 		return Result{ErrorCode: "start_failed"}, fmt.Errorf("start shell command: %w", err)
 	}
+	if err := group.Started(command); err != nil {
+		_ = command.Process.Kill()
+		_ = group.Close()
+		return Result{ErrorCode: "start_failed"}, fmt.Errorf("attach shell process group: %w", err)
+	}
+	defer group.Close()
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
 
@@ -57,7 +65,7 @@ func (executor *ShellExecutor) Execute(ctx context.Context, task db.BackgroundTa
 		if grace <= 0 {
 			grace = 2 * time.Second
 		}
-		waitErr = terminateCommandProcessGroup(command, done, grace)
+		waitErr = group.Terminate(command, done, grace)
 		exitCode := processExitCode(command)
 		errorCode := "canceled"
 		if errors.Is(executionContext.Err(), context.DeadlineExceeded) {

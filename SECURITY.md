@@ -80,16 +80,16 @@ Do not expose a raw `localhost:16888` URL to the public Internet without an auth
 
 Recommended personal setup:
 
-1. Configure Cloudflare Tunnel as a named tunnel, not a temporary `trycloudflare.com` URL.
-2. In Cloudflare Zero Trust, create a self-hosted Access application for the tunnel hostname.
+1. Prefer a named Cloudflare Tunnel plus Zero Trust Access for anything beyond short personal use. Temporary `trycloudflare.com` links are fine for quick phone follow-up, but the public URL changes and has no edge identity gate.
+2. In Cloudflare Zero Trust (named tunnel), create a self-hosted Access application for the tunnel hostname.
 3. Add an Access policy that only allows your email, identity provider group, or one-time PIN identity.
-4. Start Autoto in explicit exposed mode with a second local password gate:
+4. Start Autoto with a second local password gate when exposed beyond loopback:
 
    ```sh
    AUTOTO_EXPOSED=true AUTOTO_ACCESS_PASSWORD='use-a-long-random-password' ./autoto
    ```
 
-5. Confirm the UI reports a remote `restricted` session. In this mode `bypassPermissions`, host-wide filesystem access, and the interactive terminal are unavailable; use `acceptEdits` plus approvals for Bash.
+5. **Phone follow-up (chat + agent approvals):** on the host, open Settings → Remote access, set an access password, start the temporary tunnel (or use your named tunnel URL). Scan the on-page QR code (or copy the URL), sign in on the phone. Default **restricted** mode is enough to follow projects, message the agent, and approve/deny tools; it does not open the host terminal or native desktop dialogs.
 6. Only if you explicitly need a remote shell, open Remote Access settings from `localhost`, allow full access, and set the default remote mode to `full` after confirming Cloudflare Access or another edge authentication layer is active. Existing remote sessions and WebSockets are revoked whenever this policy changes, so sign in again after saving.
 
 Cloudflare's current dashboard flow is documented in their official Zero Trust docs for creating a remote tunnel and adding a self-hosted Access application:

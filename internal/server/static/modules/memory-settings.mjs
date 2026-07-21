@@ -1,5 +1,6 @@
 import { $, escapeAttr, escapeHtml } from "./dom.mjs";
 import { t } from "./i18n.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 export function parseMemoryKeywords(value) {
   const values = Array.isArray(value) ? value : String(value ?? "").split(/[,\n\r]+/);
@@ -297,8 +298,8 @@ export function createMemorySettingsController({
 
   async function remove(id) {
     const memoryID = String(id ?? "");
-    const confirm = confirmDelete || ((message) => typeof window === "undefined" || window.confirm(message));
-    if (!confirm(t("memory.deleteConfirm"))) return false;
+    const confirm = confirmDelete || platformConfirm;
+    if (!await confirm(t("memory.deleteConfirm"))) return false;
     return runMutation(`/api/memories/${encodeURIComponent(memoryID)}`, {
       method: "DELETE",
     }, t("memory.deleted"));

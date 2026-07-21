@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"autoto/internal/process"
 )
 
 const DefaultProtocolVersion = "2024-11-05"
@@ -52,6 +54,7 @@ type ToolCallResult struct {
 type Client struct {
 	ctx          context.Context
 	cmd          *exec.Cmd
+	group        *process.Group
 	stdin        io.WriteCloser
 	dec          *json.Decoder
 	stderr       *limitedBuffer
@@ -95,7 +98,15 @@ func StartStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 	}
 	stderr := &limitedBuffer{max: stderrLimit}
 	cmd.Stderr = stderr
+	group := process.Prepare(cmd)
 	if err := cmd.Start(); err != nil {
+		_ = group.Close()
+		cancel()
+		return nil, redactError(err, cfg.RedactValues)
+	}
+	if err := group.Started(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = group.Close()
 		cancel()
 		return nil, redactError(err, cfg.RedactValues)
 	}
@@ -104,7 +115,7 @@ func StartStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 		stdoutReader = io.LimitReader(stdout, cfg.ResponseLimit)
 	}
 	client := &Client{
-		ctx: runCtx, cmd: cmd, stdin: stdin, dec: json.NewDecoder(stdoutReader), stderr: stderr,
+		ctx: runCtx, cmd: cmd, group: group, stdin: stdin, dec: json.NewDecoder(stdoutReader), stderr: stderr,
 		cancel: cancel, done: make(chan error, 1), redactValues: normalizedRedactValues(cfg.RedactValues), nextID: 1,
 	}
 	go func() { client.done <- cmd.Wait() }()
@@ -296,9 +307,15 @@ func (c *Client) Close() error {
 	c.cancel()
 	select {
 	case err := <-c.done:
+		if c.group != nil {
+			_ = c.group.Close()
+		}
 		return err
 	case <-time.After(2 * time.Second):
-		if c.cmd != nil && c.cmd.Process != nil {
+		if c.group != nil {
+			_ = c.group.Kill(c.cmd)
+			_ = c.group.Close()
+		} else if c.cmd != nil && c.cmd.Process != nil {
 			_ = c.cmd.Process.Kill()
 		}
 		return context.DeadlineExceeded

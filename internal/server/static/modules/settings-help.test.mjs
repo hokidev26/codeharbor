@@ -168,13 +168,17 @@ test("controller opens, renders, closes on Escape, and restores focus", async ()
 });
 
 test("registered settings renderers expose help-copy markers without hiding critical notices", async () => {
+  // model-provider-settings.mjs is a re-export facade; help markers live in the
+  // split domain modules (provider-console / model-routing / anthropic accounts).
   const rendererFiles = [
     "app-main.mjs",
     "automation-control.mjs",
     "local-preferences-settings.mjs",
     "memory-settings.mjs",
     "model-provider-components.mjs",
-    "model-provider-settings.mjs",
+    "model-routing-settings.mjs",
+    "provider-anthropic-accounts.mjs",
+    "provider-console.mjs",
     "plugin-registry-ui.mjs",
     "remote-access-settings.mjs",
     "shared-api-settings.mjs",
@@ -190,6 +194,6 @@ test("registered settings renderers expose help-copy markers without hiding crit
   assert.doesNotMatch(sources["remote-access-settings.mjs"], /settings-inline-alert[^>]*data-settings-help-copy/);
   assert.match(sources["shared-api-settings.mjs"], /shared-api-security-note[^>]*role="note"/);
   assert.doesNotMatch(sources["shared-api-settings.mjs"], /shared-api-security-note[^>]*data-settings-help-copy/);
-  assert.match(sources["model-provider-settings.mjs"], /anthropic-secret-note[^>]*>\$\{escapeHtml\(mt\("anthropic\.apiKeySafety"\)\)\}/);
-  assert.doesNotMatch(sources["model-provider-settings.mjs"], /anthropic-secret-note[^>]*data-settings-help-copy/);
+  assert.match(sources["provider-anthropic-accounts.mjs"], /anthropic-secret-note[^>]*>\$\{escapeHtml\(mt\("anthropic\.apiKeySafety"\)\)\}/);
+  assert.doesNotMatch(sources["provider-anthropic-accounts.mjs"], /anthropic-secret-note[^>]*data-settings-help-copy/);
 });

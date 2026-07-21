@@ -104,14 +104,20 @@ function createController(state = {}) {
 }
 
 test("native directory picker requires capability, loopback, and macOS", () => {
-  const options = { state: { remoteAccess: { capabilities: { nativePickerAllowed: true } } }, platformLike: "MacIntel" };
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, options), true);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "127.0.0.1" }, options), true);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "::1" }, options), true);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "192.168.0.146" }, options), false);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "appliance-tires-empire-partner.trycloudflare.com" }, options), false);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, { ...options, platformLike: "Win32" }), false);
-  assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, { state: {}, platformLike: "MacIntel" }), false);
+  const previous = globalThis.window;
+  globalThis.window = {};
+  try {
+    const options = { state: { remoteAccess: { capabilities: { nativePickerAllowed: true } } }, platformLike: "MacIntel" };
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, options), true);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "127.0.0.1" }, options), true);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "::1" }, options), true);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "192.168.0.146" }, options), false);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "appliance-tires-empire-partner.trycloudflare.com" }, options), false);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, { ...options, platformLike: "Win32" }), false);
+    assert.equal(nativeDirectoryPickerAllowed({ hostname: "localhost" }, { state: {}, platformLike: "MacIntel" }), false);
+  } finally {
+    globalThis.window = previous;
+  }
 });
 
 test("white shell adds the global rail before the conversation sidebar with the expected targets", async () => {

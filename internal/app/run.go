@@ -3,38 +3,30 @@ package app
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"autoto/internal/agent"
-	"autoto/internal/anthropicauth"
-	"autoto/internal/audit"
-	"autoto/internal/automation"
-	"autoto/internal/background"
 	"autoto/internal/channels"
-	"autoto/internal/codexauth"
-	"autoto/internal/compat"
-	"autoto/internal/config"
-	"autoto/internal/db"
-	"autoto/internal/gateway"
-	"autoto/internal/integrations"
-	"autoto/internal/plugins"
-	"autoto/internal/preview"
-	"autoto/internal/providers"
-	"autoto/internal/runtime"
-	"autoto/internal/secrets"
-	"autoto/internal/server"
-	"autoto/internal/tools"
 )
 
+// Options configures CLI or desktop-hosted runtime startup.
 type Options struct {
 	LegacyCommand bool
+	// ConfigPath is the resolved or unresolved config path. When empty, Run
+	// parses --config from Args (or os.Args).
+	ConfigPath string
+	// Args are command-line arguments without the program name. When nil, Run
+	// uses os.Args[1:].
+	Args []string
+	// EphemeralHTTP binds the main HTTP listener to host:0 so desktop shells
+	// avoid clashing with a long-lived CLI instance on the configured port.
+	EphemeralHTTP bool
+	// Logger overrides the process logger. When nil, a stdout text logger is used.
+	Logger *slog.Logger
 }
 
 type channelApprovalAdapter struct {
@@ -48,300 +40,55 @@ func (a channelApprovalAdapter) ApproveToolCall(ctx context.Context, agentID, to
 	})
 }
 
+// Run is the canonical process entry for cmd/autoto and the legacy shim.
+// Desktop shells should prefer NewRuntime + Start + Close so they can own the
+// window lifecycle without process signals.
 func Run(options Options) int {
-	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
-	configPath := flags.String("config", "", "path to config.json")
-	if err := flags.Parse(os.Args[1:]); err != nil {
-		return 2
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		slog.SetDefault(logger)
+		options.Logger = logger
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-	if options.LegacyCommand {
-		logger.Warn("codeharbor command is deprecated; use autoto", "replacement", "autoto", "removalVersion", compat.RemovalVersion)
+	args := options.Args
+	if args == nil {
+		args = os.Args[1:]
 	}
-
-	resolvedConfigPath, err := config.ResolvePath(*configPath)
-	if err != nil {
-		logger.Error("resolve config", "error", err)
-		return 1
-	}
-	cfg, legacyReport, err := config.LoadWithReport(resolvedConfigPath)
-	if err != nil {
-		logger.Error("load config", "error", err)
-		return 1
-	}
-	providerAPIKeyInputs, err := config.InspectProviderAPIKeyInputs(resolvedConfigPath, cfg)
-	if err != nil {
-		logger.Error("inspect provider credential sources", "error", err)
-		return 1
-	}
-	if !legacyReport.Empty() {
-		logger.Warn(
-			"legacy compatibility used",
-			"legacy", legacyReport.LegacyNames(),
-			"replacement", legacyReport.Replacements(),
-			"removalVersion", compat.RemovalVersion,
-		)
-	}
-
-	httpListener, gatewayListener, err := bindConfiguredHTTPListeners(cfg)
-	if err != nil {
-		logger.Error("bind service listeners", "error", err)
-		return 1
-	}
-	defer httpListener.Close()
-	if gatewayListener != nil {
-		defer gatewayListener.Close()
-	}
-
-	store, err := db.Open(context.Background(), cfg.Paths.DatabasePath)
-	if err != nil {
-		logger.Error("open database", "error", err)
-		return 1
-	}
-	defer store.Close()
-	providerVault := secrets.NewProviderVault(store, cfg.Paths.HomeDir)
-	cfg, providerSecretWarnings := hydrateProviderSecrets(context.Background(), cfg, providerVault, providerAPIKeyInputs, resolvedConfigPath)
-	for _, warning := range providerSecretWarnings {
-		logger.Warn("provider credential recovery warning", "error", warning)
-	}
-	runtimeSettings, err := store.GetRuntimeSettings(context.Background())
-	if err != nil {
-		logger.Error("load runtime settings", "error", err)
-		return 1
-	}
-	if err := store.SeedBackends(context.Background(), configuredBackends(cfg.Backends.Instances)); err != nil {
-		logger.Error("seed backends", "error", err)
-		return 1
-	}
-
-	providerRegistry := providers.NewRegistry()
-	providerRegistry.SetAggregateSource(aggregateSourceFromStore(store))
-	for _, providerCfg := range cfg.Providers.Instances {
-		if providerCfg.Disabled {
-			logger.Info("skip disabled provider", "name", providerCfg.Name, "type", providerCfg.Type)
-			continue
+	if options.ConfigPath == "" {
+		flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+		configPath := flags.String("config", "", "path to config.json")
+		if err := flags.Parse(args); err != nil {
+			return 2
 		}
-		providerCfg = providerConfigForRuntime(providerCfg, runtimeSettings)
-		if providerCfg.Type == config.ProviderTypeCodex {
-			providerCfg.CredentialStorePath = codexauth.DefaultStoreDir(cfg.Paths.HomeDir)
-		}
-		if providerCfg.Name == anthropicauth.DefaultProviderName && providerCfg.Type == "anthropic" {
-			providerCfg.CredentialStorePath = anthropicauth.DefaultStoreDir(cfg.Paths.HomeDir)
-		}
-		provider, err := providers.NewProvider(providerCfg)
-		if err != nil {
-			logger.Warn("skip unsupported provider", "name", providerCfg.Name, "type", providerCfg.Type, "error", err)
-			continue
-		}
-		if codexProvider, ok := provider.(*providers.CodexProvider); ok {
-			codexProvider.SetAccountTelemetry(store)
-		}
-		if anthropicProvider, ok := provider.(*providers.AnthropicProvider); ok {
-			anthropicProvider.SetAccountTelemetry(store)
-		}
-		providerRegistry.Register(provider)
-	}
-	if !providerRegistry.SetDefaultFromConfig(cfg.Agent.DefaultModel, cfg.Providers.Instances) {
-		logger.Warn("no configured provider registered as default", "defaultModel", cfg.Agent.DefaultModel)
+		options.ConfigPath = *configPath
 	}
 
-	toolRegistry := tools.NewRegistry()
-	tools.RegisterCore(toolRegistry)
-	secretResolver := secrets.EnvResolver{}
-	pluginService := plugins.NewService(store, secretResolver)
-
-	hub := agent.NewHub()
-	runner := agent.NewRunner(store, providerRegistry, toolRegistry, hub, cfg.Agent)
-	runner.SetDynamicToolSource(pluginService)
-	runner.SetDefaultReasoningEffort(runtimeSettings.DefaultReasoningEffort)
-	if err := runner.RecoverInterruptedRuns(context.Background()); err != nil {
-		logger.Error("recover interrupted runs", "error", err)
-		return 1
-	}
-	connectionService := integrations.NewConnectionService(store, secretResolver)
-	auditRecorder := audit.NewRecorder(store)
-	automationManager, err := automation.NewManager(automation.Config{Store: store, Runner: runner, Audit: auditRecorder})
+	rt, err := NewRuntime(options)
 	if err != nil {
-		logger.Error("create automation manager", "error", err)
-		return 1
-	}
-	channelManager, err := channels.New(store, connectionService, channelApprovalAdapter{runner: runner}, toolRegistry)
-	if err != nil {
-		logger.Error("create channel manager", "error", err)
-		return 1
-	}
-	automationManager.SetTelegramSender(channelManager)
-	runner.SetNotifier(automationManager)
-
-	backgroundManager := background.NewManager(store, background.Options{})
-	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindShell, background.NewShellExecutor()); err != nil {
-		logger.Error("register background shell executor", "error", err)
-		return 1
-	}
-	if err := backgroundManager.RegisterExecutor(db.BackgroundTaskKindAgent, background.NewAgentExecutor(store, runner)); err != nil {
-		logger.Error("register background agent executor", "error", err)
-		return 1
-	}
-	backgroundService := background.NewService(backgroundManager, store)
-	backgroundManager.SetValidator(runner.ValidateBackgroundTask)
-	eventHook, terminalHook := background.NewManagerHooks(hub, automationManager, runner)
-	backgroundManager.SetEventHook(eventHook)
-	backgroundManager.SetTerminalHook(terminalHook)
-	runner.SetBackgroundTaskService(backgroundService)
-
-	previewManager := preview.NewManager()
-	temporaryTunnelManager := server.NewTemporaryTunnelManager(cfg.Addr())
-	reviewService := server.NewReviewService(providerRegistry, cfg.Agent.ReviewModel)
-	runner.SetReviewService(reviewService)
-	application := server.New(cfg, store, runner, hub, providerRegistry)
-	application.SetProviderVault(providerVault)
-	application.SetToolRegistry(toolRegistry)
-	application.SetBackgroundTaskService(backgroundService)
-	application.SetAutomationManager(automationManager)
-	application.SetConnectionService(connectionService)
-	application.SetPluginService(pluginService)
-	application.SetReviewService(reviewService)
-	application.SetAuditRecorder(auditRecorder)
-	application.SetPreviewManager(previewManager)
-	application.SetTemporaryTunnelManager(temporaryTunnelManager)
-	application.SetConfigPath(resolvedConfigPath)
-
-	httpServer := &http.Server{
-		Addr:              cfg.Addr(),
-		Handler:           application.Routes(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	gatewayHTTPServer, err := newGatewayHTTPServer(cfg, store, providerRegistry, application.GatewayProviderAllowed)
-	if err != nil {
-		logger.Error("create gateway service", "error", err)
+		logger.Error("create runtime", "error", err)
 		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	supervisor := runtime.NewSupervisor()
-	services := []runtime.Service{previewManager, temporaryTunnelManager, channelManager, automationManager, backgroundManager}
-	if gatewayHTTPServer != nil {
-		services = append(services, runtime.NewHTTPServiceWithListener(gatewayHTTPServer, gatewayListener, func(err error) {
-			logger.Error("serve gateway", "error", err)
-			stop()
-		}))
-	}
-	services = append(services, runtime.NewHTTPServiceWithListener(httpServer, httpListener, func(err error) {
-		logger.Error("serve", "error", err)
-		stop()
-	}))
-	if err := registerRuntimeServices(supervisor, services...); err != nil {
-		logger.Error("register service", "error", err)
+	if err := rt.Start(ctx); err != nil {
+		logger.Error("start runtime", "error", err)
+		_ = rt.Close(context.Background())
 		return 1
 	}
 
-	logger.Info("autoto listening", "addr", fmt.Sprintf("http://%s", cfg.Addr()))
-	if gatewayHTTPServer != nil {
-		logger.Info("private API gateway listening", "addr", fmt.Sprintf("http://%s", cfg.GatewayAddr()))
-	}
-	if err := supervisor.Start(ctx); err != nil {
-		logger.Error("start services", "error", err)
-		return 1
-	}
-	// Background reconciliation runs as part of the supervisor start. Only then
-	// can a continuation safely decide whether its task boundary is terminal.
-	if err := runner.RecoverContinuationPendingRuns(context.Background()); err != nil {
-		logger.Error("recover continuation pending runs", "error", err)
-		return 1
+	select {
+	case <-ctx.Done():
+	case <-rt.Done():
 	}
 
-	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := supervisor.Close(shutdownCtx); err != nil {
+	if err := rt.Close(shutdownCtx); err != nil {
 		logger.Error("shutdown", "error", err)
 		return 1
 	}
 	return 0
-}
-
-func bindConfiguredHTTPListeners(cfg config.Config) (net.Listener, net.Listener, error) {
-	httpListener, err := net.Listen("tcp", cfg.Addr())
-	if err != nil {
-		return nil, nil, fmt.Errorf("listen on %s: %w", cfg.Addr(), err)
-	}
-	if !cfg.Gateway.Enabled {
-		return httpListener, nil, nil
-	}
-	gatewayListener, err := net.Listen("tcp", cfg.GatewayAddr())
-	if err != nil {
-		_ = httpListener.Close()
-		return nil, nil, fmt.Errorf("listen on gateway %s: %w", cfg.GatewayAddr(), err)
-	}
-	return httpListener, gatewayListener, nil
-}
-
-func newGatewayHTTPServer(cfg config.Config, store *db.Store, registry *providers.Registry, providerAllowed gateway.ProviderPolicy) (*http.Server, error) {
-	if !cfg.Gateway.Enabled {
-		return nil, nil
-	}
-	service, err := gateway.New(store, registry, gateway.Options{
-		MaxGlobalConcurrency: cfg.Gateway.MaxGlobalConcurrency,
-		MaxRequestBytes:      cfg.Gateway.MaxRequestBytes,
-		ProviderAllowed:      providerAllowed,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &http.Server{
-		Addr:              cfg.GatewayAddr(),
-		Handler:           service.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    32 << 10,
-	}, nil
-}
-
-func registerRuntimeServices(supervisor *runtime.Supervisor, services ...runtime.Service) error {
-	for _, service := range services {
-		if err := supervisor.Register(service); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func providerConfigForRuntime(providerCfg config.ProviderConfig, settings db.RuntimeSettings) config.ProviderConfig {
-	providerCfg.ClientVersion = config.Version
-	providerCfg.InstallationID = settings.InstallationID
-	return providerCfg
-}
-
-func aggregateSourceFromStore(store *db.Store) providers.AggregateSource {
-	return providers.AggregateSourceFunc(func(ctx context.Context, name string) (providers.AggregateDefinition, error) {
-		aggregate, err := store.GetModelAggregate(ctx, name)
-		if err != nil {
-			return providers.AggregateDefinition{}, err
-		}
-		return providers.AggregateDefinition{
-			Name:    aggregate.Name,
-			Mode:    aggregate.Mode,
-			Members: append([]string(nil), aggregate.Members...),
-		}, nil
-	})
-}
-
-func configuredBackends(backends []config.BackendConfig) []db.Backend {
-	out := make([]db.Backend, 0, len(backends))
-	for _, backend := range backends {
-		out = append(out, db.Backend{
-			ID:      backend.ID,
-			Name:    backend.Name,
-			Kind:    backend.Kind,
-			BaseURL: backend.BaseURL,
-			APIKey:  backend.APIKey,
-			Active:  backend.Active,
-		})
-	}
-	return out
 }

@@ -1,6 +1,7 @@
 import { escapeAttr, escapeHtml } from "./dom.mjs";
 import { t } from "./i18n.mjs";
 import { shellExtraT as sx } from "./messages-shell-extra.mjs";
+import { confirm as platformConfirm } from "./platform.mjs";
 
 function specMessage(key, params = {}) {
   return sx(`spec.${key}`, params);
@@ -131,7 +132,7 @@ export function createSpecBoardController({
   document: documentImpl = globalThis.document,
 } = {}) {
   if (typeof request !== "function") throw new TypeError("Spec board request must be a function");
-  const confirm = confirmAction || ((message) => globalThis.window?.confirm?.(message));
+  const confirm = confirmAction || platformConfirm;
   const state = {
     rootAgent: null,
     selectedAgentId: "",

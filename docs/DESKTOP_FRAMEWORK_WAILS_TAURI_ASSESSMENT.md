@@ -382,3 +382,81 @@ Tauri 2 对这些能力已有较标准的插件路径。
 - Tauri 2 Capability/Permission 文档；
 - Tauri 2 Dialog 插件文档；
 - Autoto 当前 `cmd/autoto`、`internal/app`、`internal/server`、`internal/background`、`internal/preview`、`internal/db` 和嵌入式前端实现。
+
+## 12. 落地进度（分支 `feature/wails-desktop-shell-foundation`）
+
+截至 2026-07-21，地基与 **Wails 薄壳开窗** 已落地：
+
+| 项 | 状态 | 位置 |
+|---|---|---|
+| `app.Runtime` Start / WaitReady / Close | 已完成 | `internal/app/runtime.go`，`Run` 改为托管该 Runtime |
+| 可选 `EphemeralHTTP`（`host:0`） | 已完成 | `app.Options.EphemeralHTTP` + `bindConfiguredHTTPListeners` |
+| Wails 薄壳开窗 | 已完成 | `internal/desktop` + `cmd/autoto-desktop`：`Runtime.URL()` → `WebviewWindow.URL`；关窗 / 信号 / `ctx` 取消时 `Close` Runtime |
+| 桌面 CLI 标志 | 已完成 | `-ephemeral-http`（默认 true）、`-headless`（CI/无 GUI）、`-ready-timeout`、`-config` |
+| 依赖 | 已引入 | `github.com/wailsapp/wails/v3@v3.0.0-alpha2.117`（仅桌面壳路径使用；业务仍走 HTTP/WebSocket） |
+| 跨平台进程组 | 已完成 | `internal/process`；Unix Setpgid；Windows Job Object + KILL_ON_JOB_CLOSE |
+| background / preview 接入 | 已完成 | `internal/background/shell.go`、`internal/preview/manager.go` |
+| Bash / MCP stdio 接入 | 已完成 | `internal/tools/bash.go`、`internal/mcp/stdio.go` |
+| 前端 platform dialog 适配 | 初版 | `internal/server/static/modules/platform.mjs`；`app-main` 两处 `confirmAction` 已改用 |
+
+设计约束（保持有效）：
+
+- **不取消浏览器与远程**：`cmd/autoto` 行为不变；桌面只是可选客户端。
+- **关窗不削弱鉴权**：壳只关闭本进程 Runtime；local token / 远程密码体系仍在 HTTP 服务端。
+- **业务不走 Binding**：窗口直接加载 `http://127.0.0.1:<ephemeral>/`；Agent/API 仍是既有路由。
+
+验收命令（本机 2026-07-21）：
+
+```text
+go test ./internal/app/ ./internal/desktop/ ./internal/process/ ./internal/background/ ./internal/preview/ ./internal/tools/ ./internal/mcp/ -count=1
+node --test internal/server/static/modules/platform.test.mjs
+go build ./cmd/autoto ./cmd/autoto-desktop
+# headless smoke（CI / 无窗口）:
+#   ./autoto-desktop -headless
+# GUI smoke（Mac）:
+#   ./autoto-desktop
+# 关窗或 Ctrl+C 后进程应退出，HTTP 端口释放。
+```
+
+### 12.1 壳级产品化增量（同分支续作）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 原生 dialog（壳级） | 已完成 | HTTP 桥 `POST /api/desktop/dialog/{confirm,alert}` → `ShellDialogHost` → Wails `Dialog.Question/Info`；**不**走 Wails Service Binding（外部 `Runtime.URL()` 与 asset origin 不同） |
+| 前端 platform 自动接线 | 已完成 | `platform.mjs` 在 `AUTOTO_DESKTOP_SHELL` 时 `fetch` 上述端点；浏览器默认仍用 `window.confirm` |
+| 单实例 | 已完成 | Wails `SingleInstance` UniqueID `com.autoto.desktop`；二次启动 Focus/Restore 主窗 |
+| Windows Job Object CI | 已完成 | `.github/workflows/ci.yml` 增加 `windows-process`：`go test ./internal/process` + 构建 CLI |
+| 系统托盘（Show/Hide/Quit） | 已完成 | `internal/desktop/tray.go`：关窗隐藏到托盘，托盘菜单退出才关 Runtime |
+| 托盘/应用图标 | 已完成 | `internal/desktop/assets/*` embed；`application.Options.Icon` + tray `SetIcon` |
+| 原生选目录/文件 | 已完成 | `ShellDialogHost.PickDirectory/PickFile`；`/api/desktop/dialog/open-*`；`fsNativeDirectory` 优先 shell host（跨平台）；浏览器仍 macOS AppleScript |
+| 窗口状态持久化 | 已完成 | `desktop-window.json`（homeDir）；尺寸/位置/最大化；move/resize 防抖写入 |
+| 全面替换 `window.confirm` | 已完成 | 业务模块经 `platform.confirm`；浏览器默认仍 `window.confirm` |
+| 自动更新 / 打包签名 | 骨架+边界 | 本地 stage：`POST /api/desktop/update/stage`（loopback only）；`/api/update/status` 仍只读；`make release-desktop` + `docs/DESKTOP_PACKAGING.md`；无静默下载/远程安装 |
+| 自启动 | 已完成 | 托盘 Login Item + `GET/POST/DELETE /api/desktop/autostart`（Wails Autostart） |
+| 深度链接 `autoto://` | 已完成 | 解析 + 窗内 hash 导航；argv / ApplicationLaunchedWithUrl / 二次实例；OS 注册需正式打包 |
+| 无 GUI build tag 拆分 | 已完成 | `//go:build desktop` 于 `cmd/autoto-desktop` + `internal/desktop`；默认 `go test/build ./...` 与 CI 不链接 Wails；`make check-desktop` / `AUTOTO_CHECK_DESKTOP=1` 可选验收；清单见 `docs/DESKTOP_SHELL_ACCEPTANCE.md` |
+
+安全边界：
+
+- dialog 路由在 host 未注册时 **404**（纯 CLI/浏览器无桌面壳）；
+- **禁止远程**：`remoteAccessGateRequired` 或非 loopback peer → 403；
+- 浏览器发起请求仍校验 local token（与现有 API 一致）；
+- 仅 confirm/alert，**无** Agent/FS/任意 Binding。
+
+### 12.2 自动更新 / 打包签名（边界，未产品化）
+
+**现状（可保留，不要误做成“桌面自动升级”）：**
+
+- `internal/server/update.go` + `/api/update/status` 只报告**本地注入**的信任 manifest 元数据（版本、channel、是否需要备份/重启）。
+- **无**网络拉取 release、**无**二进制下载、**无**静默替换、**无**代码签名校验流水线。
+- CLI 与桌面壳共享同一 Runtime；远程会话同样只读 status，不能触发安装。
+
+**桌面壳若要做更新，建议硬约束：**
+
+1. 与浏览器路径一致：先 `/api/update/status`，用户显式确认后再动作；
+2. 下载与校验在壳进程完成，写入临时目录，**绝不**经远程 API 触发安装；
+3. 签名：macOS notarize / Windows Authenticode 在 CI release job 中完成，不在运行时自签名；
+4. 打包：Wails 官方打包工具链仍为 Alpha；本分支继续用 `go build ./cmd/autoto-desktop` 作为开发入口，正式 `.app` / `.msi` 另开发布任务；
+5. 更新失败必须可回滚到旧二进制；开发版（`0.1.0-dev`）默认 `development_build`，不提示升级。
+
+**本分支刻意不做：** 完整 updater UI、后台静默升级、跨平台安装器签名流水线。
