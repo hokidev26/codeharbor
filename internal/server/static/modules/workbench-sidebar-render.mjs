@@ -3,6 +3,32 @@ import { t } from "./i18n.mjs";
 import { overviewRailTarget } from "./overview-dashboard.mjs";
 import { terminalAccessAllowed } from "./remote-access-capabilities.mjs";
 
+// Which primary surface is visible for a given mode. Overview wins over every
+// mode: it is a full-page surface, so entering it hides the conversation,
+// workbench, and schedule panels rather than layering over them. Kept pure and
+// separate from the DOM work so the visibility matrix can be checked directly.
+export function primaryWorkbenchLayout(mode, { overviewActive = false } = {}) {
+  const overview = overviewActive === true;
+  const workbench = mode === "workbench" && !overview;
+  const schedules = mode === "schedules" && !overview;
+  return {
+    overview,
+    workbench,
+    schedules,
+    hidden: {
+      overviewDashboard: !overview,
+      conversationPanel: overview || workbench || schedules,
+      workbenchPanel: !workbench,
+      schedulePanel: !schedules,
+    },
+    bodyClasses: {
+      "overview-mode": overview,
+      "workbench-mode": workbench,
+      "schedule-mode": schedules,
+    },
+  };
+}
+
 // Renders the primary-mode session sidebar (conversations/workbench/
 // schedules header, search, and create buttons) and the workbench shell
 // meta/status strip, plus the schedule surface and the small i18n text/

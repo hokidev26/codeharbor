@@ -178,9 +178,12 @@ test("desktop home overview stays available while mobile starts in conversation"
   assert.match(appMain, /key === "home"[\s\S]*?openOverviewDashboard\(\)\.catch\(showError\)/);
   assert.match(appMain, /overviewDashboard\.load\(\)/);
   assert.match(appMain, /function openOverviewTask\(id = ""\)[\s\S]*?taskWorkspace\.selectTask/);
-  assert.match(appMain, /action === "runs" \|\| action === "open-run"/);
-  assert.match(appMain, /action === "schedules" \|\| action === "open-schedule"/);
-  assert.match(appMain, /action === "approvals"[\s\S]*?openOverviewApprovals/);
+  // Action -> surface routing is a table in overview-dashboard.mjs, checked
+  // exhaustively in overview-navigation.test.mjs; app-main only dispatches it.
+  assert.match(appMain, /const route = overviewNavigationRoute\(action\)/);
+  assert.match(appMain, /route\.handler === "approvals"\) return openOverviewApprovals\(\)/);
+  assert.match(appMain, /route\.handler === "runs"\) return openOverviewRuns\(target\)/);
+  assert.match(appMain, /route\.handler === "schedules"\) return openOverviewSchedules\(target\)/);
   assert.match(appMain, /tool-calls\/pending/);
   assert.match(appMain, /loadRunSummary\(run\.id, \{ agentId: run\.agentId \}\)/);
   assert.match(appMain, /setGlobalRailActive\(currentShellRailTarget\(\)\)/);
@@ -248,10 +251,12 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
   assert.match(appMain, /key === "conversation"[\s\S]*?switchPrimaryWorkbench\("conversation"\)/);
   assert.match(appMain, /key === "schedules"[\s\S]*?switchPrimaryWorkbench\("schedules"\)/);
   assert.doesNotMatch(appMain, /key === "tasks"/);
-  assert.match(appMain, /overviewDashboard"\)\?\.classList\.toggle\("hidden", !overview\)/);
-  assert.match(appMain, /conversationPanel"\)\?\.classList\.toggle\("hidden", overview \|\| workbench \|\| schedules\)/);
-  assert.match(appMain, /workbenchPanel"\)\?\.classList\.toggle\("hidden", !workbench\)/);
-  assert.match(appMain, /schedulePanel"\)\?\.classList\.toggle\("hidden", !schedules\)/);
+  // Which panel each mode shows is decided by primaryWorkbenchLayout and
+  // checked exhaustively in workbench-layout.test.mjs; app-main only applies
+  // the resulting matrix to the DOM.
+  assert.match(appMain, /primaryWorkbenchLayout\(mode, \{ overviewActive: state\.overviewActive \}\)/);
+  assert.match(appMain, /Object\.entries\(layout\.hidden\)\) \$\(id\)\?\.classList\.toggle\("hidden", hidden\)/);
+  assert.match(appMain, /Object\.entries\(layout\.bodyClasses\)\) document\.body\.classList\.toggle\(name, active\)/);
   const applyStart = appMain.indexOf("function applyPrimaryWorkbench");
   const applyEnd = appMain.indexOf("function switchPrimaryWorkbench", applyStart);
   const applyBody = appMain.slice(applyStart, applyEnd);
@@ -468,11 +473,13 @@ test("conversation creation routes project contexts through folder selection and
   assert.match(mobile, /data-create-conversation/);
   assert.doesNotMatch(`${desktop}${mobile}`, /data-open-directory-shortcut/);
   assert.match(folder, /data-open-directory-shortcut="current"/);
-  assert.match(appMain, /function navigationCreateTarget\(\)/);
-  assert.match(appMain, /if \(state\.activeWorkbench === "schedules"\) return "schedule"[\s\S]*?return state\.navigationMode === "conversations" \? "conversation" : "project"/);
-  assert.match(appMain, /const labelKey = target === "schedule"[\s\S]*?"shell\.newSchedule"[\s\S]*?target === "project" \? "shell\.chooseFolder" : "shell\.newConversation"/);
+  // Which target the create button acts on, and the label that must agree with
+  // it, are decided by navigation-create.mjs and covered in
+  // navigation-create.test.mjs across every workbench/navigation-mode pair.
+  assert.match(appMain, /return navigationCreateTarget\(state\)/);
+  assert.match(appMain, /const labelKey = navigationCreateLabelKey\(target\)/);
   assert.match(appMain, /async function createNavigationItem\(trigger = null\)/);
-  assert.match(appMain, /const target = navigationCreateTarget\(\)[\s\S]*?if \(target === "schedule"\) return startScheduleCreation\(\)[\s\S]*?if \(target === "conversation"\) return createStandaloneConversation\(\)/);
+  assert.match(appMain, /const target = currentNavigationCreateTarget\(\)[\s\S]*?if \(target === "schedule"\) return startScheduleCreation\(\)[\s\S]*?if \(target === "conversation"\) return createStandaloneConversation\(\)/);
   assert.match(appMain, /openDirectoryChooser\(state\.project\?\.gitPath \|\| state\.agent\?\.cwd \|\| "", \{ trigger \}\)/);
   assert.match(appMain, /\[data-create-navigation-item\][\s\S]*?createNavigationItem\(button\)/);
   assert.match(appMain, /async function createStandaloneConversation/);
@@ -848,43 +855,21 @@ test("Subagent compact cards integrate background tasks without polling child to
   const enterAgent = appMain.slice(appMain.indexOf("async function enterAgent"), appMain.indexOf("function showModelSetupNotice"));
   assert.match(enterAgent, /state\.chatHydrating = true;[\s\S]*?backgroundTasks\.setAgent\(agentId\)/);
   assert.match(enterAgent, /loadBackgroundTasksForAgent\(agentId\)/);
-  assert.match(appMain, /backgroundTaskAgentLoadGeneration[\s\S]*?backgroundTaskAgentLoadInFlight\?\.agentId === normalizedAgentId/);
   assert.match(backgroundTasks, /background-tasks\?limit=100/);
   assert.match(backgroundTasks, /if \(!alreadyLoaded\) await loadTask\(normalized\)/);
   assert.match(backgroundTasks, /lifecycleRefresh[\s\S]*?hydrateTask\(current\.id, \{ force: lifecycleRefresh \}\)/);
-  assert.match(appMain, /backgroundTasks\.subscribe\?\.\(scheduleSubagentCardRefresh\)/);
 
-  const refreshStart = appMain.indexOf("function refreshSubagentCardsPreservingUI");
-  const refreshEnd = appMain.indexOf("function loadBackgroundTasksForAgent", refreshStart);
-  const refreshBody = appMain.slice(refreshStart, refreshEnd);
-  assert.match(refreshBody, /captureSubagentCardViewState/);
-  assert.match(refreshBody, /cards\.reduce\(\(count, card\) => count \+ \(replaceSubagentCard\(card\) \? 1 : 0\), 0\)/);
-  assert.match(refreshBody, /if \(replaced === cards\.length\)[\s\S]*?restoreSubagentCardViewState\(snapshot, root\);[\s\S]*?return true/);
-  assert.match(refreshBody, /applyMessageSnapshot\(state\.currentMessages, agentId, \{ forceRender: true, preserveScroll: true \}\)/);
-  assert.match(refreshBody, /restoreSubagentCardViewState/);
-  assert.doesNotMatch(refreshBody, /loadRunSummary|tool-calls|loadTask/);
-  assert.match(appMain, /findToolActivityByIdentity\(\[[\s\S]*?state\.liveToolOutputs[\s\S]*?state\.activeRunToolCalls[\s\S]*?state\.activeRunSummary\?\.toolCalls/);
-  assert.match(appMain, /renderAgentTaskActivityCardHTML\(tool, task\)/);
-  assert.match(appMain, /details\.map\(\(detail\) => Boolean\(detail\.open\)\)/);
-  assert.match(appMain, /status:\s*String\(card\.dataset\?\.subagentStatus/);
-  assert.match(appMain, /statusChanged[\s\S]*?detailIndex === 0 && statusChanged[\s\S]*?detail\.open = Boolean\(saved\.open\?\.\[detailIndex\]\)/);
-  assert.match(appMain, /button\.focus\?\.\(\{ preventScroll: true \}\)[\s\S]*?querySelector\?\.\("summary"\)\?\.focus/);
-  assert.match(appMain, /if \(runId && toolUseId\) return JSON\.stringify\(\[runId, toolUseId\]\)/);
-  assert.doesNotMatch(appMain.slice(appMain.indexOf("function subagentCardIdentity"), appMain.indexOf("function captureSubagentCardViewState")), /String\(index\)|cardIndex/);
-  assert.match(appMain, /subagentCardRefreshReasons[\s\S]*?if \(!subagentCardRefreshReasons\.has\(reason\)\) return/);
-  assert.match(appMain, /subagentCardRefreshSelectionSeq = state\.projectSelectSeq[\s\S]*?expectedSelectionSeq !== state\.projectSelectSeq/);
-  assert.doesNotMatch(appMain.slice(appMain.indexOf("const subagentCardRefreshReasons"), appMain.indexOf("]);", appMain.indexOf("const subagentCardRefreshReasons"))), /task\.output|output-loaded/);
-
-  const actionStart = appMain.indexOf("async function performSubagentCardAction");
-  const actionEnd = appMain.indexOf("function bindSubagentCardActions", actionStart);
-  const actionBody = appMain.slice(actionStart, actionEnd);
-  assert.match(actionBody, /action === "view-task"\) await backgroundTasks\.selectTask\(taskId\)/);
-  assert.match(actionBody, /action === "cancel"\) await backgroundTasks\.cancel\(taskId\)/);
-  assert.match(actionBody, /action === "open-agent"\) await navigateToSubagentAgent\(childAgentId\)/);
-  assert.match(actionBody, /action === "open-run"\) await navigateToSubagentRun\(childAgentId, childRunId\)/);
-  assert.match(appMain, /Promise\.resolve\(performSubagentCardAction\(button\)\)\.catch\(showError\)/);
-  assert.match(appMain, /async function navigateToSubagentAgent[\s\S]*?selectNavigationConversation\(conversation\.targetId\)/);
-  assert.match(appMain, /async function navigateToSubagentRun[\s\S]*?loadRunSummary\(runId, \{ agentId: state\.agent\?\.id \}\)/);
+  // The card coordinator itself lives in subagent-cards.mjs and is covered by
+  // behaviour tests in subagent-cards.test.mjs (identity keyed on run/tool
+  // rather than position, in-place replacement without re-rendering, the
+  // refresh-reason allowlist excluding output events, the selection-sequence
+  // staleness guard, view-state and focus restoration, and action routing).
+  // What stays asserted here is only the entry point's side of the contract.
+  assert.match(appMain, /createSubagentCardCoordinator\(\{[\s\S]*?getBackgroundTasks: \(\) => backgroundTasks,/);
+  assert.match(appMain, /backgroundTasks\.subscribe\?\.\(subagentCards\.scheduleRefresh\)/);
+  assert.match(appMain, /subagentCards\.bindCardActions\(\)/);
+  assert.match(appMain, /onNavigateAgent: \(childAgentId\) => \{[\s\S]*?subagentCards\.navigateToAgent\(childAgentId\)\.catch\(showError\)/);
+  assert.match(appMain, /onNavigateRun: \(childAgentId, childRunId\) => \{[\s\S]*?subagentCards\.navigateToRun\(childAgentId, childRunId\)\.catch\(showError\)/);
   for (const action of ["view-task", "cancel", "open-agent", "open-run"]) {
     assert.match(chatRendering, new RegExp(`data-subagent-action="${action}"`));
   }
@@ -1471,17 +1456,13 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.match(settingsStyles, /#settingsModal \.settings-help-body\s*\{[\s\S]*?overflow:\s*auto;/);
   assert.match(settingsStyles, /\.automation-hero p/);
 
-  const enterStart = appMain.indexOf("function enterSettingsShell");
-  const enterEnd = appMain.indexOf("function exitSettingsShell", enterStart);
-  const enterBody = appMain.slice(enterStart, enterEnd);
-  assert.ok(enterStart > 0 && enterEnd > enterStart);
-  assert.match(enterBody, /saveCurrentChatDraft\(\);[\s\S]*?appShell\.appendChild\(modal\)/);
-  for (const id of ["sessionSidebar", "sidebarResizeHandle", "conversationPanel", "workbenchPanel", "schedulePanel", "terminalPanel"]) {
-    assert.match(enterBody, new RegExp(`"${id}"`));
-  }
-  assert.match(enterBody, /modal\.setAttribute\("role", "region"\);[\s\S]*?modal\.removeAttribute\("aria-modal"\)/);
-  assert.doesNotMatch(enterBody, /disconnectAgentTransports|selectNavigationConversation|beginNavigationSelection/);
-  assert.match(appMain, /function exitSettingsShell\(\)[\s\S]*?restoreInlineProperties\(session\.appShellStyle\)[\s\S]*?originalParent\.insertBefore\(modal, originalNextSibling\)/);
+  // Docking itself lives in settings-shell-helpers.mjs and is covered by
+  // settings-shell-docking.test.mjs, which drives the real enter/exit pair and
+  // asserts reparenting, the display:none !important + aria-hidden treatment of
+  // the conversation surfaces, dialog-semantics swap and restoration, full
+  // inline-style cleanup, and idempotent enter/exit.
+  assert.match(appMain, /enterSettingsShell,\n\s*exitSettingsShell,/);
+  assert.match(appMain, /if \(state\.settingsMobileViewport\) exitSettingsShell\(\);\s*\n\s*else enterSettingsShell\(\);/);
   assert.match(appMain, /closeSettingsModal\(\{ restoreWorkbench: false, restoreFocus: false \}\)/);
   assert.match(appMain, /function closeSettingsModal[\s\S]*?discardProviderConsoleDraft\(\);/);
   assert.match(html, /class="settings-sidebar legacy-settings-topbar"[^>]*data-i18n-aria-label="settings\.directory"/);

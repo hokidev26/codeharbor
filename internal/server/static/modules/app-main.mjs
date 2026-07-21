@@ -30,6 +30,8 @@ import {
   shortPath,
 } from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { navigationCreateLabelKey, navigationCreateTarget } from "./navigation-create.mjs";
+import { createSubagentCardCoordinator } from "./subagent-cards.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1-context-ring-2-global-background-1-theme-v2-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1-settings-cleanup-1";
@@ -42,6 +44,7 @@ import { createMemorySettingsController } from "./memory-settings.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1-model-configs-1-provider-reference-1-default-openai-responses-1-provider-draft-session-1";
 import {
   createOverviewDashboardController,
+  overviewNavigationRoute,
   overviewRailTarget,
   resolveOverviewStartup,
 } from "./overview-dashboard.mjs?v=overview-home-3-nav-schedules-1-mobile-no-home-1-schedule-workspace-1";
@@ -79,7 +82,7 @@ import { createUsageHistoryController } from "./usage-history.mjs";
 import { createAgentWorkspaceHelpers } from "./agent-workspace-helpers.mjs";
 import { createNavigationContextMenu } from "./navigation-context-menu.mjs";
 import { createOverviewNavHelpers } from "./overview-nav-helpers.mjs";
-import { createWorkbenchSidebarRender } from "./workbench-sidebar-render.mjs";
+import { createWorkbenchSidebarRender, primaryWorkbenchLayout } from "./workbench-sidebar-render.mjs";
 import { createWorkspaceContextHelpers } from "./workspace-context-helpers.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
@@ -105,7 +108,6 @@ function updateSidebarAccountSummary() {
 
 let skillsPhaseB = null;
 let messageViewportBusyTimer = null;
-let settingsShellSession = null;
 const messageViewportBusyDelayMs = 140;
 
 const state = {
@@ -298,13 +300,14 @@ const state = {
 const settingsShellHelpers = createSettingsShellHelpers({
   state,
   isMobileAppViewport,
-  getSettingsShellSession: () => settingsShellSession,
   selectSettingsPanel,
   renderSettingsNav,
-  enterSettingsShell,
-  exitSettingsShell,
   renderMobileSettingsIndex,
   syncSettingsCloseControl,
+  saveCurrentChatDraft,
+  hideSlashCommandPalette,
+  closeMobileSidebar,
+  applyPrimaryWorkbench,
 });
 
 const {
@@ -318,6 +321,8 @@ const {
   applyMobileSettingsViewClasses,
   syncSettingsViewportState,
   layoutSettingsShell,
+  enterSettingsShell,
+  exitSettingsShell,
 } = settingsShellHelpers;
 
 const workspaceContextHelpers = createWorkspaceContextHelpers({
@@ -514,6 +519,7 @@ const {
   normalizedSettingsSearchQuery,
   settingsSearchText,
   filteredSettingsSections,
+  nextFilteredSettingsKey,
   firstFilteredSettingsItem,
   filteredSettingsIncludesKey,
   syncSettingsSearchInput,
@@ -628,21 +634,6 @@ function getSelectedModelValue() {
 }
 
 let backgroundTasks = null;
-let backgroundTaskAgentLoadGeneration = 0;
-let backgroundTaskAgentLoadInFlight = null;
-let subagentCardRefreshHandle = 0;
-let subagentCardRefreshAgentId = "";
-let subagentCardRefreshSelectionSeq = 0;
-const subagentCardRefreshReasons = new Set([
-  "loaded",
-  "task-loaded",
-  "snapshot",
-  "wait-finished",
-  "cancel-finished",
-  "task.created",
-  "task.status",
-  "task.completed",
-]);
 
 const chatRendering = createChatRenderingController({
   state,
@@ -773,188 +764,20 @@ const executionNotifications = createExecutionNotifications({
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
 });
 
-function subagentCardIdentity(card) {
-  const dataset = card?.dataset || {};
-  const runId = String(dataset.runId || "").trim();
-  const toolUseId = String(dataset.toolUseId || "").trim();
-  if (runId && toolUseId) return JSON.stringify([runId, toolUseId]);
-  const taskId = String(dataset.taskId || "").trim();
-  return taskId ? `task:${taskId}` : "";
-}
-
-function captureSubagentCardViewState(root = $("messages")) {
-  if (!root) return { cards: [], focus: null, scrollTop: 0 };
-  const active = globalThis.document?.activeElement;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")].flatMap((card) => {
-    const key = subagentCardIdentity(card);
-    if (!key) return [];
-    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
-    return [{
-      key,
-      status: String(card.dataset?.subagentStatus || ""),
-      open: details.map((detail) => Boolean(detail.open)),
-    }];
-  });
-  const focusButton = active?.closest?.("[data-subagent-action]");
-  const focusCard = focusButton?.closest?.("[data-subagent-card]");
-  const focusKey = subagentCardIdentity(focusCard);
-  return {
-    cards,
-    focus: focusButton && focusKey ? {
-      key: focusKey,
-      action: focusButton.dataset.subagentAction || "",
-      taskId: focusButton.dataset.taskId || "",
-      childAgentId: focusButton.dataset.childAgentId || "",
-      childRunId: focusButton.dataset.childRunId || "",
-    } : null,
-    scrollTop: root.scrollTop || 0,
-  };
-}
-
-function restoreSubagentCardViewState(snapshot, root = $("messages")) {
-  if (!root || !snapshot) return;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")];
-  for (const card of cards) {
-    const saved = snapshot.cards?.find((item) => item.key === subagentCardIdentity(card));
-    if (!saved) continue;
-    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
-    const statusChanged = saved.status !== String(card.dataset?.subagentStatus || "");
-    details.forEach((detail, detailIndex) => {
-      if (detailIndex === 0 && statusChanged) return;
-      detail.open = Boolean(saved.open?.[detailIndex]);
-    });
-  }
-  if (snapshot.focus) {
-    const card = cards.find((item) => subagentCardIdentity(item) === snapshot.focus.key);
-    const button = [...(card?.querySelectorAll?.("[data-subagent-action]") || [])].find((candidate) => (
-      (candidate.dataset.subagentAction || "") === snapshot.focus.action
-      && (candidate.dataset.taskId || "") === snapshot.focus.taskId
-      && (candidate.dataset.childAgentId || "") === snapshot.focus.childAgentId
-      && (candidate.dataset.childRunId || "") === snapshot.focus.childRunId
-    ));
-    if (button) button.focus?.({ preventScroll: true });
-    else card?.querySelector?.("summary")?.focus?.({ preventScroll: true });
-  }
-  root.scrollTop = snapshot.scrollTop || 0;
-}
-
-function subagentToolActivity(runId, toolUseId) {
-  return findToolActivityByIdentity([
-    state.liveToolOutputs,
-    state.activeRunToolCalls,
-    state.activeRunSummary?.toolCalls,
-  ], runId, toolUseId);
-}
-
-function replaceSubagentCard(card) {
-  const runId = String(card?.dataset?.runId || "").trim();
-  const toolUseId = String(card?.dataset?.toolUseId || "").trim();
-  if (!runId || !toolUseId || !("outerHTML" in card)) return false;
-  const tool = subagentToolActivity(runId, toolUseId);
-  if (!tool) return false;
-  const task = backgroundTasks?.getTaskByParentTool?.(runId, toolUseId) || null;
-  const html = renderAgentTaskActivityCardHTML(tool, task);
-  if (!html) return false;
-  card.outerHTML = html;
-  return true;
-}
-
-function refreshSubagentCardsPreservingUI(agentId = state.agent?.id, selectionSeq = state.projectSelectSeq) {
-  if (!agentId || state.agent?.id !== agentId || selectionSeq !== state.projectSelectSeq || state.chatHydrating) return false;
-  const root = $("messages");
-  if (!root) return false;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")];
-  if (!cards.length) return false;
-  const snapshot = captureSubagentCardViewState(root);
-  const replaced = cards.reduce((count, card) => count + (replaceSubagentCard(card) ? 1 : 0), 0);
-  if (replaced === cards.length) {
-    restoreSubagentCardViewState(snapshot, root);
-    return true;
-  }
-  const rendered = applyMessageSnapshot(state.currentMessages, agentId, { forceRender: true, preserveScroll: true });
-  if (rendered) restoreSubagentCardViewState(snapshot, root);
-  return rendered;
-}
-
-function scheduleSubagentCardRefresh(change = {}) {
-  const agentId = state.agent?.id || "";
-  const reason = String(change.reason || "");
-  if (!subagentCardRefreshReasons.has(reason)) return;
-  if (!agentId || state.chatHydrating || (change.agentId && change.agentId !== agentId)) return;
-  subagentCardRefreshAgentId = agentId;
-  subagentCardRefreshSelectionSeq = state.projectSelectSeq;
-  if (subagentCardRefreshHandle) return;
-  const schedule = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
-  subagentCardRefreshHandle = schedule(() => {
-    subagentCardRefreshHandle = 0;
-    const expectedAgentId = subagentCardRefreshAgentId;
-    const expectedSelectionSeq = subagentCardRefreshSelectionSeq;
-    subagentCardRefreshAgentId = "";
-    subagentCardRefreshSelectionSeq = 0;
-    if (expectedSelectionSeq !== state.projectSelectSeq) return;
-    refreshSubagentCardsPreservingUI(expectedAgentId, expectedSelectionSeq);
-  });
-}
-
-function loadBackgroundTasksForAgent(agentId) {
-  const normalizedAgentId = String(agentId || "").trim();
-  if (!normalizedAgentId || !backgroundTasks) return Promise.resolve([]);
-  if (backgroundTaskAgentLoadInFlight?.agentId === normalizedAgentId) return backgroundTaskAgentLoadInFlight.promise;
-  const generation = ++backgroundTaskAgentLoadGeneration;
-  const promise = Promise.resolve(backgroundTasks.loadAgent(normalizedAgentId)).then((tasks) => {
-    if (generation !== backgroundTaskAgentLoadGeneration || state.agent?.id !== normalizedAgentId) return [];
-    return tasks;
-  }).finally(() => {
-    if (backgroundTaskAgentLoadInFlight?.generation === generation) backgroundTaskAgentLoadInFlight = null;
-  });
-  backgroundTaskAgentLoadInFlight = { agentId: normalizedAgentId, generation, promise };
-  return promise;
-}
-
-async function navigateToSubagentAgent(childAgentId) {
-  const agentId = String(childAgentId || "").trim();
-  if (!agentId) return;
-  let conversation = state.navigationConversations.find((item) => item.agentId === agentId);
-  if (!conversation?.targetId) {
-    await loadProjects({ autoEnter: false, reason: "subagent-card-navigation" });
-    conversation = state.navigationConversations.find((item) => item.agentId === agentId);
-  }
-  if (!conversation?.targetId) throw new Error(am("conversationUnavailable"));
-  await selectNavigationConversation(conversation.targetId);
-}
-
-async function navigateToSubagentRun(childAgentId, childRunId) {
-  const agentId = String(childAgentId || "").trim();
-  const runId = String(childRunId || "").trim();
-  if (agentId && agentId !== state.agent?.id) await navigateToSubagentAgent(agentId);
-  if (runId && (!agentId || agentId === state.agent?.id)) await loadRunSummary(runId, { agentId: state.agent?.id });
-}
-
-async function performSubagentCardAction(button) {
-  const action = button?.dataset?.subagentAction || "";
-  const card = button?.closest?.("[data-subagent-card]");
-  const taskId = button?.dataset?.taskId || card?.dataset?.taskId || "";
-  const childAgentId = button?.dataset?.childAgentId || card?.dataset?.childAgentId || "";
-  const childRunId = button?.dataset?.childRunId || card?.dataset?.childRunId || "";
-  if (action === "view-task") await backgroundTasks.selectTask(taskId);
-  else if (action === "cancel") await backgroundTasks.cancel(taskId);
-  else if (action === "open-agent") await navigateToSubagentAgent(childAgentId);
-  else if (action === "open-run") await navigateToSubagentRun(childAgentId, childRunId);
-}
-
-function bindSubagentCardActions() {
-  $("messages")?.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-subagent-action]");
-    if (!button) return;
-    event.preventDefault();
-    Promise.resolve(performSubagentCardAction(button)).catch(showError);
-  });
-}
+const subagentCards = createSubagentCardCoordinator({
+  state,
+  getBackgroundTasks: () => backgroundTasks,
+  applyMessageSnapshot,
+  loadProjects,
+  selectNavigationConversation,
+  loadRunSummary,
+  showError,
+});
 
 backgroundTasks = createBackgroundTasksController({
   request: api,
   onChange: (change) => {
-    scheduleSubagentCardRefresh(change);
+    subagentCards.scheduleRefresh(change);
     if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
   },
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
@@ -967,15 +790,15 @@ backgroundTasks = createBackgroundTasksController({
     toggleTerminal(true);
   },
   onNavigateAgent: (childAgentId) => {
-    navigateToSubagentAgent(childAgentId).catch(showError);
+    subagentCards.navigateToAgent(childAgentId).catch(showError);
   },
   onNavigateRun: (childAgentId, childRunId) => {
-    navigateToSubagentRun(childAgentId, childRunId).catch(showError);
+    subagentCards.navigateToRun(childAgentId, childRunId).catch(showError);
   },
 });
 backgroundTasks.bind();
-backgroundTasks.subscribe?.(scheduleSubagentCardRefresh);
-bindSubagentCardActions();
+backgroundTasks.subscribe?.(subagentCards.scheduleRefresh);
+subagentCards.bindCardActions();
 
 const agentStream = createAgentStreamController({
   api,
@@ -1795,17 +1618,14 @@ function projectKanbanTranslation(key, params = {}, fallback = "") {
   return translated === translationKey ? fallback : translated;
 }
 
-function navigationCreateTarget() {
-  if (state.activeWorkbench === "schedules") return "schedule";
-  return state.navigationMode === "conversations" ? "conversation" : "project";
+function currentNavigationCreateTarget() {
+  return navigationCreateTarget(state);
 }
 
 function syncNavigationCreateButton(button) {
   if (!button) return;
-  const target = navigationCreateTarget();
-  const labelKey = target === "schedule"
-    ? "shell.newSchedule"
-    : target === "project" ? "shell.chooseFolder" : "shell.newConversation";
+  const target = currentNavigationCreateTarget();
+  const labelKey = navigationCreateLabelKey(target);
   button.dataset.createTarget = target;
   setTranslatedAttribute(button, "title", labelKey);
   setTranslatedAttribute(button, "aria-label", labelKey);
@@ -1816,9 +1636,8 @@ function applyPrimaryWorkbench(value) {
   const previousMode = state.activeWorkbench;
   state.primaryModePreference = mode;
   state.activeWorkbench = mode;
-  const overview = state.overviewActive === true;
-  const workbench = mode === "workbench" && !overview;
-  const schedules = mode === "schedules" && !overview;
+  const layout = primaryWorkbenchLayout(mode, { overviewActive: state.overviewActive });
+  const { overview, workbench, schedules } = layout;
   if (previousMode !== mode) {
     state.projectQuery = "";
     if ($("projectSearch")) $("projectSearch").value = "";
@@ -1826,13 +1645,8 @@ function applyPrimaryWorkbench(value) {
     $("projectSearchToggleBtn")?.classList.remove("active");
     if (mode === "schedules" && scheduleWorkspace.getState().query) scheduleWorkspace.setQuery("");
   }
-  $("overviewDashboard")?.classList.toggle("hidden", !overview);
-  $("conversationPanel")?.classList.toggle("hidden", overview || workbench || schedules);
-  $("workbenchPanel")?.classList.toggle("hidden", !workbench);
-  $("schedulePanel")?.classList.toggle("hidden", !schedules);
-  document.body.classList.toggle("overview-mode", overview);
-  document.body.classList.toggle("workbench-mode", workbench);
-  document.body.classList.toggle("schedule-mode", schedules);
+  for (const [id, hidden] of Object.entries(layout.hidden)) $(id)?.classList.toggle("hidden", hidden);
+  for (const [name, active] of Object.entries(layout.bodyClasses)) document.body.classList.toggle(name, active);
   const modalOpen = elementVisible("settingsModal");
   if (!modalOpen) setGlobalRailActive(overviewRailTarget({ overviewActive: overview, activeWorkbench: mode }));
   if (workbench) {
@@ -1943,106 +1757,6 @@ function showMobileSettingsIndex({ focus = false } = {}) {
 function requestCloseSettingsModal(options) {
   if (state.settingsMobileViewport && state.mobileSettingsView === "detail" && showMobileSettingsIndex({ focus: true })) return;
   closeSettingsModal(options);
-}
-
-function enterSettingsShell() {
-  if (state.settingsShellOpen) {
-    layoutSettingsShell();
-    return;
-  }
-  const appShell = $("appShell");
-  const modal = $("settingsModal");
-  const card = modal?.querySelector(".settings-dialog-shell");
-  if (!appShell || !modal || !card) return;
-
-  saveCurrentChatDraft();
-  hideSlashCommandPalette();
-  closeMobileSidebar();
-  const originalParent = modal.parentNode;
-  const originalNextSibling = modal.nextSibling;
-  const hiddenNodes = [
-    "sessionSidebar",
-    "sidebarResizeHandle",
-    "overviewDashboard",
-    "conversationPanel",
-    "workbenchPanel",
-    "schedulePanel",
-    "terminalPanel",
-    "conversationDetailsPanel",
-    "backgroundTaskTray",
-    "expandTerminalBtn",
-  ].map((id) => setSettingsShellNodeHidden($(id), true)).filter(Boolean);
-  const appShellStyle = captureInlineProperties(appShell, ["grid-template-columns"]);
-  const modalStyle = captureInlineProperties(modal, [
-    "position", "inset", "width", "height", "min-width", "min-height", "display", "grid-column", "grid-row",
-    "align-items", "justify-content", "overflow", "padding", "background", "backdrop-filter", "z-index",
-  ]);
-  const cardStyle = captureInlineProperties(card, [
-    "width", "height", "max-width", "max-height", "display", "grid-template-columns", "grid-template-rows",
-    "overflow", "border", "border-radius", "box-shadow",
-  ]);
-  settingsShellSession = {
-    appShell,
-    modal,
-    card,
-    originalParent,
-    originalNextSibling,
-    originalRole: modal.getAttribute("role"),
-    originalAriaModal: modal.getAttribute("aria-modal"),
-    hiddenNodes,
-    appShellStyle,
-    modalStyle,
-    cardStyle,
-  };
-  state.settingsShellOpen = true;
-  appShell.appendChild(modal);
-  modal.setAttribute("role", "region");
-  modal.removeAttribute("aria-modal");
-  modal.style.setProperty("position", "relative");
-  modal.style.setProperty("inset", "auto");
-  modal.style.setProperty("width", "auto");
-  modal.style.setProperty("height", "100%");
-  modal.style.setProperty("min-width", "0");
-  modal.style.setProperty("min-height", "0");
-  modal.style.setProperty("display", "flex");
-  modal.style.setProperty("align-items", "stretch");
-  modal.style.setProperty("justify-content", "stretch");
-  modal.style.setProperty("overflow", "hidden");
-  modal.style.setProperty("padding", "0");
-  modal.style.setProperty("background", "transparent");
-  modal.style.setProperty("backdrop-filter", "none");
-  modal.style.setProperty("z-index", "10");
-  card.style.setProperty("width", "100%");
-  card.style.setProperty("height", "100%");
-  card.style.setProperty("max-width", "none");
-  card.style.setProperty("max-height", "none");
-  card.style.setProperty("display", "grid");
-  card.style.setProperty("overflow", "hidden");
-  card.style.setProperty("border", "0");
-  card.style.setProperty("border-radius", "0");
-  card.style.setProperty("box-shadow", "none");
-  layoutSettingsShell();
-}
-
-function exitSettingsShell() {
-  const session = settingsShellSession;
-  state.settingsShellOpen = false;
-  settingsShellSession = null;
-  if (!session) return;
-  const { modal, originalParent, originalNextSibling } = session;
-  restoreInlineProperties(session.appShellStyle);
-  restoreInlineProperties(session.modalStyle);
-  restoreInlineProperties(session.cardStyle);
-  session.hiddenNodes.forEach(restoreSettingsShellNode);
-  if (session.originalRole == null) modal.removeAttribute("role");
-  else modal.setAttribute("role", session.originalRole);
-  if (session.originalAriaModal == null) modal.removeAttribute("aria-modal");
-  else modal.setAttribute("aria-modal", session.originalAriaModal);
-  if (originalParent) {
-    if (originalNextSibling?.parentNode === originalParent) originalParent.insertBefore(modal, originalNextSibling);
-    else originalParent.appendChild(modal);
-  }
-  applyPrimaryWorkbench(state.activeWorkbench);
 }
 
 function openSettingsModal(key = "providers", { trigger = document.activeElement, showMobileIndex = false } = {}) {
@@ -2199,13 +1913,16 @@ async function openOverviewDashboard() {
 }
 
 function handleOverviewNavigation(action, id = "") {
-  if (action === "conversation") return activateGlobalRailTarget("conversation");
-  if (action === "tasks") return openOverviewTask();
-  if (action === "open-task") return openOverviewTask(id);
-  if (action === "schedules" || action === "open-schedule") return openOverviewSchedules(id);
-  if (action === "approvals") return openOverviewApprovals();
-  if (action === "runs" || action === "open-run") return openOverviewRuns(id);
-  if (action === "open-conversation") return openOverviewConversation(id);
+  const route = overviewNavigationRoute(action);
+  if (!route) return undefined;
+  const target = route.usesId ? id : "";
+  if (route.handler === "rail-conversation") return activateGlobalRailTarget("conversation");
+  if (route.handler === "task") return openOverviewTask(target);
+  if (route.handler === "schedules") return openOverviewSchedules(target);
+  if (route.handler === "approvals") return openOverviewApprovals();
+  if (route.handler === "runs") return openOverviewRuns(target);
+  if (route.handler === "conversation") return openOverviewConversation(target);
+  return undefined;
 }
 
 function activateGlobalRailTarget(target) {
@@ -2265,7 +1982,7 @@ function updateSettingsSearchQuery(value) {
   state.settingsSearchQuery = String(value || "").slice(0, 80);
   const sections = filteredSettingsSections();
   const activeKey = state.activeSettingsPanel || "profile";
-  const nextKey = filteredSettingsIncludesKey(activeKey, sections) ? activeKey : firstFilteredSettingsItem(sections)?.key || activeKey;
+  const nextKey = nextFilteredSettingsKey(activeKey, sections);
   renderSettingsNav(nextKey);
   if (nextKey !== activeKey) selectSettingsPanel(nextKey);
 }
@@ -2684,7 +2401,7 @@ function startScheduleCreation() {
 }
 
 async function createNavigationItem(trigger = null) {
-  const target = navigationCreateTarget();
+  const target = currentNavigationCreateTarget();
   if (target === "schedule") return startScheduleCreation();
   if (target === "conversation") return createStandaloneConversation();
   closeMobileSidebar();
@@ -3075,7 +2792,7 @@ async function enterAgent() {
     [messagesLoaded] = await Promise.all([
       loadMessages(agentId),
       loadLatestRunSummary(agentId),
-      loadBackgroundTasksForAgent(agentId),
+      subagentCards.loadBackgroundTasksForAgent(agentId),
     ]);
     if (state.agent?.id !== agentId) return;
     state.chatHydrating = false;

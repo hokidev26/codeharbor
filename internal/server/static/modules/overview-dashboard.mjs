@@ -107,6 +107,28 @@ function escapeHtml(value) {
   })[character]);
 }
 
+// Maps an overview card action onto the surface that should handle it. The
+// bare "tasks"/"schedules" actions open their surface without a selection,
+// while the "open-*" variants carry the entity id, so the two are distinguished
+// by usesId rather than by separate handlers. Unknown actions resolve to null
+// and are ignored: overview payloads come from the server and must not be able
+// to drive navigation the client does not recognise.
+const overviewNavigationRoutes = new Map([
+  ["conversation", { handler: "rail-conversation", usesId: false }],
+  ["tasks", { handler: "task", usesId: false }],
+  ["open-task", { handler: "task", usesId: true }],
+  ["schedules", { handler: "schedules", usesId: true }],
+  ["open-schedule", { handler: "schedules", usesId: true }],
+  ["approvals", { handler: "approvals", usesId: false }],
+  ["runs", { handler: "runs", usesId: true }],
+  ["open-run", { handler: "runs", usesId: true }],
+  ["open-conversation", { handler: "conversation", usesId: true }],
+]);
+
+export function overviewNavigationRoute(action) {
+  return overviewNavigationRoutes.get(String(action || "")) || null;
+}
+
 export function overviewRailTarget(value = {}) {
   if (value?.overviewActive === true) return "home";
   if (value?.activeWorkbench === "schedules") return "schedules";
