@@ -106,7 +106,6 @@ function updateSidebarAccountSummary() {
 
 let skillsPhaseB = null;
 let messageViewportBusyTimer = null;
-let settingsShellSession = null;
 const messageViewportBusyDelayMs = 140;
 
 const state = {
@@ -299,13 +298,14 @@ const state = {
 const settingsShellHelpers = createSettingsShellHelpers({
   state,
   isMobileAppViewport,
-  getSettingsShellSession: () => settingsShellSession,
   selectSettingsPanel,
   renderSettingsNav,
-  enterSettingsShell,
-  exitSettingsShell,
   renderMobileSettingsIndex,
   syncSettingsCloseControl,
+  saveCurrentChatDraft,
+  hideSlashCommandPalette,
+  closeMobileSidebar,
+  applyPrimaryWorkbench,
 });
 
 const {
@@ -319,6 +319,8 @@ const {
   applyMobileSettingsViewClasses,
   syncSettingsViewportState,
   layoutSettingsShell,
+  enterSettingsShell,
+  exitSettingsShell,
 } = settingsShellHelpers;
 
 const workspaceContextHelpers = createWorkspaceContextHelpers({
@@ -1743,106 +1745,6 @@ function showMobileSettingsIndex({ focus = false } = {}) {
 function requestCloseSettingsModal(options) {
   if (state.settingsMobileViewport && state.mobileSettingsView === "detail" && showMobileSettingsIndex({ focus: true })) return;
   closeSettingsModal(options);
-}
-
-function enterSettingsShell() {
-  if (state.settingsShellOpen) {
-    layoutSettingsShell();
-    return;
-  }
-  const appShell = $("appShell");
-  const modal = $("settingsModal");
-  const card = modal?.querySelector(".settings-dialog-shell");
-  if (!appShell || !modal || !card) return;
-
-  saveCurrentChatDraft();
-  hideSlashCommandPalette();
-  closeMobileSidebar();
-  const originalParent = modal.parentNode;
-  const originalNextSibling = modal.nextSibling;
-  const hiddenNodes = [
-    "sessionSidebar",
-    "sidebarResizeHandle",
-    "overviewDashboard",
-    "conversationPanel",
-    "workbenchPanel",
-    "schedulePanel",
-    "terminalPanel",
-    "conversationDetailsPanel",
-    "backgroundTaskTray",
-    "expandTerminalBtn",
-  ].map((id) => setSettingsShellNodeHidden($(id), true)).filter(Boolean);
-  const appShellStyle = captureInlineProperties(appShell, ["grid-template-columns"]);
-  const modalStyle = captureInlineProperties(modal, [
-    "position", "inset", "width", "height", "min-width", "min-height", "display", "grid-column", "grid-row",
-    "align-items", "justify-content", "overflow", "padding", "background", "backdrop-filter", "z-index",
-  ]);
-  const cardStyle = captureInlineProperties(card, [
-    "width", "height", "max-width", "max-height", "display", "grid-template-columns", "grid-template-rows",
-    "overflow", "border", "border-radius", "box-shadow",
-  ]);
-  settingsShellSession = {
-    appShell,
-    modal,
-    card,
-    originalParent,
-    originalNextSibling,
-    originalRole: modal.getAttribute("role"),
-    originalAriaModal: modal.getAttribute("aria-modal"),
-    hiddenNodes,
-    appShellStyle,
-    modalStyle,
-    cardStyle,
-  };
-  state.settingsShellOpen = true;
-  appShell.appendChild(modal);
-  modal.setAttribute("role", "region");
-  modal.removeAttribute("aria-modal");
-  modal.style.setProperty("position", "relative");
-  modal.style.setProperty("inset", "auto");
-  modal.style.setProperty("width", "auto");
-  modal.style.setProperty("height", "100%");
-  modal.style.setProperty("min-width", "0");
-  modal.style.setProperty("min-height", "0");
-  modal.style.setProperty("display", "flex");
-  modal.style.setProperty("align-items", "stretch");
-  modal.style.setProperty("justify-content", "stretch");
-  modal.style.setProperty("overflow", "hidden");
-  modal.style.setProperty("padding", "0");
-  modal.style.setProperty("background", "transparent");
-  modal.style.setProperty("backdrop-filter", "none");
-  modal.style.setProperty("z-index", "10");
-  card.style.setProperty("width", "100%");
-  card.style.setProperty("height", "100%");
-  card.style.setProperty("max-width", "none");
-  card.style.setProperty("max-height", "none");
-  card.style.setProperty("display", "grid");
-  card.style.setProperty("overflow", "hidden");
-  card.style.setProperty("border", "0");
-  card.style.setProperty("border-radius", "0");
-  card.style.setProperty("box-shadow", "none");
-  layoutSettingsShell();
-}
-
-function exitSettingsShell() {
-  const session = settingsShellSession;
-  state.settingsShellOpen = false;
-  settingsShellSession = null;
-  if (!session) return;
-  const { modal, originalParent, originalNextSibling } = session;
-  restoreInlineProperties(session.appShellStyle);
-  restoreInlineProperties(session.modalStyle);
-  restoreInlineProperties(session.cardStyle);
-  session.hiddenNodes.forEach(restoreSettingsShellNode);
-  if (session.originalRole == null) modal.removeAttribute("role");
-  else modal.setAttribute("role", session.originalRole);
-  if (session.originalAriaModal == null) modal.removeAttribute("aria-modal");
-  else modal.setAttribute("aria-modal", session.originalAriaModal);
-  if (originalParent) {
-    if (originalNextSibling?.parentNode === originalParent) originalParent.insertBefore(modal, originalNextSibling);
-    else originalParent.appendChild(modal);
-  }
-  applyPrimaryWorkbench(state.activeWorkbench);
 }
 
 function openSettingsModal(key = "providers", { trigger = document.activeElement, showMobileIndex = false } = {}) {

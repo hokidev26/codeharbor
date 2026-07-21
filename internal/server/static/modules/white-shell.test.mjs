@@ -1439,17 +1439,13 @@ test("settings shell docks beside the global rail and keeps complete mobile navi
   assert.match(settingsStyles, /#settingsModal \.settings-help-body\s*\{[\s\S]*?overflow:\s*auto;/);
   assert.match(settingsStyles, /\.automation-hero p/);
 
-  const enterStart = appMain.indexOf("function enterSettingsShell");
-  const enterEnd = appMain.indexOf("function exitSettingsShell", enterStart);
-  const enterBody = appMain.slice(enterStart, enterEnd);
-  assert.ok(enterStart > 0 && enterEnd > enterStart);
-  assert.match(enterBody, /saveCurrentChatDraft\(\);[\s\S]*?appShell\.appendChild\(modal\)/);
-  for (const id of ["sessionSidebar", "sidebarResizeHandle", "conversationPanel", "workbenchPanel", "schedulePanel", "terminalPanel"]) {
-    assert.match(enterBody, new RegExp(`"${id}"`));
-  }
-  assert.match(enterBody, /modal\.setAttribute\("role", "region"\);[\s\S]*?modal\.removeAttribute\("aria-modal"\)/);
-  assert.doesNotMatch(enterBody, /disconnectAgentTransports|selectNavigationConversation|beginNavigationSelection/);
-  assert.match(appMain, /function exitSettingsShell\(\)[\s\S]*?restoreInlineProperties\(session\.appShellStyle\)[\s\S]*?originalParent\.insertBefore\(modal, originalNextSibling\)/);
+  // Docking itself lives in settings-shell-helpers.mjs and is covered by
+  // settings-shell-docking.test.mjs, which drives the real enter/exit pair and
+  // asserts reparenting, the display:none !important + aria-hidden treatment of
+  // the conversation surfaces, dialog-semantics swap and restoration, full
+  // inline-style cleanup, and idempotent enter/exit.
+  assert.match(appMain, /enterSettingsShell,\n\s*exitSettingsShell,/);
+  assert.match(appMain, /if \(state\.settingsMobileViewport\) exitSettingsShell\(\);\s*\n\s*else enterSettingsShell\(\);/);
   assert.match(appMain, /closeSettingsModal\(\{ restoreWorkbench: false, restoreFocus: false \}\)/);
   assert.match(appMain, /function closeSettingsModal[\s\S]*?discardProviderConsoleDraft\(\);/);
   assert.match(html, /class="settings-sidebar legacy-settings-topbar"[^>]*data-i18n-aria-label="settings\.directory"/);
