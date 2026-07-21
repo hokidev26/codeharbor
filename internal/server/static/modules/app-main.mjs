@@ -518,6 +518,7 @@ const {
   normalizedSettingsSearchQuery,
   settingsSearchText,
   filteredSettingsSections,
+  nextFilteredSettingsKey,
   firstFilteredSettingsItem,
   filteredSettingsIncludesKey,
   syncSettingsSearchInput,
@@ -1963,7 +1964,7 @@ function updateSettingsSearchQuery(value) {
   state.settingsSearchQuery = String(value || "").slice(0, 80);
   const sections = filteredSettingsSections();
   const activeKey = state.activeSettingsPanel || "profile";
-  const nextKey = filteredSettingsIncludesKey(activeKey, sections) ? activeKey : firstFilteredSettingsItem(sections)?.key || activeKey;
+  const nextKey = nextFilteredSettingsKey(activeKey, sections);
   renderSettingsNav(nextKey);
   if (nextKey !== activeKey) selectSettingsPanel(nextKey);
 }

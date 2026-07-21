@@ -49,6 +49,15 @@ export function createSettingsNavigationHelpers({
     return sections.some((section) => section.items.some((item) => item.key === key));
   }
 
+  // Which panel a search should land on. Staying put whenever the current panel
+  // still matches keeps typing from yanking the reader around; when it stops
+  // matching we move to the first remaining item. If nothing matches at all we
+  // keep the current panel rather than blanking the pane on a typo.
+  function nextFilteredSettingsKey(activeKey, sections = filteredSettingsSections()) {
+    if (filteredSettingsIncludesKey(activeKey, sections)) return activeKey;
+    return firstFilteredSettingsItem(sections)?.key || activeKey;
+  }
+
   function syncSettingsSearchInput() {
     const input = $("settingsSearchInput");
     if (input && input.value !== state.settingsSearchQuery) input.value = state.settingsSearchQuery;
@@ -166,6 +175,7 @@ export function createSettingsNavigationHelpers({
     normalizedSettingsSearchQuery,
     settingsSearchText,
     filteredSettingsSections,
+    nextFilteredSettingsKey,
     firstFilteredSettingsItem,
     filteredSettingsIncludesKey,
     syncSettingsSearchInput,
