@@ -62,6 +62,7 @@ import { settingsIconSVG, settingsItemByKey, settingsItems, settingsSections } f
 import { createSettingsHelpController } from "./settings-help.mjs?v=settings-help-1";
 import { createSettingsPanelRegistry } from "./settings-panel-registry.mjs";
 import { createSettingsPreferencesController } from "./settings-preferences.mjs?v=apple-theme-1-autoto-themes-1-profile-avatar-1-dual-rail-collapse-1-global-background-1";
+import { createSkillsContext } from "./skills-context.mjs";
 import { createServerResourceLoaders } from "./server-resource-loaders.mjs";
 import { createSetupWizardController } from "./setup-wizard.mjs";
 import { createSpecBoardController } from "./spec-board.mjs";
@@ -284,6 +285,21 @@ const state = {
   ws: null,
   terminalWS: null,
 };
+
+const skillsContext = createSkillsContext({
+  state,
+  showToast,
+  notifyTerminal,
+  getSkillsPhaseB: () => skillsPhaseB,
+  getEffectiveSkillContext,
+});
+
+const {
+  getSkillContext,
+  setSkillContext,
+  refreshEffectiveSkillsPolicy,
+  invalidateAndRefreshEffectiveSkillsPolicy,
+} = skillsContext;
 
 const serverResourceLoaders = createServerResourceLoaders({
   state,
@@ -1188,14 +1204,6 @@ const {
   renderUsageMetricCard,
 } = systemSettings;
 
-function getSkillContext() {
-  return normalizeSkillContext({
-    scope: state.skillContextScope,
-    projectId: state.project?.id || "",
-    worklineId: state.workline?.id || "",
-  });
-}
-
 function getEffectiveSkillContext() {
   if (state.project?.id && state.workline?.id) {
     return normalizeSkillContext({
@@ -1206,26 +1214,6 @@ function getEffectiveSkillContext() {
   }
   if (state.project?.id) return normalizeSkillContext({ scope: "project", projectId: state.project.id });
   return normalizeSkillContext({ scope: "global" });
-}
-
-function setSkillContext(context = {}) {
-  const requested = normalizeSkillContext({
-    ...context,
-    projectId: state.project?.id || context.projectId || "",
-    worklineId: state.workline?.id || context.worklineId || "",
-  });
-  if (requested.scope === "project" && !requested.projectId) {
-    state.skillContextScope = "global";
-    showToast(sx("app.projectSkillsRequired"), "warn");
-    return getSkillContext();
-  }
-  if (requested.scope === "workspace" && !requested.worklineId) {
-    state.skillContextScope = state.project?.id ? "project" : "global";
-    showToast(sx("app.workspaceSkillsRequired"), "warn");
-    return getSkillContext();
-  }
-  state.skillContextScope = requested.scope;
-  return requested;
 }
 
 let skillsPhaseBRenderQueued = false;
@@ -1245,22 +1233,6 @@ skillsPhaseB = createSkillsPhaseBController({
     });
   },
 });
-
-async function refreshEffectiveSkillsPolicy() {
-  const agentId = state.agent?.id || "";
-  if (!agentId || !skillsPhaseB) return [];
-  try {
-    return await skillsPhaseB.loadEffective(agentId, getEffectiveSkillContext());
-  } catch (error) {
-    notifyTerminal(`[warn] ${am("effectiveSkillsRefreshFailed", { message: error?.message || error })}\n`);
-    return [];
-  }
-}
-
-function invalidateAndRefreshEffectiveSkillsPolicy() {
-  skillsPhaseB?.invalidateEffective({ drop: true });
-  return refreshEffectiveSkillsPolicy();
-}
 
 const skillsWorkbench = createSkillsWorkbenchController({
   state,
