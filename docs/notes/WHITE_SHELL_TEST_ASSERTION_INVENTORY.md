@@ -71,3 +71,39 @@
    保留 cache-stamp 與跨模組（chat-rendering / background-tasks）斷言。
 
 驗收：測試總數不得減少、`make check` 全過、每條被移除的源碼斷言都能在新測試找到對應的行為斷言。
+
+---
+
+## 執行結果（2026-07-21 完成）
+
+六輪改寫完成，app-main.mjs 3,806 → 3,522 行，前端測試 523 → 565。
+
+| 叢集 | 手法 | 新測試檔 |
+|---|---|---|
+| subagent 卡片 | 整組抽出 `subagent-cards.mjs`（依賴注入，背景任務用 getter 解循環） | `subagent-cards.test.mjs` |
+| 設定殼層停靠 | 反轉注入方向，session 與 enter/exit 移入 `settings-shell-helpers.mjs` | `settings-shell-docking.test.mjs` |
+| workbench 可見性 | 只抽純決策 `primaryWorkbenchLayout`，DOM 編排留在進入點 | `workbench-layout.test.mjs` |
+| overview 導覽 | if-chain 改為 `overviewNavigationRoute` 路由表 | `overview-navigation.test.mjs` |
+| navigation 建立目標 | 抽 `navigation-create.mjs`（target 與 label 綁在一起） | `navigation-create.test.mjs` |
+| 設定搜尋落點 | 命名為 `nextFilteredSettingsKey` | `settings-search-focus.test.mjs` |
+
+### 修正：原本的「解鎖 1,500 行」預期是錯的
+
+盤點時假設源碼釘死是 app-main.mjs 無法瘦身的主因。**實測推翻了這點**：
+全部被釘死的函數合計僅約 400 行，即使全部解除，app-main.mjs 也只能降到約 3,220 行。
+其餘約 1,700 行在 60+ 個**從未被釘死**的函數、52 個 controller 裝配區塊與 64 個 import——
+那些一直都可以自由重構，與本測試無關。
+
+因此本輪的價值不在行數，而在**測試品質**。原斷言只驗證原始碼長相，例如設定殼層那組
+只檢查元素 id 字串出現在源碼中，從未驗證元素真的被隱藏、更沒驗證離開時被還原。
+
+### 剩餘未改寫者（約 295 行，23 個函數）
+
+`enterAgent`、`renderSettingsNav`、`renderWorkbenchHeaderIdentity`、`syncProjectOperationContext`、
+`openOverview*`、`selectProject`、`selectNavigationConversation` 等，多為重編排邏輯：
+外部協作者常達 15–20 個，抽出後注入清單會比邏輯本身還長，屬於「搬移耦合」而非「建立邊界」。
+其中 `associationKey`、`getTaskByParentTool`、`clearRunSummary`、`renderLiveAssistantCard`
+四個根本不在 app-main.mjs，是對其他模組的跨檔源碼檢查。
+
+**建議**：純決策已採收完畢，此處停止。若日後仍要讓 app-main.mjs 大幅瘦身，
+應處理的是那 52 個 controller 裝配區塊，那是獨立的架構工作，與本測試無關。
