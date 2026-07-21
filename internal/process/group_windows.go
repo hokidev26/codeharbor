@@ -9,18 +9,19 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Windows Job Object constants (process-group equivalent for managed trees).
 const (
-	jobObjectExtendedLimitInformation = 9
-	jobObjectLimitKillOnJobClose      = 0x2000
-	createNewProcessGroup             = 0x00000200
+	jobObjectExtendedLimitInformationClass = 9
+	createNewProcessGroup                  = 0x00000200
 )
 
 type windowsGroup struct {
 	mu  sync.Mutex
-	job syscall.Handle
+	job windows.Handle
 }
 
 type ioCounters struct {
@@ -44,7 +45,7 @@ type jobObjectBasicLimitInformation struct {
 	SchedulingClass         uint32
 }
 
-type jobObjectExtendedLimitInformation struct {
+type jobObjectExtendedLimitInfo struct {
 	BasicLimitInformation jobObjectBasicLimitInformation
 	IoInfo                ioCounters
 	ProcessMemoryLimit    uintptr
@@ -69,7 +70,7 @@ func (g *windowsGroup) started(cmd *exec.Cmd) error {
 		return err
 	}
 	if err := assignProcessToJob(job, cmd.Process.Pid); err != nil {
-		_ = syscall.CloseHandle(job)
+		_ = windows.CloseHandle(job)
 		return err
 	}
 	g.mu.Lock()
@@ -106,7 +107,7 @@ func (g *windowsGroup) kill(cmd *exec.Cmd) error {
 			g.job = 0
 		}
 		g.mu.Unlock()
-		return syscall.CloseHandle(job)
+		return windows.CloseHandle(job)
 	}
 	if cmd != nil && cmd.Process != nil {
 		return cmd.Process.Kill()
@@ -118,22 +119,22 @@ func (g *windowsGroup) close() error {
 	return g.kill(nil)
 }
 
-func createKillOnCloseJob() (syscall.Handle, error) {
-	job, err := syscall.CreateJobObject(nil, nil)
+func createKillOnCloseJob() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return 0, fmt.Errorf("create job object: %w", err)
 	}
-	var info jobObjectExtendedLimitInformation
-	info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnJobClose
-	if err := setJobInformation(job, jobObjectExtendedLimitInformation, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info))); err != nil {
-		_ = syscall.CloseHandle(job)
+	var info jobObjectExtendedLimitInfo
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if err := setJobInformation(job, jobObjectExtendedLimitInformationClass, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info))); err != nil {
+		_ = windows.CloseHandle(job)
 		return 0, err
 	}
 	return job, nil
 }
 
-func setJobInformation(job syscall.Handle, class uint32, info unsafe.Pointer, length uint32) error {
-	r1, _, err := syscall.NewLazyDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
+func setJobInformation(job windows.Handle, class uint32, info unsafe.Pointer, length uint32) error {
+	r1, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
 		uintptr(job),
 		uintptr(class),
 		uintptr(info),
@@ -148,18 +149,15 @@ func setJobInformation(job syscall.Handle, class uint32, info unsafe.Pointer, le
 	return nil
 }
 
-func assignProcessToJob(job syscall.Handle, pid int) error {
-	handle, err := syscall.OpenProcess(syscall.PROCESS_SET_QUOTA|syscall.PROCESS_TERMINATE|syscall.PROCESS_DUP_HANDLE|0x0400 /*PROCESS_QUERY_INFORMATION*/, false, uint32(pid))
+func assignProcessToJob(job windows.Handle, pid int) error {
+	access := uint32(windows.PROCESS_SET_QUOTA | windows.PROCESS_TERMINATE | windows.PROCESS_DUP_HANDLE | windows.PROCESS_QUERY_INFORMATION)
+	handle, err := windows.OpenProcess(access, false, uint32(pid))
 	if err != nil {
 		return fmt.Errorf("OpenProcess: %w", err)
 	}
-	defer syscall.CloseHandle(handle)
-	r1, _, callErr := syscall.NewLazyDLL("kernel32.dll").NewProc("AssignProcessToJobObject").Call(uintptr(job), uintptr(handle))
-	if r1 == 0 {
-		if callErr != nil {
-			return fmt.Errorf("AssignProcessToJobObject: %w", callErr)
-		}
-		return fmt.Errorf("AssignProcessToJobObject failed")
+	defer windows.CloseHandle(handle)
+	if err := windows.AssignProcessToJobObject(job, handle); err != nil {
+		return fmt.Errorf("AssignProcessToJobObject: %w", err)
 	}
 	return nil
 }
