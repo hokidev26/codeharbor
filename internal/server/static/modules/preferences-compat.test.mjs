@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readStylesSource } from "./styles-source-helper.mjs";
 
 import {
   appearancePrefsKey,
@@ -531,7 +532,7 @@ test("appearance settings render a flat compact form with five accessible preset
     backgroundManager: { snapshot: () => ({ background: { mode: "theme", url: "", dim: 18, positionX: 50, positionY: 50 } }) },
   });
   const markup = settings.renderAppearanceSettingsContent();
-  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const styles = await readStylesSource(new URL("../styles.css", import.meta.url));
 
   assert.match(markup, /compact-settings-page appearance-page/);
   assert.match(markup, /compact-settings-section/);

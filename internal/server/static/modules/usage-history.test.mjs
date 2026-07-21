@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readStylesSource } from "./styles-source-helper.mjs";
 
 import { usageHistoryMessages, usageHistoryMessage } from "./messages-usage-history.mjs";
 import {
@@ -257,7 +258,7 @@ test("static integration uses the new usage controller and leaves metric card re
   const [appMain, systemSettings, styles] = await Promise.all([
     readFile(new URL("modules/app-main.mjs", root), "utf8"),
     readFile(new URL("modules/system-settings.mjs", root), "utf8"),
-    readFile(new URL("styles.css", root), "utf8"),
+    readStylesSource(new URL("styles.css", root)),
   ]);
   assert.match(appMain, /createUsageHistoryController/);
   assert.match(appMain, /\["usage", \{ render: usageHistory\.render, bind: usageHistory\.bind \}\]/);
