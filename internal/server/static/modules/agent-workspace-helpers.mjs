@@ -5,6 +5,90 @@ import { appMainT as am } from "./messages-app-main-extra.mjs";
 // Small, mostly independent helpers around the agent transport connection
 // badge, chat attachment classification, the terminal dock toggle, and
 // opening the task-workspace board for a given agent.
+function compactActivityTarget(value, max = 28) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(8, max - 1))}…`;
+}
+
+function toolActivityVerbLabel(toolName, translate = t) {
+  const name = String(toolName || "").toLowerCase();
+  if (name.includes("grep") || name.includes("search") || name.includes("glob") || name.includes("web_search") || name.includes("websearch")) {
+    return translate("chat.activity.searching");
+  }
+  if (name.includes("read") || name.includes("open_page") || name.includes("webfetch")) return translate("chat.activity.reading");
+  if (name.includes("edit") || name.includes("apply_patch") || name.includes("strreplace")) return translate("chat.activity.editing");
+  if (name.includes("write") || name.includes("create_file")) return translate("chat.activity.writing");
+  if (name.includes("bash") || name.includes("shell") || name.includes("terminal") || name.includes("exec")) {
+    return translate("chat.activity.runningCommand");
+  }
+  return translate("chat.activity.genericStep");
+}
+
+function toolActivityTargetLabel(item) {
+  const input = item?.inputJson && typeof item.inputJson === "object"
+    ? item.inputJson
+    : (item?.input && typeof item.input === "object" ? item.input : {});
+  const command = input.command || input.cmd;
+  const filePath = input.file_path || input.filePath || input.path || input.cwd;
+  const pattern = input.pattern || input.query;
+  const value = input.value || input.url || input.ref_id;
+  if (command) return compactActivityTarget(command, 36);
+  if (filePath) return compactActivityTarget(String(filePath).split(/[\\/]/).pop() || filePath, 28);
+  if (pattern) return compactActivityTarget(pattern, 28);
+  if (value) return compactActivityTarget(value, 28);
+  return "";
+}
+
+function runningLiveTools(state) {
+  const agentId = state?.agent?.id || "";
+  return Object.values(state?.liveToolOutputs || {})
+    .filter((item) => item && (!item.agentId || item.agentId === agentId))
+    .filter((item) => {
+      const status = String(item.status || "").toLowerCase();
+      return !status || ["running", "pending", "in_progress", "started", "active"].includes(status);
+    })
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
+export function resolveComposerActivityStatus(state, translate = t) {
+  const approvals = Object.values(state?.pendingToolApprovals || {}).filter(Boolean);
+  if (approvals.length) {
+    const toolName = approvals[0]?.toolName || approvals[0]?.name || "";
+    return {
+      kind: "approval",
+      text: toolName
+        ? `${translate("chat.activity.awaitingApproval")} · ${compactActivityTarget(toolName, 18)}`
+        : translate("chat.activity.awaitingApproval"),
+    };
+  }
+
+  const [tool] = runningLiveTools(state);
+  if (tool) {
+    const verb = toolActivityVerbLabel(tool.toolName, translate);
+    const target = toolActivityTargetLabel(tool);
+    return {
+      kind: "tool",
+      text: target ? `${verb} ${target}` : verb,
+    };
+  }
+
+  if (state?.liveAssistantActive) {
+    const hasText = Boolean(String(state.liveAssistantText || "").trim());
+    return {
+      kind: hasText ? "generating" : "thinking",
+      text: hasText ? translate("chat.activity.generating") : translate("chat.activity.thinking"),
+    };
+  }
+
+  if (String(state?.agent?.status || "").toLowerCase() === "running") {
+    return { kind: "thinking", text: translate("chat.activity.thinking") };
+  }
+
+  return null;
+}
+
 export function createAgentWorkspaceHelpers({
   state,
   getAgentStream,
@@ -23,11 +107,36 @@ export function createAgentWorkspaceHelpers({
   loadProjects,
   selectNavigationConversation,
 }) {
-  function setComposerConnectionStatus(text, ok = false) {
+  let lastConnectionStatus = { text: t("chat.idle"), ok: false };
+
+  function paintComposerStatus() {
     const label = $("composerStatusText");
     const dot = $("composerStatusDot");
+    const wrap = label?.closest?.(".composer-status") || document.querySelector?.(".composer-status");
+    const activity = resolveComposerActivityStatus(state, t);
+    const text = activity?.text || lastConnectionStatus.text || t("chat.idle");
+    const busy = Boolean(activity);
+    const ok = !busy && Boolean(lastConnectionStatus.ok);
     if (label) label.textContent = text;
-    if (dot) dot.classList.toggle("ok", ok);
+    if (dot) {
+      dot.classList.toggle("ok", ok);
+      dot.classList.toggle("busy", busy);
+    }
+    if (wrap) {
+      wrap.classList.toggle("is-busy", busy);
+      wrap.classList.toggle("is-ok", ok);
+      wrap.title = text;
+      wrap.setAttribute("aria-label", text);
+    }
+  }
+
+  function setComposerConnectionStatus(text, ok = false) {
+    lastConnectionStatus = { text: text || t("chat.idle"), ok: Boolean(ok) };
+    paintComposerStatus();
+  }
+
+  function refreshComposerActivityStatus() {
+    paintComposerStatus();
   }
 
   function connectWS() {
@@ -110,6 +219,7 @@ export function createAgentWorkspaceHelpers({
 
   return {
     setComposerConnectionStatus,
+    refreshComposerActivityStatus,
     connectWS,
     updateAgentStreamStatus,
     attachmentKind,

@@ -3716,6 +3716,116 @@ body.white-shell.theme-light .composer-select-chevron {
   font-weight: 700;
 }
 
+.composer-message-mode-section-title {
+  padding-top: 2px;
+}
+
+.mobile-permission-sheet .mobile-select-sheet-options {
+  gap: 2px;
+}
+
+.mobile-permission-sheet .composer-permission-option {
+  min-height: 44px;
+  width: 100%;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+.mobile-permission-sheet .composer-permission-option-main {
+  gap: 12px;
+}
+
+.mobile-permission-sheet .composer-permission-option-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
+.mobile-permission-sheet .composer-permission-option-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.mobile-permission-sheet .composer-permission-divider {
+  margin: 8px 2px;
+  background: rgba(60, 60, 67, .12);
+}
+
+.mobile-permission-sheet .composer-permission-safety-status {
+  min-height: 40px;
+  margin: 2px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(118, 118, 128, .12);
+  color: #3a4150;
+}
+
+.mobile-permission-sheet .composer-message-mode-section-title {
+  padding: 4px 12px 6px;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mobile-permission-sheet .composer-select-option-check {
+  color: #007aff;
+  font-weight: 700;
+}
+
+body.white-shell.theme-light .composer-status.is-busy {
+  width: auto;
+  min-width: 0;
+  max-width: min(46vw, 220px);
+  flex: 0 1 auto;
+  justify-content: flex-start;
+  gap: 7px;
+  padding-right: 4px;
+}
+
+body.white-shell.theme-light .composer-status-dot.busy,
+body.white-shell.theme-light .composer-status.is-busy .composer-status-dot {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 2px solid color-mix(in srgb, var(--ws-primary, #2563eb) 22%, transparent);
+  border-top-color: var(--ws-primary, #2563eb);
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  animation: composer-task-indicator-spin .8s linear infinite;
+}
+
+body.white-shell.theme-light .composer-status.is-busy .composer-status-text {
+  display: inline;
+  overflow: hidden;
+  color: var(--ws-primary, #2563eb);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.white-shell.theme-light .composer-status.is-busy .composer-status-bars {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  body.white-shell.theme-light .composer-status.is-busy {
+    max-width: min(42vw, 168px);
+    margin-right: auto;
+  }
+
+  body.white-shell.theme-light .composer-status.is-busy .composer-status-text {
+    font-size: 11px;
+  }
+
+  body.white-shell.theme-light .composer-toolbar:has(.composer-task-summary.has-task) .composer-status.is-busy {
+    display: inline-flex;
+  }
+}
+
 body.white-shell.theme-light .toolbar-lightning-btn svg,
 body.white-shell.theme-light .composer-toolbar-icon svg {
   width: 18px;

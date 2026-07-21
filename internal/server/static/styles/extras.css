@@ -284,7 +284,18 @@ body.white-shell.theme-light .composer-wrap {
     overflow: visible;
   }
 
-  body.white-shell.theme-light .composer-toolbar:has(.composer-task-summary.has-task) .composer-status {
+  body.white-shell.theme-light .composer-status.is-busy {
+    width: auto;
+    min-width: 0;
+    max-width: min(48vw, 200px);
+    flex: 0 1 auto;
+    justify-content: flex-start;
+    gap: 6px;
+    margin-right: auto;
+    padding-right: 2px;
+  }
+
+  body.white-shell.theme-light .composer-toolbar:has(.composer-task-summary.has-task) .composer-status:not(.is-busy) {
     display: none;
   }
 
@@ -301,9 +312,28 @@ body.white-shell.theme-light .composer-wrap {
     box-shadow: none;
   }
 
+  body.white-shell.theme-light .composer-status-dot.busy,
+  body.white-shell.theme-light .composer-status.is-busy .composer-status-dot {
+    border-color: color-mix(in srgb, var(--ws-primary, #2563eb) 22%, transparent);
+    border-top-color: var(--ws-primary, #2563eb);
+    border-right-color: color-mix(in srgb, var(--ws-primary, #2563eb) 22%, transparent);
+    animation: composer-task-indicator-spin .8s linear infinite;
+  }
+
   body.white-shell.theme-light .composer-status-bars,
-  body.white-shell.theme-light .composer-status-text {
+  body.white-shell.theme-light .composer-status:not(.is-busy) .composer-status-text {
     display: none;
+  }
+
+  body.white-shell.theme-light .composer-status.is-busy .composer-status-text {
+    display: inline;
+    overflow: hidden;
+    color: var(--ws-primary, #2563eb);
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   body.white-shell.theme-light .composer-controls {

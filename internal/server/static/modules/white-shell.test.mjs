@@ -765,7 +765,12 @@ test("composer selects hide external labels and open titled menus upward", async
   assert.match(styles, /\.composer-permission-safety-status\s*\{/);
   assert.match(uiShell, /heading\.textContent = binding\.label\?\.textContent/);
   assert.match(uiShell, /menu\.classList\.toggle\("composer-permission-popover", isPermissionMenu\)/);
-  assert.match(uiShell, /appendPermissionSafetyStatus\(\)/);
+  assert.match(uiShell, /appendPermissionSafetyStatus\(/);
+  assert.match(uiShell, /appendMessageModeSection\(/);
+  assert.match(uiShell, /usesMobileSheet[\s\S]*permissionMode/);
+  assert.match(uiShell, /messageModeToggle\?\.addEventListener\("click", messageModeHandler\)/);
+  assert.match(uiShell, /chat\.enterPlanMode/);
+  assert.match(uiShell, /chat\.executeMode/);
   assert.match(uiShell, /menu\.style\.bottom = `\$\{Math\.max\(8,[\s\S]*?- rect\.top \+ 6\)\}px`/);
   assert.match(uiShell, /binding\.select\.dispatchEvent\(new EventConstructor\("change"/);
 });
@@ -965,6 +970,8 @@ test("mobile header and composer use compact icon-first layouts", async () => {
   assert.doesNotMatch(appMain, /\$\("(?:remoteSecurityBanner|workbenchRemoteSecurityBanner)"\)/);
   assert.match(html, /data-message-mode="plan"[^>]*data-mobile-label="P"/);
   assert.match(html, /data-message-mode="execute"[^>]*data-mobile-label="▶"/);
+  assert.match(styles, /\.mobile-permission-sheet \.composer-permission-option/);
+  assert.match(styles, /\.composer-message-mode-section-title/);
   assert.match(html, /id="sendMessageBtn"[^>]*data-mobile-label="↑"/);
   assert.equal(compactComposerModelLabel("cliproxyapi:claude-sonnet-4-6"), "sonnet");
   assert.equal(compactComposerModelLabel("codex:gpt-5.5"), "gpt-5.5");
@@ -1000,6 +1007,9 @@ test("narrow composer switches atomically to a fixed unframed icon rail", async 
   assert.ok(iconRail.startsWith(marker));
   assert.match(iconRail, /@container composer-shell \(max-width:\s*480px\)/);
   assert.match(iconRail, /\.composer-status\s*\{[^}]*width:\s*28px[^}]*display:\s*inline-flex[^}]*flex:\s*0 0 28px/);
+  assert.match(iconRail, /\.composer-status\.is-busy\s*\{[^}]*width:\s*auto[^}]*flex:\s*0 1 auto/);
+  assert.match(iconRail, /\.composer-status-dot\.busy,[\s\S]*?animation:\s*composer-task-indicator-spin/);
+  assert.match(iconRail, /\.composer-status\.is-busy \.composer-status-text\s*\{[^}]*display:\s*inline/);
   assert.match(iconRail, /\.composer-status-dot,[\s\S]*?\.composer-status-dot\.ok\s*\{[^}]*width:\s*14px[^}]*border:\s*2px solid[^}]*background:\s*transparent/);
   assert.match(iconRail, /\.composer-controls\s*\{[^}]*min-width:\s*max-content[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible/);
   assert.match(iconRail, /:is\(\.composer-model-field, \.composer-effort-field, \.composer-permission-field\)\s*\{[^}]*width:\s*28px[^}]*min-width:\s*28px[^}]*max-width:\s*28px[^}]*flex:\s*0 0 28px/);

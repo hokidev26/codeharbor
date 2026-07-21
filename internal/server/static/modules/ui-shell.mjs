@@ -69,6 +69,8 @@ const permissionMenuIconMarkup = Object.freeze({
   bypassPermissions: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.5-2.5 7.8-7 10-4.5-2.2-7-5.5-7-10V6z"></path><path d="m8.5 8.5 7 7"></path><path d="m15.5 8.5-7 7"></path></svg>',
   readOnly: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>',
   dontAsk: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11V6.5a1.5 1.5 0 0 1 3 0V10"></path><path d="M11 10V5.5a1.5 1.5 0 0 1 3 0V10"></path><path d="M14 10V7a1.5 1.5 0 0 1 3 0v5"></path><path d="M8 10.5 6.7 9.2a1.7 1.7 0 0 0-2.4 2.4l4.2 5.1A5 5 0 0 0 12.4 19H14a5 5 0 0 0 5-5v-3.5a1.5 1.5 0 0 0-3 0"></path></svg>',
+  plan: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8a2 2 0 0 1 2 2v14l-3-2-3 2-3-2-3 2V6a2 2 0 0 1 2-2z"></path><path d="M9 9h6M9 13h4"></path></svg>',
+  execute: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 9 5-9 5z"></path></svg>',
 });
 
 export function normalizeSidebarWidth(value, fallback = defaultSidebarWidth, { compact = false } = {}) {
@@ -113,6 +115,8 @@ export function createUIShellController({
   manageContext = null,
   compactContext = () => {},
   getContextStatus = () => ({}),
+  getMessageMode = () => "execute",
+  setMessageMode = () => {},
   renderProjects,
   onLayoutChange = renderProjects,
   resizeTerminal,
@@ -123,6 +127,7 @@ export function createUIShellController({
   const manageContextAction = typeof manageContext === "function" ? manageContext : compactContext;
   const mobileViewport = () => window.matchMedia?.("(max-width: 767px)")?.matches
     ?? (globalThis.innerWidth || document.documentElement.clientWidth) <= 767;
+  const resolveMessageMode = () => (getMessageMode?.() === "plan" ? "plan" : "execute");
 
   function isVisibleDialog(node) {
     if (!node || node.classList?.contains("hidden") || node.getAttribute?.("aria-hidden") === "true" || node.closest?.("[hidden], .hidden, [aria-hidden=\"true\"]")) return false;
@@ -403,7 +408,7 @@ export function createUIShellController({
     }).filter(({ select }) => select);
 
     const usesMobileSheet = (binding) => mobileViewport()
-      && ["modelSelect", "reasoningEffort"].includes(binding.select.id);
+      && ["modelSelect", "reasoningEffort", "permissionMode"].includes(binding.select.id);
 
     const close = ({ focus = false } = {}) => {
       if (!active) return;
@@ -420,9 +425,11 @@ export function createUIShellController({
         menu.classList.remove("composer-permission-popover", "composer-model-popover");
         menu.replaceChildren();
       }
-      binding.trigger.setAttribute("aria-expanded", "false");
-      binding.trigger.setAttribute("aria-haspopup", binding.ariaHaspopup);
-      binding.trigger.removeAttribute("aria-controls");
+      if (binding?.trigger) {
+        binding.trigger.setAttribute("aria-expanded", "false");
+        binding.trigger.setAttribute("aria-haspopup", binding.ariaHaspopup || "listbox");
+        binding.trigger.removeAttribute("aria-controls");
+      }
       if (focus && returnFocus?.isConnected !== false) returnFocus?.focus?.();
     };
 
@@ -433,11 +440,15 @@ export function createUIShellController({
       close({ focus: true });
     };
 
-    const createOptionButton = (binding, option, { permission = false } = {}) => {
+    const createOptionButton = (binding, option, { permission = false, mobile = false } = {}) => {
       const selected = option.value === binding.select.value;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = permission ? "composer-select-option composer-permission-option" : "composer-select-option";
+      button.className = [
+        "composer-select-option",
+        permission ? "composer-permission-option" : "",
+        mobile ? "mobile-select-sheet-option" : "",
+      ].filter(Boolean).join(" ");
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", selected ? "true" : "false");
       button.disabled = option.disabled;
@@ -502,7 +513,7 @@ export function createUIShellController({
       return button;
     };
 
-    const appendPermissionSafetyStatus = () => {
+    const appendPermissionSafetyStatus = (target = menu) => {
       const divider = document.createElement("div");
       divider.className = "composer-permission-divider";
       divider.setAttribute("aria-hidden", "true");
@@ -520,22 +531,74 @@ export function createUIShellController({
       state.className = "composer-permission-safety-state";
       state.textContent = translate("common.enabled");
       status.append(icon, label, state);
-      menu.append(divider, status);
+      target.append(divider, status);
     };
 
-    const appendPermissionOptions = (binding) => {
+    const chooseMessageMode = (mode) => {
+      setMessageMode?.(mode === "plan" ? "plan" : "execute");
+      close({ focus: true });
+    };
+
+    const createMessageModeOption = (mode, { mobile = false } = {}) => {
+      const selected = resolveMessageMode() === mode;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = mobile
+        ? "composer-select-option mobile-select-sheet-option composer-permission-option"
+        : "composer-select-option composer-permission-option";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+      button.dataset.messageModeOption = mode;
+
+      const main = document.createElement("span");
+      main.className = "composer-permission-option-main";
+      const icon = document.createElement("span");
+      icon.className = "composer-permission-option-icon";
+      icon.innerHTML = permissionMenuIconMarkup[mode] || permissionMenuIconMarkup.execute;
+      const label = document.createElement("span");
+      label.textContent = mode === "plan"
+        ? translate("chat.enterPlanMode")
+        : translate("chat.executeMode");
+      main.append(icon, label);
+      button.appendChild(main);
+
+      const check = document.createElement("span");
+      check.className = "composer-select-option-check";
+      check.setAttribute("aria-hidden", "true");
+      check.textContent = selected ? "✓" : "";
+      button.appendChild(check);
+      button.addEventListener("click", () => chooseMessageMode(mode));
+      return button;
+    };
+
+    const appendMessageModeSection = (target = menu, { mobile = false } = {}) => {
+      const divider = document.createElement("div");
+      divider.className = "composer-permission-divider";
+      divider.setAttribute("aria-hidden", "true");
+      target.appendChild(divider);
+
+      const heading = document.createElement("div");
+      heading.className = "composer-select-popover-title composer-message-mode-section-title";
+      heading.textContent = translate("chat.messageMode");
+      target.appendChild(heading);
+      target.appendChild(createMessageModeOption("execute", { mobile }));
+      target.appendChild(createMessageModeOption("plan", { mobile }));
+    };
+
+    const appendPermissionOptions = (binding, target = menu, { mobile = false } = {}) => {
       const options = orderPermissionMenuOptions([...binding.select.options].filter((option) => !option.hidden));
       const primary = options.filter((option) => permissionMenuPrimaryValues.includes(option.value));
       const secondary = options.filter((option) => !permissionMenuPrimaryValues.includes(option.value));
-      primary.forEach((option) => menu.appendChild(createOptionButton(binding, option, { permission: true })));
-      appendPermissionSafetyStatus();
+      primary.forEach((option) => target.appendChild(createOptionButton(binding, option, { permission: true, mobile })));
+      appendPermissionSafetyStatus(target);
       if (secondary.length) {
         const divider = document.createElement("div");
         divider.className = "composer-permission-divider";
         divider.setAttribute("aria-hidden", "true");
-        menu.appendChild(divider);
-        secondary.forEach((option) => menu.appendChild(createOptionButton(binding, option, { permission: true })));
+        target.appendChild(divider);
+        secondary.forEach((option) => target.appendChild(createOptionButton(binding, option, { permission: true, mobile })));
       }
+      appendMessageModeSection(target, { mobile });
     };
 
     const positionMenu = (trigger) => {
@@ -644,18 +707,28 @@ export function createUIShellController({
 
     const openMobile = (binding, { returnFocus = binding.trigger } = {}) => {
       const isModel = binding.select.id === "modelSelect";
+      const isPermission = binding.select.id === "permissionMode";
       active = { binding, mobile: true, returnFocus };
-      mobileSheet.className = `mobile-select-sheet ${isModel ? "mobile-model-sheet" : "mobile-reasoning-sheet"}`;
-      mobileTitle.textContent = isModel ? translate("chat.selectModel") : (binding.label?.textContent?.trim() || translate("chat.reasoningEffort"));
+      mobileSheet.className = `mobile-select-sheet ${isModel ? "mobile-model-sheet" : isPermission ? "mobile-permission-sheet" : "mobile-reasoning-sheet"}`;
+      mobileTitle.textContent = isModel
+        ? translate("chat.selectModel")
+        : isPermission
+          ? translate("chat.permissionMode")
+          : (binding.label?.textContent?.trim() || translate("chat.reasoningEffort"));
 
       const options = document.createElement("div");
       options.className = "mobile-select-sheet-options";
       options.setAttribute("role", "listbox");
       options.setAttribute("aria-label", mobileTitle.textContent);
-      [...binding.select.options]
-        .filter((option) => !option.hidden)
-        .forEach((option) => options.appendChild(createMobileOptionButton(binding, option, { model: isModel })));
-      mobileBody.replaceChildren(options);
+      if (isPermission) {
+        appendPermissionOptions(binding, options, { mobile: true });
+        mobileBody.replaceChildren(options);
+      } else {
+        [...binding.select.options]
+          .filter((option) => !option.hidden)
+          .forEach((option) => options.appendChild(createMobileOptionButton(binding, option, { model: isModel })));
+        mobileBody.replaceChildren(options);
+      }
 
       if (isModel) {
         const actions = document.createElement("div");
@@ -687,14 +760,14 @@ export function createUIShellController({
       document.body.style.overflow = "hidden";
       mobileBackdrop.classList.remove("hidden");
       mobileBackdrop.setAttribute("aria-hidden", "false");
-      binding.trigger.setAttribute("aria-haspopup", "dialog");
-      binding.trigger.setAttribute("aria-expanded", "true");
-      binding.trigger.setAttribute("aria-controls", mobileSheet.id);
+      binding.trigger?.setAttribute("aria-haspopup", "dialog");
+      binding.trigger?.setAttribute("aria-expanded", "true");
+      binding.trigger?.setAttribute("aria-controls", mobileSheet.id);
       (options.querySelector('[aria-selected="true"]') || options.querySelector("button") || mobileClose).focus?.();
     };
 
     const open = (binding) => {
-      if (active?.binding.trigger === binding.trigger) {
+      if (active?.binding?.trigger === binding.trigger) {
         close();
         return;
       }
@@ -713,7 +786,7 @@ export function createUIShellController({
       heading.textContent = binding.label?.textContent?.trim() || binding.select.title || "";
       menu.appendChild(heading);
       if (isPermissionMenu) {
-        appendPermissionOptions(binding);
+        appendPermissionOptions(binding, menu, { mobile: false });
       } else {
         [...binding.select.options]
           .filter((option) => !option.hidden)
@@ -727,6 +800,25 @@ export function createUIShellController({
       menu.querySelector('[aria-selected="true"]')?.focus();
     };
 
+    const openPermissionMenu = (returnFocus = null) => {
+      const permissionBinding = bindings.find(({ select }) => select.id === "permissionMode");
+      if (!permissionBinding) return;
+      if (returnFocus) {
+        close();
+        if (usesMobileSheet(permissionBinding)) {
+          openMobile(permissionBinding, { returnFocus });
+          return;
+        }
+        open(permissionBinding);
+        if (active) {
+          active.returnFocus = returnFocus;
+          positionMenu(returnFocus);
+        }
+        return;
+      }
+      open(permissionBinding);
+    };
+
     const triggerHandlers = bindings.map((binding) => {
       const handler = (event) => {
         event.preventDefault();
@@ -736,8 +828,24 @@ export function createUIShellController({
       binding.trigger.addEventListener("click", handler);
       return [binding.trigger, handler];
     });
+
+    const messageModeToggle = $("messageModeToggle");
+    const messageModeHandler = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (active?.binding?.select?.id === "permissionMode") {
+        close({ focus: true });
+        return;
+      }
+      openPermissionMenu(messageModeToggle || event.currentTarget);
+    };
+    messageModeToggle?.addEventListener("click", messageModeHandler);
+
     const handleDocumentPointer = (event) => {
-      if (!active || active.mobile || menu.contains(event.target) || active.binding.trigger.contains(event.target)) return;
+      if (!active || active.mobile) return;
+      if (menu.contains(event.target)) return;
+      if (active.binding?.trigger?.contains?.(event.target)) return;
+      if (messageModeToggle?.contains?.(event.target)) return;
       close();
     };
     const handleDocumentKey = (event) => {
@@ -780,6 +888,7 @@ export function createUIShellController({
     return () => {
       close();
       triggerHandlers.forEach(([trigger, handler]) => trigger.removeEventListener("click", handler));
+      messageModeToggle?.removeEventListener("click", messageModeHandler);
       bindings.forEach(({ select, sync }) => select.removeEventListener("change", sync));
       observers.forEach((observer) => observer.disconnect());
       mobileBackdrop.removeEventListener("click", handleBackdropClick);

@@ -74,7 +74,7 @@ import { createSystemSettingsController } from "./system-settings.mjs?v=users-pa
 import { installDesktopDeepLinkRouter, isDesktopShell } from "./desktop-shell-ui.mjs";
 import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-panel-removed-1";
 import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-2";
-import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1-context-ring-2-dual-rail-collapse-1-compact-navigation-1-global-rail-2";
+import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-2-plan-mode-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1-context-ring-2-dual-rail-collapse-1-compact-navigation-1-global-rail-2";
 import { createUsageHistoryController } from "./usage-history.mjs";
 import { createAgentWorkspaceHelpers } from "./agent-workspace-helpers.mjs";
 import { createNavigationContextMenu } from "./navigation-context-menu.mjs";
@@ -473,6 +473,7 @@ const agentWorkspaceHelpers = createAgentWorkspaceHelpers({
 
 const {
   setComposerConnectionStatus,
+  refreshComposerActivityStatus,
   connectWS,
   updateAgentStreamStatus,
   attachmentKind,
@@ -1072,6 +1073,11 @@ const contextManagement = createContextManagementController({
 });
 contextManagement.bind();
 
+const messageModeBridge = {
+  get: () => "execute",
+  set: () => "execute",
+};
+
 const uiShell = createUIShellController({
   state,
   clearSettingsSearchQuery,
@@ -1084,6 +1090,8 @@ const uiShell = createUIShellController({
   openModelSettings: () => openSettingsModal("models"),
   manageContext: (options) => contextManagement.open(options),
   getContextStatus: () => contextManagement.getStatus(),
+  getMessageMode: () => messageModeBridge.get(),
+  setMessageMode: (mode) => messageModeBridge.set(mode),
   renderProjects,
   onLayoutChange: ({ sessionSidebarMode = "expanded" } = {}) => {
     const changed = state.sessionSidebarLayout !== sessionSidebarMode;
@@ -1252,6 +1260,16 @@ const {
   updatePromptHistoryHint,
   updateSlashCommandPalette,
 } = chatComposer;
+
+messageModeBridge.get = () => {
+  const agentId = state.agent?.id;
+  const saved = agentId ? state.messageModes?.[agentId] : "";
+  if (saved === "plan" || saved === "execute") return saved;
+  const toggle = $("messageModeToggle");
+  if (toggle?.dataset?.mode === "plan" || toggle?.dataset?.mode === "execute") return toggle.dataset.mode;
+  return state.agent?.planMode === true ? "plan" : "execute";
+};
+messageModeBridge.set = (mode) => setMessageMode(mode);
 
 settingsPreferences = createSettingsPreferencesController({
   state,
@@ -3189,6 +3207,7 @@ async function handleAgentStreamEvent(event) {
     syncNavigationConversationFromAgent(state.agent, { status: "running", reason: "agent-started" });
     clearRunSummary();
     clearLiveAssistantText();
+    refreshComposerActivityStatus();
   }
   if (event.type === "model.started") {
     beginLiveAssistantGeneration({
@@ -3198,9 +3217,11 @@ async function handleAgentStreamEvent(event) {
       model: event.data?.model,
       startedAt: event.data?.startedAt,
     });
+    refreshComposerActivityStatus();
   }
   if (event.type === "agent.text") {
     appendLiveAssistantText(event.text || event.data?.text || "", { requestId, runId });
+    refreshComposerActivityStatus();
   }
   if (event.type === "model.streaming") {
     updateLiveAssistantPerformance(event.data?.pendingThroughput, { requestId, runId });
@@ -3210,15 +3231,20 @@ async function handleAgentStreamEvent(event) {
     if (throughput.ttftMs == null && event.data?.ttftMs != null) throughput.ttftMs = event.data.ttftMs;
     updateLiveAssistantPerformance(throughput, { requestId, runId, replace: true });
   }
-  if (event.type === "tool.started") rememberToolStarted(event);
+  if (event.type === "tool.started") {
+    rememberToolStarted(event);
+    refreshComposerActivityStatus();
+  }
   if (event.type === "tool.output") appendToolOutput(event);
   if (event.type === "tool.approval_required") {
     rememberToolApproval(event);
     showToast(event.data?.risk === "danger" ? t("workspace.chat.dangerousToolBlocked") : t("workspace.chat.toolApproval"), event.data?.risk === "danger" ? "error" : "warn");
+    refreshComposerActivityStatus();
   }
   if (event.type === "tool.finished") {
     clearToolApproval(event.data?.toolUseId);
     finishToolOutput(event);
+    refreshComposerActivityStatus();
   }
   if (event.type === "agent.interrupted") clearCurrentAgentApprovals();
   if (terminalAgentEvents.includes(event.type)) {
@@ -3226,7 +3252,10 @@ async function handleAgentStreamEvent(event) {
     state.agent = { ...state.agent, status };
     syncNavigationConversationFromAgent(state.agent, { status, reason: event.type });
   }
-  if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) clearLiveAssistantText();
+  if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) {
+    clearLiveAssistantText();
+    refreshComposerActivityStatus();
+  }
   if ([...completedMessageEvents, ...terminalAgentEvents].includes(event.type)) scheduleMessageRefresh(80, agentId);
   if (navigationRefreshEvents.includes(event.type)) navigationRefresh.request(event.type);
   if (terminalAgentEvents.includes(event.type) && runId) {
@@ -3538,9 +3567,7 @@ $("manualDirectoryPath").addEventListener("keydown", (event) => {
 });
 $("chooseDirectoryBtn").addEventListener("click", () => createProjectFromDirectory(state.directoryPath).catch(showError));
 $("messageForm").addEventListener("submit", (event) => sendMessage(event).catch(showError));
-document.querySelectorAll("[data-message-mode]").forEach((button) => {
-  button.addEventListener("click", () => setMessageMode(button.dataset.messageMode));
-});
+// Message mode buttons open the shared permission/mode panel (bound in ui-shell).
 $("attachFileBtn")?.addEventListener("click", openAttachmentPicker);
 $("attachFileInput")?.addEventListener("change", (event) => importAttachmentFiles(event).catch(showError));
 $("composerInputShell")?.addEventListener("dragover", handleAttachmentDragOver);
