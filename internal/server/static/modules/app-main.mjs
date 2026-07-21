@@ -30,6 +30,7 @@ import {
   shortPath,
 } from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { createSubagentCardCoordinator } from "./subagent-cards.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1-context-ring-2-global-background-1-theme-v2-1";
 import { appMainT as am } from "./messages-app-main-extra.mjs?v=workbench-title-edit-1-hidden-toggle-removed-1-settings-cleanup-1";
@@ -627,21 +628,6 @@ function getSelectedModelValue() {
 }
 
 let backgroundTasks = null;
-let backgroundTaskAgentLoadGeneration = 0;
-let backgroundTaskAgentLoadInFlight = null;
-let subagentCardRefreshHandle = 0;
-let subagentCardRefreshAgentId = "";
-let subagentCardRefreshSelectionSeq = 0;
-const subagentCardRefreshReasons = new Set([
-  "loaded",
-  "task-loaded",
-  "snapshot",
-  "wait-finished",
-  "cancel-finished",
-  "task.created",
-  "task.status",
-  "task.completed",
-]);
 
 const chatRendering = createChatRenderingController({
   state,
@@ -772,188 +758,20 @@ const executionNotifications = createExecutionNotifications({
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
 });
 
-function subagentCardIdentity(card) {
-  const dataset = card?.dataset || {};
-  const runId = String(dataset.runId || "").trim();
-  const toolUseId = String(dataset.toolUseId || "").trim();
-  if (runId && toolUseId) return JSON.stringify([runId, toolUseId]);
-  const taskId = String(dataset.taskId || "").trim();
-  return taskId ? `task:${taskId}` : "";
-}
-
-function captureSubagentCardViewState(root = $("messages")) {
-  if (!root) return { cards: [], focus: null, scrollTop: 0 };
-  const active = globalThis.document?.activeElement;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")].flatMap((card) => {
-    const key = subagentCardIdentity(card);
-    if (!key) return [];
-    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
-    return [{
-      key,
-      status: String(card.dataset?.subagentStatus || ""),
-      open: details.map((detail) => Boolean(detail.open)),
-    }];
-  });
-  const focusButton = active?.closest?.("[data-subagent-action]");
-  const focusCard = focusButton?.closest?.("[data-subagent-card]");
-  const focusKey = subagentCardIdentity(focusCard);
-  return {
-    cards,
-    focus: focusButton && focusKey ? {
-      key: focusKey,
-      action: focusButton.dataset.subagentAction || "",
-      taskId: focusButton.dataset.taskId || "",
-      childAgentId: focusButton.dataset.childAgentId || "",
-      childRunId: focusButton.dataset.childRunId || "",
-    } : null,
-    scrollTop: root.scrollTop || 0,
-  };
-}
-
-function restoreSubagentCardViewState(snapshot, root = $("messages")) {
-  if (!root || !snapshot) return;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")];
-  for (const card of cards) {
-    const saved = snapshot.cards?.find((item) => item.key === subagentCardIdentity(card));
-    if (!saved) continue;
-    const details = card.matches?.("details") ? [card] : [...card.querySelectorAll("details")];
-    const statusChanged = saved.status !== String(card.dataset?.subagentStatus || "");
-    details.forEach((detail, detailIndex) => {
-      if (detailIndex === 0 && statusChanged) return;
-      detail.open = Boolean(saved.open?.[detailIndex]);
-    });
-  }
-  if (snapshot.focus) {
-    const card = cards.find((item) => subagentCardIdentity(item) === snapshot.focus.key);
-    const button = [...(card?.querySelectorAll?.("[data-subagent-action]") || [])].find((candidate) => (
-      (candidate.dataset.subagentAction || "") === snapshot.focus.action
-      && (candidate.dataset.taskId || "") === snapshot.focus.taskId
-      && (candidate.dataset.childAgentId || "") === snapshot.focus.childAgentId
-      && (candidate.dataset.childRunId || "") === snapshot.focus.childRunId
-    ));
-    if (button) button.focus?.({ preventScroll: true });
-    else card?.querySelector?.("summary")?.focus?.({ preventScroll: true });
-  }
-  root.scrollTop = snapshot.scrollTop || 0;
-}
-
-function subagentToolActivity(runId, toolUseId) {
-  return findToolActivityByIdentity([
-    state.liveToolOutputs,
-    state.activeRunToolCalls,
-    state.activeRunSummary?.toolCalls,
-  ], runId, toolUseId);
-}
-
-function replaceSubagentCard(card) {
-  const runId = String(card?.dataset?.runId || "").trim();
-  const toolUseId = String(card?.dataset?.toolUseId || "").trim();
-  if (!runId || !toolUseId || !("outerHTML" in card)) return false;
-  const tool = subagentToolActivity(runId, toolUseId);
-  if (!tool) return false;
-  const task = backgroundTasks?.getTaskByParentTool?.(runId, toolUseId) || null;
-  const html = renderAgentTaskActivityCardHTML(tool, task);
-  if (!html) return false;
-  card.outerHTML = html;
-  return true;
-}
-
-function refreshSubagentCardsPreservingUI(agentId = state.agent?.id, selectionSeq = state.projectSelectSeq) {
-  if (!agentId || state.agent?.id !== agentId || selectionSeq !== state.projectSelectSeq || state.chatHydrating) return false;
-  const root = $("messages");
-  if (!root) return false;
-  const cards = [...root.querySelectorAll("[data-subagent-card]")];
-  if (!cards.length) return false;
-  const snapshot = captureSubagentCardViewState(root);
-  const replaced = cards.reduce((count, card) => count + (replaceSubagentCard(card) ? 1 : 0), 0);
-  if (replaced === cards.length) {
-    restoreSubagentCardViewState(snapshot, root);
-    return true;
-  }
-  const rendered = applyMessageSnapshot(state.currentMessages, agentId, { forceRender: true, preserveScroll: true });
-  if (rendered) restoreSubagentCardViewState(snapshot, root);
-  return rendered;
-}
-
-function scheduleSubagentCardRefresh(change = {}) {
-  const agentId = state.agent?.id || "";
-  const reason = String(change.reason || "");
-  if (!subagentCardRefreshReasons.has(reason)) return;
-  if (!agentId || state.chatHydrating || (change.agentId && change.agentId !== agentId)) return;
-  subagentCardRefreshAgentId = agentId;
-  subagentCardRefreshSelectionSeq = state.projectSelectSeq;
-  if (subagentCardRefreshHandle) return;
-  const schedule = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
-  subagentCardRefreshHandle = schedule(() => {
-    subagentCardRefreshHandle = 0;
-    const expectedAgentId = subagentCardRefreshAgentId;
-    const expectedSelectionSeq = subagentCardRefreshSelectionSeq;
-    subagentCardRefreshAgentId = "";
-    subagentCardRefreshSelectionSeq = 0;
-    if (expectedSelectionSeq !== state.projectSelectSeq) return;
-    refreshSubagentCardsPreservingUI(expectedAgentId, expectedSelectionSeq);
-  });
-}
-
-function loadBackgroundTasksForAgent(agentId) {
-  const normalizedAgentId = String(agentId || "").trim();
-  if (!normalizedAgentId || !backgroundTasks) return Promise.resolve([]);
-  if (backgroundTaskAgentLoadInFlight?.agentId === normalizedAgentId) return backgroundTaskAgentLoadInFlight.promise;
-  const generation = ++backgroundTaskAgentLoadGeneration;
-  const promise = Promise.resolve(backgroundTasks.loadAgent(normalizedAgentId)).then((tasks) => {
-    if (generation !== backgroundTaskAgentLoadGeneration || state.agent?.id !== normalizedAgentId) return [];
-    return tasks;
-  }).finally(() => {
-    if (backgroundTaskAgentLoadInFlight?.generation === generation) backgroundTaskAgentLoadInFlight = null;
-  });
-  backgroundTaskAgentLoadInFlight = { agentId: normalizedAgentId, generation, promise };
-  return promise;
-}
-
-async function navigateToSubagentAgent(childAgentId) {
-  const agentId = String(childAgentId || "").trim();
-  if (!agentId) return;
-  let conversation = state.navigationConversations.find((item) => item.agentId === agentId);
-  if (!conversation?.targetId) {
-    await loadProjects({ autoEnter: false, reason: "subagent-card-navigation" });
-    conversation = state.navigationConversations.find((item) => item.agentId === agentId);
-  }
-  if (!conversation?.targetId) throw new Error(am("conversationUnavailable"));
-  await selectNavigationConversation(conversation.targetId);
-}
-
-async function navigateToSubagentRun(childAgentId, childRunId) {
-  const agentId = String(childAgentId || "").trim();
-  const runId = String(childRunId || "").trim();
-  if (agentId && agentId !== state.agent?.id) await navigateToSubagentAgent(agentId);
-  if (runId && (!agentId || agentId === state.agent?.id)) await loadRunSummary(runId, { agentId: state.agent?.id });
-}
-
-async function performSubagentCardAction(button) {
-  const action = button?.dataset?.subagentAction || "";
-  const card = button?.closest?.("[data-subagent-card]");
-  const taskId = button?.dataset?.taskId || card?.dataset?.taskId || "";
-  const childAgentId = button?.dataset?.childAgentId || card?.dataset?.childAgentId || "";
-  const childRunId = button?.dataset?.childRunId || card?.dataset?.childRunId || "";
-  if (action === "view-task") await backgroundTasks.selectTask(taskId);
-  else if (action === "cancel") await backgroundTasks.cancel(taskId);
-  else if (action === "open-agent") await navigateToSubagentAgent(childAgentId);
-  else if (action === "open-run") await navigateToSubagentRun(childAgentId, childRunId);
-}
-
-function bindSubagentCardActions() {
-  $("messages")?.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-subagent-action]");
-    if (!button) return;
-    event.preventDefault();
-    Promise.resolve(performSubagentCardAction(button)).catch(showError);
-  });
-}
+const subagentCards = createSubagentCardCoordinator({
+  state,
+  getBackgroundTasks: () => backgroundTasks,
+  applyMessageSnapshot,
+  loadProjects,
+  selectNavigationConversation,
+  loadRunSummary,
+  showError,
+});
 
 backgroundTasks = createBackgroundTasksController({
   request: api,
   onChange: (change) => {
-    scheduleSubagentCardRefresh(change);
+    subagentCards.scheduleRefresh(change);
     if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
   },
   onError: (error) => notifyTerminal(`[warn] ${error?.message || error}\n`),
@@ -966,15 +784,15 @@ backgroundTasks = createBackgroundTasksController({
     toggleTerminal(true);
   },
   onNavigateAgent: (childAgentId) => {
-    navigateToSubagentAgent(childAgentId).catch(showError);
+    subagentCards.navigateToAgent(childAgentId).catch(showError);
   },
   onNavigateRun: (childAgentId, childRunId) => {
-    navigateToSubagentRun(childAgentId, childRunId).catch(showError);
+    subagentCards.navigateToRun(childAgentId, childRunId).catch(showError);
   },
 });
 backgroundTasks.bind();
-backgroundTasks.subscribe?.(scheduleSubagentCardRefresh);
-bindSubagentCardActions();
+backgroundTasks.subscribe?.(subagentCards.scheduleRefresh);
+subagentCards.bindCardActions();
 
 const agentStream = createAgentStreamController({
   api,
@@ -3057,7 +2875,7 @@ async function enterAgent() {
     [messagesLoaded] = await Promise.all([
       loadMessages(agentId),
       loadLatestRunSummary(agentId),
-      loadBackgroundTasksForAgent(agentId),
+      subagentCards.loadBackgroundTasksForAgent(agentId),
     ]);
     if (state.agent?.id !== agentId) return;
     state.chatHydrating = false;

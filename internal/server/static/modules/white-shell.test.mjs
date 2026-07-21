@@ -843,43 +843,21 @@ test("Subagent compact cards integrate background tasks without polling child to
   const enterAgent = appMain.slice(appMain.indexOf("async function enterAgent"), appMain.indexOf("function showModelSetupNotice"));
   assert.match(enterAgent, /state\.chatHydrating = true;[\s\S]*?backgroundTasks\.setAgent\(agentId\)/);
   assert.match(enterAgent, /loadBackgroundTasksForAgent\(agentId\)/);
-  assert.match(appMain, /backgroundTaskAgentLoadGeneration[\s\S]*?backgroundTaskAgentLoadInFlight\?\.agentId === normalizedAgentId/);
   assert.match(backgroundTasks, /background-tasks\?limit=100/);
   assert.match(backgroundTasks, /if \(!alreadyLoaded\) await loadTask\(normalized\)/);
   assert.match(backgroundTasks, /lifecycleRefresh[\s\S]*?hydrateTask\(current\.id, \{ force: lifecycleRefresh \}\)/);
-  assert.match(appMain, /backgroundTasks\.subscribe\?\.\(scheduleSubagentCardRefresh\)/);
 
-  const refreshStart = appMain.indexOf("function refreshSubagentCardsPreservingUI");
-  const refreshEnd = appMain.indexOf("function loadBackgroundTasksForAgent", refreshStart);
-  const refreshBody = appMain.slice(refreshStart, refreshEnd);
-  assert.match(refreshBody, /captureSubagentCardViewState/);
-  assert.match(refreshBody, /cards\.reduce\(\(count, card\) => count \+ \(replaceSubagentCard\(card\) \? 1 : 0\), 0\)/);
-  assert.match(refreshBody, /if \(replaced === cards\.length\)[\s\S]*?restoreSubagentCardViewState\(snapshot, root\);[\s\S]*?return true/);
-  assert.match(refreshBody, /applyMessageSnapshot\(state\.currentMessages, agentId, \{ forceRender: true, preserveScroll: true \}\)/);
-  assert.match(refreshBody, /restoreSubagentCardViewState/);
-  assert.doesNotMatch(refreshBody, /loadRunSummary|tool-calls|loadTask/);
-  assert.match(appMain, /findToolActivityByIdentity\(\[[\s\S]*?state\.liveToolOutputs[\s\S]*?state\.activeRunToolCalls[\s\S]*?state\.activeRunSummary\?\.toolCalls/);
-  assert.match(appMain, /renderAgentTaskActivityCardHTML\(tool, task\)/);
-  assert.match(appMain, /details\.map\(\(detail\) => Boolean\(detail\.open\)\)/);
-  assert.match(appMain, /status:\s*String\(card\.dataset\?\.subagentStatus/);
-  assert.match(appMain, /statusChanged[\s\S]*?detailIndex === 0 && statusChanged[\s\S]*?detail\.open = Boolean\(saved\.open\?\.\[detailIndex\]\)/);
-  assert.match(appMain, /button\.focus\?\.\(\{ preventScroll: true \}\)[\s\S]*?querySelector\?\.\("summary"\)\?\.focus/);
-  assert.match(appMain, /if \(runId && toolUseId\) return JSON\.stringify\(\[runId, toolUseId\]\)/);
-  assert.doesNotMatch(appMain.slice(appMain.indexOf("function subagentCardIdentity"), appMain.indexOf("function captureSubagentCardViewState")), /String\(index\)|cardIndex/);
-  assert.match(appMain, /subagentCardRefreshReasons[\s\S]*?if \(!subagentCardRefreshReasons\.has\(reason\)\) return/);
-  assert.match(appMain, /subagentCardRefreshSelectionSeq = state\.projectSelectSeq[\s\S]*?expectedSelectionSeq !== state\.projectSelectSeq/);
-  assert.doesNotMatch(appMain.slice(appMain.indexOf("const subagentCardRefreshReasons"), appMain.indexOf("]);", appMain.indexOf("const subagentCardRefreshReasons"))), /task\.output|output-loaded/);
-
-  const actionStart = appMain.indexOf("async function performSubagentCardAction");
-  const actionEnd = appMain.indexOf("function bindSubagentCardActions", actionStart);
-  const actionBody = appMain.slice(actionStart, actionEnd);
-  assert.match(actionBody, /action === "view-task"\) await backgroundTasks\.selectTask\(taskId\)/);
-  assert.match(actionBody, /action === "cancel"\) await backgroundTasks\.cancel\(taskId\)/);
-  assert.match(actionBody, /action === "open-agent"\) await navigateToSubagentAgent\(childAgentId\)/);
-  assert.match(actionBody, /action === "open-run"\) await navigateToSubagentRun\(childAgentId, childRunId\)/);
-  assert.match(appMain, /Promise\.resolve\(performSubagentCardAction\(button\)\)\.catch\(showError\)/);
-  assert.match(appMain, /async function navigateToSubagentAgent[\s\S]*?selectNavigationConversation\(conversation\.targetId\)/);
-  assert.match(appMain, /async function navigateToSubagentRun[\s\S]*?loadRunSummary\(runId, \{ agentId: state\.agent\?\.id \}\)/);
+  // The card coordinator itself lives in subagent-cards.mjs and is covered by
+  // behaviour tests in subagent-cards.test.mjs (identity keyed on run/tool
+  // rather than position, in-place replacement without re-rendering, the
+  // refresh-reason allowlist excluding output events, the selection-sequence
+  // staleness guard, view-state and focus restoration, and action routing).
+  // What stays asserted here is only the entry point's side of the contract.
+  assert.match(appMain, /createSubagentCardCoordinator\(\{[\s\S]*?getBackgroundTasks: \(\) => backgroundTasks,/);
+  assert.match(appMain, /backgroundTasks\.subscribe\?\.\(subagentCards\.scheduleRefresh\)/);
+  assert.match(appMain, /subagentCards\.bindCardActions\(\)/);
+  assert.match(appMain, /onNavigateAgent: \(childAgentId\) => \{[\s\S]*?subagentCards\.navigateToAgent\(childAgentId\)\.catch\(showError\)/);
+  assert.match(appMain, /onNavigateRun: \(childAgentId, childRunId\) => \{[\s\S]*?subagentCards\.navigateToRun\(childAgentId, childRunId\)\.catch\(showError\)/);
   for (const action of ["view-task", "cancel", "open-agent", "open-run"]) {
     assert.match(chatRendering, new RegExp(`data-subagent-action="${action}"`));
   }
