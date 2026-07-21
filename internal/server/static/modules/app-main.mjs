@@ -2,6 +2,7 @@ import { createAccountPreferencesController } from "./account-preferences.mjs?v=
 import { createAgentStreamController } from "./agent-stream.mjs";
 import { createAutomationControlController } from "./automation-control.mjs?v=nav-schedules-1";
 import { createArchiveSettingsController } from "./archive-settings.mjs?v=archive-settings-1";
+import { createConversationTitleHelpers } from "./conversation-title-helpers.mjs";
 import { createBackgroundTasksController } from "./background-tasks.mjs?v=subagent-cards-1";
 import { createExecutionNotifications } from "./execution-notifications.mjs";
 import { createBackendRegistryController } from "./backend-registry.mjs?v=agent-admin-removed-1";
@@ -320,7 +321,7 @@ const securityModeHelpers = createSecurityModeHelpers({
   connectionMobileLabel,
   updatePermissionModeDisplay,
   projectOperationContextActive,
-  updateWorkspaceMetaPills,
+  updateWorkspaceMetaPills: () => updateWorkspaceMetaPills(),
   closeSidebarSettingsMenu: () => closeSidebarSettingsMenu(),
   enforceTerminalAccessPolicy: () => enforceTerminalAccessPolicy(),
   renderTerminalButtonState: () => renderTerminalButtonState(),
@@ -337,6 +338,36 @@ const {
   logoutRemoteAccess,
   updateSecurityModeUI,
 } = securityModeHelpers;
+
+const conversationTitleHelpers = createConversationTitleHelpers({
+  state,
+  selectedModelValue: () => selectedModelValue(),
+  currentModelValue: () => currentModelValue(),
+  projectOperationContextActive,
+  effectivePermissionForDisplay,
+  connectionModeSummary,
+  permissionLabel,
+  renderConversationHeaderIdentity,
+  renderWorkbenchHeaderIdentity,
+  renderRecentSidebarConversations,
+  saveConversationTitle,
+  showError,
+});
+
+const {
+  currentWorkspaceModel,
+  conversationHeaderTitle,
+  titleEditorElements,
+  titleForSurface,
+  renderAllTitleEditors,
+  normalizedTitleEditSurface,
+  cancelConversationTitleEdit,
+  updateTitleDraft,
+  handleTitleEditorKeydown,
+  updateWorkspaceMetaPills,
+  loadRecentConversations,
+  rememberCurrentConversation,
+} = conversationTitleHelpers;
 
 const settingsNavigationHelpers = createSettingsNavigationHelpers({
   state,
@@ -2566,32 +2597,6 @@ function connectionMobileLabel(connection) {
   return connection.restricted ? "T−" : "T+";
 }
 
-function currentWorkspaceModel() {
-  return state.agent?.model || selectedModelValue() || currentModelValue() || am("noModelSelected");
-}
-
-function conversationHeaderTitle() {
-  return state.agent?.title || state.navigationTransitionTitle || state.project?.name || t("chat.noAgent");
-}
-
-function titleEditorElements(surface) {
-  const workbench = surface === "workbench";
-  return {
-    display: $(workbench ? "workbenchTitle" : "currentTitle"),
-    input: $(workbench ? "workbenchTitleInput" : "currentTitleInput"),
-    edit: $(workbench ? "editWorkbenchTitleBtn" : "editConversationTitleBtn"),
-    save: $(workbench ? "saveWorkbenchTitleBtn" : "saveConversationTitleBtn"),
-    cancel: $(workbench ? "cancelWorkbenchTitleBtn" : "cancelConversationTitleBtn"),
-    editLabel: am(workbench ? "editWorkbenchTitle" : "editConversationTitle"),
-    fieldLabel: am(workbench ? "workbenchTitleLabel" : "conversationTitle"),
-  };
-}
-
-function titleForSurface(surface) {
-  if (surface === "workbench") return state.agent?.title || state.navigationTransitionTitle || state.project?.name || t("workbench.title");
-  return conversationHeaderTitle();
-}
-
 function renderAgentTitleEditor(surface) {
   const { display, input, edit, save, cancel, editLabel, fieldLabel } = titleEditorElements(surface);
   const editable = Boolean(state.agent?.id);
@@ -2689,15 +2694,6 @@ function renderWorkbenchHeaderIdentity() {
   cancel?.classList.add("hidden");
 }
 
-function renderAllTitleEditors() {
-  renderConversationHeaderIdentity();
-  renderWorkbenchHeaderIdentity();
-}
-
-function normalizedTitleEditSurface(surface) {
-  return surface === "workbench" ? "workbench" : "conversation";
-}
-
 function beginConversationTitleEdit(surface = "conversation") {
   if (!state.agent?.id || state.titleSaving) return;
   state.titleEditSurface = normalizedTitleEditSurface(surface);
@@ -2709,30 +2705,6 @@ function beginConversationTitleEdit(surface = "conversation") {
     input?.focus();
     input?.select();
   });
-}
-
-function cancelConversationTitleEdit() {
-  if (state.titleSaving) return;
-  state.titleEditing = false;
-  state.titleDraft = "";
-  renderAllTitleEditors();
-}
-
-function updateTitleDraft(surface, event) {
-  state.titleEditSurface = normalizedTitleEditSurface(surface);
-  state.titleDraft = event.target.value;
-}
-
-function handleTitleEditorKeydown(surface, event) {
-  if (isComposingInput(event)) return;
-  if (event.key === "Enter") {
-    event.preventDefault();
-    saveConversationTitle(surface).catch(showError);
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopPropagation();
-    cancelConversationTitleEdit();
-  }
 }
 
 async function saveConversationTitle(surface = state.titleEditSurface) {
@@ -2777,56 +2749,6 @@ async function saveConversationTitle(surface = state.titleEditSurface) {
       renderAllTitleEditors();
     }
   }
-}
-
-function updateWorkspaceMetaPills() {
-  const el = $("workspaceMetaPills");
-  if (!el) return;
-  if (!state.project && !state.agent) {
-    el.classList.add("hidden");
-    el.innerHTML = "";
-    return;
-  }
-  const model = currentWorkspaceModel();
-  if (!projectOperationContextActive()) {
-    el.innerHTML = `
-      <span class="workspace-pill">${escapeHtml(`${t("shell.filters.conversations")} · ${t("chat.permission.readOnly")}`)}</span>
-      <span class="workspace-pill" title="${escapeAttr(model)}">${escapeHtml(t("workspace.main.modelLabel", { model }))}</span>
-    `;
-    el.classList.remove("hidden");
-    return;
-  }
-  const cwd = canonicalLocalPath(state.agent?.cwd || state.project?.gitPath || "");
-  const permission = effectivePermissionForDisplay(state.agent?.permissionMode || $("permissionMode")?.value || state.settings?.agent?.defaultPermissionMode || "acceptEdits");
-  const securityText = connectionModeSummary().label;
-  el.innerHTML = `
-    <span class="workspace-pill" title="${escapeAttr(cwd)}">${escapeHtml(t("workspace.main.directoryLabel", { path: shortPath(cwd) }))}</span>
-    <span class="workspace-pill">${escapeHtml(t("workspace.main.permissionLabel", { permission: permissionLabel(permission) }))}</span>
-    <span class="workspace-pill security-workspace-pill">${escapeHtml(t("workspace.main.modeLabel", { mode: securityText }))}</span>
-    <span class="workspace-pill" title="${escapeAttr(model)}">${escapeHtml(t("workspace.main.modelLabel", { model }))}</span>
-  `;
-  el.classList.remove("hidden");
-}
-
-function loadRecentConversations() {
-  try {
-    return normalizeRecentConversations(JSON.parse(readLocalPreference(recentConversationsKey) || "[]"));
-  } catch {
-    return [];
-  }
-}
-
-function rememberCurrentConversation() {
-  if (!state.agent?.id) return;
-  const navigationConversation = state.navigationConversations.find((item) => item.agentId === state.agent.id);
-  const target = navigationConversation?.targetId || (state.project?.id && state.workline?.id
-    ? { projectId: state.project.id, worklineId: state.workline.id, agentId: state.agent.id }
-    : { projectId: "", worklineId: "", agentId: state.agent.id });
-  state.recentConversations = addRecentConversation(state.recentConversations, target);
-  try {
-    localStorage.setItem(recentConversationsKey, JSON.stringify(state.recentConversations));
-  } catch {}
-  renderRecentSidebarConversations();
 }
 
 function renderRecentSidebarConversations() {
