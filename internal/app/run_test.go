@@ -19,6 +19,7 @@ import (
 	"autoto/internal/review"
 	"autoto/internal/runtime"
 	"autoto/internal/server"
+	updatepkg "autoto/internal/update"
 )
 
 type orderedService struct {
@@ -156,10 +157,14 @@ func TestRuntimeStartWaitReadyAndClose(t *testing.T) {
 	if snap := rt.Config(); snap.Server.Host != "127.0.0.1" {
 		t.Fatalf("Config host=%q", snap.Server.Host)
 	}
-	// Shell dialog host is optional; registering a no-op keeps the desktop API
-	// surface reachable when the Wails package is build-tag excluded.
+	// Shell hosts are optional; registering no-ops keeps the desktop API surface
+	// reachable when the Wails package is build-tag excluded.
 	rt.SetShellDialogHost(stubShellDialogHost{})
 	rt.SetShellDialogHost(nil)
+	rt.SetShellLifecycleHost(stubShellLifecycleHost{})
+	rt.SetShellLifecycleHost(nil)
+	rt.SetShellUpdateHost(stubShellUpdateHost{})
+	rt.SetShellUpdateHost(nil)
 
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -202,6 +207,27 @@ func (stubShellDialogHost) PickDirectory(context.Context, string, string) (strin
 func (stubShellDialogHost) PickFile(context.Context, string, string, []server.ShellFileFilter) (string, bool, error) {
 	return "", true, nil
 }
+
+type stubShellLifecycleHost struct{}
+
+func (stubShellLifecycleHost) AutostartStatus() (bool, string, string, error) {
+	return false, "", "", nil
+}
+func (stubShellLifecycleHost) AutostartEnable() error  { return nil }
+func (stubShellLifecycleHost) AutostartDisable() error { return nil }
+func (stubShellLifecycleHost) NotifyDeepLink(string) error {
+	return nil
+}
+
+type stubShellUpdateHost struct{}
+
+func (stubShellUpdateHost) StageLocalUpdate(string, string, string) (updatepkg.PendingReplace, error) {
+	return updatepkg.PendingReplace{}, nil
+}
+func (stubShellUpdateHost) PendingUpdate() (updatepkg.PendingReplace, bool, error) {
+	return updatepkg.PendingReplace{}, false, nil
+}
+func (stubShellUpdateHost) ClearPendingUpdate() error { return nil }
 
 func TestNewGatewayHTTPServerHonorsDisabledConfig(t *testing.T) {
 	server, err := newGatewayHTTPServer(config.Config{}, nil, nil, nil)
