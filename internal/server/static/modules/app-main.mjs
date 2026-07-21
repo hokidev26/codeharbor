@@ -76,7 +76,9 @@ import { createSkillsWorkbenchController } from "./skills-workbench.mjs?v=users-
 import { createTerminalController } from "./terminal.mjs?v=terminal-actions-compact-2";
 import { createUIShellController, elementVisible, isComposingInput } from "./ui-shell.mjs?v=permission-panel-1-mobile-toolbar-right-3-icon-rail-1-mobile-viewport-1-sidebar-wheel-1-settings-cleanup-1-context-ring-2-dual-rail-collapse-1-compact-navigation-1-global-rail-2";
 import { createUsageHistoryController } from "./usage-history.mjs";
+import { createAgentWorkspaceHelpers } from "./agent-workspace-helpers.mjs";
 import { createNavigationContextMenu } from "./navigation-context-menu.mjs";
+import { createOverviewNavHelpers } from "./overview-nav-helpers.mjs";
 import { createWorkbenchSidebarRender } from "./workbench-sidebar-render.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
@@ -398,6 +400,47 @@ const {
   renderScheduleSurface,
   refreshPrimaryMode,
 } = workbenchSidebarRender;
+
+const overviewNavHelpers = createOverviewNavHelpers({
+  state,
+  getOverviewDashboard: () => overviewDashboard,
+});
+
+const {
+  overviewEntity,
+  deferOverviewDOM,
+  focusOverviewDataElement,
+  overviewApprovalAgentIds,
+} = overviewNavHelpers;
+
+const agentWorkspaceHelpers = createAgentWorkspaceHelpers({
+  state,
+  getAgentStream: () => agentStream,
+  getBackgroundTasks: () => backgroundTasks,
+  getTaskWorkspace: () => taskWorkspace,
+  getSpecBoard: () => specBoard,
+  getProjectKanban: () => projectKanban,
+  closeWorkspace: () => closeWorkspace(),
+  toggleTerminal: (collapsed) => toggleTerminal(collapsed),
+  notifyTerminal,
+  projectOperationContextActive,
+  closeConversationDetails,
+  renderConversationDetails,
+  updateRuntimeStatusButton: () => updateRuntimeStatusButton(),
+  renderWorkbenchShell,
+  loadProjects: (...args) => loadProjects(...args),
+  selectNavigationConversation: (...args) => selectNavigationConversation(...args),
+});
+
+const {
+  setComposerConnectionStatus,
+  connectWS,
+  updateAgentStreamStatus,
+  attachmentKind,
+  attachmentIcon,
+  toggleTerminalDock,
+  openTaskWorkspaceAgent,
+} = agentWorkspaceHelpers;
 
 const navigationContextMenu = createNavigationContextMenu({
   state,
@@ -2032,38 +2075,6 @@ function closeSettingsModal({ restoreWorkbench = true, restoreFocus = true } = {
   if (restoreWorkbench) setGlobalRailActive(currentShellRailTarget());
 }
 
-function overviewEntity(collection, id) {
-  return (overviewDashboard.getState().payload?.[collection] || []).find((item) => item.id === id) || null;
-}
-
-function deferOverviewDOM(callback) {
-  const raf = globalThis.requestAnimationFrame;
-  if (typeof raf === "function") {
-    raf(() => callback());
-    return;
-  }
-  if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(callback, 0);
-  else callback();
-}
-
-function focusOverviewDataElement(selector, datasetName, value, { focusSelector = "" } = {}) {
-  deferOverviewDOM(() => {
-    const node = [...document.querySelectorAll(selector)].find((item) => item.dataset?.[datasetName] === value) || null;
-    if (!node) return;
-    node.scrollIntoView?.({ block: "center" });
-    let focusTarget = focusSelector ? node.querySelector?.(focusSelector) : node;
-    if (!focusTarget || focusTarget.disabled || typeof focusTarget.focus !== "function") {
-      node.setAttribute?.("tabindex", "-1");
-      focusTarget = node;
-    }
-    try {
-      focusTarget.focus({ preventScroll: true });
-    } catch {
-      focusTarget.focus?.();
-    }
-  });
-}
-
 async function openOverviewConversation(id = "") {
   const entity = overviewEntity("recentConversations", id) || overviewEntity("activeRuns", id) || overviewEntity("activeTasks", id);
   const agentId = entity?.agentId || id;
@@ -2122,17 +2133,6 @@ async function openOverviewSchedules(id = "") {
   if (!selected) throw new Error(t("overview.scheduleUnavailable"));
   void scheduleWorkspace.loadHistory(id);
   focusOverviewDataElement("[data-schedule-workspace]", "scheduleWorkspace", id, { focusSelector: "input, select, textarea, button:not(:disabled)" });
-}
-
-function overviewApprovalAgentIds() {
-  const payload = overviewDashboard.getState().payload || {};
-  return [...new Set([
-    state.agent?.id,
-    ...(payload.activeRuns || []).map((item) => item.agentId),
-    ...(payload.activeTasks || []).map((item) => item.agentId),
-    ...(payload.recentConversations || []).map((item) => item.id),
-    ...(state.navigationConversations || []).map((item) => item.agentId),
-  ].map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 async function locateOverviewApprovals() {
@@ -3039,22 +3039,6 @@ async function selectNavigationConversation(target, options = {}) {
   }
 }
 
-async function openTaskWorkspaceAgent(agent, project) {
-  const agentId = String(agent?.id || "").trim();
-  const projectId = String(project?.id || agent?.projectId || "").trim();
-  if (!agentId || !projectId) return;
-  let target = state.navigationConversations.find((conversation) => conversation.projectId === projectId && conversation.agentId === agentId);
-  if (!target) {
-    await loadProjects({ autoEnter: false, reason: "task-workspace-agent" });
-    target = state.navigationConversations.find((conversation) => conversation.projectId === projectId && conversation.agentId === agentId);
-  }
-  if (!target) throw new Error(t("taskWorkspace.selectAgentFirst"));
-  await selectNavigationConversation(target.targetId, { preserveSidebar: true, selectionKind: "project" });
-  taskWorkspace.setContext({ projectId, agentId, scope: "agent" });
-  await specBoard.load();
-  projectKanban.render();
-}
-
 async function enterAgent() {
   if (!state.agent) return;
   syncThemePageContext();
@@ -3132,13 +3116,6 @@ function showModelSetupNotice() {
   $("openProviderSettingsNoticeBtn").addEventListener("click", () => openSettingsModal("providers"));
 }
 
-function setComposerConnectionStatus(text, ok = false) {
-  const label = $("composerStatusText");
-  const dot = $("composerStatusDot");
-  if (label) label.textContent = text;
-  if (dot) dot.classList.toggle("ok", ok);
-}
-
 function disconnectAgentTransports() {
   clearMessageRefreshTimer(state.agent?.id);
   invalidateMessageLifecycle();
@@ -3161,40 +3138,6 @@ function disconnectAgentTransports() {
   setComposerConnectionStatus(t("workspace.main.idle"));
   setTerminalStatus("idle");
   updateRuntimeStatusButton();
-}
-
-function connectWS() {
-  if (!state.agent?.id || state.remoteAccessFailClosed) return;
-  agentStream.connect(state.agent.id).catch((error) => {
-    if (state.agent?.id) notifyTerminal(`[warn] ${am("agentLiveSnapshotFailed", { message: error?.message || error })}\n`);
-  });
-}
-
-function updateAgentStreamStatus(detail = {}) {
-  const badge = $("wsBadge");
-  const streamStatus = detail.status || "idle";
-  state.agentStreamStatus = streamStatus;
-  if (streamStatus === "resyncing") {
-    state.workState = null;
-    if ($("appShell")?.classList.contains("details-open")) renderConversationDetails();
-  }
-  const labels = {
-    idle: ["ws idle", t("workspace.main.idle"), false],
-    syncing: ["ws syncing", t("workspace.main.syncing"), false],
-    resyncing: ["ws resync", t("workspace.main.recovering"), false],
-    connecting: ["ws connecting", t("workspace.main.connecting"), false],
-    reconnecting: ["ws reconnecting", t("workspace.main.reconnecting"), false],
-    connected: [detail.resume === "replayed" ? "ws replayed" : "ws connected", t("workspace.main.connected"), true],
-    offline: ["ws offline", t("workspace.main.offline"), false],
-  };
-  const [badgeText, composerText, ok] = labels[streamStatus] || labels.offline;
-  if (badge) {
-    badge.textContent = badgeText;
-    badge.classList.toggle("ok", ok);
-  }
-  setComposerConnectionStatus(composerText, ok);
-  updateRuntimeStatusButton();
-  renderWorkbenchShell();
 }
 
 async function applyAgentLiveSnapshot(snapshot, detail = {}) {
@@ -3379,24 +3322,6 @@ async function saveAgentSettings() {
       saveAgentSettings().catch(showError);
     }
   }
-}
-
-function attachmentKind(file) {
-  const type = String(file?.type || "").toLowerCase();
-  const name = String(file?.name || "").toLowerCase();
-  if (type.startsWith("image/")) return "image";
-  if (type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
-  if (name.endsWith(".docx") || type.includes("wordprocessingml.document")) return "docx";
-  if (type.startsWith("text/") || /\.(txt|md|markdown|json|jsonl|csv|tsv|log|xml|ya?ml|toml|ini|env|go|js|jsx|ts|tsx|css|html?|py|rb|rs|java|c|h|cpp|hpp|cs|php|sh|zsh|bash|sql|swift|kt|kts|dart|vue|svelte)$/i.test(name)) return "text";
-  return "binary";
-}
-
-function attachmentIcon(kind) {
-  if (kind === "image") return "🖼";
-  if (kind === "pdf") return "PDF";
-  if (kind === "docx") return "DOC";
-  if (kind === "text") return "TXT";
-  return "FILE";
 }
 
 function showToast(message, variant = "info", options = {}) {
@@ -3721,15 +3646,6 @@ $("permissionMode").addEventListener("change", () => {
   updatePermissionModeDisplay();
   saveAgentSettings().catch(showError);
 });
-function toggleTerminalDock(collapsed) {
-  if (!projectOperationContextActive()) return false;
-  if (collapsed !== true) {
-    backgroundTasks.closeTray("terminal-open");
-    closeConversationDetails();
-    if (state.workspaceOpen && state.workspaceTab === "preview") closeWorkspace();
-  }
-  toggleTerminal(collapsed);
-}
 $("toggleTerminalBtn").addEventListener("click", () => toggleTerminalDock());
 $("collapseTerminalBtn").addEventListener("click", () => toggleTerminalDock(true));
 $("expandTerminalBtn").addEventListener("click", () => toggleTerminalDock(false));
