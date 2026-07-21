@@ -80,7 +80,7 @@ import { createUsageHistoryController } from "./usage-history.mjs";
 import { createAgentWorkspaceHelpers } from "./agent-workspace-helpers.mjs";
 import { createNavigationContextMenu } from "./navigation-context-menu.mjs";
 import { createOverviewNavHelpers } from "./overview-nav-helpers.mjs";
-import { createWorkbenchSidebarRender } from "./workbench-sidebar-render.mjs";
+import { createWorkbenchSidebarRender, primaryWorkbenchLayout } from "./workbench-sidebar-render.mjs";
 import { createWorkspaceContextHelpers } from "./workspace-context-helpers.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
@@ -1618,9 +1618,8 @@ function applyPrimaryWorkbench(value) {
   const previousMode = state.activeWorkbench;
   state.primaryModePreference = mode;
   state.activeWorkbench = mode;
-  const overview = state.overviewActive === true;
-  const workbench = mode === "workbench" && !overview;
-  const schedules = mode === "schedules" && !overview;
+  const layout = primaryWorkbenchLayout(mode, { overviewActive: state.overviewActive });
+  const { overview, workbench, schedules } = layout;
   if (previousMode !== mode) {
     state.projectQuery = "";
     if ($("projectSearch")) $("projectSearch").value = "";
@@ -1628,13 +1627,8 @@ function applyPrimaryWorkbench(value) {
     $("projectSearchToggleBtn")?.classList.remove("active");
     if (mode === "schedules" && scheduleWorkspace.getState().query) scheduleWorkspace.setQuery("");
   }
-  $("overviewDashboard")?.classList.toggle("hidden", !overview);
-  $("conversationPanel")?.classList.toggle("hidden", overview || workbench || schedules);
-  $("workbenchPanel")?.classList.toggle("hidden", !workbench);
-  $("schedulePanel")?.classList.toggle("hidden", !schedules);
-  document.body.classList.toggle("overview-mode", overview);
-  document.body.classList.toggle("workbench-mode", workbench);
-  document.body.classList.toggle("schedule-mode", schedules);
+  for (const [id, hidden] of Object.entries(layout.hidden)) $(id)?.classList.toggle("hidden", hidden);
+  for (const [name, active] of Object.entries(layout.bodyClasses)) document.body.classList.toggle(name, active);
   const modalOpen = elementVisible("settingsModal");
   if (!modalOpen) setGlobalRailActive(overviewRailTarget({ overviewActive: overview, activeWorkbench: mode }));
   if (workbench) {

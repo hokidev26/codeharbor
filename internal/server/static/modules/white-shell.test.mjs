@@ -248,10 +248,12 @@ test("dual workbench shell keeps conversation and Kanban views in one runtime", 
   assert.match(appMain, /key === "conversation"[\s\S]*?switchPrimaryWorkbench\("conversation"\)/);
   assert.match(appMain, /key === "schedules"[\s\S]*?switchPrimaryWorkbench\("schedules"\)/);
   assert.doesNotMatch(appMain, /key === "tasks"/);
-  assert.match(appMain, /overviewDashboard"\)\?\.classList\.toggle\("hidden", !overview\)/);
-  assert.match(appMain, /conversationPanel"\)\?\.classList\.toggle\("hidden", overview \|\| workbench \|\| schedules\)/);
-  assert.match(appMain, /workbenchPanel"\)\?\.classList\.toggle\("hidden", !workbench\)/);
-  assert.match(appMain, /schedulePanel"\)\?\.classList\.toggle\("hidden", !schedules\)/);
+  // Which panel each mode shows is decided by primaryWorkbenchLayout and
+  // checked exhaustively in workbench-layout.test.mjs; app-main only applies
+  // the resulting matrix to the DOM.
+  assert.match(appMain, /primaryWorkbenchLayout\(mode, \{ overviewActive: state\.overviewActive \}\)/);
+  assert.match(appMain, /Object\.entries\(layout\.hidden\)\) \$\(id\)\?\.classList\.toggle\("hidden", hidden\)/);
+  assert.match(appMain, /Object\.entries\(layout\.bodyClasses\)\) document\.body\.classList\.toggle\(name, active\)/);
   const applyStart = appMain.indexOf("function applyPrimaryWorkbench");
   const applyEnd = appMain.indexOf("function switchPrimaryWorkbench", applyStart);
   const applyBody = appMain.slice(applyStart, applyEnd);
