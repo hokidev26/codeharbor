@@ -30,6 +30,7 @@ import {
   shortPath,
 } from "./directory-browser.mjs?v=folder-picker-remote-2-root-card-1-root-shortcut-removed-1";
 import { $, escapeAttr, escapeHtml, setButtonBusy } from "./dom.mjs";
+import { navigationCreateLabelKey, navigationCreateTarget } from "./navigation-create.mjs";
 import { createSubagentCardCoordinator } from "./subagent-cards.mjs";
 import { formatNumber, formatTimestamp } from "./formatters.mjs";
 import { t } from "./i18n.mjs?v=settings-flat-1-codex-browser-login-1-shared-api-1-apple-theme-1-autoto-themes-1-settings-help-1-task-workspace-1-navigation-state-2-archive-1-i18n-shared-1-overview-home-1-settings-cleanup-1-context-ring-2-global-background-1-theme-v2-1";
@@ -1598,17 +1599,14 @@ function projectKanbanTranslation(key, params = {}, fallback = "") {
   return translated === translationKey ? fallback : translated;
 }
 
-function navigationCreateTarget() {
-  if (state.activeWorkbench === "schedules") return "schedule";
-  return state.navigationMode === "conversations" ? "conversation" : "project";
+function currentNavigationCreateTarget() {
+  return navigationCreateTarget(state);
 }
 
 function syncNavigationCreateButton(button) {
   if (!button) return;
-  const target = navigationCreateTarget();
-  const labelKey = target === "schedule"
-    ? "shell.newSchedule"
-    : target === "project" ? "shell.chooseFolder" : "shell.newConversation";
+  const target = currentNavigationCreateTarget();
+  const labelKey = navigationCreateLabelKey(target);
   button.dataset.createTarget = target;
   setTranslatedAttribute(button, "title", labelKey);
   setTranslatedAttribute(button, "aria-label", labelKey);
@@ -2384,7 +2382,7 @@ function startScheduleCreation() {
 }
 
 async function createNavigationItem(trigger = null) {
-  const target = navigationCreateTarget();
+  const target = currentNavigationCreateTarget();
   if (target === "schedule") return startScheduleCreation();
   if (target === "conversation") return createStandaloneConversation();
   closeMobileSidebar();

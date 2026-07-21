@@ -473,11 +473,13 @@ test("conversation creation routes project contexts through folder selection and
   assert.match(mobile, /data-create-conversation/);
   assert.doesNotMatch(`${desktop}${mobile}`, /data-open-directory-shortcut/);
   assert.match(folder, /data-open-directory-shortcut="current"/);
-  assert.match(appMain, /function navigationCreateTarget\(\)/);
-  assert.match(appMain, /if \(state\.activeWorkbench === "schedules"\) return "schedule"[\s\S]*?return state\.navigationMode === "conversations" \? "conversation" : "project"/);
-  assert.match(appMain, /const labelKey = target === "schedule"[\s\S]*?"shell\.newSchedule"[\s\S]*?target === "project" \? "shell\.chooseFolder" : "shell\.newConversation"/);
+  // Which target the create button acts on, and the label that must agree with
+  // it, are decided by navigation-create.mjs and covered in
+  // navigation-create.test.mjs across every workbench/navigation-mode pair.
+  assert.match(appMain, /return navigationCreateTarget\(state\)/);
+  assert.match(appMain, /const labelKey = navigationCreateLabelKey\(target\)/);
   assert.match(appMain, /async function createNavigationItem\(trigger = null\)/);
-  assert.match(appMain, /const target = navigationCreateTarget\(\)[\s\S]*?if \(target === "schedule"\) return startScheduleCreation\(\)[\s\S]*?if \(target === "conversation"\) return createStandaloneConversation\(\)/);
+  assert.match(appMain, /const target = currentNavigationCreateTarget\(\)[\s\S]*?if \(target === "schedule"\) return startScheduleCreation\(\)[\s\S]*?if \(target === "conversation"\) return createStandaloneConversation\(\)/);
   assert.match(appMain, /openDirectoryChooser\(state\.project\?\.gitPath \|\| state\.agent\?\.cwd \|\| "", \{ trigger \}\)/);
   assert.match(appMain, /\[data-create-navigation-item\][\s\S]*?createNavigationItem\(button\)/);
   assert.match(appMain, /async function createStandaloneConversation/);
