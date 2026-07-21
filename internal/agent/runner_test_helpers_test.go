@@ -167,6 +167,52 @@ func waitDone(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+// waitForRunSettled blocks until a run started by Submit* has fully finished.
+//
+// Submit* starts the run in a goroutine bound to context.Background(), so a test
+// that returns early leaves that goroutine writing to the store and the project
+// directory while t.TempDir() cleanup is already removing them — the source of
+// intermittent "directory not empty" cleanup failures and cross-test interference.
+//
+// Waiting for a terminal run status alone is not enough: executeRegisteredRun
+// still closes the tool-output pipeline, unregisters the run, and resumes ready
+// background continuations after the status is written. So this also waits for
+// the runner to release the agent's active run. The run row is created
+// synchronously by Submit* and only reaches a terminal status from inside the
+// registered run, so observing "terminal status, then no active run" cannot pass
+// before the goroutine has actually started.
+func waitForRunSettled(t *testing.T, store *db.Store, runner *Runner, agentID, runID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	lastStatus := ""
+	for {
+		settled := runID == ""
+		if !settled {
+			run, err := store.GetRun(context.Background(), agentID, runID)
+			if err != nil {
+				t.Fatalf("get run %s: %v", runID, err)
+			}
+			lastStatus = run.Status
+			switch run.Status {
+			case "completed", "error", "failed", "interrupted", "superseded", "denied":
+				settled = true
+			}
+		}
+		if settled {
+			runner.runMu.Lock()
+			idle := runner.running[agentID] == nil
+			runner.runMu.Unlock()
+			if idle {
+				return
+			}
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("timed out waiting for run %s to settle, last status %q", runID, lastStatus)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func requestHasToolResult(req providers.GenerateRequest, toolUseID string, isError bool) bool {
 	for _, message := range req.Messages {
 		for _, block := range message.Blocks {

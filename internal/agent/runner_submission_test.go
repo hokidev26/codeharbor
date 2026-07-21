@@ -30,6 +30,7 @@ func TestSubmitUserMessageExpandsServerSkillAuthoritatively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForRunSettled(t, store, runner, agent.ID, message.RunID)
 	if message.CommandText != "/REVIEW-DIFF src/main.go --strict" {
 		t.Fatalf("unexpected command text %q", message.CommandText)
 	}
@@ -61,6 +62,7 @@ func TestSubmitCorrectionReexpandsServerSkillAuthoritatively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForRunSettled(t, store, runner, agent.ID, message.RunID)
 	if message.CommandText != "/REVIEW-DIFF src/main.go" || !strings.Contains(message.ContentText, "Review the current diff carefully.") {
 		t.Fatalf("correction did not re-expand server skill: %+v", message)
 	}
@@ -76,6 +78,7 @@ func TestSubmitUserMessageKeepsUnknownSlashCommandOrdinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForRunSettled(t, store, runner, agent.ID, message.RunID)
 	if message.ContentText != "/local-template already expanded" || message.CommandText != "" {
 		t.Fatalf("unknown slash command must remain ordinary text, got %+v", message)
 	}
@@ -94,6 +97,7 @@ func TestSubmitUserMessageDoesNotAcceptClientPromptForServerSkill(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForRunSettled(t, store, runner, agent.ID, message.RunID)
 	if !strings.HasPrefix(message.ContentText, "Trusted database prompt.\n\nUser arguments:\n") || message.ContentText == "Client supplied replacement prompt" {
 		t.Fatalf("client text replaced authoritative prompt: %q", message.ContentText)
 	}

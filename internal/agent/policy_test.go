@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"autoto/internal/config"
 	"autoto/internal/db"
@@ -219,20 +218,7 @@ func TestSubmitUserMessageWithModeFreezesRunWithoutMutatingAgentDefault(t *testi
 	if persistedAgent.PlanMode {
 		t.Fatalf("explicit run mode mutated agent default: %+v", persistedAgent)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		run, err = store.GetRun(ctx, agent.ID, message.RunID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if run.Status == "completed" || run.Status == "error" || run.Status == "interrupted" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for explicit-mode run: %+v", run)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForRunSettled(t, store, runner, agent.ID, message.RunID)
 }
 
 func TestPlanRunUsesDurableModeAndReadToolSurface(t *testing.T) {
