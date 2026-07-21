@@ -80,6 +80,7 @@ import { createAgentWorkspaceHelpers } from "./agent-workspace-helpers.mjs";
 import { createNavigationContextMenu } from "./navigation-context-menu.mjs";
 import { createOverviewNavHelpers } from "./overview-nav-helpers.mjs";
 import { createWorkbenchSidebarRender } from "./workbench-sidebar-render.mjs";
+import { createWorkspaceContextHelpers } from "./workspace-context-helpers.mjs";
 import { createWorkspaceExplorerController } from "./workspace-explorer.mjs";
 import { normalizeWorkStateSnapshot, renderWorkStateHTML } from "./work-state.mjs";
 
@@ -318,6 +319,44 @@ const {
   syncSettingsViewportState,
   layoutSettingsShell,
 } = settingsShellHelpers;
+
+const workspaceContextHelpers = createWorkspaceContextHelpers({
+  state,
+  renderEmptyWorkspaceCard,
+  syncThemePageContext: () => syncThemePageContext(),
+  getBackgroundTasks: () => backgroundTasks,
+  connectWS: (...args) => connectWS(...args),
+  getConnectTerminal: () => connectTerminal,
+});
+
+const {
+  projectOperationContextActive,
+  setGlobalRailActive,
+  terminalSocketUsable,
+  restoreAuthorizedAgentTransports,
+  showEmptyWorkspaceState,
+} = workspaceContextHelpers;
+
+async function focusTaskCreation() {
+  if (state.activeWorkbench !== "workbench") return false;
+  closeMobileSidebar();
+  if (taskWorkspace.getState().scope !== "agent") {
+    if (taskWorkspace.focusCreate()) return true;
+    await taskWorkspace.load();
+    if (taskWorkspace.focusCreate()) return true;
+    showToast(t("taskWorkspace.noAgents"), "info", { force: true });
+    return false;
+  }
+  if (!state.agent?.id) {
+    showToast(t("workbench.selectAgentToCreate"), "info", { force: true });
+    return false;
+  }
+  if (projectKanban.focusCreate()) return true;
+  await specBoard.load();
+  if (projectKanban.focusCreate()) return true;
+  showToast(t("projectKanban.unavailable"), "info", { force: true });
+  return false;
+}
 
 const securityModeHelpers = createSecurityModeHelpers({
   state,
@@ -1515,20 +1554,6 @@ const scheduleWorkspace = createScheduleWorkspaceController({
   formatTimestamp: formatDateTime,
 });
 
-function terminalSocketUsable(socket = state.terminalWS) {
-  if (!socket) return false;
-  const readyState = Number(socket.readyState);
-  return !Number.isFinite(readyState) || readyState === 0 || readyState === 1;
-}
-
-function restoreAuthorizedAgentTransports() {
-  if (state.remoteAccessFailClosed || !state.agent?.id || state.agentStreamStatus !== "idle") return false;
-  backgroundTasks.setAgent(state.agent.id);
-  connectWS();
-  if (projectOperationContextActive() && terminalAccessAllowed(state) && !terminalSocketUsable()) connectTerminal();
-  return true;
-}
-
 const remoteAccessSettings = createRemoteAccessSettingsController({
   state,
   request: api,
@@ -1824,36 +1849,7 @@ function switchPrimaryWorkbench(value) {
   return setPrimaryModePreference(mode);
 }
 
-async function focusTaskCreation() {
-  if (state.activeWorkbench !== "workbench") return false;
-  closeMobileSidebar();
-  if (taskWorkspace.getState().scope !== "agent") {
-    if (taskWorkspace.focusCreate()) return true;
-    await taskWorkspace.load();
-    if (taskWorkspace.focusCreate()) return true;
-    showToast(t("taskWorkspace.noAgents"), "info", { force: true });
-    return false;
-  }
-  if (!state.agent?.id) {
-    showToast(t("workbench.selectAgentToCreate"), "info", { force: true });
-    return false;
-  }
-  if (projectKanban.focusCreate()) return true;
-  await specBoard.load();
-  if (projectKanban.focusCreate()) return true;
-  showToast(t("projectKanban.unavailable"), "info", { force: true });
-  return false;
-}
-
 const globalRailSettingsTargets = new Set(["profile"]);
-
-function setGlobalRailActive(target = "conversation") {
-  document.querySelectorAll("[data-global-rail-target]").forEach((node) => {
-    const active = node.dataset.globalRailTarget === target;
-    node.classList.toggle("active", active);
-    node.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-}
 
 const MOBILE_SETTINGS_MEDIA_QUERY = "(max-width: 767px)";
 
@@ -2347,22 +2343,6 @@ function renderEmptyWorkspaceCard({ title = t("chat.emptyTitle"), text = t("chat
   `;
 }
 
-function showEmptyWorkspaceState(options = {}) {
-  const el = $("messages");
-  if (!el) return;
-  const busy = options.busy === true;
-  syncThemePageContext();
-  el.classList.add("empty");
-  el.innerHTML = renderEmptyWorkspaceCard(options);
-  if (busy) {
-    el.setAttribute("aria-busy", "true");
-    el.dataset.initialChatState = "loading";
-  } else {
-    el.removeAttribute("aria-busy");
-    delete el.dataset.initialChatState;
-  }
-}
-
 function clearMessageViewportBusyTimer() {
   if (messageViewportBusyTimer === null) return;
   window.clearTimeout(messageViewportBusyTimer);
@@ -2397,10 +2377,6 @@ function clearMessageViewportBusy() {
   delete el.dataset.initialChatState;
   delete el.dataset.contextSwitching;
   delete el.dataset.switchingLabel;
-}
-
-function projectOperationContextActive() {
-  return state.navigationSelectionKind === "project" && Boolean(state.project?.id && state.agent?.id);
 }
 
 function syncProjectOperationContext() {
