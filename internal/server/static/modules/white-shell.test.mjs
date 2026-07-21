@@ -178,9 +178,12 @@ test("desktop home overview stays available while mobile starts in conversation"
   assert.match(appMain, /key === "home"[\s\S]*?openOverviewDashboard\(\)\.catch\(showError\)/);
   assert.match(appMain, /overviewDashboard\.load\(\)/);
   assert.match(appMain, /function openOverviewTask\(id = ""\)[\s\S]*?taskWorkspace\.selectTask/);
-  assert.match(appMain, /action === "runs" \|\| action === "open-run"/);
-  assert.match(appMain, /action === "schedules" \|\| action === "open-schedule"/);
-  assert.match(appMain, /action === "approvals"[\s\S]*?openOverviewApprovals/);
+  // Action -> surface routing is a table in overview-dashboard.mjs, checked
+  // exhaustively in overview-navigation.test.mjs; app-main only dispatches it.
+  assert.match(appMain, /const route = overviewNavigationRoute\(action\)/);
+  assert.match(appMain, /route\.handler === "approvals"\) return openOverviewApprovals\(\)/);
+  assert.match(appMain, /route\.handler === "runs"\) return openOverviewRuns\(target\)/);
+  assert.match(appMain, /route\.handler === "schedules"\) return openOverviewSchedules\(target\)/);
   assert.match(appMain, /tool-calls\/pending/);
   assert.match(appMain, /loadRunSummary\(run\.id, \{ agentId: run\.agentId \}\)/);
   assert.match(appMain, /setGlobalRailActive\(currentShellRailTarget\(\)\)/);

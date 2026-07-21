@@ -43,6 +43,7 @@ import { createMemorySettingsController } from "./memory-settings.mjs";
 import { createModelProviderSettingsController } from "./model-provider-settings.mjs?v=native-codex-3-provider-console-3-account-wide-1-model-compact-1-codex-export-1-settings-flat-1-aggregates-1-codex-import-open-1-provider-create-page-2-codex-browser-login-1-provider-secrets-1-model-picker-1-provider-full-page-2-provider-placeholders-1-usage-cost-1-codex-usage-clean-1-model-sections-hidden-1-model-configs-1-provider-reference-1-default-openai-responses-1-provider-draft-session-1";
 import {
   createOverviewDashboardController,
+  overviewNavigationRoute,
   overviewRailTarget,
   resolveOverviewStartup,
 } from "./overview-dashboard.mjs?v=overview-home-3-nav-schedules-1-mobile-no-home-1-schedule-workspace-1";
@@ -1895,13 +1896,16 @@ async function openOverviewDashboard() {
 }
 
 function handleOverviewNavigation(action, id = "") {
-  if (action === "conversation") return activateGlobalRailTarget("conversation");
-  if (action === "tasks") return openOverviewTask();
-  if (action === "open-task") return openOverviewTask(id);
-  if (action === "schedules" || action === "open-schedule") return openOverviewSchedules(id);
-  if (action === "approvals") return openOverviewApprovals();
-  if (action === "runs" || action === "open-run") return openOverviewRuns(id);
-  if (action === "open-conversation") return openOverviewConversation(id);
+  const route = overviewNavigationRoute(action);
+  if (!route) return undefined;
+  const target = route.usesId ? id : "";
+  if (route.handler === "rail-conversation") return activateGlobalRailTarget("conversation");
+  if (route.handler === "task") return openOverviewTask(target);
+  if (route.handler === "schedules") return openOverviewSchedules(target);
+  if (route.handler === "approvals") return openOverviewApprovals();
+  if (route.handler === "runs") return openOverviewRuns(target);
+  if (route.handler === "conversation") return openOverviewConversation(target);
+  return undefined;
 }
 
 function activateGlobalRailTarget(target) {
